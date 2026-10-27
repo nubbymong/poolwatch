@@ -139,7 +139,7 @@ internal sealed class CacheClearer
 
     private readonly HashSet<ClearRecord> _reported = new(ReferenceEqualityComparer.Instance);
 
-    /// <summary>"Last clear freed 4.7 GB (11:20); clearable now about 1.2 GB." and the low-priority verdict, for the Overview.</summary>
+    /// <summary>"Last clear freed 4.7 GB (11:20); clearable now about 1.2 GB." and the low-priority verdict, for the Clear cache button's tooltip.</summary>
     public string StatusLine(PoolTotals now)
     {
         List<ClearRecord> h;
@@ -152,10 +152,10 @@ internal sealed class CacheClearer
         if (ClearPolicy.LowPriorityVerdict(h) is { } v) parts.Add(v);
         if (HelperStatus is { CanPurge: false }) parts.Add("Clear cache needs PoolWatch to run as administrator");
         if (HelperStatus?.OldTasksPresent == true)
-            parts.Add($"an older PoolWatch's Clear cache tasks are still installed and no longer used ({string.Join(", ", HelperStatus.OldTasks)}; toolbar: Remove old clear-cache tasks)");
+            parts.Add($"an older PoolWatch's Clear cache tasks are still installed and no longer used ({string.Join(", ", HelperStatus.OldTasks)}; tray menu: Remove old clear-cache tasks)");
         if (HelperStatus?.LegacyTaskPresent == true)
             parts.Add(_engine.Settings.AutoClearEnabled
-                ? $"the automatic clear is paused while your own clear task exists ({HelperStatus.LegacyTaskText}; toolbar: Remove my clear task)"
+                ? $"the automatic clear is paused while your own clear task exists ({HelperStatus.LegacyTaskText}; tray menu: Remove my clear task)"
                 : $"your own clear task clears the cache ({HelperStatus.LegacyTaskText}); turning on the automatic clear offers to remove it");
         return parts.Count == 0 ? "" : string.Join("; ", parts) + ".";
     }

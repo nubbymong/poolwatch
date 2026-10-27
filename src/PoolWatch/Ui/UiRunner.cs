@@ -5,7 +5,7 @@ using PoolWatch.Headless;
 
 namespace PoolWatch.Ui;
 
-/// <summary>Runs the tray app. With --ui-smoke N (CI) it opens the window, renders each tab to a PNG after N seconds and exits.</summary>
+/// <summary>Runs the tray app. With --ui-smoke N (CI) it opens the window, renders the window, both tabs and Settings to PNGs after N seconds and exits.</summary>
 internal static class UiRunner
 {
     public static int Run(CommandLineOptions opt)
@@ -62,6 +62,7 @@ internal static class UiRunner
                     {
                         screenshots = files.Select(Path.GetFileName),
                         form,
+                        trayMenu = app.MenuItemTexts(),
                         trayIcon = app.IconState.ToString(),
                         tags = UiData.Tags(analysis, growingOnly: false).Count,
                         processes = engine.Latest?.Processes.Count ?? 0,
