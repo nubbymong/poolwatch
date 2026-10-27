@@ -15,5 +15,8 @@
   "captureSeconds": 25,
   // C1: at most one automatic capture per interval (default 60 min). 1 min (the floor) so the leak's incident is still
   // traced when unrelated growth on the runner took the first trace (its capture is held back, then started).
-  "autoCaptureMinMinutes": 1
+  "autoCaptureMinMinutes": 1,
+  // An automatic (on-alert) capture records pool events only unless deeperCapture is on. On here so the trace also
+  // records Kernel-File and the scenario keeps testing the file-activity attribution (the opens Leaker.exe makes).
+  "deeperCapture": true
 }
