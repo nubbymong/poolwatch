@@ -1,6 +1,8 @@
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics.Eventing.Reader;
 using System.Runtime.InteropServices;
+using System.Text;
 using PoolWatch.Core.Filters;
 
 namespace PoolWatch.Collectors;
@@ -186,9 +188,7 @@ internal static unsafe class FilterInstanceQuery
             {
                 do
                 {
-                    // FILTER_FULL_INFORMATION: NextEntryOffset, FrameID, NumberOfInstances, USHORT FilterNameLength, WCHAR FilterNameBuffer[]
-                    int len = *(ushort*)(p + 12);
-                    names.Add(new string((char*)(p + 14), 0, len / 2));
+                    if (FilterName(buf) is { } name) names.Add(name);
                     hr = FilterFindNext(find, FilterFullInformation, p, buf.Length, out _);
                 } while (hr == 0);
                 if (hr != HrNoMoreItems && hr != HrInsufficientBuffer) throw new InvalidOperationException($"FilterFindNext 0x{hr:x8}");
@@ -210,11 +210,13 @@ internal static unsafe class FilterInstanceQuery
             {
                 for (int i = 0; hr == 0 && i < 256; i++)
                 {
-                    // INSTANCE_FULL_INFORMATION: NextEntryOffset, then (length, offset) USHORT pairs for instance name,
-                    // altitude, volume name and filter name; offsets are from the start of the structure.
-                    string volume = Field(p, 12);
-                    string dos = DevicePaths.ToDosPath(volume + "\\");
-                    list.Add(new FilterInstance(filter, dos.StartsWith(@"\Device\", StringComparison.OrdinalIgnoreCase) ? volume : dos, Field(p, 8), Field(p, 4)));
+                    // INSTANCE_FULL_INFORMATION: NextEntryOffset, then (length, offset) USHORT pairs for instance name (4),
+                    // altitude (8), volume name (12) and filter name (16); offsets are from the start of the structure.
+                    if (Field(buf, 12) is { } volume && Field(buf, 8) is { } altitude && Field(buf, 4) is { } instance)
+                    {
+                        string dos = DevicePaths.ToDosPath(volume + "\\");
+                        list.Add(new FilterInstance(filter, dos.StartsWith(@"\Device\", StringComparison.OrdinalIgnoreCase) ? volume : dos, altitude, instance));
+                    }
                     hr = FilterInstanceFindNext(find, InstanceFullInformation, p, buf.Length, out _);
                 }
             }
@@ -223,7 +225,27 @@ internal static unsafe class FilterInstanceQuery
         return list;
     }
 
-    private static string Field(byte* p, int at) => new((char*)(p + *(ushort*)(p + at + 2)), 0, *(ushort*)(p + at) / 2);
+    /// <summary>
+    /// The name in a FILTER_FULL_INFORMATION record (ULONG NextEntryOffset, FrameID, NumberOfInstances, then USHORT
+    /// FilterNameLength in bytes and the name at offset 14). Null when the length runs past the record.
+    /// </summary>
+    internal static string? FilterName(ReadOnlySpan<byte> record)
+    {
+        if (record.Length < 14) return null;
+        int len = BinaryPrimitives.ReadUInt16LittleEndian(record[12..]) & ~1;
+        return 14 + len <= record.Length ? Encoding.Unicode.GetString(record.Slice(14, len)) : null;
+    }
+
+    /// <summary>
+    /// A (USHORT length in bytes, USHORT offset from the record start) string field of an INSTANCE_FULL_INFORMATION
+    /// record at <paramref name="at"/>. Null when the pair or the string runs past the record.
+    /// </summary>
+    internal static string? Field(ReadOnlySpan<byte> record, int at)
+    {
+        if (at < 0 || at + 4 > record.Length) return null;
+        int len = BinaryPrimitives.ReadUInt16LittleEndian(record[at..]) & ~1, offset = BinaryPrimitives.ReadUInt16LittleEndian(record[(at + 2)..]);
+        return offset + len <= record.Length ? Encoding.Unicode.GetString(record.Slice(offset, len)) : null;
+    }
 }
 
 /// <summary>Running state of named services (Win32 services and drivers) via OpenService + QueryServiceStatusEx.</summary>
