@@ -89,7 +89,8 @@ Notes:
   `PagedFrees` @8, `PagedUsed` (SIZE_T) @16, `NonPagedAllocs` @24, `NonPagedFrees` @28, `NonPagedUsed` (SIZE_T) @32.
   Tags are keyed by their raw 4 bytes, compared ordinally.
 - A process is identified by (PID, create time): PIDs are reused.
-- The tag sum runs lower than the committed-pages total (fragmentation, lazy page release). Both are shown and labelled.
+- The tag sum runs lower than the committed-pages total (fragmentation, lazy page release). Both are recorded and
+  labelled; the window's graph shows the committed figures, the ones Task Manager shows.
 
 ## 5. Tag knowledge
 
@@ -189,10 +190,43 @@ same redaction. It is best-effort: read an export before you post it.
 
 ## 11. UI
 
-Tray icon coloured by state (green, amber, red), with the paged and non-paged totals in its tooltip. The main window
-has the pool chart (both measures, with incident markers), the growing-tags table, and per tag its suspects, evidence
-and events; tabs for Incidents, Processes, Findings, Background services and Settings. It renders only while visible:
-no timers run while it is hidden.
+PoolWatch is meant to be simple: suggest services to switch off, say what makes the pool grow, and clear the cache.
+The window shows that and little else; the analysis behind it is unchanged.
+
+Tray icon coloured by state (green, amber, red), with the paged and non-paged totals in its tooltip. Its menu holds the
+tools that are not on the window: Capture now, Since boot report, Open incident folder, Export vendor bundle, Copy
+latest incident summary, Mark, the experiments, About (version, overhead, ETW and `pooltag.txt` state, data folder)
+and, only while there is one to remove, Remove my clear task and Remove old clear-cache tasks.
+
+The main window, top to bottom:
+
+- **One status line**, in plain words, from what the analysis already knows (`Core.Util.PoolStatusLine`, unit-tested):
+  steady ("Kernel pool is steady (9.6 GB)"), growing ("+1.2 GB in the last hour", from 200 MB an hour or 100 MB in
+  10 minutes), dropping (from 200 MB an hour or 100 MB in 10 minutes; a fall in the last 10 minutes is said first), a tag
+  growing while the total holds, or not enough data yet (under 3 minutes of samples). A cause is named only when its
+  evidence is at least "some" (the open incident's trace owner or top suspect, else the ranking of the fastest-growing
+  tag); otherwise "No clear cause yet". It never prints a negative rise.
+- **One graph**: the committed paged and non-paged pool over the last 6 hours (minute averages beyond the raw hour),
+  solid lines, a legend with the current values, round axis steps. Every text position is measured from the font, so
+  the labels cannot overlap the title at any display scaling.
+- **Three buttons**: Clear cache now, Export report (the selected row's report folder, else the newest incident's) and
+  Settings (a dialog: the settings grid, Save, Start at logon).
+- **Two tabs**. *Pool causes* is one list merging what were four tabs: open incidents and those of the last 7 days;
+  tags the detector marks growing, retained or released that no open incident covers; live processes whose handles rose
+  5,000 or whose charged pool rose 32 MB in the hour, or that were orphaned while PoolWatch watched and still do 500 I/O
+  operations a second; and, from the last 24 hours, spawn storms, child accumulation, git roots, stray `.git`
+  folders, token-leak and filter-driver findings (warning or alert) and every cache clear's result. What is happening
+  now comes first. Each row: what is growing (the tag in words, with its driver), how much, how fast, the likely cause,
+  the confidence in words and when; the selected row's details are the incident report's summary, a tag's top three
+  suspects with their evidence and the recent notable events, a process's counts, chain and command line, or a
+  finding's text. Only the fastest-growing tag without an incident is ranked in the background (every 2 minutes), and
+  the selected one every 30 s, as the old tag page did. *Services* is the former Background services page, unchanged
+  in behaviour.
+
+The lag chart, the since-start chart and the raw numbers block (commit, memory lists, lag, CPU and page faults, the
+token-leak guard's state) are no longer on the window. The data is still recorded in the data folder (`totals.csv`,
+`lag.csv`, `load.csv`, `findings.jsonl`), and the Since boot report and the exports are unchanged. Every size in the
+window is scaled with the display's DPI, and it renders only while visible: no timers run while it is hidden.
 
 ## 12. Build and test
 

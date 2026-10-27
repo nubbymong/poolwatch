@@ -5,7 +5,7 @@ service or driver activity is making it grow, and writes an **evidence pack** go
 It can also find and switch off background services that saturate the PC, and it knows about AI coding-agent
 sessions (Claude Code, AI Code Conductor) when they are the ones starting the processes.
 
-![Main window (Overview), taken by the CI UI test during a File-handle leak](docs/screenshots/1-overview.png)
+![Main window, taken by the CI UI test during a File-handle leak](docs/screenshots/1-main-window.png)
 
 How it works is in [docs/DESIGN.md](docs/DESIGN.md). What it can change on your PC, and how to report a security
 problem, is in [SECURITY.md](SECURITY.md).
@@ -54,7 +54,7 @@ Below, use the zip you downloaded, and the exe name from the table (`PoolWatch.e
    UAC prompt at every logon. It is only created for a copy installed under `%ProgramFiles%`.
 
 To update, exit PoolWatch (tray menu → Exit) and replace the files. To uninstall: untick Start at logon, use **Restore
-all** on the Background services page if you turned services off, exit, then delete `%ProgramFiles%\PoolWatch` and
+all** on the Services tab if you turned services off, exit, then delete `%ProgramFiles%\PoolWatch` and
 `%ProgramData%\PoolWatch`.
 
 ## Why it runs as administrator
@@ -74,7 +74,7 @@ PoolWatch watches and reads. [SECURITY.md](SECURITY.md#what-poolwatch-changes-on
 
 | Change | Confirmed by |
 |---|---|
-| Records a bounded WPR trace (at most 5 minutes) | **Capture now**, or the `CaptureOnAlert` setting (off by default, at most one an hour) |
+| Records a bounded WPR trace (at most 5 minutes) | **Capture now** (tray menu), or the `CaptureOnAlert` setting (off by default, at most one an hour) |
 | Empties the Windows standby list (the file cache) | **Clear cache now**, or the automatic clear (off by default) |
 | Deletes your own RAMMap clear task (never RAMMap itself) | A Yes in a dialog that shows the task |
 | Stops / disables, or restores, a background service | A dialog listing them; the original is saved; protected services are never offered |
@@ -89,23 +89,34 @@ PoolWatch never installs a driver, never uninstalls anything, and never ships or
 ## Using it
 
 - **Tray icon**: green = normal, amber = a tag is growing or retained, red = an incident is open. The tooltip shows the
-  committed paged / non-paged pool (the Task Manager numbers). Closing the window keeps PoolWatch running.
-- **Overview**: the pool now and since boot, the top growing tags in plain words, free / standby / pool memory, the last
-  cache clear, the lag probe, CPU and run queue with the page-fault split, and the token-leak guard.
-- **Growing tags**: tag, owner, description, size, change over 1 / 10 / 60 minutes and state. Select a tag for its
-  suspects, grouped by who they work for, with the evidence, and the process events in the window.
-- **Incidents**, **Processes**, **Findings** (spawn storms, tokens, filters, lag, saturation, clears, experiments,
-  versions and crashes, child accumulation, service changes, your marks), **Background services** and **Settings**.
-- **Toolbar**: Capture now, Since boot (what grew since boot, hour by hour), Open incident folder, Export report, Export
-  vendor bundle, Copy summary, Clear cache now.
+  committed paged / non-paged pool (the Task Manager numbers). Closing the window keeps PoolWatch running. Right-click it
+  for the tools that are not on the window: **Capture now**, **Since boot report** (what grew since boot, hour by hour),
+  **Open incident folder**, **Export vendor bundle**, **Copy latest incident summary**, **Mark**, the experiments,
+  **About PoolWatch** (version, overhead, data folder) and, only while there is one to remove, **Remove my clear task** /
+  **Remove old clear-cache tasks**.
+- **Main window**, top to bottom:
+  - one line in plain words: the kernel pool is steady, growing or dropping, by how much, and, when it grows, the most
+    likely cause and how sure PoolWatch is ("Kernel pool is growing: +1.2 GB in the last hour. Most likely cause: ...
+    (strong evidence)");
+  - one graph: the committed paged and non-paged pool (the Task Manager figures) over the last 6 hours;
+  - three buttons: **Clear cache now** (its tooltip shows the last clear's result), **Export report** (the selected
+    row's report, or the newest incident's, redacted by default) and **Settings** (thresholds, the automatic clear,
+    redaction, Start at logon);
+  - two tabs. **Pool causes** is one list of what grew or was released: open and recent incidents, tags growing
+    before any incident, processes piling up handles or pool (or orphaned and still busy), spawn storms and other
+    pool-related findings, and each cache clear's result. Each row says what is growing, how much, how fast, the likely
+    cause, the confidence in words and when; select it for its details (the incident report's summary, or a tag's
+    suspects with their evidence), and **Open report folder** for the full report. **Services** lists the background
+    services you may turn off, with their live cost, and the non-Microsoft scheduled tasks, startup apps and heavy
+    background apps (see below).
 
 | | |
 |---|---|
-| ![Growing tags](docs/screenshots/2-growing-tags.png) | ![Incidents](docs/screenshots/3-incidents.png) |
-| ![Processes](docs/screenshots/4-processes.png) | ![Findings](docs/screenshots/5-findings.png) |
+| ![Pool causes with a row selected](docs/screenshots/2-pool-causes.png) | ![Services](docs/screenshots/3-services.png) |
+| ![Settings](docs/screenshots/4-settings.png) | |
 
-The screenshots are taken on the CI runner by the UI test and predate some of the current window (it now has a
-Background services tab and no Clear cache setup button); the CI `ui` job's artifacts have fresh ones.
+The screenshots (main window, Pool causes with a row selected, Services, Settings) are taken on the CI runner, at 100%
+display scaling, by the UI test (`ci/m4-ui.ps1`); the CI `ui` job's artifacts always have fresh ones.
 
 ### How it decides
 
@@ -119,7 +130,7 @@ correlation alone.
 ### Background services
 
 When the PC is saturated (all cores busy, typing lags) but pool and memory look fine, PoolWatch says so, naming the
-processes by CPU and page faults. The **Background services** tab groups services into *optional* (from a catalogue,
+processes by CPU and page faults. The **Services** tab groups services into *optional* (from a catalogue,
 with what you lose and the risk), *unknown* third-party ("you decide") and *protected* (never changed), shows each
 one's live cost, and turns them off reversibly: the original is saved first, and **Restore** puts it back exactly.
 
@@ -164,9 +175,9 @@ its own full path; never a bare name resolved through a shell association or the
 user and machine names, paths and your SID. They are for you, and each report says "NOT REDACTED" at the top. To
 share:
 
-- use **Export report** (or **Export vendor bundle**), and keep the default **Yes** to redact: your user name, machine
-  name, home and TEMP paths, domain and SID become placeholders, values that look like secrets become `<SECRET>`, and the
-  `.etl` trace is left out;
+- use **Export report** (or **Export vendor bundle** in the tray menu), and keep the default **Yes** to redact: your
+  user name, machine name, home and TEMP paths, domain and SID become placeholders, values that look like secrets become
+  `<SECRET>`, and the `.etl` trace is left out;
 - read the exported files before you post them: redaction is best-effort and cannot know every secret format;
 - `RedactCopies` (on by default) applies the same redaction to rows and summaries you copy from the window.
 
