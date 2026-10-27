@@ -1,118 +1,172 @@
 using PoolWatch.Analysis;
-using PoolWatch.Core;
 using PoolWatch.Engine;
 
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// Settings, opened from the main window's Settings button: the settings grid, Save, and Start at logon. It was the
-/// Settings tab; the behaviour is the same (saved settings take effect after a restart; turning on the automatic clear
-/// first deals with any clear task of your own). Created once and reused, so the edited settings and the "automatic clear
-/// confirmed" state last as long as the window, as they did on the tab.
+/// Settings, opened from the main window's Settings button: a short form in plain words with what most people change
+/// (Start at logon, automatic cache clearing, deeper capture) and an Advanced button for every setting (the old grid).
+/// Start at logon is a scheduled task and changes at once; the rest is written to settings.json by Save and taken at
+/// PoolWatch's next start, as before. The form sizes itself to its content, so nothing is cut off at any scaling.
+/// Created once and reused (the edited settings last as long as the window).
 /// </summary>
 internal sealed class SettingsDialog : Form
 {
     private readonly MonitorEngine _engine;
-    private readonly AnalysisPipeline _analysis;
-    private readonly UiActions _actions;
-    private readonly Settings _editSettings;
-    private readonly PropertyGrid _grid = new() { Dock = DockStyle.Fill, ToolbarVisible = false };
-    private readonly CheckBox _logon = new() { Text = "Start at logon (scheduled task, highest privileges: no daily UAC prompt)", AutoSize = true, Anchor = AnchorStyles.Left };
-    private bool _autoClearConfirmed;
+    private readonly SettingsEditor _editor;
+    private readonly CheckBox _logon = new() { Text = "Start PoolWatch when I sign in", AutoSize = true };
+    private readonly CheckBox _autoClear = new() { Text = "Clear the standby cache automatically", AutoSize = true };
+    private readonly NumericUpDown _hours = new() { DecimalPlaces = 1, Increment = 0.5m, Minimum = 0, Maximum = SimpleSettings.MaxHours, TextAlign = HorizontalAlignment.Right };
+    private readonly NumericUpDown _poolGb = new() { DecimalPlaces = 1, Increment = 1, Minimum = 0, Maximum = SimpleSettings.MaxPoolGb, TextAlign = HorizontalAlignment.Right };
+    private readonly CheckBox _deeper = new() { Text = "Deeper automatic captures", AutoSize = true };
+    private readonly Label _clearHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
+    private readonly Label _deeperHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
+    private readonly Label _problems = new() { AutoSize = true, ForeColor = Color.Firebrick, Visible = false };
+    private readonly List<Control> _clearFields = [];
+    private AdvancedSettingsDialog? _advanced;
 
     public SettingsDialog(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions)
     {
         _engine = engine;
-        _analysis = analysis;
-        _actions = actions;
-        _editSettings = Clone(engine.Settings);
+        _editor = new SettingsEditor(engine, analysis, actions);
         Text = "PoolWatch settings";
         Icon = TrayIcons.For(TrayState.Green);
         Font = new Font("Segoe UI", 9f);
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
         MinimizeBox = false;
-        Size = LogicalToDeviceUnits(new Size(680, 640));
-        MinimumSize = LogicalToDeviceUnits(new Size(480, 360));
+        MaximizeBox = false;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
-        _grid.SelectedObject = _editSettings;
-        var save = new Button { Text = "Save", AutoSize = true, Margin = Px(4, 4, 4, 4) };
-        save.Click += (_, _) => _actions.Guarded(this, "Save settings", Save);
-        var close = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.Cancel, Margin = Px(4, 4, 4, 4) };
+        int width = S(520), indent = S(22);
+        var bold = new Font(Font, FontStyle.Bold);
+        var form = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Padding = Px(16, 12, 16, 12), Location = Point.Empty };
+        form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
+        void Row(Control c, int indentPx = 0, int top = 0, int bottom = 4)
+        {
+            c.Margin = new Padding(indentPx, S(top), 0, S(bottom));
+            if (c is Label { AutoSize: true } l) l.MaximumSize = new Size(width - indentPx, 0);
+            form.Controls.Add(c);
+        }
+        Label Heading(string text) => new() { Text = text, AutoSize = true, Font = bold };
+        Label Hint(string text) => new() { Text = text, AutoSize = true, ForeColor = SystemColors.GrayText };
+        FlowLayoutPanel Line(params Control[] parts)
+        {
+            var p = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
+            foreach (var c in parts)
+            {
+                c.Margin = c is Label ? new Padding(0, S(5), S(6), 0) : new Padding(0, S(2), S(6), 0);
+                p.Controls.Add(c);
+            }
+            return p;
+        }
+
+        Row(Heading("Start at logon"));
+        Row(_logon, indent);
+        Row(Hint("A scheduled task with the highest privileges, so there is no UAC prompt at each sign-in. It changes as soon as you " +
+                 "tick or untick it, and is created only for a copy installed in Program Files."), indent, bottom: 10);
+
+        Row(Heading("Automatic cache clearing"));
+        Row(_autoClear, indent);
+        _hours.Width = S(70);
+        _poolGb.Width = S(70);
+        var every = Line(new Label { Text = "Every", AutoSize = true }, _hours, new Label { Text = "hours (0 = no schedule)", AutoSize = true });
+        var over = Line(new Label { Text = "When the kernel pool is over", AutoSize = true }, _poolGb, new Label { Text = "GB (0 = no size rule)", AutoSize = true });
+        Row(every, indent * 2);
+        Row(over, indent * 2);
+        Row(_clearHint, indent * 2, bottom: 10);
+        _clearFields.AddRange([every, over]);
+
+        Row(Heading("Deeper capture"));
+        Row(_deeper, indent);
+        Row(_deeperHint, indent, bottom: 10);
+
+        Row(_problems, 0, bottom: 6);
+        Row(Hint("Start at logon changes at once. Save writes the other settings now; PoolWatch uses them from its next start."), 0, bottom: 8);
+
+        var advanced = new Button { Text = "Advanced...", AutoSize = true, Margin = Padding.Empty };
+        advanced.Click += (_, _) => actions.Guarded(this, "Advanced settings", OpenAdvanced);
+        var save = new Button { Text = "Save", AutoSize = true, Margin = new Padding(S(6), 0, 0, 0) };
+        save.Click += (_, _) => actions.Guarded(this, "Save settings", Save);
+        var close = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.Cancel, Margin = new Padding(S(6), 0, 0, 0) };
         CancelButton = close;
-        var note = new Label { Text = "Changes take effect after PoolWatch restarts.", AutoSize = true, ForeColor = SystemColors.GrayText, Anchor = AnchorStyles.Left, Margin = Px(4, 8, 4, 4) };
-        // Start at logon on a row of its own; below it the note on the left, Save and Close on the right.
-        var bar = new TableLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 3, RowCount = 2, Padding = Px(8, 6, 8, 8) };
-        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        _logon.Margin = Px(4, 4, 4, 4);
-        bar.Controls.Add(_logon, 0, 0);
-        bar.SetColumnSpan(_logon, 3);
-        bar.Controls.Add(note, 0, 1);
-        bar.Controls.Add(save, 1, 1);
-        bar.Controls.Add(close, 2, 1);
-        Controls.Add(_grid);
-        Controls.Add(bar);
+        var buttons = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 4, RowCount = 1, Margin = Padding.Empty, Dock = DockStyle.Fill };
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        buttons.Controls.Add(advanced, 0, 0);
+        buttons.Controls.Add(save, 2, 0);
+        buttons.Controls.Add(close, 3, 0);
+        form.Controls.Add(buttons);
+        Controls.Add(form);
+
+        _autoClear.CheckedChanged += (_, _) => EnableClearFields();
+        LoadFrom();
 
         // schtasks /query can take seconds: ask in the background, then wire the checkbox on this (the UI) thread. The
-        // answer is posted to the context captured here, so it arrives whether or not the dialog has a window handle yet
-        // (marshalling through the handle had a window in which the answer was dropped and the box stayed disabled).
+        // answer is posted to the context captured here, so it arrives whether or not the dialog has a window handle yet.
         _logon.Enabled = false;
         var ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
-        Task.Run(SafeExists).ContinueWith(t => ui.Post(_ => { if (!IsDisposed) WireLogon(t.Result); }, null), TaskScheduler.Default);
+        Task.Run(SafeExists).ContinueWith(t => ui.Post(_ => { if (!IsDisposed) WireLogon(t.Result, actions); }, null), TaskScheduler.Default);
     }
 
-    private Padding Px(int l, int t, int r, int b) => new(LogicalToDeviceUnits(l), LogicalToDeviceUnits(t), LogicalToDeviceUnits(r), LogicalToDeviceUnits(b));
+    private int S(int logical) => LogicalToDeviceUnits(logical);
+    private Padding Px(int l, int t, int r, int b) => new(S(l), S(t), S(r), S(b));
 
-    private static Settings Clone(Settings s) => System.Text.Json.JsonSerializer.Deserialize<Settings>(System.Text.Json.JsonSerializer.Serialize(s))!;
+    /// <summary>The Advanced grid (created on first use; CI renders it for the screenshots).</summary>
+    public AdvancedSettingsDialog Advanced => _advanced ??= new AdvancedSettingsDialog(_editor);
+
+    /// <summary>The form's fields from the edited settings (also after Advanced, which edits the same settings).</summary>
+    private void LoadFrom()
+    {
+        var v = SimpleSettings.From(_editor.Edit);
+        _autoClear.Checked = v.AutoClear;
+        _hours.Value = v.EveryHours;
+        _poolGb.Value = v.PoolGb;
+        _deeper.Checked = v.DeeperCapture;
+        _clearHint.Text = SimpleSettings.AutoClearHint(_editor.Edit);
+        _deeperHint.Text = SimpleSettings.DeeperCaptureHint(_editor.Edit);
+        EnableClearFields();
+        ShowProblems([]);
+    }
+
+    private SimpleSettings Values() => new(_autoClear.Checked, _hours.Value, _poolGb.Value, _deeper.Checked);
+
+    private void EnableClearFields()
+    {
+        foreach (var c in _clearFields) c.Enabled = _autoClear.Checked;
+    }
+
+    private void ShowProblems(List<string> problems)
+    {
+        _problems.Text = string.Join("\n", problems);
+        _problems.Visible = problems.Count > 0;
+    }
 
     private void Save()
     {
-        _editSettings.Normalize();
-        if (!_editSettings.AutoClearEnabled) _autoClearConfirmed = false;
-        bool turningOnAutoClear = _editSettings.AutoClearEnabled && !_engine.Settings.AutoClearEnabled && !_autoClearConfirmed;
-        if (turningOnAutoClear)
-        {
-            // The automatic clear goes on only after the elevated step has dealt with any clear task of your own.
-            _editSettings.AutoClearEnabled = false;
-            SaveSettings(null);
-            ConfirmAutoClear();
-            return;
-        }
-        SaveSettings("Saved. Changes take effect after PoolWatch restarts.");
+        if (!Values().ApplyTo(_editor.Edit, out var problems)) { ShowProblems(problems); return; }
+        ShowProblems([]);
+        _editor.Save(this);
+        LoadFrom(); // Save may have kept the automatic clear off (your own clear task stays)
     }
 
-    private void SaveSettings(string? message)
+    private void OpenAdvanced()
     {
-        _editSettings.Save(_engine.Paths.Guard.CheckReal(_engine.Paths.SettingsFile));
-        _grid.Refresh();
-        if (message is not null) MessageBox.Show(this, message, "PoolWatch");
+        // The grid shows what this form holds now (it must be valid first), and this form shows what the grid saved.
+        if (!Values().ApplyTo(_editor.Edit, out var problems)) { ShowProblems(problems); return; }
+        if (!Advanced.Visible) Advanced.ShowDialog(this);
+        LoadFrom();
     }
 
-    /// <summary>
-    /// Turning the automatic clear on: finds any clear task of your own (RAMMap in a scheduled task), shows it, and removes
-    /// it only on a yes; kept, the automatic clear stays off. In-process (S5, review round 2: no UAC step any more;
-    /// PoolWatch is elevated).
-    /// </summary>
-    private void ConfirmAutoClear()
-    {
-        if (!CacheHelper.IsElevated) { MessageBox.Show(this, UiActions.NotElevated, "PoolWatch"); return; }
-        if (_actions.LegacyInProcess(this) == 0)
-        {
-            _autoClearConfirmed = true;
-            _editSettings.AutoClearEnabled = true;
-            SaveSettings("The automatic clear is on (from the next start of PoolWatch).");
-        }
-        else SaveSettings("Your own clear task stays, so PoolWatch's automatic clear stays off (the two should not both run).");
-        _analysis.Diagnostics.Cache.RefreshStatus();
-    }
-
-    private void WireLogon(bool exists)
+    private void WireLogon(bool exists, UiActions actions)
     {
         _logon.Checked = exists;
         _logon.Enabled = true;
-        _logon.CheckedChanged += (_, _) => _actions.Guarded(this, "Start at logon", () =>
+        _logon.CheckedChanged += (_, _) => actions.Guarded(this, "Start at logon", () =>
         {
             var (ok, output) = LogonTask.Set(_logon.Checked, Path.Combine(_engine.Paths.DataRoot, "logon-task.xml"), _engine.Paths.Guard.CheckReal);
             if (!ok) MessageBox.Show(this, "Could not change the logon task:\n" + output, "PoolWatch");
@@ -129,5 +183,11 @@ internal sealed class SettingsDialog : Form
     {
         if (e.CloseReason == CloseReason.UserClosing && !Modal) { e.Cancel = true; Hide(); }
         base.OnFormClosing(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _advanced?.Dispose();
+        base.Dispose(disposing);
     }
 }
