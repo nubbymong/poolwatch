@@ -104,6 +104,8 @@ switch ($Scenario) {
             $mine = @($c.pool | Where-Object { $_.image -eq 'Leaker.exe' -and $_.tag -ceq $r.tag -and [int64]$_.netBytes -gt 1MB })
             Assert-True ($mine.Count -ge 1) "trace attributes > 1 MB net $($r.tag) to Leaker.exe"
             Assert-True ($mine.Count -ge 1 -and @($mine[0].topFrames).Count -ge 1) "allocating module recorded ($(@($mine[0].topFrames | ForEach-Object { $_.frame }) -join ', '))"
+            # Kernel-File rides along only with deeperCapture on (m3-config.json); say so first if that is what is missing.
+            Assert-True ($c.kernelFileRecorded -eq $true) "the trace recorded Kernel-File (deeperCapture is on in m3-config.json)"
             $lf = @($c.files | Where-Object { $_.image -eq 'Leaker.exe' -and [int]$_.creates -ge 1000 })
             Assert-True ($lf.Count -ge 1) "Kernel-File attributes >= 1000 opens to Leaker.exe"
             $top = $r.suspects[0]
