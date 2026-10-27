@@ -82,7 +82,7 @@ PoolWatch watches and reads. [SECURITY.md](SECURITY.md#what-poolwatch-changes-on
 | Ends a heavy background process | A dialog with its identity, PID, start time and command line |
 | Sets the live foreground lock timeout to 0 (token-leak guard) | The `TokenGuardEnabled` setting (off by default) |
 | Creates or removes the Start-at-logon task; fixes an unsafe existing one | The checkbox; a question |
-| Creates and locks `%ProgramData%\PoolWatch`; removes an older PoolWatch's own Clear cache tasks | Automatic, and noted on the Findings timeline |
+| Creates and locks `%ProgramData%\PoolWatch`; removes an older PoolWatch's own Clear cache tasks | Automatic, and noted in the findings log (`findings.jsonl`) |
 
 PoolWatch never installs a driver, never uninstalls anything, and never ships or runs third-party tools.
 
@@ -95,9 +95,10 @@ PoolWatch never installs a driver, never uninstalls anything, and never ships or
   **About PoolWatch** (version, overhead, data folder) and, only while there is one to remove, **Remove my clear task** /
   **Remove old clear-cache tasks**.
 - **Main window**, top to bottom:
-  - one line in plain words: the kernel pool is steady, growing or dropping, by how much, and, when it grows, the most
-    likely cause and how sure PoolWatch is ("Kernel pool is growing: +1.2 GB in the last hour. Most likely cause: ...
-    (strong evidence)");
+  - one line in plain words: the kernel pool is steady, growing or dropping, by how much, and, when it grows, what is
+    growing, the most likely cause and how sure PoolWatch is ("Kernel pool is steady at 9.6 GB, but File system metadata
+    (Reff, refs.sys) grew 400 MB in the last hour. Most likely cause: ..., with strong evidence."). While every core is
+    busy it also says so, naming the busiest process;
   - one graph: the committed paged and non-paged pool (the Task Manager figures) over the last 6 hours;
   - three buttons: **Clear cache now** (its tooltip shows the last clear's result), **Export report** (the selected
     row's report, or the newest incident's, redacted by default) and **Settings** (thresholds, the automatic clear,
@@ -129,7 +130,8 @@ correlation alone.
 
 ### Background services
 
-When the PC is saturated (all cores busy, typing lags) but pool and memory look fine, PoolWatch says so, naming the
+When the PC is saturated (all cores busy, typing lags) but pool and memory look fine, PoolWatch says so at the end of
+the status line, naming the busiest process; the findings log (`findings.jsonl`) has the full answer, with the
 processes by CPU and page faults. The **Services** tab groups services into *optional* (from a catalogue,
 with what you lose and the risk), *unknown* third-party ("you decide") and *protected* (never changed), shows each
 one's live cost, and turns them off reversibly: the original is saved first, and **Restore** puts it back exactly.
@@ -187,7 +189,7 @@ share:
 PoolWatch.exe                       tray app (opens the window)
 PoolWatch.exe --tray                tray app without the window (the logon task uses this)
 PoolWatch.exe --headless [--duration <s>] [--interval <s>] [--config <settings.json>] [--out <dir>] [--verbose-csv]
-PoolWatch.exe --mark "<note>"       put a note on the running PoolWatch's timeline
+PoolWatch.exe --mark "<note>"       put a note in the running PoolWatch's findings log (and incident timelines)
 PoolWatch.exe --services-dump <file> | --tasks-dump <file>
 PoolWatch.exe --service-off <name> | --service-restore <name|all>
 PoolWatch.exe --selftest --out <dir>   native collector checks against independent sources

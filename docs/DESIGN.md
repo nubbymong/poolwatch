@@ -201,11 +201,18 @@ and, only while there is one to remove, Remove my clear task and Remove old clea
 The main window, top to bottom:
 
 - **One status line**, in plain words, from what the analysis already knows (`Core.Util.PoolStatusLine`, unit-tested):
-  steady ("Kernel pool is steady (9.6 GB)"), growing ("+1.2 GB in the last hour", from 200 MB an hour or 100 MB in
-  10 minutes), dropping (from 200 MB an hour or 100 MB in 10 minutes; a fall in the last 10 minutes is said first), a tag
-  growing while the total holds, or not enough data yet (under 3 minutes of samples). A cause is named only when its
-  evidence is at least "some" (the open incident's trace owner or top suspect, else the ranking of the fastest-growing
-  tag); otherwise "No clear cause yet". It never prints a negative rise.
+  steady ("Kernel pool is steady (9.6 GB)."), growing ("Kernel pool is growing: +1.2 GB in the last hour.", from
+  200 MB an hour or 100 MB in 10 minutes), dropping (from 200 MB an hour or 100 MB in 10 minutes; a fall in the last
+  10 minutes is said first), a tag growing while the total holds ("Kernel pool is steady at 9.6 GB, but File system
+  metadata (Reff, refs.sys) grew 400 MB in the last hour."), or not enough data yet (under 3 minutes of samples). A
+  cause is named only when its evidence is at least "some" (the open incident's trace owner or top suspect, else the
+  ranking of the fastest-growing tag): "Most likely cause: X, with strong evidence."; otherwise "No clear cause yet".
+  While the saturation detector says every core is busy, one clause is added: "Your PC is saturated; busiest: X." It
+  never prints a negative rise, "grew +", or brackets inside brackets.
+- **Tag names** (`PlainWords.Tag`) are everyday words with the tag code and its driver in one pair of brackets: "Open
+  files (File, Windows kernel)". Common tags have a fixed name; another tag uses a short pooltag.txt description without
+  its bracketed aside, and otherwise reads "Pool tag Abcd (foo.sys)". A tag row's details start with the tag code, the
+  driver and the full technical description.
 - **One graph**: the committed paged and non-paged pool over the last 6 hours (minute averages beyond the raw hour),
   solid lines, a legend with the current values, round axis steps. Every text position is measured from the font, so
   the labels cannot overlap the title at any display scaling.
