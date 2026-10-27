@@ -101,23 +101,27 @@ PoolWatch never installs a driver, never uninstalls anything, and never ships or
     busy it also says so, naming the busiest process;
   - one graph: the committed paged and non-paged pool (the Task Manager figures) over the last 6 hours;
   - three buttons: **Clear cache now** (its tooltip shows the last clear's result), **Export report** (the selected
-    row's report, or the newest incident's, redacted by default) and **Settings** (thresholds, the automatic clear,
-    redaction, Start at logon);
+    row's report, or the newest incident's, redacted by default) and **Settings**: a short form with Start at logon
+    (applies at once), automatic cache clearing (on or off, every how many hours, over what pool size) and deeper
+    captures, each explained in a line; **Advanced...** opens every setting in a grid. Saved settings take effect when
+    PoolWatch next starts;
   - two tabs. **Pool causes** is one list of what grew or was released: open and recent incidents, tags growing
     before any incident, processes piling up handles or pool (or orphaned and still busy), spawn storms and other
     pool-related findings, and each cache clear's result. Each row says what is growing, how much, how fast, the likely
-    cause, the confidence in words and when; select it for its details (the incident report's summary, or a tag's
-    suspects with their evidence), and **Open report folder** for the full report. **Services** lists the background
-    services you may turn off, with their live cost, and the non-Microsoft scheduled tasks, startup apps and heavy
-    background apps (see below).
+    cause, the confidence in words and when; a line above the list says what the colours mean (pink: an open incident
+    or an alert; yellow: growing or held now, or a warning). A growing tag's cause is ranked in the background and
+    filled in when ready. Select a row for its details (the incident report's summary, or a tag's suspects with their
+    evidence), and **Open report folder** for the full report. **Services** lists the background services you may
+    turn off, with their live cost, and the non-Microsoft scheduled tasks, startup apps and heavy background apps (see
+    below).
 
 | | |
 |---|---|
 | ![Pool causes with a row selected](docs/screenshots/2-pool-causes.png) | ![Services](docs/screenshots/3-services.png) |
-| ![Settings](docs/screenshots/4-settings.png) | |
+| ![Settings](docs/screenshots/4-settings.png) | ![Settings, Advanced](docs/screenshots/5-settings-advanced.png) |
 
-The screenshots (main window, Pool causes with a row selected, Services, Settings) are taken on the CI runner, at 100%
-display scaling, by the UI test (`ci/m4-ui.ps1`); the CI `ui` job's artifacts always have fresh ones.
+The screenshots (main window, Pool causes with a row selected, Services, Settings, Settings Advanced) are taken on the
+CI runner, at 100% display scaling, by the UI test (`ci/m4-ui.ps1`); the CI `ui` job's artifacts always have fresh ones.
 
 ### How it decides
 

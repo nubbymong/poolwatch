@@ -217,7 +217,12 @@ The main window, top to bottom:
   solid lines, a legend with the current values, round axis steps. Every text position is measured from the font, so
   the labels cannot overlap the title at any display scaling.
 - **Three buttons**: Clear cache now, Export report (the selected row's report folder, else the newest incident's) and
-  Settings (a dialog: the settings grid, Save, Start at logon).
+  Settings. Settings is a short form in plain words: Start at logon (the scheduled task, changed at once), automatic
+  cache clearing (`AutoClearEnabled`, `AutoClearEveryHours`, `AutoClearPoolGb`, with their units and the 30-minute
+  spacing) and deeper captures (`DeeperCapture`, with a line saying when it has no effect). Its values are checked
+  before saving (`SimpleSettings`, unit-tested: ranges, and an automatic clear needs a schedule or a pool size).
+  **Advanced...** opens every setting in the property grid; both edit the same settings and share one Save, which
+  writes settings.json for PoolWatch's next start.
 - **Two tabs**. *Pool causes* is one list merging what were four tabs: open incidents and those of the last 7 days;
   tags the detector marks growing, retained or released that no open incident covers; live processes whose handles rose
   5,000 or whose charged pool rose 32 MB in the hour, or that were orphaned while PoolWatch watched and still do 500 I/O
@@ -226,9 +231,13 @@ The main window, top to bottom:
   now comes first. Each row: what is growing (the tag in words, with its driver), how much, how fast, the likely cause,
   the confidence in words and when; the selected row's details are the incident report's summary, a tag's top three
   suspects with their evidence and the recent notable events, a process's counts, chain and command line, or a
-  finding's text. Only the fastest-growing tag without an incident is ranked in the background (every 2 minutes), and
-  the selected one every 30 s, as the old tag page did. *Services* is the former Background services page, unchanged
-  in behaviour.
+  finding's text. A line above the list says what the colours mean: pink for an open incident or an alert finding,
+  yellow for a tag growing or held now, a process piling up, or a warning finding. A tag row's cause comes from its
+  ranking (the correlator over the last hour, tens of milliseconds), built on a pool thread, one at a time
+  (`TagRankings`, `RankPlan`): the selected row's tag at once, every listed tag once a few seconds apart, then each
+  refreshed after 5 minutes (the selected one after 30 s), never two within 30 s. Until a tag has a ranking its cause
+  cell is blank and its details say "Ranking the suspects…". *Services* is the former Background services page,
+  unchanged in behaviour.
 
 The lag chart, the since-start chart and the raw numbers block (commit, memory lists, lag, CPU and page faults, the
 token-leak guard's state) are no longer on the window. The data is still recorded in the data folder (`totals.csv`,
