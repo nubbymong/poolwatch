@@ -28,8 +28,9 @@ if (Test-Path $smokeFile) {
 
     # The window: a plain status line, one graph, three buttons, two tabs.
     Assert-True ($f.status -match '^Kernel pool') "the status line reads in plain English: $($f.status)"
-    # (Only the amounts: the text before the cause, whose name may hold a "-2" of its own.)
-    Assert-True ((($f.status -split 'Most likely cause')[0]) -notmatch '\+-|-\d|Rising') "the status line never prints a negative rise: $($f.status)"
+    # Only the amounts are checked ("+-1 GB", "grew -1 GB", "dropped -1 GB", "steady (-1 GB)"): a tag or process name may
+    # hold a "-8" of its own ("UTF-8").
+    Assert-True ($f.status -notmatch '\+-|(growing:|grew|dropped|is|at) -\d|\(-\d|Rising') "the status line never prints a negative rise: $($f.status)"
     Assert-True ((@($f.buttons) -join '|') -eq 'Clear cache now|Export report|Settings') "three buttons: $(@($f.buttons) -join ', ')"
     Assert-True ((@($f.tabs) -join '|') -eq 'Pool causes|Services') "two tabs: $(@($f.tabs) -join ', ')"
     Assert-True ([int]$f.chartPoints -ge 2) "the graph has data ($($f.chartPoints) points)"
@@ -42,8 +43,10 @@ if (Test-Path $smokeFile) {
     Assert-True ($f.selectionKept -eq $true) "a refresh keeps the selected row"
     Assert-True ($f.copyMatches -eq $true) "Ctrl+C copies the header and exactly the selected row's cells: $($f.copiedSample)"
 
-    # Nothing clipped or overlapping (text that does not fit, controls outside their parent, the chart's labels on its title).
-    Assert-True (@($f.layoutProblems).Count -eq 0) "nothing clipped or overlapping at $($f.size.width) x $($f.size.height) ($($f.size.dpi) dpi): $(@($f.layoutProblems) -join '; ')"
+    # Nothing clipped or overlapping (text that does not fit, controls outside their parent, the chart's labels on its
+    # title), checked with each tab selected (Services once its list has loaded) and with Settings open.
+    Assert-True (@($f.layoutProblems).Count -eq 0) "Pool causes and Services: nothing clipped or overlapping at $($f.size.width) x $($f.size.height) ($($f.size.dpi) dpi): $(@($f.layoutProblems) -join '; ')"
+    Assert-True ([int]$f.rows.Services -ge 1) "the Services tab was checked with its list loaded ($($f.rows.Services) services)"
     Assert-True (@($f.settingsLayoutProblems).Count -eq 0) "Settings: nothing clipped: $(@($f.settingsLayoutProblems) -join '; ')"
     if (@($f.layoutProblemsAtMinimumSize).Count -gt 0) { Write-Host "  note, at the smallest window size: $(@($f.layoutProblemsAtMinimumSize) -join '; ')" }
 
