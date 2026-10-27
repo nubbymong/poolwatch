@@ -254,5 +254,7 @@ The code builds anywhere the .NET 10 SDK runs (`EnableWindowsTargeting`); it run
   test changes a service, task, registry value or ACL, or ends a process.
 - End-to-end on the Windows CI runner (elevated): PoolWatch runs headless while `tools/Leaker` reproduces a pattern
   (a File-handle leak, file churn with release, an orphaned child, the confirmation trace, spawn storms and more), and
-  the generated reports are checked. A UI smoke test takes the screenshots; a soak checks the overhead budget under a
-  busy-PC load.
+  the generated reports are checked. A UI smoke test takes the screenshots; a 45-minute soak checks the overhead budget
+  under a busy-PC load, headless and with the window open, judged as steady state from 15 minutes in (the start-up peak
+  is reported, not judged). "Private memory flat" is judged through the floors after PoolWatch's own 5-minute trims (a
+  slope over every sample would depend on where the window cuts the sawtooth between trims), and needs at least five.
