@@ -42,8 +42,8 @@ internal sealed record ProcessCandidate(ProcessKey Key, string Name, int Handles
 
 /// <summary>
 /// Builds the Pool causes rows. The mapping functions are pure (unit-tested in PoolWatch.AppTests); <see cref="Build"/>
-/// reads the analysis under its lock and ranks at most one growing tag every <see cref="RankEvery"/>, so the list costs
-/// about what the old tabs did.
+/// reads the analysis under its lock and only reads the tag rankings, which <see cref="TagRankings"/> builds off the UI
+/// thread (<see cref="RankPlan"/>), so the list costs about what the old tabs did.
 /// </summary>
 internal static class PoolCauses
 {
@@ -58,9 +58,6 @@ internal static class PoolCauses
     public const int MaxProcesses = 8, MaxFindings = 30, MaxIncidents = 50;
     public static readonly TimeSpan FindingWindow = TimeSpan.FromHours(24);
     public static readonly TimeSpan IncidentWindow = TimeSpan.FromDays(7);
-    /// <summary>The top growing tag without an incident is ranked this often (the selected row every 30 s, as the old tag page did).</summary>
-    public static readonly TimeSpan RankEvery = TimeSpan.FromMinutes(2);
-    public const string NotRanked = "select the row to rank";
 
     /// <summary>Finding kinds that explain pool growth or its release; the rest (lag, marks, versions, ...) stay in findings.jsonl and the bundle.</summary>
     private static readonly HashSet<FindingKind> PoolKinds =
@@ -126,13 +123,14 @@ internal static class PoolCauses
                 when = "now";
                 break;
         }
-        string cause = NotRanked, conf = "";
+        // The cause comes from the tag's ranking (built in the background, TagRankings): blank until there is one. A release
+        // has no cause to name here (its incident report lists what exited then).
+        string cause = "", conf = "";
         if (s.State != TagState.Released && view is not null)
         {
             if (CauseOf(view) is { } c) { cause = c.name; conf = PlainWords.Confidence(c.level); }
             else cause = "no clear cause yet";
         }
-        else if (s.State == TagState.Released) cause = "";
         return new CauseRow("tag:" + s.Tag.Raw.ToString("x8"), CauseKind.Tag, what, much, fast, cause, conf, when)
         {
             Active = s.State != TagState.Released, TimeUtc = s.StateSinceUtc ?? nowUtc,
@@ -225,9 +223,8 @@ internal static class PoolCauses
             rows.Add(ForIncident(r, TagWords(r.Tag, PoolTag.TryParse(r.Tag, out var t) ? a.Knowledge.Lookup(t) : null), now));
 
         var open = incidents.Where(r => r.Open).Select(r => r.Tag).ToHashSet(StringComparer.Ordinal);
-        var top = TopUnexplained(a, open)?.Tag;
         foreach (var s in GrowingTags(a).Where(s => !open.Contains(s.Tag.ToDisplay())))
-            rows.Add(ForTag(s, TagWords(s.Tag, a.Knowledge.Lookup(s.Tag)), ranked.Get(a, engine.Registry, s.Tag, build: s.Tag == top), now));
+            rows.Add(ForTag(s, TagWords(s.Tag, a.Knowledge.Lookup(s.Tag)), ranked.Get(s.Tag), now));
 
         foreach (var p in ProcessCandidates(a, engine)) rows.Add(ForProcess(p, now));
 
@@ -243,7 +240,11 @@ internal static class PoolCauses
             return a.Detector.Status.Values.Where(s => s.State != TagState.Normal).OrderByDescending(s => s.Delta10m).ThenByDescending(s => s.Bytes).ToList();
     }
 
-    /// <summary>The fastest-growing tag that no open incident explains (the one ranked in the background).</summary>
+    /// <summary>The tags whose rows need a ranking for their cause (growing or retained), in the list's order.</summary>
+    public static List<PoolTag> TagsToRank(IEnumerable<CauseRow> rows) =>
+        rows.Where(r => r.Kind == CauseKind.Tag && r.Active && r.Tag is not null).Select(r => r.Tag!.Value).Distinct().ToList();
+
+    /// <summary>The fastest-growing tag that no open incident explains (the status line's lead when no incident is open).</summary>
     public static TagStatus? TopUnexplained(AnalysisPipeline a, IReadOnlySet<string> openTags)
     {
         lock (a.History.SyncRoot)
@@ -253,10 +254,11 @@ internal static class PoolCauses
 
     /// <summary>
     /// The status line's lead: the open growth incident that grew most, else the fastest-growing tag (with its ranking
-    /// when there is one). Null when nothing grows.
+    /// when there is one; <paramref name="rankTag"/> is then that tag, for the background ranking). Null when nothing grows.
     /// </summary>
-    public static PoolStatusLead? Lead(AnalysisPipeline a, TagRankings ranked, ProcessRegistry registry, TimeSpan held)
+    public static PoolStatusLead? Lead(AnalysisPipeline a, TagRankings ranked, TimeSpan held, out PoolTag? rankTag)
     {
+        rankTag = null;
         var now = DateTime.UtcNow;
         Incident? inc;
         (string name, Confidence level)? cause;
@@ -272,7 +274,8 @@ internal static class PoolCauses
         long growth = s.Delta60m > 0 ? s.Delta60m : s.Delta10m;
         if (growth <= 0) return null;
         var over = s.Delta60m > 0 ? (held < TimeSpan.FromHours(1) ? held : TimeSpan.FromHours(1)) : TimeSpan.FromMinutes(Math.Min(10, Math.Max(1, held.TotalMinutes)));
-        var view = ranked.Get(a, registry, s.Tag, build: true);
+        rankTag = s.Tag;
+        var view = ranked.Get(s.Tag);
         var c = view is null ? null : CauseOf(view);
         return new PoolStatusLead(TagWords(s.Tag, a.Knowledge.Lookup(s.Tag)), growth, over, c?.name, c?.level ?? Confidence.Weak);
     }
@@ -312,22 +315,124 @@ internal static class PoolCauses
     }
 }
 
+
 /// <summary>
-/// The rankings of growing tags (the old tag page's suspects), each rebuilt at most once per <see cref="PoolCauses.RankEvery"/>
-/// in the background and every 30 s for the selected row. Only the window's thread uses it.
+/// Which tag to rank next (pure; unit-tested). A ranking (the correlator over the last hour) costs tens of milliseconds,
+/// so they are spaced: the selected row's tag at once when it has none, then every tag in the list once (one every
+/// <see cref="NewGap"/>), then each refreshed after <see cref="Fresh"/>, the selected one after <see cref="SelectedFresh"/>,
+/// never two within <see cref="Gap"/> (about the old tag page's two rankings a minute).
+/// </summary>
+internal static class RankPlan
+{
+    public static readonly TimeSpan Fresh = TimeSpan.FromMinutes(5);
+    public static readonly TimeSpan SelectedFresh = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan Gap = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan NewGap = TimeSpan.FromSeconds(5);
+
+    /// <param name="wanted">The tags the rows and the status line show, most important first.</param>
+    /// <param name="selected">The selected row's tag, if the selected row is a tag row.</param>
+    /// <param name="builtUtc">When each tag was last ranked (tried: a ranking that found nothing counts).</param>
+    /// <param name="lastBuildUtc">When the last ranking finished.</param>
+    public static PoolTag? Next(IReadOnlyList<PoolTag> wanted, PoolTag? selected, IReadOnlyDictionary<PoolTag, DateTime> builtUtc,
+        DateTime lastBuildUtc, DateTime nowUtc)
+    {
+        var since = nowUtc - lastBuildUtc;
+        if (selected is { } sel && !builtUtc.ContainsKey(sel)) return sel; // the user is waiting on it
+        if (since >= NewGap)
+            foreach (var t in wanted)
+                if (!builtUtc.ContainsKey(t)) return t;
+        if (since < Gap) return null;
+        if (selected is { } s && nowUtc - builtUtc[s] >= SelectedFresh) return s;
+        PoolTag? stalest = null;
+        var oldest = DateTime.MaxValue;
+        foreach (var t in wanted)
+            if (builtUtc.TryGetValue(t, out var b) && nowUtc - b >= Fresh && b < oldest) { oldest = b; stalest = t; }
+        return stalest;
+    }
+}
+
+/// <summary>
+/// The rankings of growing tags (the old tag page's suspects). <see cref="Pump"/> builds the next one <see cref="RankPlan"/>
+/// picks on a pool thread, one at a time, so the window never waits on the correlator; the rows show what is cached
+/// (a blank cause until the first ranking). Thread-safe.
 /// </summary>
 internal sealed class TagRankings
 {
+    private readonly object _lock = new();
     private readonly Dictionary<PoolTag, (TagViewData? view, DateTime builtUtc)> _views = new();
+    private PoolTag? _building;
+    private DateTime _lastBuildUtc = DateTime.MinValue;
+    private readonly Func<DateTime> _now;
 
-    /// <param name="build">Rebuild when older than <paramref name="maxAge"/> (default <see cref="PoolCauses.RankEvery"/>); false: whatever is cached.</param>
-    public TagViewData? Get(AnalysisPipeline a, ProcessRegistry registry, PoolTag tag, bool build, TimeSpan? maxAge = null)
+    public TagRankings(Func<DateTime>? now = null) => _now = now ?? (() => DateTime.UtcNow);
+
+    /// <summary>The cached ranking, or null when the tag has none yet.</summary>
+    public TagViewData? Get(PoolTag tag)
     {
-        bool have = _views.TryGetValue(tag, out var v);
-        if (!build || have && DateTime.UtcNow - v.builtUtc < (maxAge ?? PoolCauses.RankEvery)) return have ? v.view : null;
-        var view = TagViewBuilder.Build(a, registry, tag);
-        _views[tag] = (view, DateTime.UtcNow);
-        if (_views.Count > 32) foreach (var old in _views.OrderBy(kv => kv.Value.builtUtc).Take(_views.Count - 32).Select(kv => kv.Key).ToList()) _views.Remove(old);
-        return view;
+        lock (_lock) return _views.TryGetValue(tag, out var v) ? v.view : null;
+    }
+
+    /// <summary>The tag has been ranked (or tried) at least once.</summary>
+    public bool Tried(PoolTag tag)
+    {
+        lock (_lock) return _views.ContainsKey(tag);
+    }
+
+    /// <summary>The tag is being ranked right now.</summary>
+    public bool Building(PoolTag tag)
+    {
+        lock (_lock) return _building == tag;
+    }
+
+    /// <summary>CI screenshots only: ranks, on the calling thread and without spacing, every tag that has none yet.</summary>
+    public void RankNow(Func<PoolTag, TagViewData?> build, IEnumerable<PoolTag> tags)
+    {
+        foreach (var tag in tags)
+        {
+            if (Tried(tag)) continue;
+            TagViewData? view = null;
+            try { view = build(tag); } catch (Exception) { }
+            lock (_lock) { _views[tag] = (view, _now()); _lastBuildUtc = _now(); }
+        }
+    }
+
+    /// <summary>
+    /// Starts the next ranking (<see cref="RankPlan.Next"/>) on a pool thread when none is running; <paramref name="done"/>
+    /// runs on that thread when it has finished (the caller posts back to its own). Returns the tag started, or null.
+    /// </summary>
+    public PoolTag? Pump(Func<PoolTag, TagViewData?> build, IReadOnlyList<PoolTag> wanted, PoolTag? selected, Action done)
+    {
+        PoolTag tag;
+        lock (_lock)
+        {
+            if (_building is not null) return null;
+            var built = _views.ToDictionary(kv => kv.Key, kv => kv.Value.builtUtc);
+            if (RankPlan.Next(wanted, selected, built, _lastBuildUtc, _now()) is not { } next) return null;
+            tag = next;
+            _building = tag;
+        }
+        Task.Run(() =>
+        {
+            TagViewData? view = null;
+            try
+            {
+                using (Core.Util.Profiler.Stage("ui.rank")) view = build(tag);
+            }
+            catch (Exception) { /* a failed ranking counts as tried: the row stays blank, the next try is after Fresh */ }
+            finally
+            {
+                lock (_lock)
+                {
+                    var now = _now();
+                    _views[tag] = (view, now);
+                    _lastBuildUtc = now;
+                    _building = null;
+                    if (_views.Count > 64)
+                        foreach (var old in _views.OrderBy(kv => kv.Value.builtUtc).Take(_views.Count - 64).Select(kv => kv.Key).ToList()) _views.Remove(old);
+                }
+                done();
+            }
+        });
+        return tag;
     }
 }

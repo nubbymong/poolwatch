@@ -80,17 +80,57 @@ public class PoolCausesTests
         Assert.DoesNotMatch(Negative, string.Join(" ", r.Cells));
     }
 
-    [Fact]
-    public void AGrowingTagWithoutARankingSaysHowToGetOne()
+    /// <summary>A tag's ranking with one owner at <paramref name="level"/> (or none that stood out).</summary>
+    private static TagViewData View(Confidence? level, long growth = 300 * MB)
     {
-        var r = PoolCauses.ForTag(Tag(TagState.Growing, (long)(1.2 * GB), 100 * MB, 300 * MB), "FCB_DATA (Reff, refs.sys)", view: null, Now);
+        var owners = level is { } l
+            ? new List<OwnerSuspect> { new() { Owner = new Core.Identity.Owner(Core.Identity.OwnerKind.App, "leaker", "Leaker"), Members = [], Identities = [], Confidence = l, Meaningful = true } }
+            : [];
+        var tag = PoolTag.Parse("Reff");
+        return new TagViewData(tag, "Reff", new TagAnswer("Reff grew.", owners, growth, 0), owners, [], Now.AddHours(-1), Now, Now.AddMinutes(-30));
+    }
+
+    [Fact]
+    public void AGrowingTagWithoutARankingYetLeavesItsCauseBlankNeverAPlaceholder()
+    {
+        var r = PoolCauses.ForTag(Tag(TagState.Growing, (long)(1.2 * GB), 100 * MB, 300 * MB), "File system metadata (Reff, refs.sys)", view: null, Now);
         Assert.Equal(CauseKind.Tag, r.Kind);
         Assert.Equal("+300 MB (now 1.2 GB)", r.HowMuch);
         Assert.Equal("600 MB/h", r.HowFast);
-        Assert.Equal(PoolCauses.NotRanked, r.Cause);
+        Assert.Equal("", r.Cause);      // blank until the background ranking arrives
+        Assert.Equal("", r.Confidence);
         Assert.Equal("now", r.When);
         Assert.True(r.Active);
         Assert.Equal(RowTone.Warning, r.Tone);
+    }
+
+    [Fact]
+    public void ARankingFillsTheCauseAndTheConfidence()
+    {
+        var growing = Tag(TagState.Growing, GB, 100 * MB, 300 * MB);
+        var r = PoolCauses.ForTag(growing, "File system metadata (Reff, refs.sys)", View(Confidence.StronglyCorrelated), Now);
+        Assert.Equal("Leaker", r.Cause);
+        Assert.Equal("strong evidence", r.Confidence);
+        // Ranked, but nobody stood out.
+        var none = PoolCauses.ForTag(growing, "x", View(null), Now);
+        Assert.Equal("no clear cause yet", none.Cause);
+        Assert.Equal("", none.Confidence);
+        // A retained tag is ranked like a growing one; a released tag has no cause to name.
+        Assert.Equal("Leaker", PoolCauses.ForTag(Tag(TagState.Retained, GB, 0, 0, Now), "x", View(Confidence.Correlated), Now).Cause);
+        Assert.Equal("", PoolCauses.ForTag(Tag(TagState.Released, GB, -500 * MB, -500 * MB, Now), "x", View(Confidence.Correlated), Now).Cause);
+        // No cell anywhere asks the user to do something to see a cause.
+        foreach (var view in new[] { null, View(null), View(Confidence.Weak) })
+            foreach (var state in new[] { TagState.Growing, TagState.Retained, TagState.Released })
+                Assert.DoesNotContain(PoolCauses.ForTag(Tag(state, GB, 1, 1, Now), "x", view, Now).Cells, c => c.Contains("select", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void OnlyGrowingAndHeldTagRowsAreRanked()
+    {
+        var growing = PoolCauses.ForTag(Tag(TagState.Growing, GB, 100 * MB, 300 * MB), "a", null, Now);
+        var released = PoolCauses.ForTag(Tag(TagState.Released, GB, -500 * MB, -500 * MB, Now), "b", null, Now) with { Tag = PoolTag.Parse("File") };
+        var incident = PoolCauses.ForIncident(Incident(IncidentKind.Growth, GB, open: true), "c", Now);
+        Assert.Equal(new[] { PoolTag.Parse("Reff") }, PoolCauses.TagsToRank([incident, growing, released, growing]));
     }
 
     [Fact]

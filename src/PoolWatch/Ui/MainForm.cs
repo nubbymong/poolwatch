@@ -109,7 +109,7 @@ internal sealed class MainForm : Form
         {
             if (_repopulating || _causeSelectPending) return;
             _causeSelectPending = true;
-            BeginInvoke(() => { _causeSelectPending = false; SafeRefresh(ShowCauseDetails); });
+            BeginInvoke(() => { _causeSelectPending = false; SafeRefresh(ShowCauseDetails); SafeRefresh(PumpRankings); });
         };
         _causes.DoubleClick += (_, _) => { if (SelectedRow()?.Folder is { } d && Directory.Exists(d)) _actions.OpenIncidentFolder(d); };
         _causes.Resize += (_, _) => FitCauseColumns();
@@ -157,7 +157,7 @@ internal sealed class MainForm : Form
     private void UpdateStatus()
     {
         var t = UiData.Totals(_analysis);
-        var lead = PoolCauses.Lead(_analysis, _rankings, _engine.Registry, t.Held);
+        var lead = PoolCauses.Lead(_analysis, _rankings, t.Held, out _leadTag);
         var s = PoolStatusLine.Describe(t.Total, t.Held, t.Change10Min, t.ChangeHour, lead, UiData.SaturatedBusiest(_analysis));
         _statusKind = s.Kind;
         var color = s.Kind switch
@@ -184,7 +184,8 @@ internal sealed class MainForm : Form
     {
         int[] widths = [300, 150, 100, 250, 130, 110];
         for (int i = 0; i < PoolCauses.Columns.Length; i++) _causes.Columns.Add(PoolCauses.Columns[i], S(widths[i]));
-        _causesSplit.Panel1.Controls.Add(_causes);
+        _causesSplit.Panel1.Controls.Add(_causes); // fill first, then the legend above it
+        _causesSplit.Panel1.Controls.Add(Legend());
         _detailTitle.Font = new Font("Segoe UI Semibold", 10f);
         _detailTitle.Padding = Px(2, 6, 2, 4);
         _detailText.Font = new Font("Segoe UI", 9.5f);
@@ -198,6 +199,19 @@ internal sealed class MainForm : Form
         var page = new TabPage("Pool causes") { UseVisualStyleBackColor = true, Padding = Px(4, 4, 4, 4) };
         page.Controls.Add(_causesSplit);
         return page;
+    }
+
+    /// <summary>What the row colours mean (the tones PoolCauses gives each row).</summary>
+    private FlowLayoutPanel Legend()
+    {
+        var legend = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Padding = Px(0, 0, 0, 4) };
+        Label Chip(string text, Color back) => new() { Text = text, AutoSize = true, BackColor = back, Padding = Px(6, 2, 6, 2), Margin = Px(0, 0, 8, 2) };
+        legend.Controls.AddRange([
+            Chip("Pink: an open incident, or an alert", AlertBack),
+            Chip("Yellow: growing or held now, or a warning", WarningBack),
+            new Label { Text = "No colour: earlier, or for information", AutoSize = true, ForeColor = SystemColors.GrayText, Margin = Px(0, 2, 0, 2) },
+        ]);
+        return legend;
     }
 
     /// <summary>The fixed columns keep their width; "What is growing" and "Likely cause" share the rest.</summary>
@@ -245,6 +259,7 @@ internal sealed class MainForm : Form
         }
         _causesSamples = _engine.SampleCount;
         _causeRows = PoolCauses.Build(_analysis, _engine, _rankings);
+        _rankTags = PoolCauses.TagsToRank(_causeRows);
         _causeByKey = _causeRows.GroupBy(r => r.Key).ToDictionary(g => g.Key, g => g.First());
         var items = _causeRows.GroupBy(r => r.Key).Select(g => g.First()).Select(r =>
         {
@@ -318,13 +333,15 @@ internal sealed class MainForm : Form
     private string TagDetails(CauseRow row)
     {
         if (row.Tag is not { } tag) return "";
-        if (_rankings.Get(_analysis, _engine.Registry, tag, build: true, maxAge: TimeSpan.FromSeconds(29)) is not { } v)
-            return "Not enough samples yet to rank the suspects.";
         var sb = new System.Text.StringBuilder();
         // For the expert: the tag code, its driver and its technical description (the row shows the everyday name).
         var info = _analysis.Knowledge.Lookup(tag);
         string driver = PlainWords.Driver(info.Owner);
         sb.Append($"Pool tag {tag.ToDisplay()}{(driver.Length > 0 ? $", allocated by {driver}" : "")}{(info.Description.Length > 0 ? $": {info.Description}" : "")}.\r\n\r\n");
+        if (row.Active is false) return sb.Append("Released: whatever exited or was deleted then was holding this memory.").ToString();
+        // The ranking is built in the background (PumpRankings); this text is replaced when it arrives.
+        if (_rankings.Get(tag) is not { } v)
+            return sb.Append(_rankings.Tried(tag) && !_rankings.Building(tag) ? "Not enough samples yet to rank the suspects." : "Ranking the suspects…").ToString();
         sb.Append(v.Answer.Line).Append("\r\n");
         sb.Append(v.TraceBacked ? "The confirmation trace's owners come first; the rest are correlation only.\r\n" : "Suspects are ranked by correlation, not proof.\r\n");
         int n = 0;
@@ -389,7 +406,7 @@ internal sealed class MainForm : Form
             case CauseKind.Incident when row.Folder is { } dir:
                 return new CopyInfo(null, null, dir, null, () => UiActions.IncidentSummary(dir));
             case CauseKind.Tag when row.Tag is { } tag:
-                return new CopyInfo(null, null, null, null, () => _rankings.Get(_analysis, _engine.Registry, tag, build: false) is { } v ? TagSummary(v) : "");
+                return new CopyInfo(null, null, null, null, () => _rankings.Get(tag) is { } v ? TagSummary(v) : "");
             case CauseKind.Process when row.Process is { } pk && _engine.Registry.Get(pk) is { } r:
                 return new CopyInfo(r.Pid.ToString(), r.CommandLine, r.ImagePath, null, null);
             case CauseKind.Finding when row.Finding is { } f:
@@ -781,6 +798,34 @@ internal sealed class MainForm : Form
                 case 1: RefreshServices(); break;
             }
         Icon = TrayIcons.For(UiData.State(_analysis));
+        PumpRankings();
+    }
+
+    private PoolTag? _leadTag;
+    private List<PoolTag> _rankTags = [];
+
+    /// <summary>
+    /// Starts the next tag ranking in the background (TagRankings / RankPlan): the status line's lead tag first, then the
+    /// list's tag rows, the selected row's tag at once. When it is done the rows and the status line are refreshed.
+    /// </summary>
+    private void PumpRankings()
+    {
+        var wanted = new List<PoolTag>();
+        if (_leadTag is { } lead) wanted.Add(lead);
+        wanted.AddRange(_rankTags.Where(t => t != _leadTag));
+        PoolTag? selected = SelectedRow() is { Kind: CauseKind.Tag, Active: true, Tag: { } sel } ? sel : null;
+        _rankings.Pump(tag => TagViewBuilder.Build(_analysis, _engine.Registry, tag), wanted, selected, () =>
+        {
+            try { if (!IsDisposed && IsHandleCreated) BeginInvoke(OnRanked); }
+            catch (InvalidOperationException) { } // the window is closing
+        });
+    }
+
+    private void OnRanked()
+    {
+        _causesSamples = -1; // rebuild the rows (the new cause) and the status line (the lead's cause) on this refresh
+        _statusSamples = -1;
+        RefreshNow();
     }
 
     /// <summary>The item (row key) each read-only text box shows, so a refresh knows a new item from an update of the same one.</summary>
@@ -1052,13 +1097,23 @@ internal sealed class MainForm : Form
         var layoutAtMinimum = BothTabs();
         Size = size;
         Application.DoEvents();
-        // The Settings dialog, shown as it opens.
+        // The Settings form and its Advanced grid, each shown as it opens.
         var settingsLayout = new List<string>();
         _settings ??= new SettingsDialog(_engine, _analysis, _actions);
         _settings.Show(this);
         Application.DoEvents();
         ClippedControls(_settings, settingsLayout);
+        var settingsForm = new List<string>();
+        void Texts(Control parent) { foreach (Control c in parent.Controls) { if (c is CheckBox or Button || c is Label { Font.Bold: true }) settingsForm.Add(c.Text); Texts(c); } }
+        Texts(_settings);
         _settings.Hide();
+        var advanced = _settings.Advanced;
+        advanced.Show(this);
+        Application.DoEvents();
+        var advancedLayout = new List<string>();
+        ClippedControls(advanced, advancedLayout);
+        settingsLayout.AddRange(advancedLayout.Select(x => "Advanced: " + x));
+        advanced.Hide();
         bool timerWhileVisible = _timer.Enabled;
         Hide();
         bool timerWhileHidden = _timer.Enabled;
@@ -1069,8 +1124,10 @@ internal sealed class MainForm : Form
             buttons = _headerButtons.Select(b => b.Text).ToList(),
             rows = new Dictionary<string, int> { ["Pool causes"] = _causeRows.Count, ["Services"] = Math.Max(serviceRows, Rows(_services)) },
             causeKinds = kinds, detailsTitle, details = details.Length > 600 ? details[..600] : details,
+            likelyCauses = _causeRows.Take(20).Select(r => r.Cause).ToList(),
+            unrankedTagRows = _causeRows.Count(r => r.Kind == CauseKind.Tag && r.Active && r.Cause.Length == 0),
             identityKept, selectionKept, copyMatches, copiedSample = copied,
-            layoutProblems = layout, layoutProblemsAtMinimumSize = layoutAtMinimum, settingsLayoutProblems = settingsLayout,
+            layoutProblems = layout, layoutProblemsAtMinimumSize = layoutAtMinimum, settingsLayoutProblems = settingsLayout, settingsForm,
             size = new { width = size.Width, height = size.Height, dpi = DeviceDpi },
             timerWhileVisible, timerWhileHidden,
         };
@@ -1102,7 +1159,8 @@ internal sealed class MainForm : Form
             var area = parent.ClientRectangle;
             if (c.Left < -1 || c.Top < -1 || c.Right > area.Width + 1 || c.Bottom > area.Height + 1)
                 p.Add($"{Describe(c)} at {c.Bounds} is outside {Describe(parent)} ({area.Size})");
-            if (c is Button or CheckBox || c is Label { AutoSize: true })
+            // (A label with a maximum width wraps by design: its height follows its text.)
+            if (c is Button or CheckBox || c is Label { AutoSize: true, MaximumSize.Width: 0 })
             {
                 var pref = c.GetPreferredSize(Size.Empty);
                 if (pref.Width > c.Width + 1 || pref.Height > c.Height + 1) p.Add($"{Describe(c)} needs {pref}, has {c.Size}");
@@ -1130,6 +1188,10 @@ internal sealed class MainForm : Form
         _tabs.SelectedIndex = 0;
         _causes.SelectedItems.Clear();
         RefreshNow(force: true);
+        // The background ranking spaces its work out (RankPlan); for the screenshots, rank every listed tag now.
+        _rankings.RankNow(tag => TagViewBuilder.Build(_analysis, _engine.Registry, tag), _leadTag is { } lead ? _rankTags.Prepend(lead) : _rankTags);
+        _statusSamples = -1;
+        RefreshNow(force: true);
         Shot(this, "1-main-window.png");
         if (_causes.Items.Count > 0) { _causes.Items[0].Selected = true; ShowCauseDetails(); }
         Shot(this, "2-pool-causes.png");
@@ -1144,6 +1206,10 @@ internal sealed class MainForm : Form
         _settings.Show(this);
         Shot(_settings, "4-settings.png");
         _settings.Hide();
+        var advanced = _settings.Advanced;
+        advanced.Show(this);
+        Shot(advanced, "5-settings-advanced.png");
+        advanced.Hide();
         return files;
     }
 
