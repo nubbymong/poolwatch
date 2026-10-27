@@ -1,7 +1,8 @@
 # Milestone 4 acceptance: the tray app starts, the main window renders (one status line, one graph, three buttons, the
-# Pool causes and Services tabs, and the Settings dialog), nothing in it is clipped or overlaps, everything taken off the
-# window is in the tray menu, and it exits cleanly. Runs a small File-handle leak meanwhile so Pool causes has content.
-# The screenshots (main window, Pool causes with a row selected, Services, Settings) are the README's.
+# Pool causes and Services tabs, and the plain Settings form with its Advanced grid), nothing in it is clipped or
+# overlaps, everything taken off the window is in the tray menu, and it exits cleanly. Runs a small File-handle leak
+# meanwhile so Pool causes has content. The screenshots (main window, Pool causes with a row selected, Services,
+# Settings, Settings Advanced) are the README's.
 param([Parameter(Mandatory)] [string]$Exe, [Parameter(Mandatory)] [string]$Leaker, [Parameter(Mandatory)] [string]$Out)
 . "$PSScriptRoot\common.ps1"
 
@@ -23,8 +24,8 @@ if (Test-Path $smokeFile) {
     Write-Host "  smoke: $($s | ConvertTo-Json -Compress -Depth 6)"
     $f = $s.form
     $shots = @($s.screenshots)
-    Assert-True ($shots.Count -eq 4) "4 screenshots ($($shots -join ', '))"
-    foreach ($n in '1-main-window.png', '2-pool-causes.png', '3-services.png', '4-settings.png') { Assert-True ($n -in $shots) "screenshot $n taken" }
+    Assert-True ($shots.Count -eq 5) "5 screenshots ($($shots -join ', '))"
+    foreach ($n in '1-main-window.png', '2-pool-causes.png', '3-services.png', '4-settings.png', '5-settings-advanced.png') { Assert-True ($n -in $shots) "screenshot $n taken" }
 
     # The window: a plain status line, one graph, three buttons, two tabs.
     Assert-True ($f.status -match '^Kernel pool') "the status line reads in plain English: $($f.status)"
@@ -39,6 +40,9 @@ if (Test-Path $smokeFile) {
     Assert-True ([int]$f.rows.'Pool causes' -ge 1) "Pool causes lists rows ($($f.rows.'Pool causes'); by kind: $($f.causeKinds | ConvertTo-Json -Compress))"
     Assert-True ([int]$f.causeKinds.Incident -ge 1) "Pool causes lists the leak's incident ($([int]$f.causeKinds.Incident))"
     Assert-True ("$($f.detailsTitle)".Length -gt 0 -and "$($f.details)".Length -gt 0) "selecting the top row shows its details: $($f.detailsTitle)"
+    # Every cause cell is a cause, a blank (not ranked yet) or "no clear cause yet": never an instruction to the user.
+    Assert-True (@(@($f.likelyCauses) | Where-Object { $_ -match 'select the row|to rank' }).Count -eq 0) "no placeholder in Likely cause: $(@($f.likelyCauses) -join ' | ')"
+    Write-Host "  tag rows still without a ranking at the end: $($f.unrankedTagRows)"
     Assert-True ([double]$f.identityKept -ge 0.8) "a refresh updates rows in place: $([math]::Round([double]$f.identityKept * 100))% of row objects kept (no clear-and-rebuild)"
     Assert-True ($f.selectionKept -eq $true) "a refresh keeps the selected row"
     Assert-True ($f.copyMatches -eq $true) "Ctrl+C copies the header and exactly the selected row's cells: $($f.copiedSample)"
@@ -47,7 +51,13 @@ if (Test-Path $smokeFile) {
     # title), checked with each tab selected (Services once its list has loaded) and with Settings open.
     Assert-True (@($f.layoutProblems).Count -eq 0) "Pool causes and Services: nothing clipped or overlapping at $($f.size.width) x $($f.size.height) ($($f.size.dpi) dpi): $(@($f.layoutProblems) -join '; ')"
     Assert-True ([int]$f.rows.Services -ge 1) "the Services tab was checked with its list loaded ($($f.rows.Services) services)"
-    Assert-True (@($f.settingsLayoutProblems).Count -eq 0) "Settings: nothing clipped: $(@($f.settingsLayoutProblems) -join '; ')"
+    Assert-True (@($f.settingsLayoutProblems).Count -eq 0) "Settings and Settings Advanced: nothing clipped: $(@($f.settingsLayoutProblems) -join '; ')"
+    # The plain Settings form: its three parts in plain words, and Advanced for the full grid.
+    $form = @($f.settingsForm)
+    foreach ($item in 'Start at logon', 'Start PoolWatch when I sign in', 'Automatic cache clearing', 'Clear the standby cache automatically',
+                      'Deeper capture', 'Deeper automatic captures', 'Advanced...', 'Save', 'Close') {
+        Assert-True ($item -in $form) "Settings shows '$item'"
+    }
     if (@($f.layoutProblemsAtMinimumSize).Count -gt 0) { Write-Host "  note, at the smallest window size: $(@($f.layoutProblemsAtMinimumSize) -join '; ')" }
 
     # Everything taken off the window is in the tray menu (the clear-task removals show only when there is one to remove).
