@@ -105,7 +105,7 @@ internal static class UiData
     {
         if (i.TraceOwners is { Count: > 0 } traced) return (traced[0].Owner.Name, Confidence.ConfirmedByTrace);
         if (i.Owners?.FirstOrDefault(o => o.Meaningful) is { } owner) return (owner.Name, owner.Confidence);
-        if (i.Suspects.FirstOrDefault() is { } top) return ($"{top.DisplayName} ({top.Key.Pid})", top.Confidence);
+        if (i.Suspects.FirstOrDefault() is { } top) return (PlainWords.WithPid(top.DisplayName, top.Key.Pid), top.Confidence);
         return null;
     }
 
@@ -158,7 +158,7 @@ internal static class UiData
             }
             else if (r.TryGetProperty("suspects", out var s) && s.GetArrayLength() > 0)
             {
-                top = $"{s[0].GetProperty("displayName").GetString()} ({s[0].GetProperty("pid").GetInt32()})";
+                top = PlainWords.WithPid(s[0].GetProperty("displayName").GetString() ?? "?", s[0].GetProperty("pid").GetInt32());
                 if (Enum.TryParse<Confidence>(s[0].GetProperty("confidence").GetString(), out var c)) level = c;
             }
             Enum.TryParse<IncidentKind>(r.GetProperty("kind").GetString(), out var kind);
@@ -188,6 +188,20 @@ internal static class UiData
             int step = Math.Max(1, h.Count / 600);
             for (int i = h.IndexAtOrAfter(cutoff); i < h.Count; i += step) pts.Add(new ChartPoint(h.Times[i], h.Totals[i]));
             return pts;
+        }
+    }
+
+    /// <summary>
+    /// For the status line: null while the PC is not saturated (the saturation detector: all cores busy for a minute);
+    /// while it is, the busiest process's image, or "" when none uses a fifth of a core.
+    /// </summary>
+    public static string? SaturatedBusiest(AnalysisPipeline a)
+    {
+        lock (a.History.SyncRoot)
+        {
+            var d = a.Diagnostics;
+            if (!d.Saturation.Saturated) return null;
+            return d.Load?.Processes.FirstOrDefault() is { Cores: >= 0.2 } top ? top.Image : "";
         }
     }
 

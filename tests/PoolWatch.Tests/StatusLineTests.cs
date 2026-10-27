@@ -1,19 +1,27 @@
 using System.Text.RegularExpressions;
+using PoolWatch.Core;
 using PoolWatch.Core.Correlation;
+using PoolWatch.Core.Tags;
 using PoolWatch.Core.Util;
 
 namespace PoolWatch.Tests;
 
 /// <summary>
 /// The main window's status line and its small formatters (kept in Core so the wording is unit-tested on every OS).
+/// The line is for someone who is not a kernel expert: everyday tag names, one pair of brackets at most, no "grew +".
 /// </summary>
 public class StatusLineTests
 {
     private const long MB = 1L << 20, GB = 1L << 30;
     private static readonly TimeSpan TwoHours = TimeSpan.FromHours(2);
+    private const string Metadata = "File system metadata (Reff, refs.sys)";
+    private const string OpenFiles = "Open files (File, Windows kernel)";
 
-    private static PoolStatus Describe(long? total, TimeSpan held, long change10, long? changeHour, PoolStatusLead? lead = null) =>
-        PoolStatusLine.Describe(total, held, change10, changeHour, lead);
+    private static PoolStatus Describe(long? total, TimeSpan held, long change10, long? changeHour, PoolStatusLead? lead = null, string? saturated = null) =>
+        PoolStatusLine.Describe(total, held, change10, changeHour, lead, saturated);
+
+    /// <summary>Brackets inside brackets ("(growing most: X (Reff))"): the wording must never do that.</summary>
+    private static readonly Regex Nested = new(@"\([^()]*\(");
 
     [Fact]
     public void ASteadyPoolSaysSoWithTheTotal()
@@ -26,13 +34,13 @@ public class StatusLineTests
     [Fact]
     public void AGrowingPoolNamesTheMostLikelyCauseWithItsConfidenceInWords()
     {
-        var lead = new PoolStatusLead("File objects (File)", (long)(1.1 * GB), TimeSpan.FromMinutes(50), "Stream Deck", Confidence.StronglyCorrelated);
+        var lead = new PoolStatusLead(OpenFiles, (long)(1.1 * GB), TimeSpan.FromMinutes(50), "Stream Deck", Confidence.StronglyCorrelated);
         var s = Describe(10 * GB, TwoHours, 150 * MB, (long)(1.2 * GB), lead);
         Assert.Equal(PoolStatusKind.Growing, s.Kind);
-        Assert.Equal("Kernel pool is growing: +1.2 GB in the last hour. Most likely cause: Stream Deck (strong evidence).", s.Text);
+        Assert.Equal("Kernel pool is growing: +1.2 GB in the last hour. Most likely cause: Stream Deck, with strong evidence.", s.Text);
 
-        var traced = Describe(10 * GB, TwoHours, 150 * MB, (long)(1.2 * GB), lead with { Confidence = Confidence.ConfirmedByTrace });
-        Assert.EndsWith("Most likely cause: Stream Deck (confirmed by a trace).", traced.Text);
+        var traced = Describe(10 * GB, TwoHours, 150 * MB, (long)(1.2 * GB), lead with { Confidence = Confidence.ConfirmedByTrace, Cause = "Leaker.exe (PID 7716)" });
+        Assert.EndsWith("Most likely cause: Leaker.exe (PID 7716), confirmed by a trace.", traced.Text);
     }
 
     [Fact]
@@ -44,10 +52,11 @@ public class StatusLineTests
         Assert.Equal("Kernel pool is growing: +300 MB in the last hour. No clear cause yet.", none.Text);
 
         // A lead whose suspect has only weak evidence is not named as the cause; what grows most is still said.
-        var weak = new PoolStatusLead("ReFS per-file control blocks (Reff, refs.sys)", 280 * MB, TimeSpan.FromHours(1), "Explorer", Confidence.Weak);
+        var weak = new PoolStatusLead(Metadata, 280 * MB, TimeSpan.FromHours(1), "Explorer", Confidence.Weak);
         var s = Describe(10 * GB, TwoHours, 20 * MB, 300 * MB, weak);
-        Assert.Equal("Kernel pool is growing: +300 MB in the last hour. No clear cause yet (growing most: ReFS per-file control blocks (Reff, refs.sys)).", s.Text);
+        Assert.Equal("Kernel pool is growing: +300 MB in the last hour. No clear cause yet; growing most: File system metadata (Reff, refs.sys).", s.Text);
         Assert.DoesNotContain("Explorer", s.Text);
+        Assert.DoesNotMatch(Nested, s.Text);
     }
 
     [Fact]
@@ -91,19 +100,21 @@ public class StatusLineTests
 
         // ... but a growth the detector already caught (an open incident) is said, with its cause.
         var caught = Describe((long)(9.6 * GB), TimeSpan.FromMinutes(1), 500 * MB, null,
-            new PoolStatusLead("File objects (File)", 12 * MB, TimeSpan.FromSeconds(40), "Leaker.exe (7716)", Confidence.StronglyCorrelated));
+            new PoolStatusLead(OpenFiles, 12 * MB, TimeSpan.FromSeconds(40), "Leaker.exe (PID 7716)", Confidence.StronglyCorrelated));
         Assert.Equal(PoolStatusKind.TagGrowing, caught.Kind);
-        Assert.Equal("Kernel pool is 9.6 GB; File objects (File) grew +12 MB in 40 s. Most likely cause: Leaker.exe (7716) (strong evidence).", caught.Text);
+        Assert.Equal("Kernel pool is 9.6 GB, and Open files (File, Windows kernel) grew 12 MB in 40 seconds. Most likely cause: Leaker.exe (PID 7716), with strong evidence.", caught.Text);
     }
 
     [Fact]
-    public void ATagGrowingWhileTheTotalHoldsIsNamed()
+    public void ATagGrowingWhileTheTotalHoldsIsNamedInPlainWords()
     {
         // An open incident on one tag while other tags shrink: the total is steady, the line still says what grows and why.
-        var lead = new PoolStatusLead("File objects (File)", 400 * MB, TimeSpan.FromMinutes(25), "Leaker.exe (7716)", Confidence.Correlated);
+        var lead = new PoolStatusLead(Metadata, 400 * MB, TimeSpan.FromHours(1), "Explorer", Confidence.Correlated);
         var s = Describe((long)(9.6 * GB), TwoHours, -50 * MB, -150 * MB, lead);
         Assert.Equal(PoolStatusKind.TagGrowing, s.Kind);
-        Assert.Equal("Kernel pool is steady (9.6 GB), but File objects (File) grew +400 MB in 25 min. Most likely cause: Leaker.exe (7716) (some evidence).", s.Text);
+        Assert.Equal("Kernel pool is steady at 9.6 GB, but File system metadata (Reff, refs.sys) grew 400 MB in the last hour. Most likely cause: Explorer, with some evidence.", s.Text);
+
+        Assert.Contains("grew 400 MB in 25 minutes.", Describe((long)(9.6 * GB), TwoHours, 0, 0, lead with { Over = TimeSpan.FromMinutes(25) }).Text);
 
         // A lead that did not grow (a release incident, a tag back down) is never named.
         var shrunk = Describe((long)(9.6 * GB), TwoHours, 0, 0, lead with { Growth = -300 * MB });
@@ -111,25 +122,94 @@ public class StatusLineTests
     }
 
     [Fact]
-    public void NoInputEverPrintsANegativeAmount()
+    public void ASaturatedPcIsSaidInOneShortClause()
+    {
+        var s = Describe((long)(9.6 * GB), TwoHours, 0, 0, saturated: "MsMpEng.exe");
+        Assert.Equal(PoolStatusKind.Steady, s.Kind);
+        Assert.True(s.Saturated);
+        Assert.Equal("Kernel pool is steady (9.6 GB). Your PC is saturated; busiest: MsMpEng.exe.", s.Text);
+
+        Assert.EndsWith(" Your PC is saturated: every core is busy.", Describe((long)(9.6 * GB), TwoHours, 0, 0, saturated: "").Text);
+        Assert.False(Describe((long)(9.6 * GB), TwoHours, 0, 0).Saturated);
+    }
+
+    [Fact]
+    public void NoInputEverPrintsANegativeAmountNestedBracketsOrGrewPlus()
     {
         var negative = new Regex(@"(\+-|-\d|−)");
         long[] changes = [-3 * GB, -400 * MB, -150 * MB, -99 * MB, -1, 0, 1, 99 * MB, 150 * MB, 400 * MB, 3 * GB];
         var leads = new PoolStatusLead?[]
         {
             null,
-            new("File objects (File)", 300 * MB, TimeSpan.FromMinutes(30), "app.exe", Confidence.StronglyCorrelated),
-            new("File objects (File)", -300 * MB, TimeSpan.FromMinutes(30), "app.exe", Confidence.Weak),
+            new(Metadata, 300 * MB, TimeSpan.FromMinutes(30), "app.exe (PID 12)", Confidence.StronglyCorrelated),
+            new(OpenFiles, 300 * MB, TimeSpan.FromMinutes(30), "app.exe", Confidence.Weak),
+            new(Metadata, -300 * MB, TimeSpan.FromMinutes(30), "app.exe", Confidence.Weak),
         };
         foreach (var held in new[] { TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(30), TwoHours })
         foreach (var c10 in changes)
         foreach (var c60 in changes.Select(c => (long?)c).Append(null))
         foreach (var lead in leads)
+        foreach (var saturated in new[] { null, "", "app.exe" })
         {
-            var s = Describe(9 * GB, held, c10, c60, lead);
+            var s = Describe(9 * GB, held, c10, c60, lead, saturated);
             Assert.False(negative.IsMatch(s.Text), $"negative amount in: {s.Text}");
+            Assert.False(Nested.IsMatch(s.Text), $"nested brackets in: {s.Text}");
+            Assert.DoesNotContain("grew +", s.Text);
             Assert.DoesNotContain("Rising", s.Text);
         }
+    }
+
+    [Fact]
+    public void TagsHaveEverydayNamesWithTheirCodeAndDriver()
+    {
+        // The built-in table (no Debugging Tools installed): the everyday name, then the tag code and its driver.
+        Assert.Equal("File system metadata (Reff, refs.sys)", PlainWords.Tag(PoolTag.Parse("Reff"), BuiltinTags.Table[PoolTag.Parse("Reff")]));
+        Assert.Equal("Open files (File, Windows kernel)", PlainWords.Tag(PoolTag.Parse("File"), BuiltinTags.Table[PoolTag.Parse("File")]));
+        Assert.Equal("Cached file mappings (MmSt, Windows kernel)", PlainWords.Tag(PoolTag.Parse("MmSt"), BuiltinTags.Table[PoolTag.Parse("MmSt")]));
+        // pooltag.txt's own wording does not replace a known name; an unknown owner is left out.
+        Assert.Equal("Open files (File)", PlainWords.Tag(PoolTag.Parse("File"), new TagInfo("<unknown>", "File objects", "pooltag.txt")));
+        // Every tag in the built-in table reads without jargon codes or brackets inside the name.
+        foreach (var (tag, info) in BuiltinTags.Table)
+        {
+            string words = PlainWords.Tag(tag, info);
+            Assert.DoesNotMatch(Nested, words);
+            Assert.DoesNotMatch(new Regex(@"[A-Z]+_[A-Z]+"), words);
+            Assert.DoesNotContain("nt!", words);
+        }
+    }
+
+    [Fact]
+    public void ATagWithoutPoolTagTxtDataFallsBackPlainly()
+    {
+        var abcd = PoolTag.Parse("Abcd");
+        // Found only by scanning the drivers: no description, just the driver.
+        Assert.Equal("Pool tag Abcd (foo.sys)", PlainWords.Tag(abcd, new TagInfo("foo.sys", "", "driver scan")));
+        // Nothing known at all.
+        Assert.Equal("Pool tag Abcd", PlainWords.Tag(abcd, null));
+        Assert.Equal("Pool tag Abcd", PlainWords.Tag(abcd, new TagInfo("<unknown>", "", "none")));
+        // A pooltag.txt description that is a short phrase is used without its bracketed aside ...
+        Assert.Equal("NetIO buffers (Abcd, netio.sys)", PlainWords.Tag(abcd, new TagInfo("netio.sys", "NetIO buffers (per connection)", "pooltag.txt")));
+        // ... but a structure name ("NAME_CACHE_NODE") or a long sentence is not plain words.
+        Assert.Equal("Pool tag Abcd (fltmgr.sys)", PlainWords.Tag(abcd, new TagInfo("fltmgr.sys", "NAME_CACHE_NODE structure", "pooltag.txt")));
+        Assert.Equal("Pool tag Abcd (foo.sys)", PlainWords.Tag(abcd, new TagInfo("foo.sys", new string('x', 41), "pooltag.txt")));
+    }
+
+    [Fact]
+    public void ProcessesCarryTheirPidInOnePairOfBrackets()
+    {
+        Assert.Equal("Leaker.exe (PID 7716)", PlainWords.WithPid("Leaker.exe", 7716));
+        Assert.Equal("svchost.exe (Schedule, PID 1234)", PlainWords.WithPid("svchost.exe (Schedule)", 1234));
+    }
+
+    [Fact]
+    public void SpansReadAsWords()
+    {
+        Assert.Equal("40 seconds", PlainWords.Span(TimeSpan.FromSeconds(40)));
+        Assert.Equal("a minute", PlainWords.Span(TimeSpan.FromSeconds(70)));
+        Assert.Equal("25 minutes", PlainWords.Span(TimeSpan.FromMinutes(25)));
+        Assert.Equal("the last hour", PlainWords.Span(TimeSpan.FromMinutes(60)));
+        Assert.Equal("2 hours 10 minutes", PlainWords.Span(TimeSpan.FromMinutes(130)));
+        Assert.Equal("1 hour 30 minutes", PlainWords.Span(TimeSpan.FromMinutes(90)));
     }
 
     [Fact]
@@ -139,6 +219,8 @@ public class StatusLineTests
         Assert.Equal("strong evidence", PlainWords.Confidence(Confidence.StronglyCorrelated));
         Assert.Equal("some evidence", PlainWords.Confidence(Confidence.Correlated));
         Assert.Equal("weak evidence", PlainWords.Confidence(Confidence.Weak));
+        Assert.Equal("with strong evidence", PlainWords.ConfidencePhrase(Confidence.StronglyCorrelated));
+        Assert.Equal("confirmed by a trace", PlainWords.ConfidencePhrase(Confidence.ConfirmedByTrace));
     }
 
     [Fact]
@@ -175,5 +257,6 @@ public class StatusLineTests
         Assert.Equal("2.5 GB", ChartScale.Label((long)(2.5 * GB), (long)(2.5 * GB)));
         Assert.Equal("10 GB", ChartScale.Label(10 * GB, (long)(2.5 * GB)));
         Assert.Equal("300 MB", ChartScale.Label(300 * MB, 100 * MB));
+        Assert.Equal("7.5 MB", ChartScale.Label((long)(7.5 * MB), (long)(2.5 * MB))); // a small step keeps its half
     }
 }

@@ -158,15 +158,15 @@ internal sealed class MainForm : Form
     {
         var t = UiData.Totals(_analysis);
         var lead = PoolCauses.Lead(_analysis, _rankings, _engine.Registry, t.Held);
-        var s = PoolStatusLine.Describe(t.Total, t.Held, t.Change10Min, t.ChangeHour, lead);
+        var s = PoolStatusLine.Describe(t.Total, t.Held, t.Change10Min, t.ChangeHour, lead, UiData.SaturatedBusiest(_analysis));
         _statusKind = s.Kind;
         var color = s.Kind switch
         {
             PoolStatusKind.Growing => Growing,
             PoolStatusKind.TagGrowing => TagGrowing,
-            PoolStatusKind.Dropping => Dropping,
-            PoolStatusKind.Collecting => SystemColors.GrayText,
-            _ => SystemColors.ControlText,
+            PoolStatusKind.Dropping when !s.Saturated => Dropping,
+            PoolStatusKind.Collecting when !s.Saturated => SystemColors.GrayText,
+            _ => s.Saturated ? TagGrowing : SystemColors.ControlText,
         };
         if (_status.ForeColor != color) _status.ForeColor = color;
         if (_status.Text != s.Text) { _status.Text = s.Text; LayoutHeader(); }
@@ -321,6 +321,10 @@ internal sealed class MainForm : Form
         if (_rankings.Get(_analysis, _engine.Registry, tag, build: true, maxAge: TimeSpan.FromSeconds(29)) is not { } v)
             return "Not enough samples yet to rank the suspects.";
         var sb = new System.Text.StringBuilder();
+        // For the expert: the tag code, its driver and its technical description (the row shows the everyday name).
+        var info = _analysis.Knowledge.Lookup(tag);
+        string driver = PlainWords.Driver(info.Owner);
+        sb.Append($"Pool tag {tag.ToDisplay()}{(driver.Length > 0 ? $", allocated by {driver}" : "")}{(info.Description.Length > 0 ? $": {info.Description}" : "")}.\r\n\r\n");
         sb.Append(v.Answer.Line).Append("\r\n");
         sb.Append(v.TraceBacked ? "The confirmation trace's owners come first; the rest are correlation only.\r\n" : "Suspects are ranked by correlation, not proof.\r\n");
         int n = 0;
@@ -329,7 +333,7 @@ internal sealed class MainForm : Form
             sb.Append($"\r\n{++n}. {o.Name}: {PlainWords.Confidence(o.Confidence)}{(o.CorrelationOnly ? " (correlation only)" : "")}\r\n");
             foreach (var p in o.Plain) sb.Append("   - ").Append(p).Append("\r\n");
             if (o.Members.Count > 0)
-                sb.Append("   Processes: ").Append(string.Join(", ", o.Members.Take(5).Select(m => $"{m.DisplayName} (PID {m.Key.Pid})")))
+                sb.Append("   Processes: ").Append(string.Join("; ", o.Members.Take(5).Select(m => PlainWords.WithPid(m.DisplayName, m.Key.Pid))))
                   .Append(o.Members.Count > 5 ? $" and {o.Members.Count - 5} more" : "").Append("\r\n");
             if (o.Members.FirstOrDefault(m => m.CommandLine is not null)?.CommandLine is { } cl) sb.Append("   Command line: ").Append(cl).Append("\r\n");
         }
@@ -1024,12 +1028,28 @@ internal sealed class MainForm : Form
         bool copyMatches = lines.Length == 2 && lines[0] == string.Join('\t', _causes.Columns.Cast<ColumnHeader>().Select(c => c.Text)) &&
                            _causes.SelectedItems.Count == 1 && lines[1] == string.Join('\t', _causes.SelectedItems[0].SubItems.Cast<ListViewItem.ListViewSubItem>().Select(s => CopyText.Cell(s.Text)));
         string detailsTitle = _detailTitle.Text, details = _detailText.Text;
-        var layout = LayoutProblems();
+        // Both tabs, each with the tab selected (a hidden page is not laid out for the user): Services once its list has
+        // loaded, as the user sees it (its status text and wrapping button bar are what clipped before).
+        _tabs.SelectedIndex = 1;
+        RefreshNow(force: true);
+        for (int i = 0; i < 200 && _serviceOptions.Count == 0; i++) { Application.DoEvents(); Thread.Sleep(100); }
+        List<string> BothTabs()
+        {
+            _tabs.SelectedIndex = 0;
+            Application.DoEvents();
+            var p = LayoutProblems().Select(x => "Pool causes: " + x).ToList();
+            _tabs.SelectedIndex = 1;
+            Application.DoEvents();
+            p.AddRange(LayoutProblems().Select(x => "Services: " + x));
+            _tabs.SelectedIndex = 0;
+            return p;
+        }
+        var layout = BothTabs();
         // The smallest size the window allows: reported (the CI asserts the default size).
         var size = Size;
         Size = MinimumSize;
         Application.DoEvents();
-        var layoutAtMinimum = LayoutProblems();
+        var layoutAtMinimum = BothTabs();
         Size = size;
         Application.DoEvents();
         // The Settings dialog, shown as it opens.
@@ -1047,7 +1067,7 @@ internal sealed class MainForm : Form
             status = _status.Text, statusKind = _statusKind.ToString(), chartPoints = _chart.PointCount,
             tabs = _tabs.TabPages.Cast<TabPage>().Select(p => p.Text).ToList(),
             buttons = _headerButtons.Select(b => b.Text).ToList(),
-            rows = new Dictionary<string, int> { ["Pool causes"] = _causeRows.Count, ["Services"] = serviceRows },
+            rows = new Dictionary<string, int> { ["Pool causes"] = _causeRows.Count, ["Services"] = Math.Max(serviceRows, Rows(_services)) },
             causeKinds = kinds, detailsTitle, details = details.Length > 600 ? details[..600] : details,
             identityKept, selectionKept, copyMatches, copiedSample = copied,
             layoutProblems = layout, layoutProblemsAtMinimumSize = layoutAtMinimum, settingsLayoutProblems = settingsLayout,

@@ -19,7 +19,6 @@ internal sealed class SettingsDialog : Form
     private readonly PropertyGrid _grid = new() { Dock = DockStyle.Fill, ToolbarVisible = false };
     private readonly CheckBox _logon = new() { Text = "Start at logon (scheduled task, highest privileges: no daily UAC prompt)", AutoSize = true, Anchor = AnchorStyles.Left };
     private bool _autoClearConfirmed;
-    private bool? _logonPending;
 
     public SettingsDialog(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions)
     {
@@ -56,14 +55,12 @@ internal sealed class SettingsDialog : Form
         Controls.Add(_grid);
         Controls.Add(bar);
 
-        // schtasks /query can take seconds: ask in the background, then wire the checkbox.
+        // schtasks /query can take seconds: ask in the background, then wire the checkbox on this (the UI) thread. The
+        // answer is posted to the context captured here, so it arrives whether or not the dialog has a window handle yet
+        // (marshalling through the handle had a window in which the answer was dropped and the box stayed disabled).
         _logon.Enabled = false;
-        Task.Run(SafeExists).ContinueWith(t =>
-        {
-            if (!IsHandleCreated || IsDisposed) { _logonPending = t.Result; return; }
-            BeginInvoke(() => WireLogon(t.Result));
-        });
-        HandleCreated += (_, _) => { if (_logonPending is { } v) { _logonPending = null; BeginInvoke(() => WireLogon(v)); } };
+        var ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+        Task.Run(SafeExists).ContinueWith(t => ui.Post(_ => { if (!IsDisposed) WireLogon(t.Result); }, null), TaskScheduler.Default);
     }
 
     private Padding Px(int l, int t, int r, int b) => new(LogicalToDeviceUnits(l), LogicalToDeviceUnits(t), LogicalToDeviceUnits(r), LogicalToDeviceUnits(b));

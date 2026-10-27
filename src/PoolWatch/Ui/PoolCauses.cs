@@ -68,16 +68,11 @@ internal static class PoolCauses
 
     // ---------------------------------------------------------------- pure mapping
 
-    /// <summary>A tag in plain words: "File objects (File)", "FCB_DATA (Reff, refs.sys)", or "Pool tag Abcd (foo.sys)".</summary>
-    public static string TagWords(PoolTag tag, TagInfo info) => TagWords(tag.ToDisplay(), info);
+    /// <summary>A tag in plain words (<see cref="PlainWords.Tag"/>): "File system metadata (Reff, refs.sys)", "Pool tag Abcd (foo.sys)".</summary>
+    public static string TagWords(PoolTag tag, TagInfo? info) => PlainWords.Tag(tag, info);
 
-    public static string TagWords(string tag, TagInfo? info)
-    {
-        string desc = info?.Description is { Length: > 0 and <= 60 } d ? d : "";
-        string owner = info?.Owner is { Length: > 0 } o && !o.StartsWith('<') ? o : "";
-        if (desc.Length > 0) return owner.Length > 0 ? $"{desc} ({tag}, {owner})" : $"{desc} ({tag})";
-        return owner.Length > 0 ? $"Pool tag {tag} ({owner})" : $"Pool tag {tag}";
-    }
+    /// <summary>The same for a tag read back from a report ("Reff"); a tag that does not parse is shown as it is.</summary>
+    public static string TagWords(string tag, TagInfo? info) => PoolTag.TryParse(tag, out var t) ? PlainWords.Tag(t, info) : $"Pool tag {tag}";
 
     public static CauseRow ForIncident(IncidentRow r, string what, DateTime nowUtc)
     {
@@ -97,7 +92,7 @@ internal static class PoolCauses
                     fast = PlainWords.PerHour(r.Growth, (r.Open ? nowUtc : r.EndUtc ?? r.OpenedUtc) - start);
                 }
                 if (r.Kind == IncidentKind.NonPagedTotal) what += ", with non-paged pool over the limit";
-                else if (r.Kind == IncidentKind.Capture) what += " (manual capture)";
+                else if (r.Kind == IncidentKind.Capture) what = "Manual capture: " + what;
                 break;
         }
         return new CauseRow("inc:" + r.Dir, CauseKind.Incident, what, much, fast, r.Top, r.Confidence,
@@ -181,7 +176,7 @@ internal static class PoolCauses
             fast = "";
             conf = "worth a look";
         }
-        return new CauseRow($"proc:{p.Key.Pid}:{p.Key.CreateTime}", CauseKind.Process, what, much, fast, $"{p.Name} (PID {p.Key.Pid})", conf,
+        return new CauseRow($"proc:{p.Key.Pid}:{p.Key.CreateTime}", CauseKind.Process, what, much, fast, PlainWords.WithPid(p.Name, p.Key.Pid), conf,
             p.StartUtc > DateTime.MinValue ? $"started {PlainWords.When(p.StartUtc, nowUtc)}" : "")
         {
             Active = true, TimeUtc = nowUtc, Tone = RowTone.Warning, Process = p.Key, Candidate = p,
@@ -203,7 +198,7 @@ internal static class PoolCauses
                 much = $"freed {Fmt.Bytes(Math.Max(0, freed))}";
             else if (f.Data.GetValueOrDefault("error") is string) what += " failed";
         }
-        string cause = f.Image is { Length: > 0 } image ? (f.Pid > 0 ? $"{image} (PID {f.Pid})" : image) : "";
+        string cause = f.Image is { Length: > 0 } image ? (f.Pid > 0 ? PlainWords.WithPid(image, f.Pid) : image) : "";
         return new CauseRow($"find:{f.TimeUtc.Ticks}:{f.Kind}:{f.Title}", CauseKind.Finding, what, much, "", cause, "", PlainWords.When(f.TimeUtc, nowUtc))
         {
             TimeUtc = f.TimeUtc, Folder = f.ReportDir, Finding = f,

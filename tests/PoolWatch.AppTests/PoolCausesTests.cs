@@ -22,7 +22,7 @@ public class PoolCausesTests
 
     private static IncidentRow Incident(IncidentKind kind, long growth, bool open, long dropped = 0) =>
         new("20261027-140000-File-656c6946", @"C:\data\incidents\20261027-140000-File-656c6946", Now.AddHours(-1), "File", kind, growth,
-            "Leaker.exe (7716)", "strong evidence", open)
+            "Leaker.exe (PID 7716)", "strong evidence", open)
         { Level = Confidence.StronglyCorrelated, OnsetUtc = Now.AddHours(-1), EndUtc = open ? null : Now.AddMinutes(-30), Dropped = dropped };
 
     private static TagStatus Tag(TagState state, long bytes, long d10, long d60, DateTime? since = null) =>
@@ -31,19 +31,34 @@ public class PoolCausesTests
     [Fact]
     public void TagsReadInPlainWords()
     {
-        Assert.Equal("File objects (File)", PoolCauses.TagWords(PoolTag.Parse("File"), new TagInfo("<unknown>", "File objects", "pooltag.txt")));
-        Assert.Equal("FCB_DATA (Reff, refs.sys)", PoolCauses.TagWords(PoolTag.Parse("Reff"), new TagInfo("refs.sys", "FCB_DATA", "builtin")));
+        // The row's "What is growing": an everyday name, then the tag code and driver, in one pair of brackets.
+        Assert.Equal("Open files (File)", PoolCauses.TagWords(PoolTag.Parse("File"), new TagInfo("<unknown>", "File objects", "pooltag.txt")));
+        Assert.Equal("File system metadata (Reff, refs.sys)", PoolCauses.TagWords(PoolTag.Parse("Reff"), BuiltinTags.Table[PoolTag.Parse("Reff")]));
+        // A tag with no pooltag.txt data: found by the driver scan, or not at all; a report's tag read back as text.
         Assert.Equal("Pool tag Abcd (foo.sys)", PoolCauses.TagWords(PoolTag.Parse("Abcd"), new TagInfo("foo.sys", "", "driver scan")));
         Assert.Equal("Pool tag Abcd", PoolCauses.TagWords("Abcd", null));
+        Assert.Equal("Pool tag toolong", PoolCauses.TagWords("toolong", null)); // not a tag: shown as it is
         Assert.Equal("Pool tag Abcd (foo.sys)", PoolCauses.TagWords(PoolTag.Parse("Abcd"), new TagInfo("foo.sys", new string('x', 61), "pooltag.txt"))); // too long to read
+    }
+
+    [Fact]
+    public void RowsNeverNestBrackets()
+    {
+        var nested = new Regex(@"\([^()]*\(");
+        foreach (var kind in Enum.GetValues<IncidentKind>())
+            foreach (var cell in PoolCauses.ForIncident(Incident(kind, 300 * MB, open: true, dropped: 300 * MB), "File system metadata (Reff, refs.sys)", Now).Cells)
+                Assert.DoesNotMatch(nested, cell);
+        foreach (var state in new[] { TagState.Growing, TagState.Retained, TagState.Released })
+            foreach (var cell in PoolCauses.ForTag(Tag(state, GB, 100 * MB, 300 * MB, Now.AddMinutes(-5)), "File system metadata (Reff, refs.sys)", null, Now).Cells)
+                Assert.DoesNotMatch(nested, cell);
     }
 
     [Fact]
     public void AnOpenIncidentSaysHowMuchHowFastTheCauseAndSince()
     {
-        var r = PoolCauses.ForIncident(Incident(IncidentKind.Growth, (long)(1.2 * GB), open: true), "File objects (File)", Now);
+        var r = PoolCauses.ForIncident(Incident(IncidentKind.Growth, (long)(1.2 * GB), open: true), "Open files (File, Windows kernel)", Now);
         Assert.Equal(CauseKind.Incident, r.Kind);
-        Assert.Equal(new[] { "File objects (File)", "+1.2 GB", "1.2 GB/h", "Leaker.exe (7716)", "strong evidence", "since 14:00" }, r.Cells);
+        Assert.Equal(new[] { "Open files (File, Windows kernel)", "+1.2 GB", "1.2 GB/h", "Leaker.exe (PID 7716)", "strong evidence", "since 14:00" }, r.Cells);
         Assert.True(r.Active);
         Assert.Equal(RowTone.Alert, r.Tone);
         Assert.NotNull(r.Folder);
