@@ -1,7 +1,7 @@
 {
   // CI soak: the in-memory windows are shortened (defaults 70 / 15 / 90 min) so each one is full before the
-  // steady-state window starts at 600 s: "private memory flat" then tests that nothing grows without bound, which a
-  // 25-minute run with 70-minute windows cannot show. Everything else is at its default.
+  // steady-state window starts at 15 min: "private memory flat" then tests that nothing grows without bound, which a
+  // 45-minute run with 70-minute windows cannot show. Everything else is at its default.
   "rawHistoryMinutes": 8,
   "shortLivedKeepMinutes": 5,
   "incidentEventKeepMinutes": 8,
