@@ -6,13 +6,17 @@ namespace PoolWatch.Ui;
 
 /// <summary>
 /// The tray app: an icon coloured by state (green / amber / red) with the paged + non-paged totals in its tooltip,
-/// a balloon when an incident opens, and the main window on demand.
+/// a balloon when an incident opens, and the main window on demand. Its menu also holds the tools that are not on the
+/// simplified main window (DESIGN.md section 11): Capture now, Since boot report, Open incident folder, Export vendor
+/// bundle, Copy latest incident summary, the clear-task removals (shown only while there is something to remove) and About.
 /// </summary>
 internal sealed class TrayApp : ApplicationContext
 {
     private readonly MonitorEngine _engine;
     private readonly AnalysisPipeline _analysis;
+    private readonly UiActions _actions;
     private readonly NotifyIcon _icon;
+    private readonly ContextMenuStrip _menu = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 10_000 };
     private readonly SynchronizationContext _ui;
     private MainForm? _form;
@@ -32,15 +36,20 @@ internal sealed class TrayApp : ApplicationContext
         _engine = engine;
         _analysis = analysis;
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
-        var menu = new ContextMenuStrip();
+        _actions = new UiActions(engine, analysis, _ui);
+        var menu = _menu;
         menu.Items.Add("Open PoolWatch", null, (_, _) => ShowWindow());
-        menu.Items.Add("Capture now", null, (_, _) =>
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Capture now", null, (_, _) => _actions.Guarded(null, "Capture now", () =>
         {
             var i = _analysis.CaptureNow();
             string what = Core.Incidents.CaptureGovernor.ScopeFor(Core.Incidents.CaptureSource.Manual, _engine.Settings).Describe();
             Balloon(i is null ? "A capture is already running." : $"Capture started ({what}): {i.Id}");
-        });
-        menu.Items.Add("Open incident folder", null, (_, _) => OpenFolder(_engine.Paths.EnsureDir(_engine.Paths.IncidentsDir)));
+        }));
+        menu.Items.Add("Since boot report", null, (_, _) => _actions.Guarded(null, "Since boot", () => _actions.SinceBoot(null)));
+        menu.Items.Add("Open incident folder", null, (_, _) => _actions.OpenIncidentFolder());
+        menu.Items.Add("Export vendor bundle...", null, (_, _) => _actions.Guarded(null, "Export vendor bundle", () => _actions.ExportVendorBundle(null)));
+        menu.Items.Add("Copy latest incident summary", null, (_, _) => _actions.Guarded(null, "Copy summary", () => _actions.CopyLatestIncidentSummary(null)));
         menu.Items.Add(new ToolStripSeparator());
         _hotkey = new HotkeyWindow(engine.Settings.MarkHotkey, Mark);
         menu.Items.Add(new ToolStripMenuItem("Mark...", null, (_, _) => Mark()) { ShortcutKeyDisplayString = _hotkey.Registered ? _hotkey.Text : null });
@@ -48,11 +57,22 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(_experimentItem);
         var clearLag = new ToolStripMenuItem("Experiment: lag before / after a clear", null, (_, _) => StartClearExperiment());
         menu.Items.Add(clearLag);
+        menu.Items.Add(new ToolStripSeparator());
+        // Shown only while there is something to remove (they were toolbar buttons that appeared the same way).
+        var removeLegacy = new ToolStripMenuItem("Remove my clear task...", null, (_, _) => _actions.Guarded(null, "Remove task", () => _actions.RemoveLegacyTask(null)))
+            { ToolTipText = "Shows your own clear task (a scheduled task that runs RAMMap with an -E option) and removes it after you say yes; RAMMap itself stays in place" };
+        var removeOld = new ToolStripMenuItem("Remove old clear-cache tasks...", null, (_, _) => _actions.Guarded(null, "Remove old clear-cache tasks", () => _actions.RemoveOldClearTasks(null)))
+            { ToolTipText = @"An older PoolWatch installed two SYSTEM tasks (\PoolWatch\Clear cache ...) for Clear cache; they are no longer used. Removes them after you say yes." };
+        menu.Items.Add(removeLegacy);
+        menu.Items.Add(removeOld);
+        menu.Items.Add("About PoolWatch", null, (_, _) => _actions.About(null));
         menu.Opening += (_, _) =>
         {
             bool active = _analysis.Diagnostics.AnyExperimentActive;
             _experimentItem.Text = active ? "Stop experiment" : "Experiment...";
             clearLag.Enabled = !active;
+            removeLegacy.Visible = _actions.LegacyTaskPresent;
+            removeOld.Visible = _actions.OldTasksPresent;
         };
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
@@ -74,7 +94,10 @@ internal sealed class TrayApp : ApplicationContext
         if (showWindow) ShowWindow();
     }
 
-    public MainForm Form => _form ??= new MainForm(_engine, _analysis);
+    public MainForm Form => _form ??= new MainForm(_engine, _analysis, _actions);
+
+    /// <summary>Every item of the tray menu, by text (CI: what the main window gave up must still be reachable).</summary>
+    public List<string> MenuItemTexts() => _menu.Items.OfType<ToolStripMenuItem>().Select(i => i.Text ?? "").ToList();
 
     public void ShowWindow()
     {
@@ -131,16 +154,6 @@ internal sealed class TrayApp : ApplicationContext
         _icon.ShowBalloonTip(ms);
     }
 
-    /// <summary>
-    /// Opens a folder in Explorer. S1/S3: the elevated app never shell-executes a path (that consults the user's shell
-    /// associations and App Paths); it starts explorer.exe by full path with the folder as an argument, UseShellExecute = false.
-    /// </summary>
-    private static void OpenFolder(string folder)
-    {
-        string explorer = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
-        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(explorer, $"\"{System.IO.Path.GetFullPath(folder)}\"") { UseShellExecute = false }); } catch { }
-    }
-
     protected override void ExitThreadCore()
     {
         _analysis.Incidents.Opened -= _onOpened; // the sampler may still raise it until the engine stops
@@ -151,6 +164,7 @@ internal sealed class TrayApp : ApplicationContext
         _timer.Dispose();
         _icon.Visible = false;
         _icon.Dispose();
+        _menu.Dispose();
         _form?.Dispose();
         base.ExitThreadCore();
     }

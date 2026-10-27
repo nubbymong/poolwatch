@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using PoolWatch.Analysis;
 using PoolWatch.Core;
 using PoolWatch.Core.Correlation;
@@ -12,255 +11,497 @@ using PoolWatch.Engine;
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// The main window (DESIGN.md section 11). Refreshes on a 10 s timer that runs only while the window is visible and not
-/// minimised; nothing is rendered or recomputed while it is hidden.
+/// The main window (DESIGN.md section 11): one plain-English status line, one pool graph, three buttons (Clear cache
+/// now, Export report, Settings) and two tabs (Pool causes, Services). Everything else is in the tray menu. Refreshes on
+/// a 10 s timer that runs only while the window is visible and not minimised; nothing is rendered or recomputed while
+/// it is hidden.
 /// </summary>
 internal sealed class MainForm : Form
 {
     private readonly MonitorEngine _engine;
     private readonly AnalysisPipeline _analysis;
+    private readonly UiActions _actions;
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 10_000 };
-    private readonly PoolChart _chart = new() { Dock = DockStyle.Top, Height = 190 };
-    private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
-    private readonly ListView _tags = NewList(("Tag", 60), ("Owner", 110), ("Description", 240), ("Size", 80), ("1 min", 70), ("10 min", 70), ("60 min", 70), ("State", 80),
-        ("Allocs/min", 80), ("Frees/min", 80), ("Shape (10 min)", 230));
-    private readonly ListView _owners = NewList(("Suspect (who it works for)", 300), ("Likelihood", 90), ("Why", 340));
-    private readonly ListView _eventsList = NewList(("Event", 900));
-    private readonly TextBox _answer = new() { Dock = DockStyle.Top, ReadOnly = true, Multiline = true, Height = 50, ScrollBars = ScrollBars.Vertical, BorderStyle = BorderStyle.None, WordWrap = true, Font = new Font("Segoe UI", 10f, FontStyle.Bold), BackColor = SystemColors.Window };
-    private readonly TextBox _details = new() { Dock = DockStyle.Fill, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical, WordWrap = true, BackColor = SystemColors.Window, Font = new Font("Segoe UI", 9f) };
-    private readonly ActivityStrip _strip = new() { Dock = DockStyle.Top, Height = 130 };
-    private readonly LinkLabel _showMore = new() { Dock = DockStyle.Bottom, Height = 20, Text = "Show more" };
-    private readonly CheckBox _allEvents = new() { Text = "Show all events (not just notable ones and summaries)", AutoSize = true, Dock = DockStyle.Top };
-    private readonly GroupBox _suspectsBox = new() { Text = "Suspects", Dock = DockStyle.Fill };
-    private readonly TextBox _overview = new() { Dock = DockStyle.Top, ReadOnly = true, Multiline = true, Height = 170, WordWrap = true, BorderStyle = BorderStyle.None, BackColor = SystemColors.Window, Font = new Font("Segoe UI", 10.5f) };
-    private readonly LagChart _lagChart = new() { Dock = DockStyle.Bottom, Height = 170 };
-    private readonly PoolChart _bootChart = new() { Dock = DockStyle.Fill, Title = "Kernel pool since PoolWatch started (minute averages; up to 25 h)" };
-    private bool _showAllOwners;
-    private bool _tagSelectPending;
-    private bool _forceOrder;
-    private TagViewData? _view;
-    private DateTime _viewAt = DateTime.MinValue;
-    private readonly CheckBox _growingOnly = new() { Text = "Growing / retained / released only", Checked = true, AutoSize = true, Dock = DockStyle.Top };
-    private readonly ListView _incidents = NewList(("Opened", 130), ("Tag", 60), ("Kind", 100), ("Growth", 80), ("Top suspect", 240), ("Confidence", 130), ("State", 60), ("Folder", 300));
-    private readonly ListView _processes = NewList(("Process", 230), ("PID", 60), ("Parent", 60), ("I/O ops/s", 90), ("Handles", 80), ("Quota pool", 90), ("Private", 90), ("Orphan", 60), ("Command line", 500));
-    private readonly ListView _findings = NewList(("Time", 130), ("Kind", 100), ("Severity", 70), ("Finding", 760), ("Folder", 260));
-    private readonly ListView _services = new() { View = View.Details, FullRowSelect = true, CheckBoxes = true, Dock = DockStyle.Fill, MultiSelect = true, HideSelection = false };
-    private readonly Label _servicesStatus = new() { Dock = DockStyle.Top, AutoSize = false, Height = 40, Padding = new Padding(4) };
-    private readonly ListView _tasks = new() { View = View.Details, FullRowSelect = true, Dock = DockStyle.Fill, MultiSelect = false, HideSelection = false };
-    private readonly ListView _spawnRates = NewList(("Parent", 220), ("PID", 60), ("Child image", 160), ("Starts", 70), ("Short-lived", 80));
-    private readonly TextBox _tokenSummary = new() { Dock = DockStyle.Top, ReadOnly = true, Multiline = true, Height = 36, BorderStyle = BorderStyle.None, BackColor = SystemColors.Window, WordWrap = true };
-    private readonly PropertyGrid _settingsGrid = new() { Dock = DockStyle.Fill, ToolbarVisible = false };
-    private readonly CheckBox _logon = new() { Text = "Start at logon (scheduled task, highest privileges: no daily UAC prompt)", AutoSize = true };
-    private readonly ToolStripStatusLabel _status = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
-    private readonly ToolStripStatusLabel _orderHint = new() { ForeColor = Color.DarkSlateBlue };
-    private Settings _editSettings;
-    private PoolTag? _selectedTag;
-    private int _procSortColumn = 3;
-    private bool _repopulating;
-    private bool? _logonPending;
-    private bool _procSortDesc = true;
+    private readonly ToolTip _tips = new() { AutoPopDelay = 30_000, InitialDelay = 400 };
 
-    public MainForm(MonitorEngine engine, AnalysisPipeline analysis)
+    // The header: the status line on the left, the three buttons on the right.
+    private readonly Panel _header = new() { Dock = DockStyle.Top };
+    private readonly Label _status = new() { Dock = DockStyle.Fill, AutoSize = false, TextAlign = ContentAlignment.MiddleLeft, UseMnemonic = false, AutoEllipsis = false };
+    private readonly FlowLayoutPanel _buttons = new() { Dock = DockStyle.Right, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false };
+    private readonly List<Button> _headerButtons = [];
+    private PoolStatusKind _statusKind = PoolStatusKind.Collecting;
+
+    private readonly PoolChart _chart = new() { Dock = DockStyle.Fill };
+    private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
+
+    // Pool causes: the merged list and the selected row's details.
+    private readonly ListView _causes = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false };
+    private readonly SplitContainer _causesSplit = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
+    private readonly WrapLabel _detailTitle = new() { Dock = DockStyle.Top };
+    private readonly TextBox _detailText = new() { Dock = DockStyle.Fill, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical, WordWrap = true, BackColor = SystemColors.Window, BorderStyle = BorderStyle.None };
+    private readonly Button _openFolder = new() { Text = "Open report folder", AutoSize = true, Visible = false };
+    private readonly TagRankings _rankings = new();
+    private List<CauseRow> _causeRows = [];
+    private Dictionary<string, CauseRow> _causeByKey = new();
+    private bool _causeSelectPending;
+    private long _causesSamples = -1;
+
+    // Services (the former Background services page; same behaviour).
+    private readonly ListView _services = new() { View = View.Details, FullRowSelect = true, CheckBoxes = true, Dock = DockStyle.Fill, MultiSelect = true, HideSelection = false };
+    private readonly WrapLabel _servicesStatus = new() { Dock = DockStyle.Top };
+    private readonly ListView _tasks = new() { View = View.Details, FullRowSelect = true, Dock = DockStyle.Fill, MultiSelect = false, HideSelection = false };
+    private readonly ComboBox _preset = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly SplitContainer _servicesSplit = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
+    private readonly Engine.TasksAndStartup _tasksEngine;
+
+    private SettingsDialog? _settings;
+    private bool _repopulating;
+
+    public MainForm(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions)
     {
         _engine = engine;
-        _tasksEngine = new Engine.TasksAndStartup(engine.Log);
         _analysis = analysis;
-        _editSettings = Clone(engine.Settings);
+        _actions = actions;
+        _tasksEngine = new Engine.TasksAndStartup(engine.Log);
         Text = "PoolWatch";
         Icon = TrayIcons.For(TrayState.Green);
-        Width = 1200;
-        Height = 820;
-        StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9f);
+        BackColor = SystemColors.Window;
+        StartPosition = FormStartPosition.CenterScreen;
+        // About 1100 x 750 at 100%, scaled with the display (and never larger than the screen's working area).
+        var want = LogicalToDeviceUnits(new Size(1100, 750));
+        var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(Point.Empty, want);
+        Size = new Size(Math.Min(want.Width, area.Width), Math.Min(want.Height, area.Height));
+        MinimumSize = LogicalToDeviceUnits(new Size(760, 540));
 
-        var tools = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden };
-        tools.Items.Add(new ToolStripButton("Capture now", null, (_, _) => Guarded("Capture now", CaptureNow)) { ToolTipText = "Run the confirmation trace now (bounded: pool events + Kernel-File, plus CPU when CpuTraceEnabled; not while another capture runs)" });
-        tools.Items.Add(new ToolStripButton("Since boot", null, (_, _) => Guarded("Since boot", SinceBoot)) { ToolTipText = "What has grown since boot, and what drove it, hour by hour" });
-        tools.Items.Add(new ToolStripButton("Open incident folder", null, (_, _) => Guarded("Open incident folder", OpenIncidentFolder)));
-        tools.Items.Add(new ToolStripButton("Export report", null, (_, _) => Guarded("Export report", Export)) { ToolTipText = "Zip the selected incident, optionally redacted" });
-        tools.Items.Add(new ToolStripButton("Export vendor bundle", null, (_, _) => Guarded("Export vendor bundle", ExportBundle))
-            { ToolTipText = "One zip for an app vendor: Windows build and app versions, boot baselines, samples, tag snapshots, filters, git / spawn traces, crashes (redacted by default)" });
-        tools.Items.Add(new ToolStripButton("Copy summary", null, (_, _) => Guarded("Copy summary", CopySummary)) { ToolTipText = "Copy the selected tag's answer and suspects, or the selected incident's summary, as plain text" });
-        tools.Items.Add(new ToolStripSeparator());
-        tools.Items.Add(new ToolStripButton("Clear cache now", null, (_, _) => Guarded("Clear cache", ClearCacheNow))
-            { ToolTipText = "Empty the Windows standby list (cached file pages); the per-file ReFS / filter-manager pool they keep alive is freed with them. Measured: pool before and 2 min after." });
-        // S5 (review round 2): no setup any more (the purge is in-process). This appears only when an older PoolWatch's two
-        // SYSTEM tasks are still installed, to remove them.
-        tools.Items.Add(new ToolStripButton("Remove old clear-cache tasks", null, (_, _) => Guarded("Remove old clear-cache tasks", RemoveOldClearTasks))
-            { ToolTipText = @"An older PoolWatch installed two SYSTEM tasks (\PoolWatch\Clear cache ...) and a helper in Program Files for Clear cache; they are no longer used. Removes them after you say yes.", Visible = false, Name = "removeOldTasks" });
-        tools.Items.Add(new ToolStripButton("Remove my clear task", null, (_, _) => Guarded("Remove task", RemoveLegacyTask))
-            { ToolTipText = "Shows your own clear task (a scheduled task that runs RAMMap with an -E option) and removes it after you say yes; RAMMap itself stays in place", Visible = false, Name = "removeLegacy" });
-        tools.Items.Add(new ToolStripSeparator());
-        tools.Items.Add(new ToolStripButton("About", null, (_, _) => About()));
-        _tools = tools;
+        // Header.
+        _status.Font = new Font("Segoe UI Semibold", 13f);
+        _status.Text = "Kernel pool: collecting the first sample…";
+        var clear = HeaderButton("Clear cache now", () => _actions.Guarded(this, "Clear cache", () => _actions.ClearCacheNow(this)));
+        clear.MouseEnter += (_, _) => _tips.SetToolTip(clear, _actions.ClearCacheTip());
+        var export = HeaderButton("Export report", () => _actions.Guarded(this, "Export report", () => _actions.ExportReport(this, SelectedRow()?.Folder)));
+        _tips.SetToolTip(export, "Zip the selected row's report (or the newest incident's) to share it. Redacted by default.");
+        var settings = HeaderButton("Settings", () => _actions.Guarded(this, "Settings", OpenSettings));
+        _tips.SetToolTip(settings, "Detection thresholds, the automatic cache clear, redaction, and Start at logon.");
+        _header.Controls.Add(_status);  // fill first, then the docked edge
+        _header.Controls.Add(_buttons);
 
-        _tabs.TabPages.Add(OverviewPage());
-        _tabs.TabPages.Add(TagsPage());
-        _tabs.TabPages.Add(Page("Incidents", _incidents));
-        _tabs.TabPages.Add(Page("Processes", _processes));
-        _tabs.TabPages.Add(FindingsPage());
+        // Body: the graph above the two tabs.
+        _tips.SetToolTip(_chart, "Committed paged and non-paged pool: the figures Task Manager shows (Performance, Memory).");
+        _tabs.TabPages.Add(CausesPage());
         _tabs.TabPages.Add(ServicesPage());
-        _tabs.TabPages.Add(SettingsPage());
+        var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = Px(12, 0, 12, 12), BackColor = SystemColors.Window };
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        body.RowStyles.Add(new RowStyle(SizeType.Percent, 36));
+        body.RowStyles.Add(new RowStyle(SizeType.Percent, 64));
+        _chart.Margin = Px(0, 0, 0, 8);
+        _tabs.Margin = Padding.Empty;
+        body.Controls.Add(_chart, 0, 0);
+        body.Controls.Add(_tabs, 0, 1);
+        Controls.Add(body);
+        Controls.Add(_header);
 
-        var statusStrip = new StatusStrip();
-        statusStrip.Items.Add(_status);
-        statusStrip.Items.Add(_orderHint);
-        statusStrip.ContextMenuStrip = new ContextMenuStrip();
-        statusStrip.ContextMenuStrip.Items.Add("Copy status", null, (_, _) => Copy(_status.Text ?? ""));
-        // Copy: Ctrl+C (tab-separated, with a header row) and a right-click menu on every list.
-        EnableCopy(_tags, _ => null);
-        EnableCopy(_owners, OwnerCopy);
-        EnableCopy(_eventsList, _ => null);
-        EnableCopy(_incidents, k => k is string dir ? new CopyInfo(null, null, dir, null, () => IncidentSummary(dir)) : null);
-        EnableCopy(_processes, k => k is ProcessKey pk && _engine.Registry.Get(pk) is { } r ? new CopyInfo(r.Pid.ToString(), r.CommandLine, r.ImagePath, null, null) : null);
-        EnableCopy(_findings, k => k is Finding f ? new CopyInfo(f.Pid != 0 ? f.Pid.ToString() : null, f.Data.GetValueOrDefault("commandLine") as string, f.ReportDir,
-            string.Join("\r\n", new[] { f.Title }.Concat(f.Details)), null) : null);
-        EnableCopy(_spawnRates, _ => null);
-        foreach (var tb in new[] { _answer, _details, _overview }) EnableTextCopy(tb);
-        Controls.Add(_tabs);
-        Controls.Add(_chart);
-        Controls.Add(tools);
-        Controls.Add(statusStrip);
+        EnableCopy(_causes, CauseCopy);
+        EnableTextCopy(_detailText);
 
-        // Selection changes are debounced (a click deselects, then selects; Ctrl+A or Shift-click fire once per row): the
-        // view is rebuilt once, after the burst, and only when the selected tag really changed.
-        _tags.SelectedIndexChanged += (_, _) =>
+        // Selection changes are debounced (a click deselects, then selects): the details are rebuilt once, after the burst.
+        _causes.SelectedIndexChanged += (_, _) =>
         {
-            if (_repopulating || _tagSelectPending) return;
-            _tagSelectPending = true;
-            BeginInvoke(() =>
-            {
-                _tagSelectPending = false;
-                PoolTag? tag = _tags.SelectedItems.Count > 0 ? (PoolTag)_tags.SelectedItems[0].Tag! : null;
-                if (tag == _selectedTag) return;
-                _selectedTag = tag;
-                _view = null;
-                SafeRefresh(RefreshSuspects);
-            });
+            if (_repopulating || _causeSelectPending) return;
+            _causeSelectPending = true;
+            BeginInvoke(() => { _causeSelectPending = false; SafeRefresh(ShowCauseDetails); SafeRefresh(PumpRankings); });
         };
-        _owners.SelectedIndexChanged += (_, _) => { if (!_repopulating) SafeRefresh(ShowDetails); };
-        _showMore.LinkClicked += (_, _) => { _showAllOwners = !_showAllOwners; SafeRefresh(RefreshSuspects); };
-        _allEvents.CheckedChanged += (_, _) => { _view = null; SafeRefresh(RefreshSuspects); };
-        _growingOnly.CheckedChanged += (_, _) => { _tagsSamples = -1; SafeRefresh(RefreshTags); };
-        _incidents.DoubleClick += (_, _) => OpenIncidentFolder();
-        _findings.DoubleClick += (_, _) => { if (_findings.SelectedItems.Count > 0 && _findings.SelectedItems[0].Tag is Finding { ReportDir: { } d } && Directory.Exists(d)) OpenFolder(d); };
-        _processes.ColumnClick += (_, e) => { _procSortDesc = e.Column == _procSortColumn ? !_procSortDesc : true; _procSortColumn = e.Column; _forceOrder = true; SafeRefresh(RefreshProcesses); _forceOrder = false; };
+        _causes.DoubleClick += (_, _) => { if (SelectedRow()?.Folder is { } d && Directory.Exists(d)) _actions.OpenIncidentFolder(d); };
+        _causes.Resize += (_, _) => FitCauseColumns();
+        _openFolder.Click += (_, _) => { if (SelectedRow()?.Folder is { } d) _actions.OpenIncidentFolder(d); };
         _tabs.SelectedIndexChanged += (_, _) => RefreshNow();
         _timer.Tick += (_, _) => RefreshNow();
         VisibleChanged += (_, _) => UpdateTimer();
-        HandleCreated += (_, _) => { if (_logonPending is { } v) { _logonPending = null; BeginInvoke(() => WireLogon(v)); } };
-        Resize += (_, _) => UpdateTimer();
+        Resize += (_, _) => { UpdateTimer(); LayoutHeader(); };
+        Load += (_, _) => { LayoutHeader(); FitCauseColumns(); };
+        SplitAt(_causesSplit, 0.58);
+        SplitAt(_servicesSplit, 0.6);
+        LayoutHeader();
     }
 
-    /// <summary>Start-up (JIT, first scans, tag scan) is not steady state: overhead is shown only after this long.</summary>
-    private const int SteadySeconds = 300;
+    private int S(int logical) => LogicalToDeviceUnits(logical);
+    private Padding Px(int l, int t, int r, int b) => new(S(l), S(t), S(r), S(b));
 
-    private static Settings Clone(Settings s) => System.Text.Json.JsonSerializer.Deserialize<Settings>(System.Text.Json.JsonSerializer.Serialize(s))!;
-
-    private static ListView NewList(params (string name, int width)[] cols)
+    private Button HeaderButton(string text, Action click)
     {
-        var lv = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = true };
-        foreach (var (n, w) in cols) lv.Columns.Add(n, w);
-        return lv;
+        var b = new Button { Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = Px(10, 4, 10, 4), Margin = Px(8, 0, 0, 0), UseVisualStyleBackColor = true };
+        b.Click += (_, _) => click();
+        _buttons.Controls.Add(b);
+        _headerButtons.Add(b);
+        return b;
     }
 
-    private static TabPage Page(string title, Control c)
+    /// <summary>The header's height follows the status text (wrapped to the room left of the buttons) and the buttons.</summary>
+    private void LayoutHeader()
     {
-        var p = new TabPage(title);
-        p.Controls.Add(c);
-        return p;
+        if (_buttons.Controls.Count == 0) return;
+        _header.Padding = Px(14, 10, 12, 8);
+        int btnH = _headerButtons.Max(b => b.GetPreferredSize(Size.Empty).Height + b.Margin.Vertical);
+        int btnW = _headerButtons.Sum(b => b.GetPreferredSize(Size.Empty).Width + b.Margin.Horizontal) + S(12);
+        int textW = Math.Max(S(200), ClientSize.Width - _header.Padding.Horizontal - btnW);
+        // Measured a little narrower than the label: wrapping earlier can only add a line, never cut one off.
+        int textH = WrapLabel.Measure(_status.Text, _status.Font, textW - S(4));
+        int inner = Math.Max(textH + S(2), btnH);
+        _buttons.Padding = new Padding(S(12), Math.Max(0, (inner - btnH) / 2), 0, 0);
+        int h = inner + _header.Padding.Vertical;
+        if (_header.Height != h) _header.Height = h;
     }
 
-    private TabPage OverviewPage()
+    private static readonly Color Growing = Color.FromArgb(178, 34, 34), TagGrowing = Color.FromArgb(150, 90, 0), Dropping = Color.FromArgb(0, 110, 50);
+
+    private void UpdateStatus()
     {
-        var page = new TabPage("Overview");
-        page.Controls.Add(_bootChart);
-        page.Controls.Add(_lagChart);
-        page.Controls.Add(_overview);
+        var t = UiData.Totals(_analysis);
+        var lead = PoolCauses.Lead(_analysis, _rankings, t.Held, out _leadTag);
+        var s = PoolStatusLine.Describe(t.Total, t.Held, t.Change10Min, t.ChangeHour, lead, UiData.SaturatedBusiest(_analysis));
+        _statusKind = s.Kind;
+        var color = s.Kind switch
+        {
+            PoolStatusKind.Growing => Growing,
+            PoolStatusKind.TagGrowing => TagGrowing,
+            PoolStatusKind.Dropping when !s.Saturated => Dropping,
+            PoolStatusKind.Collecting when !s.Saturated => SystemColors.GrayText,
+            _ => s.Saturated ? TagGrowing : SystemColors.ControlText,
+        };
+        if (_status.ForeColor != color) _status.ForeColor = color;
+        if (_status.Text != s.Text) { _status.Text = s.Text; LayoutHeader(); }
+    }
+
+    private void OpenSettings()
+    {
+        _settings ??= new SettingsDialog(_engine, _analysis, _actions);
+        if (!_settings.Visible) _settings.ShowDialog(this);
+    }
+
+    // ---------------------------------------------------------------- Pool causes
+
+    private TabPage CausesPage()
+    {
+        int[] widths = [300, 150, 100, 250, 130, 110];
+        for (int i = 0; i < PoolCauses.Columns.Length; i++) _causes.Columns.Add(PoolCauses.Columns[i], S(widths[i]));
+        _causesSplit.Panel1.Controls.Add(_causes); // fill first, then the legend above it
+        _causesSplit.Panel1.Controls.Add(Legend());
+        _detailTitle.Font = new Font("Segoe UI Semibold", 10f);
+        _detailTitle.Padding = Px(2, 6, 2, 4);
+        _detailText.Font = new Font("Segoe UI", 9.5f);
+        var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = Px(0, 4, 0, 0) };
+        bar.Controls.Add(_openFolder);
+        _causesSplit.Panel2.Padding = Px(4, 0, 4, 4);
+        _causesSplit.Panel2.Controls.Add(_detailText); // fill first, then the docked edges
+        _causesSplit.Panel2.Controls.Add(_detailTitle);
+        _causesSplit.Panel2.Controls.Add(bar);
+        _causesSplit.SplitterWidth = S(6);
+        var page = new TabPage("Pool causes") { UseVisualStyleBackColor = true, Padding = Px(4, 4, 4, 4) };
+        page.Controls.Add(_causesSplit);
         return page;
     }
 
-    private TabPage TagsPage()
+    /// <summary>What the row colours mean (the tones PoolCauses gives each row).</summary>
+    private FlowLayoutPanel Legend()
     {
-        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 190 };
-        split.Panel1.Controls.Add(_tags);
-        split.Panel1.Controls.Add(_growingOnly);
-        // Lower half: the answer line, the activity strip, the owners (top 3) with a details pane, and the events.
-        var lower = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterDistance = 760 };
-        var ownersSplit = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 110 };
-        ownersSplit.Panel1.Controls.Add(_owners);
-        ownersSplit.Panel1.Controls.Add(_showMore);
-        ownersSplit.Panel2.Controls.Add(_details);
-        _suspectsBox.Controls.Add(ownersSplit);
-        _suspectsBox.Controls.Add(_strip);
-        _suspectsBox.Controls.Add(_answer);
-        var eventsBox = new GroupBox { Text = "Events in the window", Dock = DockStyle.Fill };
-        eventsBox.Controls.Add(_eventsList);
-        eventsBox.Controls.Add(_allEvents);
-        lower.Panel1.Controls.Add(_suspectsBox);
-        lower.Panel2.Controls.Add(eventsBox);
-        split.Panel2.Controls.Add(lower);
-        var page = new TabPage("Growing tags");
-        page.Controls.Add(split);
-        return page;
+        var legend = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Padding = Px(0, 0, 0, 4) };
+        Label Chip(string text, Color back) => new() { Text = text, AutoSize = true, BackColor = back, Padding = Px(6, 2, 6, 2), Margin = Px(0, 0, 8, 2) };
+        legend.Controls.AddRange([
+            Chip("Pink: an open incident, or an alert", AlertBack),
+            Chip("Yellow: growing or held now, or a warning", WarningBack),
+            new Label { Text = "No colour: earlier, or for information", AutoSize = true, ForeColor = SystemColors.GrayText, Margin = Px(0, 2, 0, 2) },
+        ]);
+        return legend;
     }
 
-    private TabPage FindingsPage()
+    /// <summary>The fixed columns keep their width; "What is growing" and "Likely cause" share the rest.</summary>
+    private void FitCauseColumns()
     {
-        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 300 };
-        split.Panel1.Controls.Add(_findings);
-        var box = new GroupBox { Text = "Process starts per parent and child image (current window; short-lived = exited quickly)", Dock = DockStyle.Fill };
-        box.Controls.Add(_spawnRates);
-        split.Panel2.Controls.Add(box);
-        split.Panel2.Controls.Add(_tokenSummary);
-        var page = new TabPage("Findings");
-        page.Controls.Add(split);
-        return page;
+        if (_causes.Columns.Count < 6 || _causes.ClientSize.Width <= 0) return;
+        int fixedW = _causes.Columns[1].Width + _causes.Columns[2].Width + _causes.Columns[4].Width + _causes.Columns[5].Width;
+        int rest = _causes.ClientSize.Width - fixedW - S(4);
+        int what = Math.Max(S(180), rest * 55 / 100), cause = Math.Max(S(150), rest - what);
+        if (_causes.Columns[0].Width != what) _causes.Columns[0].Width = what;
+        if (_causes.Columns[3].Width != cause) _causes.Columns[3].Width = cause;
     }
 
-    private readonly ComboBox _preset = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 160 };
+    /// <summary>Puts the splitter at <paramref name="fraction"/> of the container once it has its real size (then the panels keep the ratio).</summary>
+    private static void SplitAt(SplitContainer s, double fraction)
+    {
+        bool done = false;
+        void Apply()
+        {
+            int size = s.Orientation == Orientation.Horizontal ? s.Height : s.Width;
+            if (done || size <= 120) return;
+            try
+            {
+                s.SplitterDistance = Math.Clamp((int)(size * fraction), s.Panel1MinSize, size - s.Panel2MinSize - s.SplitterWidth);
+                done = true;
+            }
+            catch (InvalidOperationException) { } // not laid out yet: tried again on the next size change
+        }
+        s.SizeChanged += (_, _) => Apply();
+        Apply();
+    }
+
+    private CauseRow? SelectedRow() =>
+        _causes.SelectedItems.Count > 0 && _causes.SelectedItems[0].Tag is string key ? _causeByKey.GetValueOrDefault(key) : null;
+
+    private static readonly Color AlertBack = Color.MistyRose, WarningBack = Color.FromArgb(255, 248, 214);
+
+    private void RefreshCauses(bool force)
+    {
+        if (!force && _engine.SampleCount == _causesSamples)
+        {
+            // The list only changes with a new sample; the selected tag's ranking has its own 30 s clock.
+            if (SelectedRow() is { Kind: CauseKind.Tag }) ShowCauseDetails();
+            return;
+        }
+        _causesSamples = _engine.SampleCount;
+        _causeRows = PoolCauses.Build(_analysis, _engine, _rankings);
+        _rankTags = PoolCauses.TagsToRank(_causeRows);
+        _causeByKey = _causeRows.GroupBy(r => r.Key).ToDictionary(g => g.Key, g => g.First());
+        var items = _causeRows.GroupBy(r => r.Key).Select(g => g.First()).Select(r =>
+        {
+            var it = new ListViewItem(r.Cells) { Tag = r.Key };
+            if (r.Tone == RowTone.Alert) it.BackColor = AlertBack;
+            else if (r.Tone == RowTone.Warning) it.BackColor = WarningBack;
+            return it;
+        }).ToList();
+        Update(_causes, items);
+        ShowCauseDetails();
+    }
+
+    private void ShowCauseDetails()
+    {
+        var row = SelectedRow();
+        if (row is null)
+        {
+            _openFolder.Visible = false;
+            if (_causeRows.Count == 0)
+            {
+                SetTitle("Nothing stands out right now");
+                SetText(_detailText, "No pool tag is growing, no incident is open, and no process is piling up handles or pool. When something grows, " +
+                    "it is listed here with how much, how fast, the likely cause and how sure PoolWatch is.", "empty");
+            }
+            else
+            {
+                SetTitle("Select a row to see its details");
+                SetText(_detailText, "", "none");
+            }
+            return;
+        }
+        SetTitle(row.HowMuch.Length > 0 ? $"{row.What}: {row.HowMuch}" : row.What);
+        string text = row.Kind switch
+        {
+            CauseKind.Incident => IncidentDetails(row),
+            CauseKind.Tag => TagDetails(row),
+            CauseKind.Process => ProcessDetails(row),
+            _ => FindingDetails(row),
+        };
+        SetText(_detailText, text, row.Key);
+        bool folder = row.Folder is { } f && Directory.Exists(f);
+        if (_openFolder.Visible != folder) _openFolder.Visible = folder;
+    }
+
+    private void SetTitle(string text) { if (_detailTitle.Text != text) _detailTitle.Text = text; }
+
+    private readonly Dictionary<string, (DateTime written, string text)> _reportText = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The incident's report summary (from report.json; re-read when the report is rewritten).</summary>
+    private string IncidentDetails(CauseRow row)
+    {
+        if (row.Folder is not { } dir) return "";
+        string json = Path.Combine(dir, "report.json");
+        try
+        {
+            var info = new FileInfo(json);
+            if (!info.Exists) return "The report is being written.";
+            if (_reportText.TryGetValue(dir, out var c) && c.written == info.LastWriteTimeUtc) return c.text;
+            string text = info.Length > 16 << 20 ? "The report is too large to show here: open the report folder."
+                : UiActions.IncidentSummary(dir).TrimEnd() + "\r\n\r\nThe full report (report.md, with the timeline chart, every suspect's evidence and a draft bug report) is in the report folder.";
+            _reportText[dir] = (info.LastWriteTimeUtc, text);
+            return text;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            return "The report could not be read just now (" + ex.Message + ").";
+        }
+    }
+
+    /// <summary>A growing tag: the plain answer, the top suspects with their evidence, and the recent notable events.</summary>
+    private string TagDetails(CauseRow row)
+    {
+        if (row.Tag is not { } tag) return "";
+        var sb = new System.Text.StringBuilder();
+        // For the expert: the tag code, its driver and its technical description (the row shows the everyday name).
+        var info = _analysis.Knowledge.Lookup(tag);
+        string driver = PlainWords.Driver(info.Owner);
+        sb.Append($"Pool tag {tag.ToDisplay()}{(driver.Length > 0 ? $", allocated by {driver}" : "")}{(info.Description.Length > 0 ? $": {info.Description}" : "")}.\r\n\r\n");
+        if (row.Active is false) return sb.Append("Released: whatever exited or was deleted then was holding this memory.").ToString();
+        // The ranking is built in the background (PumpRankings); this text is replaced when it arrives.
+        if (_rankings.Get(tag) is not { } v)
+            return sb.Append(_rankings.Tried(tag) && !_rankings.Building(tag) ? "Not enough samples yet to rank the suspects." : "Ranking the suspects…").ToString();
+        sb.Append(v.Answer.Line).Append("\r\n");
+        sb.Append(v.TraceBacked ? "The confirmation trace's owners come first; the rest are correlation only.\r\n" : "Suspects are ranked by correlation, not proof.\r\n");
+        int n = 0;
+        foreach (var o in v.Owners.Where(o => o.Meaningful).Take(3))
+        {
+            sb.Append($"\r\n{++n}. {o.Name}: {PlainWords.Confidence(o.Confidence)}{(o.CorrelationOnly ? " (correlation only)" : "")}\r\n");
+            foreach (var p in o.Plain) sb.Append("   - ").Append(p).Append("\r\n");
+            if (o.Members.Count > 0)
+                sb.Append("   Processes: ").Append(string.Join("; ", o.Members.Take(5).Select(m => PlainWords.WithPid(m.DisplayName, m.Key.Pid))))
+                  .Append(o.Members.Count > 5 ? $" and {o.Members.Count - 5} more" : "").Append("\r\n");
+            if (o.Members.FirstOrDefault(m => m.CommandLine is not null)?.CommandLine is { } cl) sb.Append("   Command line: ").Append(cl).Append("\r\n");
+        }
+        if (n == 0) sb.Append("\r\nNo suspect stood out.\r\n");
+        var events = v.Events.Where(e => e.Notable).TakeLast(10).ToList();
+        if (events.Count > 0)
+        {
+            sb.Append("\r\nRecent events:\r\n");
+            foreach (var e in events) sb.Append("   ").Append(e.Text).Append("\r\n");
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    private string ProcessDetails(CauseRow row)
+    {
+        if (row.Candidate is not { } p) return "";
+        var rec = _engine.Registry.Get(p.Key);
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"{p.Name}, PID {p.Key.Pid}{(p.StartUtc > DateTime.MinValue ? $", started {Fmt.Stamp(p.StartUtc)}" : "")}.\r\n");
+        string over = p.Over > TimeSpan.Zero ? $" (over {Fmt.Duration(p.Over)})" : "";
+        sb.Append($"Handles: {p.Handles:N0}, was {p.HandlesBefore:N0}{over}.\r\n");
+        sb.Append($"Pool charged to it: {Fmt.Bytes(p.Quota)}, was {Fmt.Bytes(p.QuotaBefore)}{over}.\r\n");
+        sb.Append($"I/O: {p.OpsPerSec:N0} operations a second.\r\n");
+        if (rec is not null)
+        {
+            if (rec.OrphanedUtc is { } o) sb.Append($"Kept running after its parent exited (at {Fmt.Clock(o)}).\r\n");
+            var chain = _engine.Registry.Ancestry(rec.Key);
+            if (chain.Count > 1) sb.Append("Started by: ").Append(string.Join(" › ", chain.Select(r => r.DisplayName))).Append("\r\n");
+            if (rec.CommandLine is { } cl) sb.Append("Command line: ").Append(cl).Append("\r\n");
+            if (rec.ImagePath is { } path) sb.Append("Path: ").Append(path).Append("\r\n");
+        }
+        sb.Append("\r\nA process whose handles or pool charge keep rising holds kernel pool; if it is not meant to, closing it gives the memory back.");
+        return sb.ToString();
+    }
+
+    private static string FindingDetails(CauseRow row)
+    {
+        if (row.Finding is not { } f) return "";
+        var sb = new System.Text.StringBuilder();
+        sb.Append(f.Title).Append("\r\n");
+        foreach (var d in f.Details) sb.Append(d).Append("\r\n");
+        if (f.Data.GetValueOrDefault("commandLine") is string cl) sb.Append("\r\nCommand line: ").Append(cl).Append("\r\n");
+        sb.Append($"\r\n{Fmt.Stamp(f.TimeUtc)} ({f.Kind}, {f.Severity.ToString().ToLowerInvariant()})");
+        return sb.ToString();
+    }
+
+    /// <summary>What the right-click menu can copy for a Pool causes row.</summary>
+    private CopyInfo? CauseCopy(object? key)
+    {
+        if (key is not string k || _causeByKey.GetValueOrDefault(k) is not { } row) return null;
+        switch (row.Kind)
+        {
+            case CauseKind.Incident when row.Folder is { } dir:
+                return new CopyInfo(null, null, dir, null, () => UiActions.IncidentSummary(dir));
+            case CauseKind.Tag when row.Tag is { } tag:
+                return new CopyInfo(null, null, null, null, () => _rankings.Get(tag) is { } v ? TagSummary(v) : "");
+            case CauseKind.Process when row.Process is { } pk && _engine.Registry.Get(pk) is { } r:
+                return new CopyInfo(r.Pid.ToString(), r.CommandLine, r.ImagePath, null, null);
+            case CauseKind.Finding when row.Finding is { } f:
+                return new CopyInfo(f.Pid != 0 ? f.Pid.ToString() : null, f.Data.GetValueOrDefault("commandLine") as string, f.ReportDir,
+                    string.Join("\r\n", new[] { f.Title }.Concat(f.Details)), null);
+            default:
+                return null;
+        }
+    }
+
+    internal static string OwnerDetails(OwnerSuspect o, TagViewData v)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"{o.Name}: {OwnerRanking.Strength(o.Confidence)}{(o.CorrelationOnly ? " (correlation only: the confirmation trace did not see it allocate this tag)" : "")} ({o.Owner.Kind})");
+        foreach (var p in o.Plain) sb.AppendLine("• " + p);
+        sb.AppendLine();
+        // 2a / 2b: what the trace saw this owner's processes do, each with its identity, chain and command line.
+        if (o.Trace is { } t)
+        {
+            sb.AppendLine($"Traced processes ({t.Processes.Count}, net {Fmt.Bytes(t.Net)}, {t.Allocs:N0} allocations, {t.Frees:N0} frees):");
+            foreach (var p in t.Processes.OrderByDescending(p => p.Usage.NetBytes).Take(20))
+            {
+                sb.AppendLine($"{p.Name}  (PID {p.Usage.Pid}{(p.StartUtc is { } st ? $", started {Fmt.Clock(st)}" : "")}{(p.ExitUtc is { } ex ? $", exited {Fmt.Clock(ex)}" : "")}): {Fmt.SignedBytes(p.Usage.NetBytes)} net");
+                if (p.Chain.Count > 1) sb.AppendLine("   chain: " + string.Join(" › ", p.Chain));
+                if (p.CommandLine is { } tcl) sb.AppendLine("   command line: " + tcl);
+            }
+            if (t.Processes.Count > 20) sb.AppendLine($"… and {t.Processes.Count - 20} more traced processes");
+            if (o.Members.Count > 0) sb.AppendLine().AppendLine("Seen by correlation:");
+        }
+        for (int i = 0; i < o.Members.Count && i < 20; i++)
+        {
+            var m = o.Members[i];
+            var id = o.Identities[i];
+            sb.AppendLine($"{id.Display}  (PID {m.Key.Pid}, started {Fmt.Clock(m.StartUtc)}{(m.ExitUtc is { } x ? $", exited {Fmt.Clock(x)}" : "")}{(m.IsOrphan ? ", kept running after its parent exited" : "")})");
+            if (m.Ancestry.Count > 1) sb.AppendLine("   chain: " + string.Join(" › ", m.Ancestry));
+            if (m.CommandLine is { } cl) sb.AppendLine("   command line: " + cl);
+            if (m.ImagePath is { } path) sb.AppendLine("   path: " + path);
+            foreach (var e in m.Evidence) sb.AppendLine("   raw: " + e);
+        }
+        if (o.Members.Count > 20) sb.AppendLine($"… and {o.Members.Count - 20} more processes");
+        return sb.ToString().TrimEnd(); // AppendLine is \r\n on Windows: a TextBox needs that
+    }
+
+    /// <summary>A tag's answer, window and suspects with their evidence, as plain text (Copy summary on a tag row).</summary>
+    private static string TagSummary(TagViewData v)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append(v.Answer.Line).Append("\r\n");
+        sb.Append($"{v.Title}\r\nWindow: {Fmt.Stamp(v.FromUtc)} to {Fmt.Stamp(v.ToUtc)}, growth from {Fmt.Clock(v.OnsetUtc)}\r\n\r\n");
+        int n = 0;
+        foreach (var o in v.Owners.Where(o => o.Meaningful).Take(5)) sb.Append($"{++n}. ").Append(OwnerDetails(o, v)).Append("\r\n\r\n");
+        if (n == 0) sb.Append("No suspect stood out.\r\n");
+        return sb.ToString().TrimEnd() + "\r\n";
+    }
+
+    // ---------------------------------------------------------------- Services
 
     private TabPage ServicesPage()
     {
-        foreach (var (h, w) in new[] { ("Service", 220), ("Group", 90), ("Category", 150), ("State", 260), ("Cost", 200), ("You lose / publisher", 380) })
-            _services.Columns.Add(h, w);
+        foreach (var (h, w) in new[] { ("Service", 200), ("Group", 80), ("Category", 140), ("State", 230), ("Cost", 190), ("You lose / publisher", 360) })
+            _services.Columns.Add(h, S(w));
         _preset.Items.AddRange(["Custom", "Telemetry only", "Dev workstation"]);
         _preset.SelectedIndex = 0;
-        _preset.SelectedIndexChanged += (_, _) => Guarded("Preset", ApplyPresetTicks);
-        var apply = new Button { Text = "Apply (turn off ticked)", AutoSize = true };
-        apply.Click += (_, _) => Guarded("Apply services", ApplyServices);
-        var restoreOne = new Button { Text = "Restore selected", AutoSize = true };
-        restoreOne.Click += (_, _) => Guarded("Restore service", RestoreSelected);
-        var restoreDefault = new Button { Text = "Restore selected to Windows default", AutoSize = true };
-        restoreDefault.Click += (_, _) => Guarded("Restore to Windows default", RestoreSelectedToDefault);
-        var restore = new Button { Text = "Restore all", AutoSize = true };
-        restore.Click += (_, _) => Guarded("Restore services", () => DoRestore(null));
-        var refresh = new Button { Text = "Refresh", AutoSize = true };
-        refresh.Click += (_, _) => Guarded("Refresh services", () => { _servicesLoaded = false; RefreshServices(); });
-        var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(4) };
-        bar.Controls.AddRange([new Label { Text = "Preset:", AutoSize = true, Padding = new Padding(4, 8, 2, 0) }, _preset, apply, restoreOne, restoreDefault, restore, refresh]);
+        _preset.Width = S(150);
+        _preset.SelectedIndexChanged += (_, _) => _actions.Guarded(this, "Preset", ApplyPresetTicks);
+        Button Btn(string text, string what, Action a) { var b = new Button { Text = text, AutoSize = true, UseVisualStyleBackColor = true }; b.Click += (_, _) => _actions.Guarded(this, what, a); return b; }
+        var apply = Btn("Apply (turn off ticked)", "Apply services", ApplyServices);
+        var restoreOne = Btn("Restore selected", "Restore service", RestoreSelected);
+        var restoreDefault = Btn("Restore to Windows default", "Restore to Windows default", RestoreSelectedToDefault);
+        var restore = Btn("Restore all", "Restore services", () => DoRestore(null));
+        var refresh = Btn("Refresh", "Refresh services", () => { _servicesLoaded = false; RefreshServices(); });
+        _tips.SetToolTip(restoreDefault, "For a selected service that is off outside PoolWatch: set it back to its Windows default start type (reversible with Restore).");
+        var bar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = Px(0, 2, 0, 4) };
+        bar.Controls.AddRange([new Label { Text = "Preset:", AutoSize = true, Margin = Px(3, 8, 0, 0) }, _preset, apply, restoreOne, restoreDefault, restore, refresh]);
+        _servicesStatus.Padding = Px(2, 4, 2, 2);
         _servicesStatus.Text = "PoolWatch recommends; you choose; every change is reversible (Restore). Protected services (security, Windows Update, input/audio, core) are greyed out.";
-        foreach (var (h, w) in new[] { ("Type", 70), ("Name", 240), ("State", 150), ("Cost", 220), ("Runs / command", 520) }) _tasks.Columns.Add(h, w);
-        var taskDisable = new Button { Text = "Disable", AutoSize = true };
-        taskDisable.Click += (_, _) => Guarded("Disable", () => ToggleTaskOrStartup(false));
-        var taskEnable = new Button { Text = "Enable", AutoSize = true };
-        taskEnable.Click += (_, _) => Guarded("Enable", () => ToggleTaskOrStartup(true));
-        var appEnd = new Button { Text = "End process", AutoSize = true };
-        appEnd.Click += (_, _) => Guarded("End process", EndSelectedApp);
-        var appOpen = new Button { Text = "Open file location", AutoSize = true };
-        appOpen.Click += (_, _) => Guarded("Open location", OpenSelectedAppLocation);
-        var cBar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(4) };
+
+        foreach (var (h, w) in new[] { ("Type", 70), ("Name", 230), ("State", 140), ("Cost", 210), ("Runs / command", 480) }) _tasks.Columns.Add(h, S(w));
+        var taskDisable = Btn("Disable", "Disable", () => ToggleTaskOrStartup(false));
+        var taskEnable = Btn("Enable", "Enable", () => ToggleTaskOrStartup(true));
+        var appEnd = Btn("End process", "End process", EndSelectedApp);
+        var appOpen = Btn("Open file location", "Open location", OpenSelectedAppLocation);
+        var cBar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = Px(0, 4, 0, 0) };
         cBar.Controls.AddRange([taskDisable, taskEnable, appEnd, appOpen]);
-        var cBox = new GroupBox { Text = "Non-Microsoft scheduled tasks, startup apps, and heavy background apps (same rules: you choose, reversible)", Dock = DockStyle.Fill };
+        var cBox = new GroupBox { Text = "Scheduled tasks, startup apps and heavy background apps (non-Microsoft; you choose, reversible)", Dock = DockStyle.Fill, Padding = Px(6, 4, 6, 6) };
         cBox.Controls.Add(_tasks);
         cBox.Controls.Add(cBar);
-        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 420 };
-        split.Panel1.Controls.Add(_services);
-        split.Panel1.Controls.Add(_servicesStatus);
-        split.Panel2.Controls.Add(cBox);
-        var page = new TabPage("Background services");
-        page.Controls.Add(split);
-        page.Controls.Add(bar);
+
+        _servicesSplit.Panel1.Controls.Add(_services); // fill first, then the docked edges (the last added is the topmost)
+        _servicesSplit.Panel1.Controls.Add(bar);
+        _servicesSplit.Panel1.Controls.Add(_servicesStatus);
+        _servicesSplit.Panel2.Controls.Add(cBox);
+        _servicesSplit.SplitterWidth = S(6);
+        var page = new TabPage("Services") { UseVisualStyleBackColor = true, Padding = Px(4, 4, 4, 4) };
+        page.Controls.Add(_servicesSplit);
         _services.ItemChecked += (_, e) => { if (!_repopulating && e.Item.Tag is Core.Services.ServiceOption o && !o.CanTurnOff && e.Item.Checked) e.Item.Checked = false; };
         return page;
     }
@@ -315,7 +556,7 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>A heavy background app, keyed by PID AND create time so End process never kills a reused PID (S6).</summary>
-    private sealed record HeavyApp(Core.Model.ProcessKey Key, string Image, string Identity, string? CommandLine, double Cores);
+    private sealed record HeavyApp(ProcessKey Key, string Image, string Identity, string? CommandLine, double Cores);
 
     private void ShowTasks(List<(string type, string name, string state, string cost, string runs, object tag)> rows) =>
         KeepPlace(_tasks, it => it.SubItems.Count > 1 ? it.SubItems[0].Text + "\u001f" + it.SubItems[1].Text : null, () =>
@@ -329,8 +570,6 @@ internal sealed class MainForm : Form
             }
             finally { _tasks.EndUpdate(); }
         });
-
-    private readonly Engine.TasksAndStartup _tasksEngine;
 
     private void ToggleTaskOrStartup(bool enable)
     {
@@ -387,7 +626,7 @@ internal sealed class MainForm : Form
         try
         {
             string? path = System.Diagnostics.Process.GetProcessById(app.Key.Pid).MainModule?.FileName;
-            if (path is not null) ShowFile(path);
+            if (path is not null) UiActions.ShowFile(path);
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "PoolWatch"); }
     }
@@ -524,56 +763,7 @@ internal sealed class MainForm : Form
         });
     }
 
-    private TabPage SettingsPage()
-    {
-        _settingsGrid.SelectedObject = _editSettings;
-        var save = new Button { Text = "Save settings", AutoSize = true };
-        save.Click += (_, _) => Guarded("Save settings", () =>
-        {
-            _editSettings.Normalize();
-            if (!_editSettings.AutoClearEnabled) _autoClearConfirmed = false;
-            bool turningOnAutoClear = _editSettings.AutoClearEnabled && !_engine.Settings.AutoClearEnabled && !_autoClearConfirmed;
-            if (turningOnAutoClear)
-            {
-                // The automatic clear goes on only after the elevated step has dealt with any clear task of your own.
-                _editSettings.AutoClearEnabled = false;
-                SaveSettings(null);
-                ConfirmAutoClear();
-                return;
-            }
-            SaveSettings("Saved. Changes take effect after PoolWatch restarts.");
-        });
-        // schtasks /query can take seconds: ask in the background, then wire the checkbox.
-        _logon.Enabled = false;
-        Task.Run(SafeExists).ContinueWith(t =>
-        {
-            if (!IsHandleCreated || IsDisposed) { _logonPending = t.Result; return; }
-            BeginInvoke(() => WireLogon(t.Result));
-        });
-        var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(4) };
-        bar.Controls.Add(save);
-        bar.Controls.Add(_logon);
-        var page = new TabPage("Settings");
-        page.Controls.Add(_settingsGrid);
-        page.Controls.Add(bar);
-        return page;
-    }
-
-    private void WireLogon(bool exists)
-    {
-        _logon.Checked = exists;
-        _logon.Enabled = true;
-        _logon.CheckedChanged += (_, _) => Guarded("Start at logon", () =>
-        {
-            var (ok, output) = LogonTask.Set(_logon.Checked, Path.Combine(_engine.Paths.DataRoot, "logon-task.xml"), _engine.Paths.Guard.CheckReal);
-            if (!ok) MessageBox.Show(this, "Could not change the logon task:\n" + output, "PoolWatch");
-        });
-    }
-
-    private static bool SafeExists()
-    {
-        try { return LogonTask.Exists(); } catch { return false; }
-    }
+    // ---------------------------------------------------------------- refresh
 
     private void UpdateTimer()
     {
@@ -582,232 +772,70 @@ internal sealed class MainForm : Form
         if (active) RefreshNow();
     }
 
-    private long _chartSamples = -1;
+    private long _statusSamples = -1;
 
-    public void RefreshNow()
+    public void RefreshNow() => RefreshNow(force: false);
+
+    private void RefreshNow(bool force)
     {
         if (!Visible || WindowState == FormWindowState.Minimized) return;
-        SafeRefresh(RefreshVisible);
+        SafeRefresh(() => RefreshVisible(force));
     }
 
-    private void RefreshVisible()
+    private void RefreshVisible(bool force)
     {
         using var _ui = Core.Util.Profiler.Stage("ui.refresh");
-        if (_engine.SampleCount != _chartSamples) // only when there is a new sample
+        if (_engine.SampleCount != _statusSamples || force) // the chart and the status line change only with a new sample
         {
-            _chartSamples = _engine.SampleCount;
-            _chart.SetData(UiData.Chart(_analysis, TimeSpan.FromHours(6)), UiData.IncidentMarkers(_analysis));
+            _statusSamples = _engine.SampleCount;
+            _chart.SetData(UiData.Chart(_analysis, PoolChart.Span));
+            UpdateStatus();
         }
         using (Core.Util.Profiler.Stage("ui.page" + _tabs.SelectedIndex))
             switch (_tabs.SelectedIndex)
             {
-                case 0: RefreshOverview(); break;
-                case 1: RefreshTags(); break;
-                case 2: RefreshIncidents(); break;
-                case 3: RefreshProcesses(); break;
-                case 4: RefreshFindings(); break;
-                case 5: RefreshServices(); break;
+                case 0: RefreshCauses(force); break;
+                case 1: RefreshServices(); break;
             }
         Icon = TrayIcons.For(UiData.State(_analysis));
-        _status.Text = $"{_engine.SampleCount} samples · ETW {(_engine.EtwRunning ? _engine.EtwMode : "not running")} · " +
-                       $"pooltag.txt {(_analysis.Knowledge.PoolTagTxtLoaded ? "loaded" : "not found")} · {_engine.Meter.OwnCostLine()}";
-        _status.ForeColor = _status.Text.Contains("OVER BUDGET", StringComparison.Ordinal) ? Color.DarkRed : SystemColors.ControlText;
+        PumpRankings();
     }
 
-    private long _tagsSamples = -1;
+    private PoolTag? _leadTag;
+    private List<PoolTag> _rankTags = [];
 
-    private void RefreshTags()
+    /// <summary>
+    /// Starts the next tag ranking in the background (TagRankings / RankPlan): the status line's lead tag first, then the
+    /// list's tag rows, the selected row's tag at once. When it is done the rows and the status line are refreshed.
+    /// </summary>
+    private void PumpRankings()
     {
-        // The tag table only changes with a new sample; the suspects below have their own 30 s clock.
-        if (_engine.SampleCount == _tagsSamples) { RefreshSuspects(); return; }
-        _tagsSamples = _engine.SampleCount;
-        var rows = UiData.Tags(_analysis, _growingOnly.Checked);
-        Update(_tags, rows.Select(r => Item(r.Tag, r.Tag.ToString(), r.Owner, r.Description, Fmt.Bytes(r.Bytes), Fmt.SignedBytes(r.D1), Fmt.SignedBytes(r.D10),
-            Fmt.SignedBytes(r.D60), r.State == TagState.Normal ? "" : r.State.ToString(), r.Rates.AllocsPerMin.ToString("N0"), r.Rates.FreesPerMin.ToString("N0"),
-            r.Rates.Shape == AllocShape.Idle ? "" : r.Rates.Text)).ToList(), _selectedTag);
-        if (_selectedTag is { } sel && !rows.Any(r => r.Tag == sel)) _selectedTag = null; // it left the list
-        RefreshSuspects();
-    }
-
-    private long _overviewSamples = -1;
-
-    private void RefreshOverview()
-    {
-        if (_tools?.Items["removeLegacy"] is { } rl)
-            rl.Visible = _analysis.Diagnostics.Cache.HelperStatus?.LegacyTaskPresent == true;
-        if (_tools?.Items["removeOldTasks"] is { } ro)
-            ro.Visible = _analysis.Diagnostics.Cache.HelperStatus?.OldTasksPresent == true;
-        if (_engine.SampleCount == _overviewSamples) return; // nothing new since the last refresh
-        _overviewSamples = _engine.SampleCount;
-        var o = TagViewBuilder.Overview(_analysis);
-        SetText(_overview, o.Text, "overview");
-        _bootChart.SetData(o.SinceBoot, UiData.IncidentMarkers(_analysis));
-        var lag = _analysis.Diagnostics.Lag;
-        _lagChart.AlertRatio = _engine.Settings.LagAlertRatio;
-        lock (lag) _lagChart.SetData(lag.Recent.ToList(), lag.Baseline);
-    }
-
-    private TagViewData? _renderedView;
-    private bool _renderedShowAll;
-
-    private void RefreshSuspects()
-    {
-        if (_selectedTag is not { } tag)
+        var wanted = new List<PoolTag>();
+        if (_leadTag is { } lead) wanted.Add(lead);
+        wanted.AddRange(_rankTags.Where(t => t != _leadTag));
+        PoolTag? selected = SelectedRow() is { Kind: CauseKind.Tag, Active: true, Tag: { } sel } ? sel : null;
+        _rankings.Pump(tag => TagViewBuilder.Build(_analysis, _engine.Registry, tag), wanted, selected, () =>
         {
-            _view = null;
-            _renderedView = null;
-            _suspectsBox.Text = "Suspects: select a tag above";
-            SetText(_answer, "", null);
-            SetText(_details, "", null);
-            _strip.SetData(null);
-            Update(_owners, [], null);
-            Update(_eventsList, [], null);
-            return;
-        }
-        // The ranking runs the correlator over the last hour: every 30 s for the same tag is enough (a new selection,
-        // or the events toggle, clears _view and rebuilds at once).
-        if (_view is null || _view.Tag != tag || DateTime.UtcNow - _viewAt >= TimeSpan.FromSeconds(29))
-        {
-            _view = TagViewBuilder.Build(_analysis, _engine.Registry, tag, _allEvents.Checked, _allEvents.Checked ? _engine.RecentRawEvents() : []);
-            _viewAt = DateTime.UtcNow;
-        }
-        var v = _view;
-        if (v is null) return;
-        // The same view, shown the same way: nothing to redo (building the owner and up to 300 event rows was the tag
-        // page's main cost on every 10 s refresh).
-        if (ReferenceEquals(v, _renderedView) && _showAllOwners == _renderedShowAll) return;
-        _renderedView = v;
-        _renderedShowAll = _showAllOwners;
-        string box = "Suspects for " + v.Title + (v.TraceBacked ? " (the confirmation trace's owners first, then correlation only)" : " (correlation, not proof)");
-        if (_suspectsBox.Text != box) _suspectsBox.Text = box;
-        SetText(_answer, v.Answer.Line, v.Tag);
-        _strip.SetData(v);
-        var meaningful = v.Owners.Where(o => o.Meaningful).ToList();
-        var shown = _showAllOwners ? v.Owners.ToList() : meaningful.Take(3).ToList();
-        int hidden = v.Owners.Count - shown.Count;
-        _showMore.Text = _showAllOwners ? "Show fewer" : hidden > 0 ? $"Show more ({hidden} more, including {v.Owners.Count - meaningful.Count} with no meaningful activity)" : "";
-        if (Update(_owners, shown.Select(o => Item(o.Owner.Key, o.Summary, OwnerRanking.Strength(o.Confidence) + (o.CorrelationOnly ? " (correlation only)" : ""), o.Plain.FirstOrDefault() ?? "")).ToList(), null))
-            FitColumns(_owners); // measuring text: only when the rows changed
-        Update(_eventsList, v.Events.TakeLast(300).Select(e => { var it = Item(e.Key, e.Text); if (!e.Notable) it.ForeColor = Color.DimGray; return it; }).ToList(), null);
-        ShowDetails();
+            try { if (!IsDisposed && IsHandleCreated) BeginInvoke(OnRanked); }
+            catch (InvalidOperationException) { } // the window is closing
+        });
     }
 
-    /// <summary>Key columns sized to their content within the list's width (the last one takes the rest): no horizontal scrolling.</summary>
-    private static void FitColumns(ListView lv)
+    private void OnRanked()
     {
-        if (lv.Columns.Count == 0 || lv.Items.Count == 0) return;
-        int avail = lv.ClientSize.Width - 4;
-        int used = 0;
-        for (int c = 0; c < lv.Columns.Count - 1; c++)
-        {
-            lv.AutoResizeColumn(c, ColumnHeaderAutoResizeStyle.ColumnContent);
-            lv.Columns[c].Width = Math.Min(lv.Columns[c].Width, Math.Max(80, avail / 2 - used / 2));
-            used += lv.Columns[c].Width;
-        }
-        lv.Columns[^1].Width = Math.Max(120, avail - used);
+        _causesSamples = -1; // rebuild the rows (the new cause) and the status line (the lead's cause) on this refresh
+        _statusSamples = -1;
+        RefreshNow();
     }
 
-    /// <summary>The selected owner (else the top one) in full: plain evidence, members with identity, chain and command line, raw numbers.</summary>
-    private void ShowDetails()
-    {
-        var v = _view;
-        object? key = _owners.SelectedItems.Count > 0 ? _owners.SelectedItems[0].Tag : null;
-        var o = v?.Owners.FirstOrDefault(x => Equals(x.Owner.Key, key)) ?? v?.Owners.FirstOrDefault(x => x.Meaningful);
-        string text = o is null ? "" : OwnerDetails(o, v!);
-        SetText(_details, text, (v?.Tag, o?.Owner.Key)); // the item is the tag AND the owner: either changing replaces the text
-    }
-
-    internal static string OwnerDetails(OwnerSuspect o, TagViewData v)
-    {
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"{o.Name}: {OwnerRanking.Strength(o.Confidence)}{(o.CorrelationOnly ? " (correlation only: the confirmation trace did not see it allocate this tag)" : "")} ({o.Owner.Kind})");
-        foreach (var p in o.Plain) sb.AppendLine("• " + p);
-        sb.AppendLine();
-        // 2a / 2b: what the trace saw this owner's processes do, each with its identity, chain and command line.
-        if (o.Trace is { } t)
-        {
-            sb.AppendLine($"Traced processes ({t.Processes.Count}, net {Fmt.Bytes(t.Net)}, {t.Allocs:N0} allocations, {t.Frees:N0} frees):");
-            foreach (var p in t.Processes.OrderByDescending(p => p.Usage.NetBytes).Take(20))
-            {
-                sb.AppendLine($"{p.Name}  (PID {p.Usage.Pid}{(p.StartUtc is { } st ? $", started {Fmt.Clock(st)}" : "")}{(p.ExitUtc is { } ex ? $", exited {Fmt.Clock(ex)}" : "")}): {Fmt.SignedBytes(p.Usage.NetBytes)} net");
-                if (p.Chain.Count > 1) sb.AppendLine("   chain: " + string.Join(" › ", p.Chain));
-                if (p.CommandLine is { } tcl) sb.AppendLine("   command line: " + tcl);
-            }
-            if (t.Processes.Count > 20) sb.AppendLine($"… and {t.Processes.Count - 20} more traced processes");
-            if (o.Members.Count > 0) sb.AppendLine().AppendLine("Seen by correlation:");
-        }
-        for (int i = 0; i < o.Members.Count && i < 20; i++)
-        {
-            var m = o.Members[i];
-            var id = o.Identities[i];
-            sb.AppendLine($"{id.Display}  (PID {m.Key.Pid}, started {Fmt.Clock(m.StartUtc)}{(m.ExitUtc is { } x ? $", exited {Fmt.Clock(x)}" : "")}{(m.IsOrphan ? ", kept running after its parent exited" : "")})");
-            if (m.Ancestry.Count > 1) sb.AppendLine("   chain: " + string.Join(" › ", m.Ancestry));
-            if (m.CommandLine is { } cl) sb.AppendLine("   command line: " + cl);
-            if (m.ImagePath is { } path) sb.AppendLine("   path: " + path);
-            foreach (var e in m.Evidence) sb.AppendLine("   raw: " + e);
-        }
-        if (o.Members.Count > 20) sb.AppendLine($"… and {o.Members.Count - 20} more processes");
-        return sb.ToString().TrimEnd(); // AppendLine is \r\n on Windows: a TextBox needs that
-    }
-
-    private void RefreshIncidents()
-    {
-        var rows = UiData.Incidents(_analysis, _engine.Paths.IncidentsDir);
-        object? sel = _incidents.SelectedItems.Count > 0 ? _incidents.SelectedItems[0].Tag : null;
-        Update(_incidents, rows.Select(r => Item(r.Dir, Fmt.Stamp(r.OpenedUtc), r.Tag, r.Kind.ToString(), Fmt.SignedBytes(r.Growth), r.Top, r.Confidence,
-            r.Open ? "open" : "closed", r.Dir)).ToList(), sel);
-    }
-
-    private void RefreshFindings()
-    {
-        var d = _analysis.Diagnostics;
-        object? sel = _findings.SelectedItems.Count > 0 ? _findings.SelectedItems[0].Tag : null;
-        Update(_findings, d.Findings.Snapshot().AsEnumerable().Reverse().Take(500).Select(f =>
-        {
-            var it = Item(f, Fmt.Stamp(f.TimeUtc), f.Kind.ToString(), f.Severity.ToString(), f.Title, f.ReportDir ?? "");
-            if (f.Severity == FindingSeverity.Alert) it.BackColor = Color.MistyRose;
-            else if (f.Severity == FindingSeverity.Warning) it.BackColor = Color.LemonChiffon;
-            return it;
-        }).ToList(), sel);
-        List<(string Parent, int ParentPid, string Image, int Starts, int ShortLived)> rates;
-        lock (d.Spawns) rates = d.Spawns.Rates(DateTime.UtcNow, 20);
-        string tokens;
-        lock (d.Tokens) tokens = "Toke vs process starts: " + (d.Tokens.Latest?.Summary ?? "collecting the first buckets");
-        if (_tokenSummary.Text != tokens) _tokenSummary.Text = tokens;
-        Update(_spawnRates, rates.Select(r => Item($"{r.ParentPid}/{r.Image}", r.Parent, r.ParentPid.ToString(), r.Image, r.Starts.ToString(), r.ShortLived.ToString())).ToList(), null);
-    }
-
-    private void RefreshProcesses()
-    {
-        var pair = _engine.LatestPair;
-        var rows = UiData.Processes(pair?.Current, pair?.Previous, _engine.Registry);
-        Func<ProcRow, IComparable> key = _procSortColumn switch
-        {
-            0 => r => r.Name, 1 => r => r.Key.Pid, 2 => r => r.ParentPid, 4 => r => r.Handles, 5 => r => r.Quota, 6 => r => r.Private, 7 => r => r.Orphan,
-            _ => r => r.OpsPerSec,
-        };
-        var sorted = _procSortDesc ? rows.OrderByDescending(key) : rows.OrderBy(key);
-        object? sel = _processes.SelectedItems.Count > 0 ? _processes.SelectedItems[0].Tag : null;
-        var items = sorted.Take(400).Select(r =>
-        {
-            var it = Item(r.Key, r.Name, r.Key.Pid.ToString(), r.ParentPid.ToString(), r.OpsPerSec.ToString("N0"), r.Handles.ToString("N0"), Fmt.Bytes(r.Quota),
-                Fmt.Bytes(r.Private), r.Orphan ? "orphan" : "", r.CommandLine ?? "");
-            if (r.Orphan) it.BackColor = Color.MistyRose;
-            return it;
-        }).ToList();
-        Update(_processes, items, sel);
-    }
-
-    private static ListViewItem Item(object tag, params string[] cols) => new(cols) { Tag = tag };
-
-    /// <summary>The item (tag, owner) each read-only text box shows, so a refresh knows a new item from an update of the same one.</summary>
+    /// <summary>The item (row key) each read-only text box shows, so a refresh knows a new item from an update of the same one.</summary>
     private readonly Dictionary<TextBox, object?> _textItems = new();
 
     /// <summary>
-    /// Updates a read-only text box without making it jump (C5). A different <paramref name="item"/> (another tag or owner)
-    /// always replaces the text, even while text is selected: skipping then froze the answer and details on the old tag.
-    /// For the same item the first visible line and the caret are kept, and a selection is kept when the selected text is
-    /// unchanged; an update that would destroy the selection waits only while the box has focus (Core.Util.TextRefresh).
+    /// Updates a read-only text box without making it jump (C5). A different <paramref name="item"/> always replaces the
+    /// text, even while text is selected. For the same item the first visible line and the caret are kept, and a selection
+    /// is kept when the selected text is unchanged; an update that would destroy the selection waits only while the box
+    /// has focus (Core.Util.TextRefresh).
     /// </summary>
     private void SetText(TextBox tb, string text, object? item)
     {
@@ -869,8 +897,8 @@ internal sealed class MainForm : Form
     private string? _lastRefreshError;
 
     /// <summary>
-    /// C5: a refresh runs from the timer and from selection events, outside <see cref="Guarded"/>; an exception there went
-    /// to WinForms' unhandled-exception path. It is logged (once per distinct error) and the window keeps running.
+    /// C5: a refresh runs from the timer and from selection events, outside <see cref="UiActions.Guarded"/>; an exception
+    /// there went to WinForms' unhandled-exception path. It is logged (once per distinct error) and the window keeps running.
     /// </summary>
     private void SafeRefresh(Action refresh)
     {
@@ -887,7 +915,7 @@ internal sealed class MainForm : Form
     /// <summary>Ctrl+C in a read-only text box goes through the copy redaction setting too.</summary>
     private void EnableTextCopy(TextBox tb) => tb.KeyDown += (_, e) =>
     {
-        if (e.Control && e.KeyCode == Keys.C && tb.SelectionLength > 0) { Copy(tb.SelectedText); e.Handled = e.SuppressKeyPress = true; }
+        if (e.Control && e.KeyCode == Keys.C && tb.SelectionLength > 0) { _actions.Copy(tb.SelectedText); e.Handled = e.SuppressKeyPress = true; }
     };
 
     /// <summary>What the right-click menu can copy for a row (null entries are left out of the menu).</summary>
@@ -897,14 +925,7 @@ internal sealed class MainForm : Form
     {
         lv.KeyDown += (_, e) =>
         {
-            if (e.Control && e.KeyCode == Keys.C) { Copy(RowsText(lv, selectedOnly: true)); e.Handled = true; }
-            else if (e.Control && e.KeyCode == Keys.A)
-            {
-                _repopulating = true; // one view rebuild after, not one per row
-                try { foreach (ListViewItem it in lv.Items) it.Selected = true; }
-                finally { _repopulating = false; }
-                e.Handled = true;
-            }
+            if (e.Control && e.KeyCode == Keys.C) { _actions.Copy(RowsText(lv, selectedOnly: true)); e.Handled = true; }
         };
         var menu = new ContextMenuStrip();
         menu.Opening += (_, e) =>
@@ -912,15 +933,15 @@ internal sealed class MainForm : Form
             menu.Items.Clear();
             var key = lv.SelectedItems.Count > 0 ? lv.SelectedItems[0].Tag : null;
             if (key is null) { e.Cancel = true; return; }
-            menu.Items.Add(lv.SelectedItems.Count > 1 ? $"Copy {lv.SelectedItems.Count} rows" : "Copy row", null, (_, _) => Copy(RowsText(lv, selectedOnly: true)));
-            menu.Items.Add("Copy all rows", null, (_, _) => Copy(RowsText(lv, selectedOnly: false)));
+            menu.Items.Add("Copy row", null, (_, _) => _actions.Copy(RowsText(lv, selectedOnly: true)));
+            menu.Items.Add("Copy all rows", null, (_, _) => _actions.Copy(RowsText(lv, selectedOnly: false)));
             if (info(key) is { } i)
             {
-                if (i.CommandLine is { } cl) menu.Items.Add("Copy command line", null, (_, _) => Copy(cl));
-                if (i.Path is { } p) menu.Items.Add("Copy path", null, (_, _) => Copy(p));
-                if (i.Pid is { } pid) menu.Items.Add("Copy PID", null, (_, _) => Copy(pid));
-                if (i.Evidence is { } ev) menu.Items.Add("Copy evidence", null, (_, _) => Copy(ev));
-                if (i.Summary is { } sum) menu.Items.Add("Copy summary", null, (_, _) => Guarded("Copy summary", () => Copy(sum())));
+                if (i.CommandLine is { } cl) menu.Items.Add("Copy command line", null, (_, _) => _actions.Copy(cl));
+                if (i.Path is { } p) menu.Items.Add("Copy path", null, (_, _) => _actions.Copy(p));
+                if (i.Pid is { } pid) menu.Items.Add("Copy PID", null, (_, _) => _actions.Copy(pid));
+                if (i.Evidence is { } ev) menu.Items.Add("Copy evidence", null, (_, _) => _actions.Copy(ev));
+                if (i.Summary is { } sum) menu.Items.Add("Copy summary", null, (_, _) => _actions.Guarded(this, "Copy summary", () => _actions.Copy(sum())));
             }
         };
         lv.ContextMenuStrip = menu;
@@ -935,58 +956,17 @@ internal sealed class MainForm : Form
             .Select(c => c < i.SubItems.Count ? i.SubItems[c].Text : "").ToList()));
     }
 
-    private void Copy(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return;
-        text = CopyText.Apply(text, _engine.Settings.RedactCopies ? CurrentRedaction() : null);
-        try { Clipboard.SetDataObject(text, copy: true, retryTimes: 5, retryDelay: 100); }
-        catch (Exception ex) { _engine.Log.Info("clipboard: " + ex.Message); } // another app holds the clipboard
-    }
-
-    private CopyInfo? OwnerCopy(object? key)
-    {
-        if (_view?.Owners.FirstOrDefault(o => Equals(o.Owner.Key, key)) is not { } o) return null;
-        var pids = string.Join(", ", o.Members.Select(m => m.Key.Pid));
-        var cls = string.Join("\r\n", o.Members.Select(m => m.CommandLine).Where(c => c is not null).Distinct());
-        var paths = string.Join("\r\n", o.Members.Select(m => m.ImagePath).Where(p => p is not null).Distinct());
-        return new CopyInfo(pids, cls.Length > 0 ? cls : null, paths.Length > 0 ? paths : null, OwnerDetails(o, _view!), TagSummary);
-    }
-
-    /// <summary>The selected tag's answer, window and suspects with their evidence, as plain text.</summary>
-    private string TagSummary()
-    {
-        if (_view is not { } v) return "";
-        var sb = new System.Text.StringBuilder();
-        sb.Append(v.Answer.Line).Append("\r\n");
-        sb.Append($"{v.Title}\r\nWindow: {Fmt.Stamp(v.FromUtc)} to {Fmt.Stamp(v.ToUtc)}, growth from {Fmt.Clock(v.OnsetUtc)}\r\n\r\n");
-        int n = 0;
-        foreach (var o in v.Owners.Where(o => o.Meaningful).Take(5)) sb.Append($"{++n}. ").Append(OwnerDetails(o, v)).Append("\r\n\r\n");
-        if (n == 0) sb.Append("No suspect stood out.\r\n");
-        return sb.ToString().TrimEnd() + "\r\n";
-    }
-
-    private static string IncidentSummary(string dir) => CopyText.IncidentSummary(File.ReadAllText(Path.Combine(dir, "report.json")));
-
-    /// <summary>Toolbar "Copy summary": the incident selected on the Incidents page, else the selected tag.</summary>
-    private void CopySummary()
-    {
-        if (_tabs.SelectedTab?.Text == "Incidents" && SelectedIncidentDir() is { } dir && File.Exists(Path.Combine(dir, "report.json"))) { Copy(IncidentSummary(dir)); return; }
-        if (_view is not null) { Copy(TagSummary()); return; }
-        MessageBox.Show(this, "Select a tag (Growing tags) or an incident first.", "PoolWatch");
-    }
-
     private readonly Dictionary<ListView, ListSync> _syncs = new();
     private readonly Dictionary<ListView, string> _listSignature = new();
 
     /// <summary>
     /// Updates a list in place (no clear-and-rebuild: that made the window flash). Rows are matched by their Tag; the
-    /// selection and scroll position stay. <paramref name="select"/> is kept for the callers' intent; the selection is
-    /// never moved by a refresh.
+    /// selection and scroll position stay, and the order is held while a row is selected or the mouse is over the list.
     /// </summary>
     /// <returns>False when the rows were unchanged (nothing was touched).</returns>
-    private bool Update(ListView lv, List<ListViewItem> items, object? select)
+    private bool Update(ListView lv, List<ListViewItem> items)
     {
-        // Unchanged rows: nothing to do (even an in-place sync walks every row; the UI thread's largest cost on a busy PC).
+        // Unchanged rows: nothing to do (even an in-place sync walks every row).
         var sig = new System.Text.StringBuilder(items.Count * 64);
         foreach (var it in items)
         {
@@ -996,185 +976,24 @@ internal sealed class MainForm : Form
         }
         string signature = sig.ToString();
         if (!_syncs.TryGetValue(lv, out var sync)) _syncs[lv] = sync = new ListSync(lv);
-        // Unchanged rows, and no held order waiting to be released: nothing to do.
-        if (!sync.OrderHeld && !_forceOrder && _listSignature.TryGetValue(lv, out var last) && last == signature)
-        {
-            UpdateOrderHint();
-            return false;
-        }
+        if (!sync.OrderHeld && _listSignature.TryGetValue(lv, out var last) && last == signature) return false;
         _listSignature[lv] = signature;
         _repopulating = true;
         try
         {
             sync.Update(items.Select(i => new ListSync.Row(i.Tag!, i.SubItems.Cast<ListViewItem.ListViewSubItem>().Select(s => s.Text).ToArray(),
                 i.BackColor == Color.Empty || i.BackColor == SystemColors.Window ? null : i.BackColor,
-                Fore: i.ForeColor == Color.Empty || i.ForeColor == SystemColors.WindowText ? null : i.ForeColor)).ToList(), _forceOrder);
+                Fore: i.ForeColor == Color.Empty || i.ForeColor == SystemColors.WindowText ? null : i.ForeColor)).ToList());
         }
         catch (Exception) { /* the handle may not exist yet (hidden tab) */ }
         finally { _repopulating = false; }
-        UpdateOrderHint();
         return true;
     }
 
-    /// <summary>The hint reflects the lists on the visible page only.</summary>
-    private void UpdateOrderHint()
-    {
-        bool held = _syncs.Any(kv => kv.Value.OrderHeld && kv.Key.Visible);
-        string hint = held ? "List order held while a row is selected or the mouse is over it" : "";
-        if (_orderHint.Text != hint) _orderHint.Text = hint;
-    }
-
-    private ToolStrip? _tools;
-
-    private void ClearCacheNow()
-    {
-        var c = _analysis.Diagnostics.Cache;
-        // S5 (review round 2): the purge is in-process; PoolWatch runs as administrator, so there is nothing to set up.
-        if (!Engine.CacheHelper.IsElevated)
-        {
-            MessageBox.Show(this, NotElevated, "PoolWatch");
-            return;
-        }
-        MessageBox.Show(this, c.Request(Core.Cache.ClearMode.Standby, Core.Cache.ClearTrigger.Manual)
-            ? "Clearing the standby cache. PoolWatch measures the pool again in 2 minutes; the result is on the Overview and in Findings."
-            : "A clear is already running (or no sample yet).", "PoolWatch");
-    }
-
-    private bool _autoClearConfirmed;
-
-    private void SaveSettings(string? message)
-    {
-        _editSettings.Save(_engine.Paths.Guard.CheckReal(_engine.Paths.SettingsFile));
-        _settingsGrid.Refresh();
-        if (message is not null) MessageBox.Show(this, message, "PoolWatch");
-    }
-
-    private const string NotElevated = "Clear cache needs PoolWatch to run as administrator (start PoolWatch normally: it asks for that).";
-
     /// <summary>
-    /// Turning the automatic clear on: finds any clear task of your own (RAMMap in a scheduled task), shows it, and removes
-    /// it only on a yes; kept, the automatic clear stays off. In-process (S5, review round 2: no UAC step any more;
-    /// PoolWatch is elevated).
-    /// </summary>
-    private void ConfirmAutoClear()
-    {
-        if (!Engine.CacheHelper.IsElevated) { MessageBox.Show(this, NotElevated, "PoolWatch"); return; }
-        if (LegacyInProcess() == 0)
-        {
-            _autoClearConfirmed = true;
-            _editSettings.AutoClearEnabled = true;
-            SaveSettings("The automatic clear is on (from the next start of PoolWatch).");
-        }
-        else SaveSettings("Your own clear task stays, so PoolWatch's automatic clear stays off (the two should not both run).");
-        _analysis.Diagnostics.Cache.RefreshStatus();
-    }
-
-    private void RemoveLegacyTask()
-    {
-        if (!Engine.CacheHelper.IsElevated) { MessageBox.Show(this, NotElevated, "PoolWatch"); return; }
-        int code = LegacyInProcess();
-        _analysis.Diagnostics.Cache.RefreshStatus();
-        if (code == 0) MessageBox.Show(this, "Removed (RAMMap itself is left in place).", "PoolWatch");
-    }
-
-    /// <summary>The same step as <c>--remove-legacy-clear-task</c>. 0 none/removed, 4 kept.</summary>
-    private int LegacyInProcess()
-    {
-        var (outcome, _) = Engine.CacheHelper.ResolveLegacy(t =>
-            MessageBox.Show(this, Engine.CacheHelper.LegacyQuestion(t), "PoolWatch: your own clear task", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes);
-        return outcome == Engine.CacheHelper.LegacyOutcome.Kept ? 4 : 0;
-    }
-
-    /// <summary>
-    /// S5 (review round 2): removes the two \PoolWatch\ SYSTEM tasks and the helper files an older PoolWatch's Clear cache
-    /// setup installed (the button shows only while they are there), after a yes. Recorded on the timeline.
-    /// </summary>
-    private void RemoveOldClearTasks()
-    {
-        if (!Engine.CacheHelper.IsElevated) { MessageBox.Show(this, NotElevated, "PoolWatch"); return; }
-        var old = _analysis.Diagnostics.Cache.HelperStatus?.OldTasks ?? [];
-        string list = old.Count > 0 ? string.Join("\n", old.Select(n => $@"{Engine.CacheHelper.Folder}\{n}")) : "(none found just now)";
-        if (MessageBox.Show(this, "An older PoolWatch installed these SYSTEM tasks for Clear cache. PoolWatch clears the cache itself now and no longer " +
-                $"uses them:\n\n{list}\n\nRemove them, and the helper files in {Engine.CacheHelper.OldHelperDir}? (Your own clear task, if any, is not touched.)",
-                "PoolWatch: old clear-cache tasks", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-        var removed = Engine.CacheHelper.RemoveOldTasks();
-        _analysis.Diagnostics.Cache.RefreshStatus();
-        if (removed.Count > 0) _analysis.Diagnostics.RecordOwnerChange("Removed the old Clear cache tasks and helper: " + string.Join("; ", removed), null);
-        MessageBox.Show(this, removed.Count == 0 ? "Nothing was found to remove." : "Removed:\n" + string.Join("\n", removed), "PoolWatch");
-    }
-
-    private void CaptureNow()
-    {
-        var inc = _analysis.CaptureNow();
-        var scope = Core.Incidents.CaptureGovernor.ScopeFor(Core.Incidents.CaptureSource.Manual, _engine.Settings);
-        MessageBox.Show(this, inc is null ? "A capture is already running. Try again when it has finished." :
-            $"Capturing {scope.Describe()} for {_engine.Settings.CaptureSeconds} s" + (scope.Cpu ? $" (then {_engine.Settings.CpuTraceSeconds} s of CPU)" : "") +
-            $" into\n{inc.Dir}\nThe report updates when the trace has been parsed.", "PoolWatch");
-    }
-
-    private void SinceBoot()
-    {
-        // Builds the 25-hour report under the history lock: keep it off the UI thread.
-        string dir = _engine.Paths.EnsureDir(Path.Combine(_engine.Paths.DataRoot, "reports"));
-        Task.Run(() => _analysis.WriteSinceBoot(dir)).ContinueWith(t =>
-        {
-            if (!IsHandleCreated || IsDisposed) return;
-            BeginInvoke(() =>
-            {
-                if (t.IsFaulted) MessageBox.Show(this, "Since-boot report failed: " + t.Exception!.GetBaseException().Message, "PoolWatch");
-                else ShowFile(t.Result); // t.Result is the report file; show it in its folder, never open it through an association
-            });
-        });
-    }
-
-    private void Guarded(string what, Action action)
-    {
-        try { action(); }
-        catch (Exception ex)
-        {
-            _engine.Log.Info($"{what} failed: {ex}");
-            MessageBox.Show(this, $"{what} failed: {ex.Message}", "PoolWatch");
-        }
-    }
-
-    private string? SelectedIncidentDir() =>
-        _incidents.SelectedItems.Count > 0 ? _incidents.SelectedItems[0].Tag as string : UiData.Incidents(_analysis, _engine.Paths.IncidentsDir).FirstOrDefault()?.Dir;
-
-    private void OpenIncidentFolder()
-    {
-        var dir = SelectedIncidentDir();
-        OpenFolder(dir is not null && Directory.Exists(dir) ? dir : _engine.Paths.EnsureDir(_engine.Paths.IncidentsDir));
-    }
-
-    private void Export()
-    {
-        var dir = SelectedIncidentDir();
-        if (dir is null || !Directory.Exists(dir)) { MessageBox.Show(this, "No incident to export yet.", "PoolWatch"); return; }
-        if (_analysis.Captures.Busy) { MessageBox.Show(this, "A confirmation trace is being recorded. Export when it has finished.", "PoolWatch"); return; }
-        // M1: redaction is the default (Yes, or Enter); the incident folder itself is never redacted.
-        var answer = MessageBox.Show(this, "Redact the user name, home and TEMP paths, machine name, SID and values that look like secrets " +
-            "(passwords, tokens, API keys on a command line)? Recommended before you share it.\n(The .etl trace is left out of a redacted export. " +
-            "Redaction is best-effort: read the export before you post it.)",
-            "Export report", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
-        if (answer == DialogResult.Cancel) return;
-        var zip = Exporter.Export(dir, _engine.Paths.ExportsDir, answer == DialogResult.Yes ? CurrentRedaction() : null, _engine.Paths.Guard.CheckReal);
-        OpenFolder(Path.GetDirectoryName(zip)!);
-    }
-
-    private void ExportBundle()
-    {
-        // Redaction is the default: Yes (or Enter) redacts; No has to be chosen.
-        var answer = MessageBox.Show(this, "Redact the user name, home paths, machine name, SID and values that look like secrets? (Recommended before sending it to anyone.)",
-            "Export vendor bundle", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
-        if (answer == DialogResult.Cancel) return;
-        var zip = BundleBuilder.Export(_engine, _analysis, answer == DialogResult.Yes ? CurrentRedaction() : null);
-        OpenFolder(Path.GetDirectoryName(zip)!);
-    }
-
-    /// <summary>
-    /// The home folder in its long and 8.3 forms (TEMP is often C:\Users\JOHNDO~1\AppData\Local\Temp) and the TEMP
-    /// folders, so a short path in a command line cannot carry part of the user name out of a redacted export. C6: TEMP
-    /// is redacted as &lt;TEMP&gt; (it was listed as a home path, so ...\Temp\x became &lt;HOME&gt;\x).
+    /// The elevated app's redaction for exports and copies: the home folder in its long and 8.3 forms (TEMP is often
+    /// C:\Users\JOHNDO~1\AppData\Local\Temp) and the TEMP folders, so a short path in a command line cannot carry part of
+    /// the user name out of a redacted export. C6: TEMP is redacted as &lt;TEMP&gt;.
     /// </summary>
     internal static RedactionInfo CurrentRedaction()
     {
@@ -1201,40 +1020,6 @@ internal sealed class MainForm : Form
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern uint GetShortPathName(string longPath, System.Text.StringBuilder shortPath, int size);
 
-    private void About()
-    {
-        var o = _engine.Meter.Report();
-        MessageBox.Show(this,
-            $"PoolWatch {typeof(MainForm).Assembly.GetName().Version}\n\nOverhead (budget in brackets){(o.SteadyStateSeconds >= SteadySeconds ? $", steady state over {Fmt.Duration(TimeSpan.FromSeconds(o.SteadyStateSeconds))}" : " - still warming up, numbers include start-up")}:\n" +
-            $"CPU {o.CpuPercentOfOneCore:0.00}% of one core (< {SelfMeter.CpuBudgetPercent.ToString(System.Globalization.CultureInfo.InvariantCulture)}%)\n" +
-            $"Peak working set {Fmt.Bytes(o.PeakWorkingSetBytes)} (< {SelfMeter.RamBudgetBytes >> 20} MB)\n" +
-            $"Disk writes {Fmt.Bytes(o.DiskWriteBytesPerHour)}/h (< {SelfMeter.DiskBudgetBytesPerHour >> 20} MB/h)\n\nData: {_engine.Paths.DataRoot}\n\n" +
-            "PoolWatch watches and reads. It changes the system where you choose to on its pages (Clear cache, background " +
-            "services, scheduled tasks, startup apps, End process, start at logon) and, when you turn it on, in the token-leak " +
-            "guard's live focus setting at logon; and, on its own, it secures its data folder and removes an older PoolWatch's " +
-            "leftover clear-cache tasks. SECURITY.md in the source repository (github.com/nubbymong/poolwatch) lists every such " +
-            "action. No network calls, no telemetry.", "About PoolWatch");
-    }
-
-    /// <summary>The real explorer.exe, by full path, never a bare name resolved through App Paths or the current directory.</summary>
-    private static readonly string ExplorerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
-
-    /// <summary>
-    /// Opens a folder in Explorer. S1/S3: the elevated app never shell-executes a path (that would consult the user's
-    /// shell associations and App Paths, both user-writable): it starts explorer.exe by full path with the folder as an
-    /// argument and UseShellExecute = false.
-    /// </summary>
-    private static void OpenFolder(string folder)
-    {
-        try { Process.Start(new ProcessStartInfo(ExplorerPath, $"\"{Path.GetFullPath(folder)}\"") { UseShellExecute = false }); } catch { }
-    }
-
-    /// <summary>Shows a file in Explorer with it selected: the folder opens, never the file through its association.</summary>
-    private static void ShowFile(string file)
-    {
-        try { Process.Start(new ProcessStartInfo(ExplorerPath, $"/select,\"{Path.GetFullPath(file)}\"") { UseShellExecute = false }); } catch { }
-    }
-
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         // Closing the window hides it; the tray keeps monitoring. Exit is in the tray menu.
@@ -1242,87 +1027,200 @@ internal sealed class MainForm : Form
         base.OnFormClosing(e);
     }
 
-    /// <summary>CI soak: every minute show the next page (tags with the top tag selected, incidents, processes, findings).</summary>
+    // ---------------------------------------------------------------- CI
+
+    /// <summary>CI soak: every minute show the next page (Pool causes with its top row selected, then Services).</summary>
     public void StartSoakCycle()
     {
         var t = new System.Windows.Forms.Timer { Interval = 60_000 };
         int page = 0;
         t.Tick += (_, _) =>
         {
-            int[] pages = [0, 1, 2, 3, 4, 5]; // overview, tags, incidents, processes, findings, background services
-            _tabs.SelectedIndex = pages[page++ % pages.Length];
-            if (_tabs.SelectedIndex == 1 && _tags.Items.Count > 0 && _tags.SelectedItems.Count == 0) _tags.Items[0].Selected = true;
+            _tabs.SelectedIndex = page++ % _tabs.TabCount; // ui.page0 = Pool causes, ui.page1 = Services
+            if (_tabs.SelectedIndex == 0 && _causes.Items.Count > 0 && _causes.SelectedItems.Count == 0) _causes.Items[0].Selected = true;
             RefreshNow();
         };
         t.Start();
     }
 
-    /// <summary>CI: what the window actually shows (list rows), and whether hiding it stops the refresh timer.</summary>
+    /// <summary>The selected tab's row count (CI).</summary>
+    private static int Rows(ListView lv) => lv.Items.Count;
+
+    /// <summary>
+    /// CI: what the window shows (status, rows, the selected row's details), whether a refresh keeps rows and the selection,
+    /// whether anything is clipped or overlaps, and whether hiding the window stops the refresh timer.
+    /// </summary>
     public object SmokeStats()
     {
-        var counts = new Dictionary<string, int>();
-        long ioRows = 0;
-        for (int i = 1; i < _tabs.TabCount - 1; i++)
-        {
-            _tabs.SelectedIndex = i;
-            RefreshNow();
-            // Every tab between Overview and Settings, each with its own list (the Background services list loads in the
-            // background, so it may still be empty here).
-            counts[_tabs.TabPages[i].Text] = i switch { 1 => _tags.Items.Count, 2 => _incidents.Items.Count, 3 => _processes.Items.Count, 4 => _findings.Items.Count, 5 => _services.Items.Count, _ => 0 };
-            if (i == 3) foreach (ListViewItem it in _processes.Items) if (it.SubItems[3].Text != "0") ioRows++;
-        }
-        // No flashing: one refresh keeps the row objects and the selection; Ctrl+C copies exactly what the row shows.
-        _tabs.SelectedIndex = 3;
-        RefreshNow();
-        var before = _processes.Items.Cast<ListViewItem>().ToDictionary(i => i.Tag!, i => i);
-        if (_processes.Items.Count > 1) _processes.Items[1].Selected = true;
-        var selectedKey = _processes.SelectedItems.Count > 0 ? _processes.SelectedItems[0].Tag : null;
-        RefreshNow();
-        int kept = _processes.Items.Cast<ListViewItem>().Count(i => before.TryGetValue(i.Tag!, out var old) && ReferenceEquals(old, i));
-        double identityKept = _processes.Items.Count == 0 ? 0 : kept / (double)_processes.Items.Count;
-        bool selectionKept = selectedKey is not null && _processes.SelectedItems.Count == 1 && Equals(_processes.SelectedItems[0].Tag, selectedKey);
-        string copied = RowsText(_processes, selectedOnly: true);
-        var lines = copied.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
-        bool copyMatches = lines.Length == 2 && lines[0] == string.Join('\t', _processes.Columns.Cast<ColumnHeader>().Select(c => c.Text)) &&
-                           _processes.SelectedItems.Count == 1 && lines[1] == string.Join('\t', _processes.SelectedItems[0].SubItems.Cast<ListViewItem.ListViewSubItem>().Select(s => CopyText.Cell(s.Text)));
-        _processes.SelectedItems.Clear();
         _tabs.SelectedIndex = 1;
-        if (_tags.Items.Count > 0) { _tags.Items[0].Selected = true; RefreshNow(); }
-        int ownerRows = _owners.Items.Count;
-        string answer = _answer.Text;
+        RefreshNow(force: true);
+        int serviceRows = Rows(_services);
         _tabs.SelectedIndex = 0;
-        RefreshNow();
-        string overview = _overview.Text;
+        RefreshNow(force: true);
+        var kinds = _causeRows.GroupBy(r => r.Kind.ToString()).ToDictionary(g => g.Key, g => g.Count());
+        // No flashing: one refresh keeps the row objects and the selection; Ctrl+C copies exactly what the row shows.
+        var before = _causes.Items.Cast<ListViewItem>().ToDictionary(i => i.Tag!, i => i);
+        _causes.SelectedItems.Clear();
+        if (_causes.Items.Count > 0) _causes.Items[0].Selected = true;
+        ShowCauseDetails();
+        var selectedKey = _causes.SelectedItems.Count > 0 ? _causes.SelectedItems[0].Tag : null;
+        RefreshNow(force: true);
+        int kept = _causes.Items.Cast<ListViewItem>().Count(i => before.TryGetValue(i.Tag!, out var old) && ReferenceEquals(old, i));
+        double identityKept = _causes.Items.Count == 0 ? 0 : kept / (double)_causes.Items.Count;
+        bool selectionKept = selectedKey is not null && _causes.SelectedItems.Count == 1 && Equals(_causes.SelectedItems[0].Tag, selectedKey);
+        string copied = RowsText(_causes, selectedOnly: true);
+        var lines = copied.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+        bool copyMatches = lines.Length == 2 && lines[0] == string.Join('\t', _causes.Columns.Cast<ColumnHeader>().Select(c => c.Text)) &&
+                           _causes.SelectedItems.Count == 1 && lines[1] == string.Join('\t', _causes.SelectedItems[0].SubItems.Cast<ListViewItem.ListViewSubItem>().Select(s => CopyText.Cell(s.Text)));
+        string detailsTitle = _detailTitle.Text, details = _detailText.Text;
+        // Both tabs, each with the tab selected (a hidden page is not laid out for the user): Services once its list has
+        // loaded, as the user sees it (its status text and wrapping button bar are what clipped before).
+        _tabs.SelectedIndex = 1;
+        RefreshNow(force: true);
+        for (int i = 0; i < 200 && _serviceOptions.Count == 0; i++) { Application.DoEvents(); Thread.Sleep(100); }
+        List<string> BothTabs()
+        {
+            _tabs.SelectedIndex = 0;
+            Application.DoEvents();
+            var p = LayoutProblems().Select(x => "Pool causes: " + x).ToList();
+            _tabs.SelectedIndex = 1;
+            Application.DoEvents();
+            p.AddRange(LayoutProblems().Select(x => "Services: " + x));
+            _tabs.SelectedIndex = 0;
+            return p;
+        }
+        var layout = BothTabs();
+        // The smallest size the window allows: reported (the CI asserts the default size).
+        var size = Size;
+        Size = MinimumSize;
+        Application.DoEvents();
+        var layoutAtMinimum = BothTabs();
+        Size = size;
+        Application.DoEvents();
+        // The Settings form and its Advanced grid, each shown as it opens.
+        var settingsLayout = new List<string>();
+        _settings ??= new SettingsDialog(_engine, _analysis, _actions);
+        _settings.Show(this);
+        Application.DoEvents();
+        ClippedControls(_settings, settingsLayout);
+        var settingsForm = new List<string>();
+        void Texts(Control parent) { foreach (Control c in parent.Controls) { if (c is CheckBox or Button || c is Label { Font.Bold: true }) settingsForm.Add(c.Text); Texts(c); } }
+        Texts(_settings);
+        _settings.Hide();
+        var advanced = _settings.Advanced;
+        advanced.Show(this);
+        Application.DoEvents();
+        var advancedLayout = new List<string>();
+        ClippedControls(advanced, advancedLayout);
+        settingsLayout.AddRange(advancedLayout.Select(x => "Advanced: " + x));
+        advanced.Hide();
         bool timerWhileVisible = _timer.Enabled;
         Hide();
         bool timerWhileHidden = _timer.Enabled;
-        return new { rows = counts, processRowsWithIo = ioRows, suspectRows = ownerRows, answer, overview, timerWhileVisible, timerWhileHidden,
-            identityKept, selectionKept, copyMatches, copiedSample = copied };
+        return new
+        {
+            status = _status.Text, statusKind = _statusKind.ToString(), chartPoints = _chart.PointCount,
+            tabs = _tabs.TabPages.Cast<TabPage>().Select(p => p.Text).ToList(),
+            buttons = _headerButtons.Select(b => b.Text).ToList(),
+            rows = new Dictionary<string, int> { ["Pool causes"] = _causeRows.Count, ["Services"] = Math.Max(serviceRows, Rows(_services)) },
+            causeKinds = kinds, detailsTitle, details = details.Length > 600 ? details[..600] : details,
+            likelyCauses = _causeRows.Take(20).Select(r => r.Cause).ToList(),
+            unrankedTagRows = _causeRows.Count(r => r.Kind == CauseKind.Tag && r.Active && r.Cause.Length == 0),
+            identityKept, selectionKept, copyMatches, copiedSample = copied,
+            layoutProblems = layout, layoutProblemsAtMinimumSize = layoutAtMinimum, settingsLayoutProblems = settingsLayout, settingsForm,
+            size = new { width = size.Width, height = size.Height, dpi = DeviceDpi },
+            timerWhileVisible, timerWhileHidden,
+        };
     }
 
-    /// <summary>CI/README screenshots: renders each tab to a PNG.</summary>
+    /// <summary>
+    /// CI: text that does not fit, controls outside their parent, the status line cut off, and the chart's text overlapping
+    /// (its title, legend and axis labels). Empty when the window is clean.
+    /// </summary>
+    internal List<string> LayoutProblems()
+    {
+        PerformLayout();
+        _chart.Refresh(); // paint now, so the chart's layout is the current one
+        var p = new List<string>();
+        int need = WrapLabel.Measure(_status.Text, _status.Font, Math.Max(1, _status.ClientSize.Width));
+        if (need > _status.ClientSize.Height) p.Add($"the status line needs {need} px, has {_status.ClientSize.Height}");
+        if (_header.Bottom > ClientSize.Height || _status.Width < S(150)) p.Add($"the header does not fit ({_header.Bounds}, status {_status.Bounds})");
+        ClippedControls(this, p);
+        if (_chart.LastLayout is { } l) p.AddRange(l.Problems().Select(x => "chart: " + x));
+        return p;
+    }
+
+    /// <summary>Visible controls outside their parent, and buttons, check boxes and labels whose text does not fit (CI).</summary>
+    internal static void ClippedControls(Control parent, List<string> p)
+    {
+        foreach (Control c in parent.Controls)
+        {
+            if (!c.Visible) continue;
+            var area = parent.ClientRectangle;
+            if (c.Left < -1 || c.Top < -1 || c.Right > area.Width + 1 || c.Bottom > area.Height + 1)
+                p.Add($"{Describe(c)} at {c.Bounds} is outside {Describe(parent)} ({area.Size})");
+            // (A label with a maximum width wraps by design: its height follows its text.)
+            if (c is Button or CheckBox || c is Label { AutoSize: true, MaximumSize.Width: 0 })
+            {
+                var pref = c.GetPreferredSize(Size.Empty);
+                if (pref.Width > c.Width + 1 || pref.Height > c.Height + 1) p.Add($"{Describe(c)} needs {pref}, has {c.Size}");
+            }
+            if (c is WrapLabel w && w.NeededHeight > w.Height + 1) p.Add($"{Describe(c)} needs {w.NeededHeight} px, has {w.Height}");
+            if (c is Panel or TabControl or GroupBox or SplitContainer) ClippedControls(c, p);
+        }
+
+        static string Describe(Control c) => $"{c.GetType().Name} \"{(c.Text.Length > 40 ? c.Text[..40] + "…" : c.Text)}\"";
+    }
+
+    /// <summary>CI/README screenshots: the window as opened, the top cause selected, Services, and Settings.</summary>
     public List<string> Screenshots(string dir)
     {
         var files = new List<string>();
-        for (int i = 0; i < _tabs.TabCount; i++)
+        void Shot(Control c, string name)
         {
-            _tabs.SelectedIndex = i;
-            if (i == 1 && _tags.Items.Count > 0) _tags.Items[0].Selected = true;
-            RefreshNow();
             Application.DoEvents();
-            using var bmp = new Bitmap(Width, Height);
-            DrawToBitmap(bmp, new Rectangle(0, 0, Width, Height));
-            string name = Path.Combine(dir, $"{i + 1}-{_tabs.TabPages[i].Text.ToLowerInvariant().Replace(' ', '-')}.png");
-            bmp.Save(_engine.Paths.Guard.CheckReal(name), System.Drawing.Imaging.ImageFormat.Png);
-            files.Add(name);
+            using var bmp = new Bitmap(c.Width, c.Height);
+            c.DrawToBitmap(bmp, new Rectangle(0, 0, c.Width, c.Height));
+            string path = Path.Combine(dir, name);
+            bmp.Save(_engine.Paths.Guard.CheckReal(path), System.Drawing.Imaging.ImageFormat.Png);
+            files.Add(path);
         }
         _tabs.SelectedIndex = 0;
+        _causes.SelectedItems.Clear();
+        RefreshNow(force: true);
+        // The background ranking spaces its work out (RankPlan); for the screenshots, rank every listed tag now.
+        _rankings.RankNow(tag => TagViewBuilder.Build(_analysis, _engine.Registry, tag), _leadTag is { } lead ? _rankTags.Prepend(lead) : _rankTags);
+        _statusSamples = -1;
+        RefreshNow(force: true);
+        Shot(this, "1-main-window.png");
+        if (_causes.Items.Count > 0) { _causes.Items[0].Selected = true; ShowCauseDetails(); }
+        Shot(this, "2-pool-causes.png");
+        _tabs.SelectedIndex = 1;
+        RefreshNow(force: true);
+        // The services list loads in the background: wait for it (at most 20 s) so the shot shows it.
+        for (int i = 0; i < 200 && _serviceOptions.Count == 0; i++) { Application.DoEvents(); Thread.Sleep(100); }
+        Shot(this, "3-services.png");
+        _tabs.SelectedIndex = 0;
+        _settings ??= new SettingsDialog(_engine, _analysis, _actions);
+        _settings.StartPosition = FormStartPosition.CenterParent;
+        _settings.Show(this);
+        Shot(_settings, "4-settings.png");
+        _settings.Hide();
+        var advanced = _settings.Advanced;
+        advanced.Show(this);
+        Shot(advanced, "5-settings-advanced.png");
+        advanced.Hide();
         return files;
     }
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _timer.Dispose();
+        if (disposing)
+        {
+            _timer.Dispose();
+            _tips.Dispose();
+            _settings?.Dispose();
+        }
         base.Dispose(disposing);
     }
 }

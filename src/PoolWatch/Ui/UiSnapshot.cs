@@ -5,6 +5,7 @@ using PoolWatch.Core.Detection;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
+using PoolWatch.Core.Util;
 
 namespace PoolWatch.Ui;
 
@@ -15,9 +16,23 @@ internal sealed record TagRow(PoolTag Tag, string Owner, string Description, lon
 
 internal sealed record ProcRow(ProcessKey Key, string Name, int ParentPid, long OpsPerSec, int Handles, long Quota, long Private, bool Orphan, string? CommandLine);
 
-internal sealed record IncidentRow(string Id, string Dir, DateTime OpenedUtc, string Tag, IncidentKind Kind, long Growth, string Top, string Confidence, bool Open);
+/// <summary>An incident (in memory, or an older one read from its report.json).</summary>
+/// <param name="Top">The most likely cause: the trace's top owner, else the top suspect owner, else the top process; "" when none.</param>
+/// <param name="Confidence">The cause's confidence in words ("strong evidence").</param>
+internal sealed record IncidentRow(string Id, string Dir, DateTime OpenedUtc, string Tag, IncidentKind Kind, long Growth, string Top, string Confidence, bool Open)
+{
+    public Confidence? Level { get; init; }
+    /// <summary>When the growth began, and when it stopped (or the incident closed); null when not known.</summary>
+    public DateTime? OnsetUtc { get; init; }
+    public DateTime? EndUtc { get; init; }
+    /// <summary>For a release: how much the tag dropped.</summary>
+    public long Dropped { get; init; }
+}
 
 internal sealed record ChartPoint(DateTime TimeUtc, PoolTotals Totals);
+
+/// <summary>The committed pool total now and how it moved, for the status line.</summary>
+internal sealed record TotalsNow(long? Total, TimeSpan Held, long Change10Min, long? ChangeHour);
 
 internal static class UiData
 {
@@ -82,8 +97,17 @@ internal static class UiData
     }
 
     /// <summary>Rows read from disk, keyed by folder and report.json's write time (a rewritten report is read again).</summary>
-    /// <summary>A null row: a finding report (spawn storm, ...), listed in the Findings tab instead.</summary>
+    /// <summary>A null row: a finding report (spawn storm, ...), shown from the finding itself instead.</summary>
     private static readonly Dictionary<string, (DateTime written, IncidentRow? row)> DiskRows = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The most likely cause of an in-memory incident: the trace's top owner, else the top suspect owner, else the top process.</summary>
+    public static (string name, Confidence level)? CauseOf(Incident i)
+    {
+        if (i.TraceOwners is { Count: > 0 } traced) return (traced[0].Owner.Name, Confidence.ConfirmedByTrace);
+        if (i.Owners?.FirstOrDefault(o => o.Meaningful) is { } owner) return (owner.Name, owner.Confidence);
+        if (i.Suspects.FirstOrDefault() is { } top) return (PlainWords.WithPid(top.DisplayName, top.Key.Pid), top.Confidence);
+        return null;
+    }
 
     /// <summary>In-memory incidents plus older ones still on disk (the manager forgets them after 6 h or a restart).</summary>
     public static List<IncidentRow> Incidents(AnalysisPipeline a, string incidentsDir)
@@ -92,9 +116,12 @@ internal static class UiData
         lock (a.History.SyncRoot)
             live = a.Incidents.All.Select(i =>
             {
-                var top = i.Suspects.FirstOrDefault();
-                return new IncidentRow(i.Id, i.Dir, i.OpenedUtc, i.Tag.ToDisplay(), i.Kind, i.Growth, top is null ? "" : $"{top.DisplayName} ({top.Key.Pid})",
-                    top is null ? "" : IncidentWriterText.Confidence(top.Confidence), i.IsOpen);
+                var cause = CauseOf(i);
+                return new IncidentRow(i.Id, i.Dir, i.OpenedUtc, i.Tag.ToDisplay(), i.Kind, i.Growth, cause?.name ?? "",
+                    cause is { } c ? PlainWords.Confidence(c.level) : "", i.IsOpen)
+                {
+                    Level = cause?.level, OnsetUtc = i.OnsetUtc, EndUtc = i.EndUtc ?? i.ClosedUtc, Dropped = i.Release?.Dropped ?? 0,
+                };
             }).ToList();
         var known = new HashSet<string>(live.Select(r => r.Dir), StringComparer.OrdinalIgnoreCase);
         try
@@ -121,20 +148,33 @@ internal static class UiData
             using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "report.json")));
             var r = doc.RootElement;
             if (r.TryGetProperty("severity", out _)) return (true, null); // a finding report
-            string top = "", conf = "";
-            if (r.TryGetProperty("suspects", out var s) && s.GetArrayLength() > 0)
+            string top = "";
+            Confidence? level = null;
+            if (r.TryGetProperty("traceOwners", out var to) && to.ValueKind == System.Text.Json.JsonValueKind.Array && to.GetArrayLength() > 0 &&
+                to[0].TryGetProperty("owner", out var owner) && owner.GetString() is { Length: > 0 } name)
             {
-                top = $"{s[0].GetProperty("displayName").GetString()} ({s[0].GetProperty("pid").GetInt32()})";
-                conf = Enum.TryParse<Confidence>(s[0].GetProperty("confidence").GetString(), out var c) ? IncidentWriterText.Confidence(c) : "";
+                top = name;
+                level = Confidence.ConfirmedByTrace;
+            }
+            else if (r.TryGetProperty("suspects", out var s) && s.GetArrayLength() > 0)
+            {
+                top = PlainWords.WithPid(s[0].GetProperty("displayName").GetString() ?? "?", s[0].GetProperty("pid").GetInt32());
+                if (Enum.TryParse<Confidence>(s[0].GetProperty("confidence").GetString(), out var c)) level = c;
             }
             Enum.TryParse<IncidentKind>(r.GetProperty("kind").GetString(), out var kind);
+            DateTime? Time(string name) => r.TryGetProperty(name, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String && v.TryGetDateTime(out var t) ? t.ToUniversalTime() : null;
+            long dropped = r.TryGetProperty("release", out var rel) && rel.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                           rel.TryGetProperty("dropped", out var d) && d.TryGetInt64(out var db) ? db : 0;
             return (true, new IncidentRow(r.GetProperty("id").GetString() ?? Path.GetFileName(dir), dir, r.GetProperty("openedUtc").GetDateTime().ToUniversalTime(),
-                (r.GetProperty("tag").GetString() ?? "").TrimEnd(), kind, r.GetProperty("growthBytes").GetInt64(), top, conf, false));
+                (r.GetProperty("tag").GetString() ?? "").TrimEnd(), kind, r.GetProperty("growthBytes").GetInt64(), top, level is { } l ? PlainWords.Confidence(l) : "", false)
+            {
+                Level = level, OnsetUtc = Time("onsetUtc"), EndUtc = Time("endUtc") ?? Time("closedUtc"), Dropped = dropped,
+            });
         }
         catch { return (false, null); } // still being written, or not an incident folder
     }
 
-    /// <summary>Pool totals for the header chart: minute averages for older data, raw samples for the last hour.</summary>
+    /// <summary>Pool totals for the chart: minute averages for older data, raw samples for the last hour.</summary>
     public static List<ChartPoint> Chart(AnalysisPipeline a, TimeSpan span)
     {
         lock (a.History.SyncRoot)
@@ -151,19 +191,33 @@ internal static class UiData
         }
     }
 
-    public static List<DateTime> IncidentMarkers(AnalysisPipeline a)
+    /// <summary>
+    /// For the status line: null while the PC is not saturated (the saturation detector: all cores busy for a minute);
+    /// while it is, the busiest process's image, or "" when none uses a fifth of a core.
+    /// </summary>
+    public static string? SaturatedBusiest(AnalysisPipeline a)
     {
-        lock (a.History.SyncRoot) return a.Incidents.All.Select(i => i.OpenedUtc).ToList();
+        lock (a.History.SyncRoot)
+        {
+            var d = a.Diagnostics;
+            if (!d.Saturation.Saturated) return null;
+            return d.Load?.Processes.FirstOrDefault() is { Cores: >= 0.2 } top ? top.Image : "";
+        }
     }
-}
 
-internal static class IncidentWriterText
-{
-    public static string Confidence(Confidence c) => c switch
+    /// <summary>The committed total now, how far back the raw samples go, and its change over 10 minutes and an hour.</summary>
+    public static TotalsNow Totals(AnalysisPipeline a)
     {
-        Core.Correlation.Confidence.ConfirmedByTrace => "confirmed by trace",
-        Core.Correlation.Confidence.StronglyCorrelated => "strongly correlated",
-        Core.Correlation.Confidence.Correlated => "correlated",
-        _ => "weak",
-    };
+        lock (a.History.SyncRoot)
+        {
+            var h = a.History;
+            if (h.Count == 0) return new TotalsNow(null, TimeSpan.Zero, 0, null);
+            static long Sum(PoolTotals t) => (long)(t.CommittedPaged + t.CommittedNonPaged);
+            long total = Sum(h.Totals[^1]);
+            var now = h.Times[^1];
+            var held = now - h.Times[0];
+            long Change(TimeSpan span) => total - Sum(h.Totals[Math.Min(h.IndexAtOrAfter(now - span), h.Count - 1)]);
+            return new TotalsNow(total, held, Change(TimeSpan.FromMinutes(10)), held.TotalMinutes >= 55 ? Change(TimeSpan.FromHours(1)) : null);
+        }
+    }
 }

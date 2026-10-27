@@ -105,6 +105,12 @@ $md = New-Object System.Text.StringBuilder
 [void]$md.AppendLine("|---|---:|---:|---:|---:|---:|---:|---:|")
 foreach ($s in $profile.stages) { [void]$md.AppendLine("| $($s.stage) | $($s.count) | $($s.cpuMs) | $($s.cpuPercentOfOneCore) | $($s.wallMs) | $($s.maxWallMs) | $($s.allocMB) | $($s.allocKBPerCall) |") }
 [void]$md.AppendLine()
+# -Ui: the window walks its two pages once a minute (MainForm.StartSoakCycle), each refresh profiled as ui.page<index>.
+$uiPages = @($profile.stages | Where-Object { $_.stage -like 'ui.page*' } | ForEach-Object { $_.stage })
+if ($Ui) {
+    [void]$md.AppendLine("UI pages: ui.page0 = Pool causes (top row selected), ui.page1 = Services; refreshed: $($uiPages -join ', ')")
+    [void]$md.AppendLine()
+}
 [void]$md.AppendLine("| File | MB | MB/h |")
 [void]$md.AppendLine("|---|---:|---:|")
 foreach ($w in $profile.writesByFile) { [void]$md.AppendLine("| $($w.file) | $($w.MB) | $($w.MBPerHour) |") }
@@ -118,6 +124,10 @@ if ($Assert) {
     Assert-True ($null -ne $floorSlope -and $floorSlope -lt 5) ("private memory flat: trend {0} < 5 MB/h" -f $floorText)
     Assert-True ([int]$profile.held.registryRecords -le 20000) "registry bounded ($($profile.held.registryRecords) <= 20000)"
     Assert-True ($handleSlope -lt 50) ("own handles flat: trend {0:N0}/h < 50/h" -f $handleSlope)
+    if ($Ui) {
+        Assert-True ('ui.page0' -in $uiPages -and 'ui.page1' -in $uiPages) "the UI soak refreshed both pages, Pool causes and Services ($($uiPages -join ', '))"
+        Assert-True (@($uiPages | Where-Object { $_ -notin 'ui.page0', 'ui.page1' }).Count -eq 0) "no page beyond the two tabs was refreshed ($($uiPages -join ', '))"
+    }
 }
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 Complete-Assertions 'Soak'

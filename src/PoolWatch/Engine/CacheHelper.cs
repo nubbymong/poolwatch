@@ -14,7 +14,7 @@ namespace PoolWatch.Engine;
 /// in \PoolWatch\ that a named standard user could start. Both review rounds recommended removing it (less attack surface:
 /// a SYSTEM payload startable by a non-administrator, plus the setup that wrote it). Nothing creates those tasks any more;
 /// <see cref="RemoveOldTasks"/> removes what a previous build installed: automatically on the first elevated start that finds
-/// it (review round 3, <see cref="OldTaskCleanup"/>), else <c>--remove-clear-cache</c> or the toolbar button that appears when
+/// it (review round 3, <see cref="OldTaskCleanup"/>), else <c>--remove-clear-cache</c> or the tray menu item that appears when
 /// they are found.
 /// A clear task of your own (a task in the Task Scheduler root that runs Sysinternals RAMMap with one of its -E "empty"
 /// options as SYSTEM or with highest privileges, under any name: <see cref="IsOwnClearAction"/>) is shown, and removed only
@@ -83,13 +83,13 @@ internal static class CacheHelper
 
     /// <summary>
     /// Review round 3 (item 7): on an elevated start that finds an older build's two tasks, they are removed automatically
-    /// (no longer used: the purge is in-process), with a line for the timeline; the toolbar button stays as the fallback.
+    /// (no longer used: the purge is in-process), with a line for the timeline; the tray menu item stays as the fallback.
     /// Null when there was nothing to do. <paramref name="remove"/> is <see cref="RemoveOldTasks"/> (a fake in tests).
     /// </summary>
     public static string? RemoveOldTasksAutomatically(Status s, Func<List<string>> remove)
     {
         if (!s.CanPurge || !s.OldTasksPresent) return null;
-        const string fallback = "toolbar: Remove old clear-cache tasks";
+        const string fallback = "tray menu: Remove old clear-cache tasks";
         try
         {
             var removed = remove();

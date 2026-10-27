@@ -11,12 +11,9 @@ using PoolWatch.Core.Util;
 
 namespace PoolWatch.Ui;
 
-/// <summary>One owner's I/O per sample over the tag view's window (the activity strip).</summary>
-internal sealed record ActivityBand(string Owner, double[] Ops);
-
-/// <summary>Everything the selected tag's view shows, copied under the history lock.</summary>
+/// <summary>A growing tag's suspects and events (a Pool causes row's details), copied under the history lock.</summary>
 internal sealed record TagViewData(PoolTag Tag, string Title, TagAnswer Answer, IReadOnlyList<OwnerSuspect> Owners, IReadOnlyList<EventRow> Events,
-    DateTime FromUtc, DateTime ToUtc, IReadOnlyList<DateTime> Times, IReadOnlyList<long> TagSeries, IReadOnlyList<ActivityBand> Bands, DateTime OnsetUtc)
+    DateTime FromUtc, DateTime ToUtc, DateTime OnsetUtc)
 {
     /// <summary>The answer comes from a confirmation trace; the owners listed below it are correlation only (2a).</summary>
     public bool TraceBacked { get; init; }
@@ -26,12 +23,10 @@ internal sealed record TagViewData(PoolTag Tag, string Title, TagAnswer Answer, 
 /// <param name="Key">Stable across refreshes (so the list is updated in place): the event's identity, or minute + owner for a summary.</param>
 internal sealed record EventRow(DateTime TimeUtc, string Text, bool Notable, string Key);
 
-internal sealed record OverviewData(string Text, IReadOnlyList<ChartPoint> SinceBoot);
-
 internal static class TagViewBuilder
 {
-    /// <summary>The selected tag over the last hour (or what the raw history holds), ranked by owner, in plain words.</summary>
-    public static TagViewData? Build(AnalysisPipeline a, ProcessRegistry registry, PoolTag tag, bool allEvents, IReadOnlyList<LifecycleEvent> rawEvents)
+    /// <summary>A tag over the last hour (or what the raw history holds), ranked by owner, in plain words.</summary>
+    public static TagViewData? Build(AnalysisPipeline a, ProcessRegistry registry, PoolTag tag)
     {
         lock (a.History.SyncRoot)
         {
@@ -65,23 +60,8 @@ internal static class TagViewBuilder
                 owners = TraceAttribution.Rank(traced.TraceOwners!, owners, tag);
             }
             string title = $"{tag.ToDisplay()} · {info.Description} ({info.Owner}): {Fmt.Bytes(p + np)} now, {Fmt.SignedBytes(growth)} in {span}";
-
-            var times = new List<DateTime>();
-            for (int i = i0; i < h.Count; i++) times.Add(h.Times[i]);
-            var bands = new List<ActivityBand>();
-            foreach (var o in owners.Where(o => o.Meaningful && o.Members.Count > 0).Take(4))
-            {
-                var ops = new double[times.Count];
-                foreach (var m in o.Members)
-                {
-                    var pts = h.ProcessSeries(m.Key, i0);
-                    for (int i = 1; i < ops.Length && i < pts.Length; i++)
-                        if (pts[i - 1] is { } x && pts[i] is { } y) ops[i] += Math.Max(0, y.TotalOps - x.TotalOps);
-                }
-                bands.Add(new ActivityBand(o.Name, ops));
-            }
-            var events = EventRows(allEvents ? rawEvents.Where(ev => ev.TimeUtc >= from).ToList() : a.Incidents.EventsBetween(from, now), registry, allEvents);
-            return new TagViewData(tag, title, answer, owners, events, from, now, times, series, bands, onset) { TraceBacked = traceBacked };
+            var events = EventRows(a.Incidents.EventsBetween(from, now), registry, all: false);
+            return new TagViewData(tag, title, answer, owners, events, from, now, onset) { TraceBacked = traceBacked };
         }
     }
 
@@ -162,81 +142,4 @@ internal static class TagViewBuilder
     private static string Bare(string image) => image.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? image[..^4] : image;
     private static DateTime Min(DateTime a, DateTime b) => a < b ? a : b;
     private static DateTime Max(DateTime a, DateTime b) => a > b ? a : b;
-
-    /// <summary>The Overview page: pool now vs shortly after boot, how fast it rises, lag, the top growing tags.</summary>
-    public static OverviewData Overview(AnalysisPipeline a)
-    {
-        lock (a.History.SyncRoot)
-        {
-            var h = a.History;
-            var sb = new StringBuilder();
-            if (h.Count == 0) return new OverviewData("Collecting the first sample…", []);
-            var now = h.Totals[^1];
-            long total = (long)(now.CommittedPaged + now.CommittedNonPaged);
-            sb.AppendLine($"Kernel pool now: {Fmt.Bytes(total)} (paged {Fmt.Bytes((long)now.CommittedPaged)}, non-paged {Fmt.Bytes((long)now.CommittedNonPaged)}; as Task Manager shows).");
-            var boot = DateTime.UtcNow - TimeSpan.FromMilliseconds(Environment.TickCount64);
-            var first = h.Minutes.Count > 0 ? h.Minutes[0] : null;
-            var firstTotals = first?.Totals ?? h.Totals[0];
-            var firstTime = first?.TimeUtc ?? h.Times[0];
-            long firstTotal = (long)(firstTotals.CommittedPaged + firstTotals.CommittedNonPaged);
-            if (firstTime - boot <= TimeSpan.FromMinutes(30))
-                sb.AppendLine($"Shortly after boot ({Fmt.Duration(firstTime - boot)} in) it was {Fmt.Bytes(firstTotal)}: now {Fmt.SignedBytes(total - firstTotal)} above that.");
-            else
-                sb.AppendLine($"Usual level shortly after boot: not known (PoolWatch started {Fmt.Duration(firstTime - boot)} after boot; start it at logon to measure it). " +
-                              $"Since {Fmt.Clock(firstTime)}: {Fmt.SignedBytes(total - firstTotal)}.");
-            long Rise(TimeSpan span)
-            {
-                int i = h.IndexAtOrAfter(h.Times[^1] - span);
-                var t = h.Totals[Math.Min(i, h.Count - 1)];
-                return total - (long)(t.CommittedPaged + t.CommittedNonPaged);
-            }
-            double minutesHeld = (h.Times[^1] - h.Times[0]).TotalMinutes;
-            sb.AppendLine($"Rising: {Fmt.SignedBytes(Rise(TimeSpan.FromMinutes(10)))} in the last 10 min" +
-                          (minutesHeld >= 55 ? $", {Fmt.SignedBytes(Rise(TimeSpan.FromHours(1)))} in the last hour." : "."));
-            var sys = h.System[^1];
-            if (sys.CommitLimitBytes > 0)
-                sb.AppendLine($"Memory: commit {Fmt.Bytes((long)sys.CommitBytes)} of {Fmt.Bytes((long)sys.CommitLimitBytes)} ({100.0 * sys.CommitBytes / sys.CommitLimitBytes:0}%), " +
-                              $"{Fmt.Bytes((long)sys.AvailableBytes)} RAM available, compression store {Fmt.Bytes((long)sys.CompressionWsBytes)}; {sys.Handles:N0} handles, {sys.Processes:N0} processes.");
-            lock (a.Diagnostics.Lag)
-                sb.AppendLine(a.Diagnostics.Lag.Summary() + (a.Diagnostics.LagProbePaused ? " (probe paused while PoolWatch's own trace or cache clear runs, and 30 s after)" : ""));
-            if (a.Diagnostics.ExperimentStatus() is { Length: > 0 } xs) sb.AppendLine(xs);
-            if (a.Boots.PreviousLine() is { Length: > 0 } pb) sb.AppendLine(pb);
-            // Addendum 2: Task Manager's "available" includes the standby (file) cache; the per-file pool records live as long as it does.
-            var lists = a.Diagnostics.Cache.Lists;
-            if (lists.Known) sb.AppendLine($"Memory lists: {lists.Text}; kernel pool {Fmt.Bytes(total)}.");
-            if (a.Diagnostics.Cache.StatusLine(now) is { Length: > 0 } clear) sb.AppendLine("Clear cache: " + clear);
-            // Addendum 3: the token-leak guard (workaround on / off, last test, Toke outstanding).
-            var (toke, tokeBytes) = a.Diagnostics.TokeNow;
-            sb.AppendLine(a.Diagnostics.Guard.StatusLine(toke, tokeBytes));
-            // Addendum 4: CPU / run-queue load and the top CPU / page-fault processes.
-            if (a.Diagnostics.Load is { } load)
-            {
-                string rq = a.Diagnostics.RunQueue is { } q ? $", run queue {q:0}" : "";
-                sb.AppendLine($"CPU: {load.CpuFraction * 100:0}% of {Environment.ProcessorCount} cores{rq}" + (a.Diagnostics.Saturation.Saturated ? " — SATURATED" : "") + ".");
-                if (a.Diagnostics.Faults is { } f)
-                    sb.AppendLine($"Page faults: {f.Text()}" + (f.Dominant() is { } d ? $"; {d}" : "") + ".");
-                var busy = load.Processes.Where(r => r.Cores >= 0.2 || r.PageFaultsPerSec >= 50_000).Take(3).ToList();
-                if (busy.Count > 0)
-                    sb.AppendLine("Busiest: " + string.Join("; ", busy.Select(r => $"{r.Image} {r.Cores:0.0} core{(r.PageFaultsPerSec >= 50_000 ? $", {r.PageFaultsPerSec:N0} page faults/s" : "")}")) + ".");
-            }
-            // (The lag line is the lag monitor's own summary above: "measuring…", the baseline being learned, or the status.
-            // A leftover placeholder here printed "not measured yet" under the real numbers: Part 3, item 9.)
-            sb.AppendLine();
-            var top = a.Detector.Status.Values.Where(s => s.Delta60m > 0).OrderByDescending(s => s.Delta60m).Take(3).ToList();
-            if (top.Count == 0) sb.AppendLine("No tag is growing.");
-            else
-            {
-                sb.AppendLine("Growing most:");
-                foreach (var s in top)
-                {
-                    var info = a.Knowledge.Lookup(s.Tag);
-                    sb.AppendLine($"  {info.Description} ({s.Tag.ToDisplay()}, {info.Owner}): {Fmt.Bytes(s.Bytes)}, {Fmt.SignedBytes(s.Delta60m)} in the last hour, {Fmt.SignedBytes(s.Delta10m)} in 10 min" +
-                                  (s.Rates.Shape is AllocShape.LeakShape or AllocShape.GrowingWithChurn ? $"; {s.Rates.Text}" : ""));
-                }
-            }
-            var chart = h.Minutes.Select(m => new ChartPoint(m.TimeUtc, m.Totals)).ToList();
-            chart.Add(new ChartPoint(h.Times[^1], now));
-            return new OverviewData(sb.ToString().TrimEnd(), chart);
-        }
-    }
 }

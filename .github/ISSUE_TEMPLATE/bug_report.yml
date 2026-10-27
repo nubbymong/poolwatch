@@ -22,7 +22,7 @@ body:
     id: version
     attributes:
       label: PoolWatch version
-      description: About (toolbar) shows it.
+      description: About PoolWatch (right-click the tray icon) shows it.
       placeholder: "1.0.0"
     validations:
       required: true
