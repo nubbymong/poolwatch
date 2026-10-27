@@ -31,8 +31,6 @@ internal static class ServiceControl
     private static extern bool QueryServiceStatusEx(IntPtr svc, int level, IntPtr buf, int size, out int needed);
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern bool ControlService(IntPtr svc, uint control, IntPtr status);
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool EnumServicesStatusExW(IntPtr scm, int level, uint type, uint state, byte[]? buf, int size, out int needed, out int count, ref int resume, string? group);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct QUERY_SERVICE_CONFIG { public uint ServiceType, StartType, ErrorControl; public IntPtr BinaryPathName, LoadOrderGroup; public uint TagId; public IntPtr Dependencies, ServiceStartName, DisplayName; }
@@ -41,6 +39,11 @@ internal static class ServiceControl
     public static bool IsElevated => CacheHelper.IsElevated;
 
     /// <summary>Every installed Win32 service with its start type, state, binary path and signer (unelevated).</summary>
+    /// <remarks>
+    /// The names come from <see cref="Native.ServiceEnumeration"/>, which reads them from unmanaged memory and copies them
+    /// before this loop runs. (This used to read them from a managed array through the addresses the API stored in it:
+    /// a compacting collection during the slow per-service queries below moved the array and the reads crashed.)
+    /// </remarks>
     public static List<ServiceView> Enumerate()
     {
         var views = new List<ServiceView>();
@@ -48,31 +51,12 @@ internal static class ServiceControl
         if (scm == IntPtr.Zero) return views;
         try
         {
-            int resume = 0;
-            EnumServicesStatusExW(scm, 0, SERVICE_WIN32, SERVICE_STATE_ALL, null, 0, out int needed, out _, ref resume, null);
-            var buf = new byte[Math.Max(needed, 256 * 1024)];
-            resume = 0;
-            if (!EnumServicesStatusExW(scm, 0, SERVICE_WIN32, SERVICE_STATE_ALL, buf, buf.Length, out needed, out int count, ref resume, null))
-                return views;
-            // ENUM_SERVICE_STATUS_PROCESSW is 3 pointers + status; walk it for the names, then query each.
-            int stride = IntPtr.Size == 8 ? 0x38 : 0x24;
-            for (int i = 0; i < count; i++)
-            {
-                int off = i * stride;
-                string name = PtrStr(buf, off) ?? "";
-                string display = PtrStr(buf, off + IntPtr.Size) ?? name;
-                if (name.Length == 0) continue;
-                views.Add(Read(scm, name, display));
-            }
+            foreach (var e in Native.ServiceEnumeration.Query(scm, SERVICE_WIN32, SERVICE_STATE_ALL))
+                views.Add(Read(scm, e.Name, e.DisplayName));
         }
         catch { }
         finally { CloseServiceHandle(scm); }
         return views;
-    }
-
-    private static unsafe string? PtrStr(byte[] buf, int off)
-    {
-        fixed (byte* p = buf) { var ptr = *(IntPtr*)(p + off); return ptr == IntPtr.Zero ? null : Marshal.PtrToStringUni(ptr); }
     }
 
     private static ServiceView Read(IntPtr scm, string name, string display)
