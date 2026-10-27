@@ -1,0 +1,17 @@
+# L3 (supply chain): weekly update pull requests for the NuGet packages (with their packages.lock.json) and for the
+# GitHub Actions, which the workflow pins by full commit SHA with the version in a comment.
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      test-packages:
+        patterns: [xunit*, Microsoft.NET.Test.Sdk]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

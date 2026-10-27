@@ -1,0 +1,2 @@
+{"type":"user","sessionId":"00000000-0000-4000-8000-000000000001","timestamp":"2026-10-20T06:00:00.000Z","message":{"role":"user","content":"find the release notes -maxdepth 6 -type d -name please"}}
+{"type":"assistant","sessionId":"00000000-0000-4000-8000-000000000001","timestamp":"2026-10-20T06:01:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Searching."},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls -la D:\\sample-app"}}]}}

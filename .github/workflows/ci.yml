@@ -1,0 +1,501 @@
+name: CI
+
+# Pull requests and pushes to main: build, unit tests (Windows and Linux), the end-to-end and diagnostics scenarios and
+# the UI smoke test. The soak and overhead checks run on demand (workflow_dispatch) and on a release tag, where they are
+# required. A tag v* also signs the build, verifies every signature and publishes the release.
+#
+# Fork pull requests are safe: this runs on pull_request (never pull_request_target), no job a pull request can reach
+# holds a secret or a write token, and the signing secrets live in the "release" environment, which only a v* tag can use.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  # GitHub sets CI=true, which turns on the locked NuGet restore (Directory.Build.props): packages.lock.json must match.
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Unit tests
+        run: dotnet test tests/PoolWatch.Tests -c Release --logger "console;verbosity=normal"
+      - name: App-layer unit tests (Windows only)
+        run: dotnet test tests/PoolWatch.AppTests -c Release --logger "console;verbosity=normal"
+      - name: Publish framework-dependent single file
+        run: dotnet publish src/PoolWatch/PoolWatch.csproj -c Release -r win-x64 -p:SelfContained=false -p:PublishSingleFile=true -o publish/fd
+      - name: Publish self-contained single file
+        shell: pwsh
+        run: |
+          dotnet publish src/PoolWatch/PoolWatch.csproj -c Release -r win-x64 -p:SelfContained=true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o publish/sc
+          if ($LASTEXITCODE -ne 0) { throw "self-contained publish failed ($LASTEXITCODE)" }
+          Move-Item publish/sc/PoolWatch.exe publish/sc/PoolWatch-selfcontained.exe
+          Get-ChildItem publish/fd, publish/sc | Format-Table Name, Length
+          $fd = (Get-Item publish/fd/PoolWatch.exe).Length
+          if ($fd -gt 30MB) { throw "framework-dependent exe is $fd bytes: the runtime was bundled by mistake" }
+          # S4 (review round 2): native DLLs ship next to the exe (never self-extracted into the user's %TEMP%).
+          foreach ($d in 'publish/fd', 'publish/sc') {
+            if (-not (Test-Path "$d/amd64/KernelTraceControl.dll")) { throw "$d/amd64/KernelTraceControl.dll missing: native DLLs are bundled for self-extraction again" }
+          }
+      - name: Self-test (native collectors vs independent sources)
+        shell: pwsh
+        run: |
+          . ./ci/common.ps1
+          $p = Start-PoolWatch "$PWD/publish/fd/PoolWatch.exe" @('--selftest', '--out', "$env:RUNNER_TEMP/selftest")
+          $code = Wait-PoolWatch $p 180
+          Get-Content "$env:RUNNER_TEMP/selftest/selftest.json"
+          if ($code -ne 0) { throw "selftest failed ($code)" }
+      - name: Self-test (self-contained exe)
+        shell: pwsh
+        run: |
+          . ./ci/common.ps1
+          $p = Start-PoolWatch "$PWD/publish/sc/PoolWatch-selfcontained.exe" @('--selftest', '--out', "$env:RUNNER_TEMP/selftest-sc")
+          $code = Wait-PoolWatch $p 180
+          if ($code -ne 0) { Get-Content "$env:RUNNER_TEMP/selftest-sc/selftest.json"; throw "self-contained selftest failed ($code)" }
+      - name: Publish Leaker (test helper)
+        run: dotnet publish tools/Leaker/Leaker.csproj -c Release -r win-x64 -p:SelfContained=false -o publish/leaker
+      - name: M1 headless CSV checks
+        shell: pwsh
+        run: ./ci/m1-headless.ps1 -Exe "$PWD/publish/fd/PoolWatch.exe" -Out "$env:RUNNER_TEMP/m1"
+      - name: Upload executables
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: PoolWatch-exe
+          # Each build is a folder (the exe and the native DLLs next to it): install the whole folder.
+          path: |
+            publish/fd/
+            publish/sc/
+          if-no-files-found: error
+      - name: Upload Leaker
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: leaker
+          path: publish/leaker
+          if-no-files-found: error
+      - name: Upload run output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: m1-output
+          path: |
+            ${{ runner.temp }}/selftest
+            ${{ runner.temp }}/selftest-sc
+            ${{ runner.temp }}/m1
+          if-no-files-found: warn
+
+  e2e:
+    needs: build
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [handles, files, orphan, capture]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: PoolWatch-exe
+          path: publish
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: leaker
+          path: publish/leaker
+      - name: End-to-end scenario ${{ matrix.scenario }}
+        shell: pwsh
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: ./ci/m2-e2e.ps1 -Scenario $env:SCENARIO -Exe "$PWD/publish/fd/PoolWatch.exe" -Leaker "$PWD/publish/leaker/Leaker.exe" -Out "$env:RUNNER_TEMP/e2e-$env:SCENARIO"
+      - name: Upload incidents
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-${{ matrix.scenario }}
+          path: ${{ runner.temp }}/e2e-${{ matrix.scenario }}
+          if-no-files-found: warn
+
+  diag:
+    needs: build
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [spawn, clearcache, tokenguard, services, identity, tokens, filters, shape, lag, experiment, versions, accumulation, bundle]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: PoolWatch-exe
+          path: publish
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: leaker
+          path: publish/leaker
+      - name: Diagnostics scenario ${{ matrix.scenario }}
+        shell: pwsh
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: ./ci/diag-e2e.ps1 -Scenario $env:SCENARIO -Exe "$PWD/publish/fd/PoolWatch.exe" -Leaker "$PWD/publish/leaker/Leaker.exe" -Out "$env:RUNNER_TEMP/diag-$env:SCENARIO"
+      - name: Upload output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: diag-${{ matrix.scenario }}
+          path: ${{ runner.temp }}/diag-${{ matrix.scenario }}
+          if-no-files-found: warn
+
+  ui:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: PoolWatch-exe
+          path: publish
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: leaker
+          path: publish/leaker
+      - name: UI smoke test + screenshots
+        shell: pwsh
+        run: ./ci/m4-ui.ps1 -Exe "$PWD/publish/fd/PoolWatch.exe" -Leaker "$PWD/publish/leaker/Leaker.exe" -Out "$env:RUNNER_TEMP/ui"
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-screenshots
+          path: ${{ runner.temp }}/ui
+          if-no-files-found: warn
+
+  linux-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test tests/PoolWatch.Tests -c Release
+      - run: dotnet build src/PoolWatch/PoolWatch.csproj -c Release
+
+  # The long checks: on demand and on a release tag (where the release needs them).
+  overhead:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Publish
+        run: dotnet publish src/PoolWatch/PoolWatch.csproj -c Release -r win-x64 -p:SelfContained=false -p:PublishSingleFile=true -o publish/fd
+      - name: Overhead check (10 min idle, default interval)
+        shell: pwsh
+        run: ./ci/overhead.ps1 -Exe "$PWD/publish/fd/PoolWatch.exe" -Out "$env:RUNNER_TEMP/overhead"
+      - name: Upload overhead output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: overhead-output
+          path: ${{ runner.temp }}/overhead
+          if-no-files-found: warn
+
+  soak:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [headless, ui]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: PoolWatch-exe
+          path: publish
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: leaker
+          path: publish/leaker
+      - name: Soak under a busy-PC load (${{ matrix.mode }})
+        shell: pwsh
+        env:
+          SOAK_MODE: ${{ matrix.mode }}
+        run: ./ci/soak.ps1 -Exe "$PWD/publish/fd/PoolWatch.exe" -Leaker "$PWD/publish/leaker/Leaker.exe" -Out "$env:RUNNER_TEMP/soak" -Ui:($env:SOAK_MODE -eq 'ui') -Assert
+      - name: Upload soak output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: soak-${{ matrix.mode }}
+          path: |
+            ${{ runner.temp }}/soak/soak.*
+            ${{ runner.temp }}/soak/profile.json
+            ${{ runner.temp }}/soak/overhead.json
+            ${{ runner.temp }}/soak/summary.json
+            ${{ runner.temp }}/soak/poolwatch.log
+            ${{ runner.temp }}/soak/screenshots
+          if-no-files-found: warn
+
+  # ------------------------------------------------------------------------------------------------------------------
+  # Release, part 1: sign and verify (a v* tag only). This job holds the signing secrets, from the "release" environment
+  # (a deployment rule lets only v* tags use it), and only a read-only token. It fails closed: any file that should be
+  # signed and is not, or is signed by anyone else, or has no RFC 3161 timestamp, stops the release.
+  sign:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, e2e, diag, ui, overhead, soak, linux-unit-tests]
+    runs-on: windows-latest
+    environment: release
+    timeout-minutes: 30   # a hung silent installer must not hold the runner (and the signing session) for the 6 h default
+    permissions:
+      contents: read
+    env:
+      # The code-signing certificate's leaf (SSL.com eSigner, "Nicholas Moger"). It EXPIRES 2027-08-10: renew the
+      # certificate before then and put the new leaf's thumbprint here. Files signed before that keep verifying (they
+      # carry an RFC 3161 timestamp).
+      EXPECTED_THUMBPRINT: 00EC0DEE208F91785D253C0731E28249C68053FD
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: PoolWatch-exe
+          path: publish
+
+      - name: Check the tag and the version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') { throw "Tag '$tag' is not v<major>.<minor>.<patch>[-suffix]" }
+          $version = $Matches[1]
+          foreach ($exe in 'publish/fd/PoolWatch.exe', 'publish/sc/PoolWatch-selfcontained.exe') {
+            $product = ((Get-Item $exe).VersionInfo.ProductVersion -split '\+')[0]
+            if ($product -ne $version) { throw "$exe is version '$product' but the tag is $tag: set <Version> in Directory.Build.props before tagging" }
+          }
+
+      # SSL.com eSigner CKA (cloud HSM), the same setup as the maintainer's other signed project: the key never exists as
+      # a file on the runner; CKA registers a key storage provider so the certificate appears in the user's store.
+      - name: Set up code signing (eSigner CKA)
+        id: esigner
+        shell: pwsh
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:ES_USERNAME -or -not $env:ES_PASSWORD -or -not $env:ES_TOTP_SECRET) {
+            throw 'Signing secrets are missing from the "release" environment: refusing to release unsigned files'
+          }
+          # Pinned release + SHA-256 of the installer, verified before running.
+          $url = 'https://github.com/SSLcom/eSignerCKA/releases/download/v1.1.2/SSL.COM.eSigner.CKA_1.1.2_build_202600624.exe'
+          $sha = '3F088403139505DDFB0ED3B56B72893F92C865F98B382753A1E1C695A5CECE35'
+          $setup = Join-Path $env:RUNNER_TEMP 'eSignerCKA-setup.exe'
+          Invoke-WebRequest -Uri $url -OutFile $setup
+          $actual = (Get-FileHash $setup -Algorithm SHA256).Hash
+          if ($actual -ne $sha) { throw "eSigner CKA download hash mismatch: got $actual" }
+          $dir = Join-Path $env:RUNNER_TEMP 'eSignerCKA'
+          Start-Process $setup -ArgumentList '/CURRENTUSER','/VERYSILENT','/SUPPRESSMSGBOXES',"/DIR=$dir" -Wait
+          # SSL.com's CKA sequence: install -> vc_redist.x64 -> RegisterKSP -> eSignerCSP.Config -> config / unload / load.
+          # The x64 eSigner KSP needs the x64 VC++ runtime; the CKA installer bundles only the x86 one.
+          $vcx64 = Join-Path $dir 'vc_redist.x64.exe'
+          if (-not (Test-Path $vcx64)) { Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $vcx64 }
+          $vs = Get-AuthenticodeSignature $vcx64
+          if ($vs.Status -ne 'Valid' -or $vs.SignerCertificate.Subject -notmatch '(^|, )O=Microsoft Corporation(,|$)') { throw "vc_redist.x64.exe is not validly signed by Microsoft ($($vs.Status))" }
+          Start-Process $vcx64 -ArgumentList '/install','/quiet','/norestart' -Wait
+          $registerKsp = Join-Path $dir 'RegisterKSP.exe'
+          if (Test-Path $registerKsp) { & $registerKsp 2>&1 | Out-Null; Write-Host "RegisterKSP exit: $LASTEXITCODE" }
+          $cspConfig = Join-Path $dir 'eSignerCSP.Config.exe'
+          if (Test-Path $cspConfig) { & $cspConfig 2>&1 | Out-Null; Write-Host "eSignerCSP.Config exit: $LASTEXITCODE" }
+          $tool = @('eSignerCKATool.exe', 'eSignerCKA.exe') | ForEach-Object { Join-Path $dir $_ } | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $tool) { throw "eSigner CKA CLI not found in $dir" }
+          & $tool config -mode product -user $env:ES_USERNAME -pass $env:ES_PASSWORD -totp $env:ES_TOTP_SECRET -key (Join-Path $dir 'master.key') -r
+          & $tool unload
+          & $tool load
+          # The thumbprint is read from the store, and only the expected leaf is accepted (never a subject match).
+          $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Where-Object { $_.Thumbprint -eq $env:EXPECTED_THUMBPRINT } | Select-Object -First 1
+          if (-not $cert) {
+            Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | ForEach-Object { Write-Host "loaded: $($_.Subject) [$($_.Thumbprint)] until $($_.NotAfter)" }
+            throw "eSigner CKA did not load the expected certificate $env:EXPECTED_THUMBPRINT (renewed? update EXPECTED_THUMBPRINT)"
+          }
+          Write-Host "Certificate loaded: $($cert.Subject) [$($cert.Thumbprint)], valid until $($cert.NotAfter)"
+          "thumbprint=$($cert.Thumbprint)" >> $env:GITHUB_OUTPUT
+
+      - name: Sign every PoolWatch file that Microsoft has not signed
+        shell: pwsh
+        env:
+          SIGN_THUMBPRINT: ${{ steps.esigner.outputs.thumbprint }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:SIGN_THUMBPRINT -ne $env:EXPECTED_THUMBPRINT) { throw "Captured thumbprint '$env:SIGN_THUMBPRINT' is not the expected one" }
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
+          if (-not $signtool) { throw 'signtool.exe (Windows SDK) not found on the runner' }
+          Write-Host "signtool: $($signtool.FullName)"
+          $signed = 0
+          # Every PE file (it starts with "MZ"), whatever its extension: a PE added later under another name or none must not
+          # ship unsigned or unverified.
+          function Test-Pe([string]$Path) {
+            $fs = [IO.File]::OpenRead($Path)
+            try { $h = [byte[]]::new(2); ($fs.Read($h, 0, 2) -eq 2) -and $h[0] -eq 0x4D -and $h[1] -eq 0x5A } finally { $fs.Dispose() }
+          }
+          $pe = @(Get-ChildItem publish/fd, publish/sc -Recurse -File | Where-Object { Test-Pe $_.FullName })
+          foreach ($f in $pe) {
+            $s = Get-AuthenticodeSignature -LiteralPath $f.FullName
+            if ($s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -match '(^|, )O=Microsoft Corporation(,|$)') {
+              Write-Host "Microsoft-signed, left as it is: $($f.FullName)"
+              continue
+            }
+            & $signtool.FullName sign /fd sha256 /tr http://ts.ssl.com /td sha256 /sha1 $env:SIGN_THUMBPRINT $f.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed on $($f.FullName) (exit $LASTEXITCODE)" }
+            $signed++
+          }
+          if ($signed -lt 2) { throw "Only $signed file(s) were signed: expected at least PoolWatch.exe and PoolWatch-selfcontained.exe" }
+
+      - name: Verify every signature (Valid, the expected signer, an RFC 3161 timestamp)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Security.Cryptography.Pkcs
+          # True when the file's Authenticode signature carries an RFC 3161 timestamp (counter-signature attribute
+          # 1.3.6.1.4.1.311.3.3.1). Read from the PE certificate table; nothing is executed.
+          function Test-Rfc3161([string]$Path) {
+            $b = [IO.File]::ReadAllBytes($Path)
+            $pe = [BitConverter]::ToInt32($b, 0x3C)
+            if ([BitConverter]::ToUInt32($b, $pe) -ne 0x4550) { return $false }
+            $opt = $pe + 24
+            $dirs = $opt + $(if ([BitConverter]::ToUInt16($b, $opt) -eq 0x20B) { 112 } else { 96 })
+            $off = [BitConverter]::ToInt32($b, $dirs + 32)   # IMAGE_DIRECTORY_ENTRY_SECURITY (4): a file offset
+            if ($off -le 0 -or [BitConverter]::ToInt32($b, $dirs + 36) -le 8) { return $false }
+            $p = $off + 8                                    # past WIN_CERTIFICATE's header: the PKCS#7 SignedData
+            if ($b[$p] -ne 0x30) { return $false }
+            $l = [int]$b[$p + 1]; $n = 0; $h = 2
+            if ($l -lt 0x80) { $n = $l } else { $k = $l -band 0x7F; for ($i = 0; $i -lt $k; $i++) { $n = ($n -shl 8) -bor $b[$p + 2 + $i] }; $h = 2 + $k }
+            $der = [byte[]]::new($h + $n); [Array]::Copy($b, $p, $der, 0, $h + $n)
+            $cms = [System.Security.Cryptography.Pkcs.SignedCms]::new(); $cms.Decode($der)
+            foreach ($si in $cms.SignerInfos) { foreach ($a in $si.UnsignedAttributes) { if ($a.Oid.Value -eq '1.3.6.1.4.1.311.3.3.1') { return $true } } }
+            return $false
+          }
+          $bad = @()
+          # Every PE file (it starts with "MZ"), whatever its extension: a PE added later under another name or none must not
+          # ship unsigned or unverified.
+          function Test-Pe([string]$Path) {
+            $fs = [IO.File]::OpenRead($Path)
+            try { $h = [byte[]]::new(2); ($fs.Read($h, 0, 2) -eq 2) -and $h[0] -eq 0x4D -and $h[1] -eq 0x5A } finally { $fs.Dispose() }
+          }
+          $pe = @(Get-ChildItem publish/fd, publish/sc -Recurse -File | Where-Object { Test-Pe $_.FullName })
+          foreach ($f in $pe) {
+            $s = Get-AuthenticodeSignature -LiteralPath $f.FullName
+            if ($s.Status -ne 'Valid') { $bad += "$($f.FullName): signature $($s.Status) ($($s.StatusMessage))"; continue }
+            if ($s.SignerCertificate.Subject -match '(^|, )O=Microsoft Corporation(,|$)') { Write-Host "OK (Microsoft): $($f.FullName)"; continue }
+            if ($s.SignerCertificate.Thumbprint -ne $env:EXPECTED_THUMBPRINT) { $bad += "$($f.FullName): signed by $($s.SignerCertificate.Subject) [$($s.SignerCertificate.Thumbprint)], not the expected leaf"; continue }
+            if (-not $s.TimeStamperCertificate -or -not (Test-Rfc3161 $f.FullName)) { $bad += "$($f.FullName): no RFC 3161 timestamp"; continue }
+            Write-Host "OK (signed): $($f.FullName)  timestamp: $($s.TimeStamperCertificate.Subject)"
+          }
+          foreach ($exe in 'publish/fd/PoolWatch.exe', 'publish/sc/PoolWatch-selfcontained.exe') {
+            if ((Get-AuthenticodeSignature $exe).SignerCertificate.Thumbprint -ne $env:EXPECTED_THUMBPRINT) { $bad += "${exe}: not signed with the expected certificate" }
+          }
+          if ($bad.Count -gt 0) { $bad | ForEach-Object { Write-Host "::error::$_" }; throw "$($bad.Count) file(s) failed verification: nothing is released" }
+
+      - name: Zip each build and write SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          New-Item -ItemType Directory -Force release | Out-Null
+          foreach ($pair in @(@('fd', "PoolWatch-$tag-win-x64.zip"), @('sc', "PoolWatch-$tag-win-x64-selfcontained.zip"))) {
+            Copy-Item LICENSE, THIRD-PARTY-NOTICES.md "publish/$($pair[0])/"
+            Compress-Archive -Path "publish/$($pair[0])/*" -DestinationPath "release/$($pair[1])" -CompressionLevel Optimal
+          }
+          $lines = Get-ChildItem release -Filter *.zip | Sort-Object Name | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" }
+          [IO.File]::WriteAllText("$PWD/release/SHA256SUMS.txt", ($lines -join "`n") + "`n")
+          Get-Content release/SHA256SUMS.txt
+
+      - name: Upload the signed release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-signed
+          path: release/
+          if-no-files-found: error
+
+      - name: Unload the signing certificate
+        if: always()
+        shell: pwsh
+        run: |
+          # Housekeeping on an ephemeral runner: never the reason a verified release is not published.
+          $dir = Join-Path $env:RUNNER_TEMP 'eSignerCKA'
+          $tool = @('eSignerCKATool.exe', 'eSignerCKA.exe') | ForEach-Object { Join-Path $dir $_ } | Where-Object { Test-Path $_ } | Select-Object -First 1
+          try { if ($tool) { & $tool unload } } catch { Write-Host "unload: $_" }
+          $key = Join-Path $dir 'master.key'
+          try { if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Force } } catch { Write-Host "master.key: $_" }
+          exit 0
+
+  # Release, part 2: publish (a v* tag only). This job holds the write token and no signing secret; it publishes only
+  # the files the sign job verified, after checking them against their checksums.
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-signed
+          path: release
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum -c SHA256SUMS.txt
+          files="PoolWatch-$GITHUB_REF_NAME-win-x64.zip PoolWatch-$GITHUB_REF_NAME-win-x64-selfcontained.zip SHA256SUMS.txt"
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac   # v1.2.0-rc.1 and the like
+          # A re-run for a tag that already has a release replaces its files.
+          gh release create "$GITHUB_REF_NAME" $files --repo "$GITHUB_REPOSITORY" --title "PoolWatch $GITHUB_REF_NAME" --generate-notes --verify-tag $prerelease \
+            || gh release upload "$GITHUB_REF_NAME" $files --repo "$GITHUB_REPOSITORY" --clobber

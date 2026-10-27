@@ -1,0 +1,59 @@
+name: Bug report
+description: Something PoolWatch got wrong (a crash, a wrong answer, a missing incident).
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Redact before you post.** PoolWatch's incident folders hold full command lines (which can contain passwords
+        or tokens), your user and machine names, paths and your SID, and this issue is public.
+        - Share evidence only through **Export report** or **Export vendor bundle** with redaction on (the default
+          **Yes**), and read the exported files before you attach them.
+        - Do not attach `capture.etl` traces: they cannot be redacted.
+        - Security problems go to [private vulnerability reporting](https://github.com/nubbymong/poolwatch/security/advisories/new), never here.
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Redaction
+      options:
+        - label: I have removed my user name, machine name, paths, tokens and passwords from everything I paste or attach.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: PoolWatch version
+      description: About (toolbar) shows it.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows edition and build
+      placeholder: "Windows 11 Pro 24H2, 26100.4061"
+    validations:
+      required: true
+  - type: dropdown
+    id: build
+    attributes:
+      label: Download
+      options:
+        - framework-dependent (win-x64.zip)
+        - self-contained (win-x64-selfcontained.zip)
+        - built from source
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence (redacted)
+      description: The headline and suspects from a redacted export, or the relevant lines of poolwatch.log with names removed.
+      render: text

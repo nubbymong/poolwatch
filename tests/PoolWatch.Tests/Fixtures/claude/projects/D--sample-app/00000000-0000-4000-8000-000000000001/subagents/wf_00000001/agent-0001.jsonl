@@ -1,0 +1,1 @@
+{"type":"assistant","sessionId":"00000000-0000-4000-8000-000000000001","agentId":"agent-0001","timestamp":"2026-10-20T06:08:31.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"find / -maxdepth 6 -type d -name \"release-notes-*\" 2>/dev/null","timeout":120000}}]}}

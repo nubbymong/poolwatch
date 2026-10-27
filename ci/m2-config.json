@@ -1,0 +1,14 @@
+{
+  // Low thresholds so the CI scenarios (a few MB over a minute) trigger the same rules a real PC uses at GB scale.
+  "sampleIntervalSeconds": 2,
+  "handleIntervalSeconds": 10,
+  "tagCsvIntervalSeconds": 10,
+  "processCsvIntervalSeconds": 10,
+  "growthRules": [ { "windowMinutes": 1, "bytes": 3145728 } ],
+  "releaseBytes": 2097152,
+  "releaseWindowMinutes": 1,
+  "retentionMinutes": 0.5,
+  "incidentQuietMinutes": 0.5,
+  "incidentMaxMinutes": 10,
+  "growingDisplayBytesPer10Min": 1048576
+}

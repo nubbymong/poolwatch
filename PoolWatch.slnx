@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PoolWatch.Core/PoolWatch.Core.csproj" />
+    <Project Path="src/PoolWatch/PoolWatch.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Leaker/Leaker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PoolWatch.Tests/PoolWatch.Tests.csproj" />
+    <Project Path="tests/PoolWatch.AppTests/PoolWatch.AppTests.csproj" />
+  </Folder>
+</Solution>

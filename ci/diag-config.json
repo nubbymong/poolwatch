@@ -1,0 +1,26 @@
+{
+  // Diagnostics scenarios (spawn storms, ...): the M2 CI cadence; the diagnostics thresholds stay at their defaults.
+  "sampleIntervalSeconds": 2,
+  "handleIntervalSeconds": 10,
+  "tagCsvIntervalSeconds": 10,
+  "processCsvIntervalSeconds": 10,
+  "growthRules": [ { "windowMinutes": 1, "bytes": 3145728 } ],
+  "incidentQuietMinutes": 0.5,
+  "incidentMaxMinutes": 10,
+  // Token correlation: short buckets so a two-minute run has enough of them.
+  "tokenBucketSeconds": 5,
+  "tokenWindowMinutes": 3,
+  "tokenMinBuckets": 10,
+  "tokenMinOutstandingRise": 100,
+  // Lag probe: every 2 s, baseline from the first 6 probes.
+  "lagProbeSeconds": 2,
+  "lagBaselineSamples": 6,
+  // CPU trace (Capture now, lag trips): 10 s so it finishes inside the run. C1 turned it off by default and made the lag
+  // trip's CPU trace a deeper capture: on here so the clearcache (Capture now) and lag scenarios still exercise both.
+  // settingsVersion 3: not needed since review round 2 (a --config file is read as written, never migrated); kept so an
+  // older build reads it the same way.
+  "settingsVersion": 3,
+  "cpuTraceEnabled": true,
+  "deeperCapture": true,
+  "cpuTraceSeconds": 10
+}

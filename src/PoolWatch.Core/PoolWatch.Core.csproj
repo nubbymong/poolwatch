@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>PoolWatch.Core</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="PoolWatch.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Services\services-catalogue.json" LogicalName="services-catalogue.json" />
+  </ItemGroup>
+</Project>
