@@ -28,7 +28,7 @@
   <ItemGroup>
     <ProjectReference Include="..\PoolWatch.Core\PoolWatch.Core.csproj" />
     <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.30" />
-    <PackageReference Include="System.Management" Version="10.0.0" />
+    <PackageReference Include="System.Management" Version="10.0.14" />
     <!-- S5 (review round 2): the Clear cache helper (PoolWatch.CacheHelper, run by two SYSTEM tasks) is gone; the purge is
          in-process. Nothing is embedded or written into Program Files any more. -->
   </ItemGroup>
