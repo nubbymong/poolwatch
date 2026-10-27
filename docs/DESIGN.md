@@ -113,7 +113,9 @@ hour by hour" is a first-class report (Since boot), from one-minute history.
 - **Retention**: the tag grew during an activity burst and has not fallen within 15 minutes (default) after the
   correlated activity stopped.
 - **Release**: a sharp drop. What happened at that moment (process exits, mass deletes) is recorded: it explains what
-  was holding the memory.
+  was holding the memory. The busiest processes are counted from the sample before the drop began. I/O counters are
+  read only at samples, and an exit does not report them, so a process that deletes and exits between two samples is
+  counted over the release window up to its last sample instead, and marked as exited with its start time.
 - Change points (growth onset and end) feed the correlation.
 
 ## 7. Correlation

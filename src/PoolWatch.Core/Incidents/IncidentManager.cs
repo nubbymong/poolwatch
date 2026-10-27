@@ -545,16 +545,33 @@ public sealed class IncidentManager
             .Select(e => $"{Fmt.Clock(e.TimeUtc)} {e.Image} (PID {e.Pid}) exited{(e.ExitCode is { } c ? $", code {c}" : "")}")
             .Take(20).ToList();
         // Processes busiest while the tag dropped (mass deletes show up as I/O; Kernel-File attribution is milestone 3).
+        // A process still running is counted from the sample before the drop began. I/O counters are read only at each
+        // sample and an exit does not report them, so a process that does its last burst (the delete itself) and exits
+        // between two samples never shows that burst. A process gone by the latest sample, whose last sample is no
+        // earlier than the one before the drop began, is therefore counted over the release rule's window up to its last
+        // sample, and marked as exited with its start time (its PID can already belong to another process).
+        int iLive = Math.Max(0, iFrom - 1);
+        int iWindow = Math.Min(iLive, h.IndexAtOrAfter(a.TimeUtc - a.Window));
         var active = new List<(string text, long ops)>();
-        foreach (var key in h.ProcessesSince(Math.Max(0, iFrom - 1)))
+        foreach (var key in h.ProcessesSince(iLive))
         {
-            var pts = h.ProcessSeries(key, Math.Max(0, iFrom - 1));
-            ProcPoint? first = pts.FirstOrDefault(p => p is not null), last = pts.LastOrDefault(p => p is not null);
-            if (first is not { } f || last is not { } l) continue;
-            long ops = l.TotalOps - f.TotalOps;
-            if (ops <= 0 || key.Pid is 0) continue;
+            if (key.Pid is 0) continue;
+            var pts = h.ProcessSeries(key, iWindow);
+            int lastAt = Array.FindLastIndex(pts, p => p is not null);
+            if (lastAt < 0) continue;
+            bool gone = iWindow + lastAt < iTo;
+            int firstAt = Array.FindIndex(pts, gone ? 0 : iLive - iWindow, p => p is not null);
+            if (firstAt < 0 || firstAt > lastAt) continue;
+            long ops = pts[lastAt]!.Value.TotalOps - pts[firstAt]!.Value.TotalOps;
+            if (ops <= 0) continue;
             var rec = _registry.Get(key);
-            active.Add(($"{rec?.DisplayName ?? "unknown process"} (PID {key.Pid}): {ops:N0} I/O ops{(rec?.ExitUtc is { } x ? $", exited {Fmt.Clock(x)}" : "")}", ops));
+            string name = rec?.DisplayName ?? "unknown process";
+            string text = gone
+                ? $"{name} (PID {key.Pid}{(key.CreateTime > 0 ? $", started {Fmt.Clock(key.CreateTimeUtc)}" : "")}): {ops:N0} I/O ops up to its " +
+                  $"last sample at {Fmt.Clock(h.Times[iWindow + lastAt])}, " +
+                  (rec?.ExitUtc is { } x ? $"exited {Fmt.Clock(x)}" : $"exited by {Fmt.Clock(h.Times[iTo])}") + " (I/O after its last sample is not seen)"
+                : $"{name} (PID {key.Pid}): {ops:N0} I/O ops{(rec?.ExitUtc is { } y ? $", exited {Fmt.Clock(y)}" : "")}";
+            active.Add((text, ops));
         }
         var activeText = active.OrderByDescending(x => x.ops).Take(5).Select(x => x.text).ToList();
         return new ReleaseRecord(a.TimeUtc, a.OnsetUtc, fp + fnp, tp + tnp, exits, activeText, WorktreeNote(h, iFrom, a));
