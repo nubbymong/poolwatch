@@ -209,7 +209,13 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - run: dotnet test tests/PoolWatch.Tests -c Release
-      - run: dotnet build src/PoolWatch/PoolWatch.csproj -c Release
+      # A compile check of the Windows app. Its restore cannot use the lock file, which is made on Windows: the Linux SDK
+      # has no Windows Desktop targeting pack, so restore cannot prune System.CodeDom (a System.Management dependency that
+      # Windows Desktop provides), and the graph differs by that one package. An existing lock file is reused even without
+      # locked mode, so --force-evaluate re-resolves from the project files. Safe: nothing built here is shipped or run,
+      # and the job holds no secrets. The unit tests above stay locked.
+      - run: dotnet restore src/PoolWatch/PoolWatch.csproj --force-evaluate -p:RestoreLockedMode=false
+      - run: dotnet build src/PoolWatch/PoolWatch.csproj -c Release --no-restore
 
   # The long checks: on demand and on a release tag (where the release needs them).
   overhead:
