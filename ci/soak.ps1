@@ -66,7 +66,13 @@ if ($steady.Count -ge 3) {
     $privSlope = Slope $xs @($steady | ForEach-Object { $_.privateMB })
     $handleSlope = Slope $xs @($steady | ForEach-Object { $_.handles })
 }
-$maxWs = ($rows | Measure-Object workingSetMB -Maximum).Maximum
+# The working-set budget is a steady-state one (DESIGN.md section 3), judged over the same window as CPU and the trends.
+# The whole-run maximum includes start-up (JIT, and the runtime and framework images loading before PoolWatch's first
+# working-set trim) and is reported as the start-up peak, not judged. No sample in the window: nothing to judge, and
+# the assertion below fails rather than pass on an empty window.
+$startupPeakWs = ($rows | Measure-Object workingSetMB -Maximum).Maximum
+$steadyMaxWs = if ($steady.Count -gt 0) { ($steady | Measure-Object workingSetMB -Maximum).Maximum } else { $null }
+$steadyWsText = if ($null -ne $steadyMaxWs) { '{0:N1} MB' -f $steadyMaxWs } else { 'n/a (no sample at or after 600 s)' }
 $profile = Get-Content "$Out\profile.json" -Raw | ConvertFrom-Json
 $overhead = Get-Content "$Out\overhead.json" -Raw | ConvertFrom-Json
 $summary = Get-Content "$Out\summary.json" -Raw | ConvertFrom-Json
@@ -74,7 +80,8 @@ $md = New-Object System.Text.StringBuilder
 [void]$md.AppendLine("# Soak under load ($(if ($Ui) { 'UI, window open' } else { 'headless' }), $Minutes min, $ChainsPerMinute chains/min, $FilesPerSecond files/s, $Handles handles held)")
 [void]$md.AppendLine()
 [void]$md.AppendLine(("- CPU (steady, from outside): {0:N3}% of one core; PoolWatch's own meter: {1:N3}%" -f $cpuPct, $overhead.cpuPercentOfOneCore))
-[void]$md.AppendLine(("- Working set max {0:N1} MB; private memory trend {1:N1} MB/h; handle trend {2:N0}/h" -f $maxWs, $privSlope, $handleSlope))
+[void]$md.AppendLine(("- Working set max (steady, from 600 s): {0}; private memory trend {1:N1} MB/h; handle trend {2:N0}/h" -f $steadyWsText, $privSlope, $handleSlope))
+[void]$md.AppendLine(("- Start-up peak (working set max over the whole run, start-up included; not judged): {0:N1} MB" -f $startupPeakWs))
 [void]$md.AppendLine(("- Disk writes {0:N2} MB/h (own meter); ETW events {1}; processes tracked {2}" -f ($overhead.diskWriteBytesPerHour / 1MB), $summary.etwEvents, $summary.processesTracked))
 [void]$md.AppendLine(("- GC: heap {0} MB, committed {1} MB, allocated {2} MB total, gen0/1/2 {3}/{4}/{5}, server={6}" -f $profile.gc.heapMB, $profile.gc.committedMB, $profile.gc.totalAllocatedMB, $profile.gc.gen0, $profile.gc.gen1, $profile.gc.gen2, $profile.gc.server))
 [void]$md.AppendLine(("- Held: {0}" -f ($profile.held | ConvertTo-Json -Compress)))
@@ -90,7 +97,7 @@ $md.ToString() | Set-Content "$Out\soak.md"
 Write-Host $md.ToString()
 if ($Assert) {
     Assert-True ($cpuPct -lt 0.5) ("CPU {0:N3}% of one core < 0.5%" -f $cpuPct)
-    Assert-True ($maxWs -lt 100) ("working set max {0:N1} MB < 100 MB" -f $maxWs)
+    Assert-True ($null -ne $steadyMaxWs -and $steadyMaxWs -lt 100) ("working set max over the steady window (from 600 s, {0} samples) {1} < 100 MB" -f $steady.Count, $steadyWsText)
     Assert-True ($overhead.diskWriteBytesPerHour -lt 5MB) ("disk writes {0:N2} MB/h < 5 MB/h" -f ($overhead.diskWriteBytesPerHour / 1MB))
     Assert-True ($privSlope -lt 5) ("private memory flat: trend {0:N1} MB/h < 5 MB/h" -f $privSlope)
     Assert-True ([int]$profile.held.registryRecords -le 20000) "registry bounded ($($profile.held.registryRecords) <= 20000)"

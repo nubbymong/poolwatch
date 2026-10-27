@@ -205,4 +205,5 @@ The code builds anywhere the .NET 10 SDK runs (`EnableWindowsTargeting`); it run
 - End-to-end on the Windows CI runner (elevated): PoolWatch runs headless while `tools/Leaker` reproduces a pattern
   (a File-handle leak, file churn with release, an orphaned child, the confirmation trace, spawn storms and more), and
   the generated reports are checked. A UI smoke test takes the screenshots; a soak checks the overhead budget under a
-  busy-PC load.
+  busy-PC load, headless and with the window open, judged as steady state from 10 minutes in (the start-up peak is
+  reported, not judged).
