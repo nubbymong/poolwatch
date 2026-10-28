@@ -220,9 +220,10 @@ The main window, top to bottom:
   Settings. Settings is a short form in plain words: Start at logon (the scheduled task, changed at once), automatic
   cache clearing (`AutoClearEnabled`, `AutoClearEveryHours`, `AutoClearPoolGb`, with their units and the 30-minute
   spacing), deeper captures (`DeeperCapture`, with a line saying when it has no effect) and the token-leak guard
-  (`TokenGuardEnabled`: two lines on what it does, with the whole story in its tooltip; it starts with the tray app, so
-  it takes effect from the next start like the rest). Its values are checked
-  before saving (`SimpleSettings`, unit-tested: ranges, and an automatic clear needs a schedule or a pool size).
+  (`TokenGuardEnabled`: a line under the box with its one trade-off, that it lasts until sign-out and that a change
+  applies at the next start, since the guard starts with the tray app; the rest in its tooltip, one sentence a line).
+  Its values are checked before saving (`SimpleSettings`, unit-tested: ranges, and an automatic clear needs a schedule
+  or a pool size), and the form's fields are bound in `SimpleSettingsFields`, unit-tested too.
   **Advanced...** opens every setting in the property grid; both edit the same settings and share one Save, which
   writes settings.json for PoolWatch's next start.
 - **Two tabs**. *Pool causes* is one list merging what were four tabs: open incidents and those of the last 7 days;
