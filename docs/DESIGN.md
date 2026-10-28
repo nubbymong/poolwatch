@@ -219,7 +219,9 @@ The main window, top to bottom:
 - **Three buttons**: Clear cache now, Export report (the selected row's report folder, else the newest incident's) and
   Settings. Settings is a short form in plain words: Start at logon (the scheduled task, changed at once), automatic
   cache clearing (`AutoClearEnabled`, `AutoClearEveryHours`, `AutoClearPoolGb`, with their units and the 30-minute
-  spacing) and deeper captures (`DeeperCapture`, with a line saying when it has no effect). Its values are checked
+  spacing), deeper captures (`DeeperCapture`, with a line saying when it has no effect) and the token-leak guard
+  (`TokenGuardEnabled`: two lines on what it does, with the whole story in its tooltip; it starts with the tray app, so
+  it takes effect from the next start like the rest). Its values are checked
   before saving (`SimpleSettings`, unit-tested: ranges, and an automatic clear needs a schedule or a pool size).
   **Advanced...** opens every setting in the property grid; both edit the same settings and share one Save, which
   writes settings.json for PoolWatch's next start.

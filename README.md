@@ -80,7 +80,7 @@ PoolWatch watches and reads. [SECURITY.md](SECURITY.md#what-poolwatch-changes-on
 | Stops / disables, or restores, a background service | A dialog listing them; the original is saved; protected services are never offered |
 | Disables / enables a non-Microsoft scheduled task or startup app | Your click on the selected row |
 | Ends a heavy background process | A dialog with its identity, PID, start time and command line |
-| Sets the live foreground lock timeout to 0 (token-leak guard) | The `TokenGuardEnabled` setting (off by default) |
+| Sets the live foreground lock timeout to 0 (token-leak guard) | The `TokenGuardEnabled` setting (Settings: Token-leak guard; off by default) |
 | Creates or removes the Start-at-logon task; fixes an unsafe existing one | The checkbox; a question |
 | Creates and locks `%ProgramData%\PoolWatch`; removes an older PoolWatch's own Clear cache tasks | Automatic, and noted in the findings log (`findings.jsonl`) |
 
@@ -102,9 +102,9 @@ PoolWatch never installs a driver, never uninstalls anything, and never ships or
   - one graph: the committed paged and non-paged pool (the Task Manager figures) over the last 6 hours;
   - three buttons: **Clear cache now** (its tooltip shows the last clear's result), **Export report** (the selected
     row's report, or the newest incident's, redacted by default) and **Settings**: a short form with Start at logon
-    (applies at once), automatic cache clearing (on or off, every how many hours, over what pool size) and deeper
-    captures, each explained in a line; **Advanced...** opens every setting in a grid. Saved settings take effect when
-    PoolWatch next starts;
+    (applies at once), automatic cache clearing (on or off, every how many hours, over what pool size), deeper
+    captures and the token-leak guard, each explained in a line or two; **Advanced...** opens every setting in a grid.
+    Saved settings take effect when PoolWatch next starts;
   - two tabs. **Pool causes** is one list of what grew or was released: open and recent incidents, tags growing
     before any incident, processes piling up handles or pool (or orphaned and still busy), spawn storms and other
     pool-related findings, and each cache clear's result. Each row says what is growing, how much, how fast, the likely
@@ -143,11 +143,13 @@ one's live cost, and turns them off reversibly: the original is saved first, and
 ### Token-leak guard (optional, off by default)
 
 Some Windows 11 Insider builds leak one token reference (pool tag `Toke`) each time a process that is not allowed to take
-the foreground starts a child; agent sessions start hundreds of processes a minute. With `TokenGuardEnabled` on, the
-tray app tests for the leak at logon in a hidden helper and, when the build leaks, sets the **live**
-`ForegroundLockTimeout` to 0 for that logon (never the registry). With 0, any app may take the focus. The workaround and
-the test come from [gunrgbcr/windows-token-leak-logon-fix](https://github.com/gunrgbcr/windows-token-leak-logon-fix),
-re-implemented in C#.
+the foreground starts a child; agent sessions start hundreds of processes a minute. With `TokenGuardEnabled` on (the
+**Token-leak guard** box on the Settings form, or the setting under Advanced), the tray app tests for the leak at logon
+in a hidden helper and, when the build leaks, sets the **live** `ForegroundLockTimeout` to 0 for that logon (never the
+registry). With 0, any app may take the focus. Windows lets only the program in front change that setting, so PoolWatch
+may ask for one click to bring itself to the front. Like the other saved settings it takes effect from PoolWatch's next
+start. The workaround and the test come from
+[gunrgbcr/windows-token-leak-logon-fix](https://github.com/gunrgbcr/windows-token-leak-logon-fix), re-implemented in C#.
 
 ### AI coding-agent awareness (optional)
 

@@ -1103,6 +1103,9 @@ internal sealed class MainForm : Form
         _settings.Show(this);
         Application.DoEvents();
         ClippedControls(_settings, settingsLayout);
+        // The form sizes itself to its content: it must still fit the screen it opens on.
+        if (Screen.FromControl(_settings).WorkingArea is var area && (_settings.Height > area.Height || _settings.Width > area.Width))
+            settingsLayout.Add($"the Settings form ({_settings.Size}) is larger than the screen's working area ({area.Size})");
         var settingsForm = new List<string>();
         void Texts(Control parent) { foreach (Control c in parent.Controls) { if (c is CheckBox or Button || c is Label { Font.Bold: true }) settingsForm.Add(c.Text); Texts(c); } }
         Texts(_settings);

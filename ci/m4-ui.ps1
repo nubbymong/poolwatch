@@ -52,10 +52,12 @@ if (Test-Path $smokeFile) {
     Assert-True (@($f.layoutProblems).Count -eq 0) "Pool causes and Services: nothing clipped or overlapping at $($f.size.width) x $($f.size.height) ($($f.size.dpi) dpi): $(@($f.layoutProblems) -join '; ')"
     Assert-True ([int]$f.rows.Services -ge 1) "the Services tab was checked with its list loaded ($($f.rows.Services) services)"
     Assert-True (@($f.settingsLayoutProblems).Count -eq 0) "Settings and Settings Advanced: nothing clipped: $(@($f.settingsLayoutProblems) -join '; ')"
-    # The plain Settings form: its three parts in plain words, and Advanced for the full grid.
+    # The plain Settings form: its four parts in plain words, and Advanced for the full grid. (The layout check above covers
+    # the whole form, the token-leak guard included, at its own size: it sizes itself to its content.)
     $form = @($f.settingsForm)
     foreach ($item in 'Start at logon', 'Start PoolWatch when I sign in', 'Automatic cache clearing', 'Clear the standby cache automatically',
-                      'Deeper capture', 'Deeper automatic captures', 'Advanced...', 'Save', 'Close') {
+                      'Deeper capture', 'Deeper automatic captures', 'Token-leak guard', 'Guard against the kernel token leak of some Windows 11 Insider builds',
+                      'Advanced...', 'Save', 'Close') {
         Assert-True ($item -in $form) "Settings shows '$item'"
     }
     if (@($f.layoutProblemsAtMinimumSize).Count -gt 0) { Write-Host "  note, at the smallest window size: $(@($f.layoutProblemsAtMinimumSize) -join '; ')" }

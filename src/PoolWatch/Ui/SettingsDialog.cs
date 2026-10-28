@@ -5,7 +5,8 @@ namespace PoolWatch.Ui;
 
 /// <summary>
 /// Settings, opened from the main window's Settings button: a short form in plain words with what most people change
-/// (Start at logon, automatic cache clearing, deeper capture) and an Advanced button for every setting (the old grid).
+/// (Start at logon, automatic cache clearing, deeper capture, the token-leak guard) and an Advanced button for every
+/// setting (the old grid).
 /// Start at logon is a scheduled task and changes at once; the rest is written to settings.json by Save and taken at
 /// PoolWatch's next start, as before. The form sizes itself to its content, so nothing is cut off at any scaling.
 /// Created once and reused (the edited settings last as long as the window).
@@ -21,6 +22,8 @@ internal sealed class SettingsDialog : Form
     private readonly CheckBox _deeper = new() { Text = "Deeper automatic captures", AutoSize = true };
     private readonly Label _clearHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
     private readonly Label _deeperHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
+    private readonly CheckBox _tokenGuard = new() { Text = SimpleSettings.TokenGuardLabel, AutoSize = true };
+    private readonly ToolTip _tips = new() { AutoPopDelay = 30_000 };
     private readonly Label _problems = new() { AutoSize = true, ForeColor = Color.Firebrick, Visible = false };
     private readonly List<Control> _clearFields = [];
     private AdvancedSettingsDialog? _advanced;
@@ -83,8 +86,14 @@ internal sealed class SettingsDialog : Form
         Row(_deeper, indent);
         Row(_deeperHint, indent, bottom: 10);
 
+        // The guard starts with the tray app (UiRunner), so like the others it takes effect from PoolWatch's next start.
+        Row(Heading("Token-leak guard"));
+        Row(_tokenGuard, indent);
+        Row(Hint(SimpleSettings.TokenGuardHint), indent, bottom: 10);
+        _tips.SetToolTip(_tokenGuard, SimpleSettings.TokenGuardTip);
+
         Row(_problems, 0, bottom: 6);
-        Row(Hint("Start at logon changes at once. Save writes the other settings now; PoolWatch uses them from its next start."), 0, bottom: 8);
+        Row(Hint("Start at logon changes at once. Save writes the other settings now, the token-leak guard included; PoolWatch uses them from its next start."), 0, bottom: 8);
 
         var advanced = new Button { Text = "Advanced...", AutoSize = true, Margin = Padding.Empty };
         advanced.Click += (_, _) => actions.Guarded(this, "Advanced settings", OpenAdvanced);
@@ -127,13 +136,14 @@ internal sealed class SettingsDialog : Form
         _hours.Value = v.EveryHours;
         _poolGb.Value = v.PoolGb;
         _deeper.Checked = v.DeeperCapture;
+        _tokenGuard.Checked = v.TokenGuard;
         _clearHint.Text = SimpleSettings.AutoClearHint(_editor.Edit);
         _deeperHint.Text = SimpleSettings.DeeperCaptureHint(_editor.Edit);
         EnableClearFields();
         ShowProblems([]);
     }
 
-    private SimpleSettings Values() => new(_autoClear.Checked, _hours.Value, _poolGb.Value, _deeper.Checked);
+    private SimpleSettings Values() => new(_autoClear.Checked, _hours.Value, _poolGb.Value, _deeper.Checked, _tokenGuard.Checked);
 
     private void EnableClearFields()
     {
@@ -187,7 +197,7 @@ internal sealed class SettingsDialog : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _advanced?.Dispose();
+        if (disposing) { _advanced?.Dispose(); _tips.Dispose(); }
         base.Dispose(disposing);
     }
 }
