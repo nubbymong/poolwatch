@@ -11,7 +11,7 @@ namespace PoolWatch.Ui;
 /// <param name="EveryHours"><see cref="Settings.AutoClearEveryHours"/>: clear every this many hours; 0 = no schedule.</param>
 /// <param name="PoolGb"><see cref="Settings.AutoClearPoolGb"/>: clear when the kernel pool is over this many GB; 0 = no size rule.</param>
 /// <param name="DeeperCapture"><see cref="Settings.DeeperCapture"/>.</param>
-/// <param name="TokenGuard"><see cref="Settings.TokenGuardEnabled"/>: the token-leak guard, started with the tray app (at sign-in).</param>
+/// <param name="TokenGuard"><see cref="Settings.TokenGuardEnabled"/>: the token-leak guard, started with the tray app, so a change applies at its next start.</param>
 internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decimal PoolGb, bool DeeperCapture, bool TokenGuard)
 {
     /// <summary>The ranges <see cref="Settings.Normalize"/> keeps them in (a week; a terabyte).</summary>
@@ -21,6 +21,7 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
 
     public static SimpleSettings From(Settings s) =>
         new(s.AutoClearEnabled, Field(s.AutoClearEveryHours, MaxHours), Field(s.AutoClearPoolGb, MaxPoolGb), s.DeeperCapture, s.TokenGuardEnabled);
+
     /// <summary>A setting as the form shows it: one decimal, within the form's range.</summary>
     private static decimal Field(double v, decimal max) => double.IsFinite(v) ? Math.Clamp(Math.Round((decimal)v, 1), 0, max) : 0;
 
@@ -52,16 +53,22 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
         return true;
     }
 
-    /// <summary>The token-leak guard's checkbox, its two-line explanation, and its tooltip with the whole story.</summary>
-    public const string TokenGuardLabel = "Guard against the kernel token leak of some Windows 11 Insider builds";
+    /// <summary>The token leak guard's box.</summary>
+    public const string TokenGuardLabel = "Guard against a memory leak in some Windows 11 Insider builds";
+    /// <summary>The line under the box, always shown: the one trade-off, how long it lasts, and when a change applies.</summary>
     public const string TokenGuardHint =
-        "Tested at sign-in; if found, the public fix lasts this session only, never the registry. It may ask for one click to come to the front: only the front program may apply it.";
+        "To stop the leak, it lets any program bring its window to the front until you sign out. A change here applies the next time PoolWatch starts.";
+    /// <summary>
+    /// The box's tooltip, one sentence a line (a tooltip wraps only at the screen's edge). True to
+    /// <see cref="Core.TokenGuard.GuardPolicy"/>: the workaround goes on unless two tests in a row on the build were clean, and
+    /// nothing sets it back before sign-out.
+    /// </summary>
     public const string TokenGuardTip =
-        "On some Windows 11 Insider builds, Windows leaks a kernel token reference each time a program starts a child. With this on, " +
-        "PoolWatch tests for the leak when it starts (at sign-in) and, if the build leaks, applies the public workaround for this " +
-        "session only: the live foreground lock timeout is set to 0, never in the registry. Windows lets only the program in front " +
-        "change that setting, so PoolWatch may ask for one click to bring itself to the front. Off by default; takes effect from " +
-        "PoolWatch's next start.";
+        "Some Windows 11 Insider builds leak a little memory each time one program starts another.\n" +
+        "When PoolWatch starts, it tests for the leak.\n" +
+        "Unless two tests in a row on this build found none, it turns the workaround on.\n" +
+        "Windows lets only the program in front turn it on, so PoolWatch may ask you for one click.\n" +
+        "Turning this off does not undo a workaround already on: that lasts until you sign out.";
 
     /// <summary>The one-line explanation under Deeper capture, honest about whether it does anything with the current settings.</summary>
     public static string DeeperCaptureHint(Settings s) =>

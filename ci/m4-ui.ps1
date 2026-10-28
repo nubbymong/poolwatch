@@ -56,7 +56,7 @@ if (Test-Path $smokeFile) {
     # the whole form, the token-leak guard included, at its own size: it sizes itself to its content.)
     $form = @($f.settingsForm)
     foreach ($item in 'Start at logon', 'Start PoolWatch when I sign in', 'Automatic cache clearing', 'Clear the standby cache automatically',
-                      'Deeper capture', 'Deeper automatic captures', 'Token-leak guard', 'Guard against the kernel token leak of some Windows 11 Insider builds',
+                      'Deeper capture', 'Deeper automatic captures', 'Token leak guard', 'Guard against a memory leak in some Windows 11 Insider builds',
                       'Advanced...', 'Save', 'Close') {
         Assert-True ($item -in $form) "Settings shows '$item'"
     }

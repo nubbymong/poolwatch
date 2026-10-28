@@ -19,7 +19,7 @@ internal sealed class SettingsDialog : Form
     private readonly SimpleSettingsFields _fields = new();
     private readonly Label _clearHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
     private readonly Label _deeperHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
-    private readonly ToolTip _tips = new() { AutoPopDelay = 30_000 };
+    private readonly ToolTip _tips = new() { AutoPopDelay = 30_000, InitialDelay = 400 };
     private readonly Label _problems = new() { AutoSize = true, ForeColor = Color.Firebrick, Visible = false };
     private readonly List<Control> _clearFields = [];
     private AdvancedSettingsDialog? _advanced;
@@ -83,13 +83,13 @@ internal sealed class SettingsDialog : Form
         Row(_deeperHint, indent, bottom: 10);
 
         // The guard starts with the tray app (UiRunner), so like the others it takes effect from PoolWatch's next start.
-        Row(Heading("Token-leak guard"));
+        Row(Heading("Token leak guard"));
         Row(_fields.TokenGuard, indent);
         Row(Hint(SimpleSettings.TokenGuardHint), indent, bottom: 10);
         _tips.SetToolTip(_fields.TokenGuard, SimpleSettings.TokenGuardTip);
 
         Row(_problems, 0, bottom: 6);
-        Row(Hint("Start at logon changes at once. Save writes the other settings now, the token-leak guard included; PoolWatch uses them from its next start."), 0, bottom: 8);
+        Row(Hint("Start at logon changes at once. Save writes the other settings now; PoolWatch uses them from its next start."), 0, bottom: 8);
 
         var advanced = new Button { Text = "Advanced...", AutoSize = true, Margin = Padding.Empty };
         advanced.Click += (_, _) => actions.Guarded(this, "Advanced settings", OpenAdvanced);

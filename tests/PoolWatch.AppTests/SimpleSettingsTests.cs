@@ -4,8 +4,8 @@ using PoolWatch.Ui;
 namespace PoolWatch.AppTests;
 
 /// <summary>
-/// The plain Settings form's mapping onto <see cref="Settings"/> (automatic cache clearing and deeper capture) and its
-/// checks. Pure: nothing is saved and no window is opened.
+/// The plain Settings form's mapping onto <see cref="Settings"/> (automatic cache clearing, deeper capture and the token
+/// leak guard), its checks, its words and its fields. Nothing is saved and no window is opened.
 /// </summary>
 public class SimpleSettingsTests
 {
@@ -16,7 +16,6 @@ public class SimpleSettingsTests
         Assert.Equal(new SimpleSettings(true, 2.5m, 12m, true, true), SimpleSettings.From(s));
         // The defaults: off, every hour, over 8 GB, no deeper capture, no token-leak guard.
         Assert.Equal(new SimpleSettings(false, 1m, 8m, false, false), SimpleSettings.From(new Settings()));
-        Assert.False(new Settings().TokenGuardEnabled); // off by default, so the form starts unticked
     }
 
     [Fact]
@@ -63,18 +62,31 @@ public class SimpleSettingsTests
     }
 
     [Fact]
-    public void TheTokenLeakGuardIsExplainedInPlainWords()
+    public void TheTokenLeakGuardIsExplainedInShortPlainWords()
     {
-        // What it does, that it is this session only and never the registry, the one click and why, and when it applies.
-        Assert.Contains("Windows 11 Insider", SimpleSettings.TokenGuardLabel);
-        Assert.Contains("this session only", SimpleSettings.TokenGuardHint);
-        Assert.Contains("never the registry", SimpleSettings.TokenGuardHint);
-        Assert.Contains("one click", SimpleSettings.TokenGuardHint);
-        Assert.Contains("only the front program", SimpleSettings.TokenGuardHint);
-        Assert.Contains("starts a child", SimpleSettings.TokenGuardTip);
-        Assert.Contains("next start", SimpleSettings.TokenGuardTip);
-        // Two lines on the form: the hint stays short (measured: about 95 characters a line at the form's width).
-        Assert.True(SimpleSettings.TokenGuardHint.Length <= 180, $"{SimpleSettings.TokenGuardHint.Length} characters");
+        string label = SimpleSettings.TokenGuardLabel, hint = SimpleSettings.TokenGuardHint, tip = SimpleSettings.TokenGuardTip;
+        Assert.Contains("Windows 11 Insider", label);
+        // Under the box, so it is read without a mouse, and short: the one trade-off and how long it lasts.
+        Assert.Contains("lets any program bring its window to the front until you sign out", hint);
+        Assert.True(hint.Length <= 150, $"{hint.Length} characters");
+        // The tooltip: when the workaround really goes on, the one click and why, and that turning it off undoes nothing.
+        Assert.Contains("Unless two tests in a row on this build found none", tip);
+        Assert.Contains("one click", tip);
+        Assert.Contains("does not undo", tip);
+        // A tooltip wraps only at the screen's edge, so it breaks its own lines.
+        Assert.All(tip.Split('\n'), line => Assert.True(line.Length <= 100, line));
+        // No setting names or technical terms (those stay in Advanced and the README).
+        foreach (var text in new[] { label, hint, tip })
+            foreach (var word in new[] { "TokenGuard", "registry", "kernel token", "child", "timeout", "foreground", "session" })
+                Assert.DoesNotContain(word, text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TheLineUnderTheBoxSaysAChangeAppliesAtTheNextStart()
+    {
+        // The guard starts with the tray app (UiRunner), so a change waits for PoolWatch's next start: said where the box is,
+        // not only in its tooltip.
+        Assert.EndsWith("A change here applies the next time PoolWatch starts.", SimpleSettings.TokenGuardHint);
     }
 
     [Fact]
