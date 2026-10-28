@@ -22,12 +22,12 @@ problem, is in [SECURITY.md](SECURITY.md).
 ## Install
 
 Each [release](https://github.com/nubbymong/poolwatch/releases) has two zips and a checksum file. The names carry the
-release tag, for example tag `v1.0.0`:
+release tag, for example tag `v1.1.0`:
 
-| File (tag `v1.0.0`) | Needs | The exe inside |
+| File (tag `v1.1.0`) | Needs | The exe inside |
 |---|---|---|
-| `PoolWatch-v1.0.0-win-x64.zip` | the .NET 10 Desktop Runtime (x64) | `PoolWatch.exe` |
-| `PoolWatch-v1.0.0-win-x64-selfcontained.zip` | nothing (the runtime is inside) | `PoolWatch-selfcontained.exe` |
+| `PoolWatch-v1.1.0-win-x64.zip` | the .NET 10 Desktop Runtime (x64) | `PoolWatch.exe` |
+| `PoolWatch-v1.1.0-win-x64-selfcontained.zip` | nothing (the runtime is inside) | `PoolWatch-selfcontained.exe` |
 | `SHA256SUMS.txt` | the SHA-256 of each zip | |
 
 Every PoolWatch exe in them is signed (Authenticode, timestamped) by **Nicholas Moger**, certificate thumbprint
@@ -38,12 +38,12 @@ Below, use the zip you downloaded, and the exe name from the table (`PoolWatch.e
 
 1. Check the download, in PowerShell (the name is the file you downloaded):
    ```powershell
-   (Get-FileHash .\PoolWatch-v1.0.0-win-x64.zip -Algorithm SHA256).Hash   # compare with SHA256SUMS.txt
+   (Get-FileHash .\PoolWatch-v1.1.0-win-x64.zip -Algorithm SHA256).Hash   # compare with SHA256SUMS.txt
    ```
 2. Unpack the **whole zip** into `%ProgramFiles%\PoolWatch`, from an administrator PowerShell, and check the signature of
    the exe that zip holds:
    ```powershell
-   Expand-Archive .\PoolWatch-v1.0.0-win-x64.zip -DestinationPath "$env:ProgramFiles\PoolWatch"
+   Expand-Archive .\PoolWatch-v1.1.0-win-x64.zip -DestinationPath "$env:ProgramFiles\PoolWatch"
    (Get-AuthenticodeSignature "$env:ProgramFiles\PoolWatch\PoolWatch.exe").Status   # Valid
    # self-contained zip: check PoolWatch-selfcontained.exe instead
    ```
