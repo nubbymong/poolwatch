@@ -37,6 +37,32 @@ public class SimpleSettingsTests
     }
 
     [Fact]
+    public void TheFormsTokenLeakGuardBoxShowsTheSettingAndSavesWhatIsTicked()
+    {
+        var fields = new SimpleSettingsFields();
+        Assert.Equal(SimpleSettings.TokenGuardLabel, fields.TokenGuard.Text);
+        fields.Show(SimpleSettings.From(new Settings { TokenGuardEnabled = true }));
+        Assert.True(fields.TokenGuard.Checked);
+        fields.TokenGuard.Checked = false; // the user unticks it
+        Assert.False(fields.Values().TokenGuard);
+        fields.Show(SimpleSettings.From(new Settings()));
+        Assert.False(fields.TokenGuard.Checked);
+        fields.TokenGuard.Checked = true;
+        Assert.True(fields.Values().TokenGuard);
+    }
+
+    [Fact]
+    public void TheFormsFieldsShowAndReadBackEveryValue()
+    {
+        var fields = new SimpleSettingsFields();
+        foreach (var v in new SimpleSettings[] { new(true, 2.5m, 12m, false, true), new(false, 6m, 0m, true, false) })
+        {
+            fields.Show(v);
+            Assert.Equal(v, fields.Values());
+        }
+    }
+
+    [Fact]
     public void TheTokenLeakGuardIsExplainedInPlainWords()
     {
         // What it does, that it is this session only and never the registry, the one click and why, and when it applies.

@@ -16,13 +16,9 @@ internal sealed class SettingsDialog : Form
     private readonly MonitorEngine _engine;
     private readonly SettingsEditor _editor;
     private readonly CheckBox _logon = new() { Text = "Start PoolWatch when I sign in", AutoSize = true };
-    private readonly CheckBox _autoClear = new() { Text = "Clear the standby cache automatically", AutoSize = true };
-    private readonly NumericUpDown _hours = new() { DecimalPlaces = 1, Increment = 0.5m, Minimum = 0, Maximum = SimpleSettings.MaxHours, TextAlign = HorizontalAlignment.Right };
-    private readonly NumericUpDown _poolGb = new() { DecimalPlaces = 1, Increment = 1, Minimum = 0, Maximum = SimpleSettings.MaxPoolGb, TextAlign = HorizontalAlignment.Right };
-    private readonly CheckBox _deeper = new() { Text = "Deeper automatic captures", AutoSize = true };
+    private readonly SimpleSettingsFields _fields = new();
     private readonly Label _clearHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
     private readonly Label _deeperHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
-    private readonly CheckBox _tokenGuard = new() { Text = SimpleSettings.TokenGuardLabel, AutoSize = true };
     private readonly ToolTip _tips = new() { AutoPopDelay = 30_000 };
     private readonly Label _problems = new() { AutoSize = true, ForeColor = Color.Firebrick, Visible = false };
     private readonly List<Control> _clearFields = [];
@@ -72,25 +68,25 @@ internal sealed class SettingsDialog : Form
                  "tick or untick it, and is created only for a copy installed in Program Files."), indent, bottom: 10);
 
         Row(Heading("Automatic cache clearing"));
-        Row(_autoClear, indent);
-        _hours.Width = S(70);
-        _poolGb.Width = S(70);
-        var every = Line(new Label { Text = "Every", AutoSize = true }, _hours, new Label { Text = "hours (0 = no schedule)", AutoSize = true });
-        var over = Line(new Label { Text = "When the kernel pool is over", AutoSize = true }, _poolGb, new Label { Text = "GB (0 = no size rule)", AutoSize = true });
+        Row(_fields.AutoClear, indent);
+        _fields.Hours.Width = S(70);
+        _fields.PoolGb.Width = S(70);
+        var every = Line(new Label { Text = "Every", AutoSize = true }, _fields.Hours, new Label { Text = "hours (0 = no schedule)", AutoSize = true });
+        var over = Line(new Label { Text = "When the kernel pool is over", AutoSize = true }, _fields.PoolGb, new Label { Text = "GB (0 = no size rule)", AutoSize = true });
         Row(every, indent * 2);
         Row(over, indent * 2);
         Row(_clearHint, indent * 2, bottom: 10);
         _clearFields.AddRange([every, over]);
 
         Row(Heading("Deeper capture"));
-        Row(_deeper, indent);
+        Row(_fields.Deeper, indent);
         Row(_deeperHint, indent, bottom: 10);
 
         // The guard starts with the tray app (UiRunner), so like the others it takes effect from PoolWatch's next start.
         Row(Heading("Token-leak guard"));
-        Row(_tokenGuard, indent);
+        Row(_fields.TokenGuard, indent);
         Row(Hint(SimpleSettings.TokenGuardHint), indent, bottom: 10);
-        _tips.SetToolTip(_tokenGuard, SimpleSettings.TokenGuardTip);
+        _tips.SetToolTip(_fields.TokenGuard, SimpleSettings.TokenGuardTip);
 
         Row(_problems, 0, bottom: 6);
         Row(Hint("Start at logon changes at once. Save writes the other settings now, the token-leak guard included; PoolWatch uses them from its next start."), 0, bottom: 8);
@@ -112,7 +108,7 @@ internal sealed class SettingsDialog : Form
         form.Controls.Add(buttons);
         Controls.Add(form);
 
-        _autoClear.CheckedChanged += (_, _) => EnableClearFields();
+        _fields.AutoClear.CheckedChanged += (_, _) => EnableClearFields();
         LoadFrom();
 
         // schtasks /query can take seconds: ask in the background, then wire the checkbox on this (the UI) thread. The
@@ -131,23 +127,16 @@ internal sealed class SettingsDialog : Form
     /// <summary>The form's fields from the edited settings (also after Advanced, which edits the same settings).</summary>
     private void LoadFrom()
     {
-        var v = SimpleSettings.From(_editor.Edit);
-        _autoClear.Checked = v.AutoClear;
-        _hours.Value = v.EveryHours;
-        _poolGb.Value = v.PoolGb;
-        _deeper.Checked = v.DeeperCapture;
-        _tokenGuard.Checked = v.TokenGuard;
+        _fields.Show(SimpleSettings.From(_editor.Edit));
         _clearHint.Text = SimpleSettings.AutoClearHint(_editor.Edit);
         _deeperHint.Text = SimpleSettings.DeeperCaptureHint(_editor.Edit);
         EnableClearFields();
         ShowProblems([]);
     }
 
-    private SimpleSettings Values() => new(_autoClear.Checked, _hours.Value, _poolGb.Value, _deeper.Checked, _tokenGuard.Checked);
-
     private void EnableClearFields()
     {
-        foreach (var c in _clearFields) c.Enabled = _autoClear.Checked;
+        foreach (var c in _clearFields) c.Enabled = _fields.AutoClear.Checked;
     }
 
     private void ShowProblems(List<string> problems)
@@ -158,7 +147,7 @@ internal sealed class SettingsDialog : Form
 
     private void Save()
     {
-        if (!Values().ApplyTo(_editor.Edit, out var problems)) { ShowProblems(problems); return; }
+        if (!_fields.Values().ApplyTo(_editor.Edit, out var problems)) { ShowProblems(problems); return; }
         ShowProblems([]);
         _editor.Save(this);
         LoadFrom(); // Save may have kept the automatic clear off (your own clear task stays)
@@ -167,7 +156,7 @@ internal sealed class SettingsDialog : Form
     private void OpenAdvanced()
     {
         // The grid shows what this form holds now (it must be valid first), and this form shows what the grid saved.
-        if (!Values().ApplyTo(_editor.Edit, out var problems)) { ShowProblems(problems); return; }
+        if (!_fields.Values().ApplyTo(_editor.Edit, out var problems)) { ShowProblems(problems); return; }
         if (!Advanced.Visible) Advanced.ShowDialog(this);
         LoadFrom();
     }
@@ -200,4 +189,28 @@ internal sealed class SettingsDialog : Form
         if (disposing) { _advanced?.Dispose(); _tips.Dispose(); }
         base.Dispose(disposing);
     }
+}
+
+/// <summary>
+/// The plain form's five value fields and how they show and read <see cref="SimpleSettings"/>. The dialog lays them out;
+/// they are kept apart from it so a test can bind them without an engine or a window.
+/// </summary>
+internal sealed class SimpleSettingsFields
+{
+    public CheckBox AutoClear { get; } = new() { Text = "Clear the standby cache automatically", AutoSize = true };
+    public NumericUpDown Hours { get; } = new() { DecimalPlaces = 1, Increment = 0.5m, Minimum = 0, Maximum = SimpleSettings.MaxHours, TextAlign = HorizontalAlignment.Right };
+    public NumericUpDown PoolGb { get; } = new() { DecimalPlaces = 1, Increment = 1, Minimum = 0, Maximum = SimpleSettings.MaxPoolGb, TextAlign = HorizontalAlignment.Right };
+    public CheckBox Deeper { get; } = new() { Text = "Deeper automatic captures", AutoSize = true };
+    public CheckBox TokenGuard { get; } = new() { Text = SimpleSettings.TokenGuardLabel, AutoSize = true };
+
+    public void Show(SimpleSettings v)
+    {
+        AutoClear.Checked = v.AutoClear;
+        Hours.Value = v.EveryHours;
+        PoolGb.Value = v.PoolGb;
+        Deeper.Checked = v.DeeperCapture;
+        TokenGuard.Checked = v.TokenGuard;
+    }
+
+    public SimpleSettings Values() => new(AutoClear.Checked, Hours.Value, PoolGb.Value, Deeper.Checked, TokenGuard.Checked);
 }
