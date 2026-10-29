@@ -4,6 +4,7 @@ using PoolWatch.Core.Correlation;
 using PoolWatch.Core.Detection;
 using PoolWatch.Core.Findings;
 using PoolWatch.Core.Identity;
+using PoolWatch.Core.Impact;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
@@ -15,6 +16,7 @@ namespace PoolWatch.AppTests;
 /// The Pool causes list (the main window's first tab): one row per incident, growing tag, process that stands out, and
 /// pool-related finding. Only the pure mapping is tested here; nothing opens a window or reads the system.
 /// </summary>
+[Collection(nameof(WholeWindowLayout))] // lays windows out: one class at a time, after the parallel ones
 public class PoolCausesTests
 {
     private const long MB = 1L << 20, GB = 1L << 30;
@@ -59,7 +61,9 @@ public class PoolCausesTests
     {
         var r = PoolCauses.ForIncident(Incident(IncidentKind.Growth, (long)(1.2 * GB), open: true), "Open files (File, Windows kernel)", Now);
         Assert.Equal(CauseKind.Incident, r.Kind);
-        Assert.Equal(new[] { "Open files (File, Windows kernel)", "+1.2 GB", "1.2 GB/h", "Leaker.exe (PID 7716)", "strong evidence", "since 14:00" }, r.Cells);
+        // With no window stats for its tag, Grew and Per hour say the incident's own growth and rate.
+        Assert.Equal(new[] { "Open files (File, Windows kernel)", "+1.2 GB", "", "", "1.2 GB/h", "Leaker.exe (PID 7716)", "strong evidence", "High", "since 14:00" }, r.Cells);
+        Assert.Equal("Open files (File, Windows kernel): +1.2 GB", r.Title);
         Assert.True(r.Active);
         Assert.Equal(RowTone.Alert, r.Tone);
         Assert.NotNull(r.Folder);
@@ -86,7 +90,11 @@ public class PoolCausesTests
         Assert.Equal("File objects (File) was released", r.What);
         Assert.Equal("freed 400 MB", r.HowMuch);
         Assert.Equal("", r.HowFast);
-        Assert.DoesNotMatch(Negative, string.Join(" ", r.Cells));
+        // Never a negative growth: what fell is its net change, with the true minus sign.
+        Assert.Equal(("", "\u2212400 MB"), (r.Grew, r.Net));
+        Assert.Equal(-400 * MB, r.NetBytes);
+        AssertOnlyTheNetChangeIsSigned(r);
+        Assert.Equal("File objects (File) was released: freed 400 MB", r.Title);
     }
 
     /// <summary>A tag's ranking with one owner at <paramref name="level"/> (or none that stood out).</summary>
@@ -280,7 +288,8 @@ public class PoolCausesTests
         Assert.Equal("freed 500 MB", released.HowMuch);
         Assert.Equal("", released.Cause);
         Assert.False(released.Active);
-        Assert.DoesNotMatch(Negative, string.Join(" ", released.Cells));
+        Assert.Equal(("", "\u2212500 MB"), (released.Grew, released.Net));
+        AssertOnlyTheNetChangeIsSigned(released);
 
         var retained = PoolCauses.ForTag(Tag(TagState.Retained, 700 * MB, 0, 0, Now.AddMinutes(-20)), "FCB_DATA (Reff, refs.sys)", null, Now);
         Assert.Equal("700 MB held", retained.HowMuch);
@@ -318,6 +327,38 @@ public class PoolCausesTests
         Assert.Equal("Pool charged to Leaker.exe", q.What);
         Assert.Equal("+40 MB (now 100 MB)", q.HowMuch);
         Assert.Equal("40 MB/h", q.HowFast);
+    }
+
+    /// <summary>
+    /// Every row rounds the amounts in its columns as a tag's window row and the stats beside the graph do (whole megabytes
+    /// below a gigabyte, then one decimal): an incident's growth, a release, a tag held, released or growing now, a
+    /// process's pool charge and a clear. One column never says "+21.29 GB" on one row and "+21.3 GB" on the next.
+    /// </summary>
+    [Fact]
+    public void EveryRowRoundsItsAmountsAsTheStatsDo()
+    {
+        long grew = (long)(21.29 * GB), freed = (long)(4.83 * GB);
+        Assert.Equal("+21.3 GB", PoolCauses.ForIncident(Incident(IncidentKind.Growth, grew, open: true), "a", Now).Grew);
+        var release = PoolCauses.ForIncident(Incident(IncidentKind.Release, -freed, open: false, dropped: freed), "a", Now);
+        Assert.Equal(("freed 4.8 GB", "−4.8 GB"), (release.HowMuch, release.Net));
+        Assert.Equal("4.8 GB held", PoolCauses.ForTag(Tag(TagState.Retained, freed, 0, 0), "a", null, Now).Grew);
+        var released = PoolCauses.ForTag(Tag(TagState.Released, MB, -freed, -freed), "a", null, Now);
+        Assert.Equal(("freed 4.8 GB", "−4.8 GB"), (released.HowMuch, released.Net));
+        Assert.Equal("+103 MB (now 1.2 GB)", PoolCauses.ForTag(Tag(TagState.Growing, (long)(1.23 * GB), 0, (long)(102.6 * MB)), "a", null, Now).Grew);
+        Assert.Equal("+103 MB (now 163 MB)", PoolCauses.ForProcess(Proc(10, 10, (long)(162.6 * MB), 60 * MB), Now).Grew);
+        var clear = PoolCauses.ForFinding(new Finding
+        {
+            TimeUtc = Now.AddMinutes(-5), Kind = FindingKind.CacheClear, Title = "Clear cache (standby list, manual): freed 4.83 GB",
+            Data = new Dictionary<string, object?> { ["freedBytes"] = freed, ["error"] = null },
+        }, Now);
+        Assert.Equal(("freed 4.8 GB", "4.8 GB"), (clear.HowMuch, clear.Cleared));
+        // A clear that freed less than half a megabyte freed nothing, in both places.
+        var none = PoolCauses.ForFinding(new Finding
+        {
+            TimeUtc = Now.AddMinutes(-5), Kind = FindingKind.CacheClear, Title = "Clear cache (standby list, manual): freed 100 KB",
+            Data = new Dictionary<string, object?> { ["freedBytes"] = 100 * 1024L, ["error"] = null },
+        }, Now);
+        Assert.Equal(("freed nothing", "nothing"), (none.HowMuch, none.Cleared));
     }
 
     [Fact]
@@ -363,16 +404,328 @@ public class PoolCausesTests
     }
 
     [Fact]
-    public void NoRowEverShowsANegativeAmount()
+    public void NoRowEverShowsANegativeGrowthAndOnlyItsNetChangeIsSigned()
     {
         long[] amounts = [-2 * GB, -300 * MB, -1, 0, 1, 300 * MB, 2 * GB];
         foreach (var a in amounts)
         foreach (var b in amounts)
         {
             foreach (var state in new[] { TagState.Growing, TagState.Retained, TagState.Released })
-                Assert.DoesNotMatch(Negative, string.Join(" ", PoolCauses.ForTag(Tag(state, Math.Abs(a), a, b), "x", null, Now).Cells));
+                AssertOnlyTheNetChangeIsSigned(PoolCauses.ForTag(Tag(state, Math.Abs(a), a, b), "x", null, Now));
             foreach (var kind in Enum.GetValues<IncidentKind>())
-                Assert.DoesNotMatch(Negative, string.Join(" ", PoolCauses.ForIncident(Incident(kind, a, open: b > 0, dropped: Math.Abs(b)), "x", Now).Cells));
+                AssertOnlyTheNetChangeIsSigned(PoolCauses.ForIncident(Incident(kind, a, open: b > 0, dropped: Math.Abs(b)), "x", Now));
+            // And over a window: whatever the counts, Grew, Cleared and Per hour are never negative.
+            var counts = new Core.Growth.GrowthCounts(Math.Abs(a), Math.Abs(b), Math.Abs(a - b) / 2);
+            AssertOnlyTheNetChangeIsSigned(PoolCauses.WithWindow(PoolCauses.ForTag(Tag(TagState.Growing, GB, a, b), "x", null, Now), SixHours, counts, GB));
         }
+    }
+
+    /// <summary>No cell but Net change holds a sign; Net change is empty, "0", or a "+" or the true minus before an amount.</summary>
+    private static void AssertOnlyTheNetChangeIsSigned(CauseRow r)
+    {
+        var cells = r.Cells;
+        Assert.DoesNotMatch(Negative, string.Join(" ", cells.Where((_, i) => i != PoolCauses.NetColumn)));
+        Assert.DoesNotMatch(new Regex(@"^\+.*\+|^-|\+-|-\d"), r.Net);
+        Assert.Matches(new Regex("^(|0|[+\u2212]\\d.* (B|KB|MB|GB))$"), r.Net);
+    }
+
+    // ------------------------------------------------------------------ the window's columns, the clears' rows and the sort
+
+    /// <summary>The Advanced view's default window, measured all through: 6 clears in it.</summary>
+    private static readonly Core.Growth.GrowthWindow SixHours = new()
+    {
+        Span = TimeSpan.FromHours(6), NowUtc = Now, Measured = TimeSpan.FromHours(6), Clears = 6, StartedUtc = Now.AddDays(-1),
+        Total = new Core.Growth.GrowthCounts(7578 * MB, 7270 * MB, 0),
+    };
+
+    [Fact]
+    public void ARowAboutATagTakesItsColumnsFromTheWindowAsTheMockupSaysThem()
+    {
+        Assert.Equal(["What is growing", "Grew", "Cleared", "Net", "Per hour", "Likely cause", "Confidence", "Impact", "When"], PoolCauses.Columns);
+        var growing = PoolCauses.ForTag(Tag(TagState.Growing, 912 * MB, 100 * MB, 300 * MB), "File system metadata (Reff, refs.sys)", View(Confidence.Correlated), Now);
+        var r = PoolCauses.WithWindow(growing, SixHours, new Core.Growth.GrowthCounts(5018 * MB, 4915 * MB, 0), 912 * MB);
+        Assert.Equal(["File system metadata (Reff, refs.sys)", "+4.9 GB (now 912 MB)", "4.8 GB", "+103 MB", "836.3 MB/h", "Leaker", "some evidence", "High", "now"], r.Cells);
+        Assert.Equal("File system metadata (Reff, refs.sys): +4.9 GB (now 912 MB)", r.Title);
+        Assert.True(r.Windowed);
+        Assert.Equal((5018 * MB, 4915 * MB, 103 * MB), (r.GrewBytes!.Value, r.ClearedBytes!.Value, r.NetBytes!.Value));
+        // Security tokens, which the clears free none of; an incident's row of a counted tag follows the window too.
+        var toke = PoolCauses.WithWindow(growing, SixHours, new Core.Growth.GrowthCounts(150 * MB, 0, 0), 760 * MB);
+        Assert.Equal(("+150 MB (now 760 MB)", "nothing", "+150 MB", "25 MB/h"), (toke.Grew, toke.Cleared, toke.Net, toke.PerHour));
+        var incident = PoolCauses.WithWindow(PoolCauses.ForIncident(Incident(IncidentKind.Growth, GB, open: true), "Open files (File)", Now), SixHours,
+            new Core.Growth.GrowthCounts(GB, 0, 0), 2 * GB);
+        Assert.Equal(("+1.0 GB (now 2.0 GB)", "nothing", "+1.0 GB"), (incident.Grew, incident.Cleared, incident.Net));
+        Assert.Equal("Open files (File): +1.0 GB (now 2.0 GB)", incident.Title);
+        // Before half an hour is measured, the rate is left out (the panel says when it shows).
+        var early = SixHours with { Measured = TimeSpan.FromMinutes(20) };
+        Assert.Equal("", PoolCauses.WithWindow(growing, early, new Core.Growth.GrowthCounts(50 * MB, 0, 0), 912 * MB).PerHour);
+        Assert.Null(PoolCauses.WithWindow(growing, early, new Core.Growth.GrowthCounts(50 * MB, 0, 0), 912 * MB).PerHourBytes);
+    }
+
+    [Fact]
+    public void AClearsRowSaysWhatItFreedInTheClearedColumn()
+    {
+        Finding Clear(long freed, string? error = null) => new()
+        {
+            TimeUtc = Now.AddMinutes(-20), Kind = FindingKind.CacheClear, Severity = FindingSeverity.Info, Title = "Clear cache (standby list, automatic): freed 1.2 GB",
+            Data = new Dictionary<string, object?> { ["freedBytes"] = freed, ["error"] = error },
+        };
+        var row = PoolCauses.ForFinding(Clear((long)(1.2 * GB)), Now);
+        Assert.Equal("Clear cache (standby list, automatic)", row.What);
+        Assert.Equal(("", "1.2 GB", "", ""), (row.Grew, row.Cleared, row.Net, row.PerHour));
+        Assert.Equal((long)(1.2 * GB), row.ClearedBytes);
+        Assert.Equal("Clear cache (standby list, automatic): freed 1.2 GB", row.Title);
+        Assert.Equal("nothing", PoolCauses.ForFinding(Clear(100 * 1024), Now).Cleared);   // under half a megabyte
+        Assert.Equal("nothing", PoolCauses.ForFinding(Clear(-50 * MB), Now).Cleared);     // the pool grew in its 2 minutes
+        var failed = PoolCauses.ForFinding(Clear(0, "access denied"), Now);
+        Assert.Equal(("Clear cache (standby list, automatic) failed", ""), (failed.What, failed.Cleared));
+    }
+
+    [Fact]
+    public void OnlyRowsAboutATagHappeningNowFollowTheWindow()
+    {
+        // The same tag in four rows: its open incident and its growing row follow the window; an incident from yesterday
+        // and a release keep their own figures (what that incident grew, what the release freed).
+        var counts = new Core.Growth.GrowthCounts(5018 * MB, 4915 * MB, 0);
+        var window = SixHours with { Tags = new Dictionary<PoolTag, Core.Growth.GrowthCounts> { [PoolTag.Parse("File")] = counts, [PoolTag.Parse("Reff")] = counts } };
+        var open = PoolCauses.ForIncident(Incident(IncidentKind.Growth, GB, open: true), "open", Now);
+        var closed = PoolCauses.ForIncident(Incident(IncidentKind.Growth, GB, open: false), "closed", Now);
+        var growing = PoolCauses.ForTag(Tag(TagState.Growing, 912 * MB, 100 * MB, 300 * MB), "growing", null, Now);
+        var released = PoolCauses.ForTag(Tag(TagState.Released, 100 * MB, -400 * MB, -400 * MB), "released", null, Now);
+        var rows = PoolCauses.Windowed([open, closed, growing, released], window, _ => 912 * MB);
+        Assert.Equal([true, false, true, false], rows.Select(r => r.Windowed));
+        Assert.Equal("+4.9 GB (now 912 MB)", rows[0].Grew);
+        Assert.Equal(("+1.0 GB", "2.0 GB/h"), (rows[1].Grew, rows[1].PerHour)); // its own growth over its half hour
+        Assert.Equal("+4.9 GB (now 912 MB)", rows[2].Grew);
+        Assert.Equal("\u2212400 MB", rows[3].Net);
+        Assert.Equal("Grew, Cleared, Net change and Per hour of tags now: last 6 hours", Core.Growth.GrowthText.WindowNote(Core.Growth.StatsWindow.Default));
+        Assert.Contains("tags growing or held now and their open incidents", MainForm.WindowNoteTip);
+    }
+
+    [Fact]
+    public void PerHourSortsEveryKindOfRowByTheRateItShows()
+    {
+        // An incident's own rate (1 GB in its hour), a tag row with its 10-minute rate (100 MB in 10 minutes: 600 MB/h), a
+        // tag the window says grew (836.3 MB/h), and one the window says fell: it shows no rate, so it sorts as none.
+        var incident = PoolCauses.ForIncident(Incident(IncidentKind.Growth, GB, open: true), "i", Now);
+        var tag = PoolCauses.ForTag(Tag(TagState.Growing, 912 * MB, 100 * MB, 300 * MB), "t", null, Now);
+        var grew = PoolCauses.WithWindow(PoolCauses.ForTag(Tag(TagState.Growing, GB, 10 * MB, 20 * MB), "g", null, Now), SixHours,
+            new Core.Growth.GrowthCounts(5018 * MB, 4915 * MB, 0), 912 * MB);
+        var fell = PoolCauses.WithWindow(PoolCauses.ForTag(Tag(TagState.Growing, GB, 10 * MB, 20 * MB), "f", null, Now), SixHours,
+            Core.Growth.GrowthCounts.Of(-300 * MB, 0), 600 * MB);
+        Assert.Equal(("", (double?)null), (fell.PerHour, fell.PerHourBytes));
+        List<CauseRow> rows = [fell, grew, tag, incident];
+        string Order(bool descending) => string.Join(",", PoolCausesSort.Sort(rows, PoolCauses.PerHourColumn, descending).Select(r => r.What));
+        Assert.Equal("t,g,i,f", Order(descending: false)); // 600 MB/h, 836.3 MB/h, 1 GB/h; no rate last
+        Assert.Equal("i,g,t,f", Order(descending: true));
+    }
+
+    private static CauseRow Row(string what, long? grew, double? perHour = null, Confidence? level = null, string cause = "", int minutesAgo = 0, long? net = null,
+        ImpactLevel? impact = null) =>
+        new("k:" + what, CauseKind.Tag, what, "", "", cause, "", "") { GrewBytes = grew, PerHourBytes = perHour, Level = level, TimeUtc = Now.AddMinutes(-minutesAgo), NetBytes = net, Impact = impact };
+
+    [Fact]
+    public void AColumnSortsByItsNumbersOneWayThenTheOtherWithEmptyCellsLast()
+    {
+        List<CauseRow> rows = [Row("b", 300 * MB, 50, Confidence.Weak, "Zed", 5, -10, ImpactLevel.Medium), Row("A", null, null, null, "", 1),
+            Row("c", 2 * GB, 900, Confidence.ConfirmedByTrace, "alpha", 30, 5, ImpactLevel.High), Row("d", 300 * MB, 10, Confidence.Correlated, "Mid", 10, 0, ImpactLevel.None)];
+        string Order(int column, bool descending) => string.Concat(PoolCausesSort.Sort(rows, column, descending).Select(r => r.What));
+        Assert.Equal("bdcA", Order(PoolCauses.GrewColumn, false)); // 300 MB, 300 MB (ties keep the list's order), 2 GB; no number last
+        Assert.Equal("cbdA", Order(PoolCauses.GrewColumn, true));  // the other way, the empty cell still last
+        Assert.Equal("dbcA", Order(PoolCauses.PerHourColumn, false));
+        Assert.Equal("bdcA", Order(PoolCauses.NetColumn, false));
+        Assert.Equal("Abcd", Order(0, false));   // by name, whatever the case
+        Assert.Equal("dcbA", Order(0, true));
+        Assert.Equal("cdbA", Order(PoolCauses.CauseColumn, false));      // the likely cause by name; none last
+        Assert.Equal("bdcA", Order(PoolCauses.ConfidenceColumn, false)); // the confidence by its strength, not its words
+        Assert.Equal("dbcA", Order(PoolCauses.ImpactColumn, false));     // the impact by its level: None, Medium, High; none last
+        Assert.Equal("cbdA", Order(PoolCauses.ImpactColumn, true));
+        Assert.Equal("cdbA", Order(PoolCauses.WhenColumn, false));       // When: the oldest first
+        Assert.Equal("Abdc", Order(PoolCauses.WhenColumn, true));
+        Assert.Equal("bAcd", Order(PoolCauses.ClearedColumn, false)); // no row has a number: the list's own order
+    }
+
+    // ------------------------------------------------------------------ impact and what PoolWatch already does
+
+    [Fact]
+    public void TheImpactColumnIsTheAgreedRuleOfTheGrowthPerHourWithTheClearsAddedBack()
+    {
+        // Over the window: the tag's growth with PoolWatch's own clears added back, per hour measured (FromGrowth).
+        var growing = PoolCauses.ForTag(Tag(TagState.Growing, 912 * MB, 100 * MB, 300 * MB), "x", null, Now);
+        ImpactLevel? Over(long grew, long fell = 0, double hours = 6) =>
+            PoolCauses.WithWindow(growing, SixHours with { Measured = TimeSpan.FromHours(hours) }, new Core.Growth.GrowthCounts(grew, grew / 2, fell), GB).Impact;
+        Assert.Equal(ImpactLevel.None, Over(6 * 9 * MB));          // under 10 MB an hour
+        Assert.Equal(ImpactLevel.Low, Over(6 * 100 * MB));         // 2.3 GB a day
+        Assert.Equal(ImpactLevel.Medium, Over(6 * 300 * MB));      // 7 GB a day
+        Assert.Equal(ImpactLevel.High, Over(6 * 500 * MB));        // 11.7 GB a day, though the clears keep its net change small
+        Assert.Equal(ImpactLevel.None, Over(0, fell: 600 * MB));   // it fell
+        Assert.Null(Over(6 * 500 * MB, hours: 0.25));              // not known before half an hour is measured
+        Assert.Equal("", PoolCauses.WithWindow(growing, SixHours with { Measured = TimeSpan.FromMinutes(15) }, new Core.Growth.GrowthCounts(GB, 0, 0), GB).Cells[PoolCauses.ImpactColumn]);
+        // Each one is the rule's, word for word.
+        foreach (var rate in new long[] { 0, 9 * MB, 10 * MB, 210 * MB, 430 * MB, 2 * GB })
+            Assert.Equal(ImpactRules.FromGrowth(rate).ToString(),
+                PoolCauses.WithWindow(growing, SixHours, new Core.Growth.GrowthCounts(rate * 6, 0, 0), GB).Cells[PoolCauses.ImpactColumn]);
+        // A row with no rate of its own has none: a release, a clear, a finding.
+        Assert.Null(PoolCauses.ForTag(Tag(TagState.Released, 100 * MB, -400 * MB, -400 * MB), "r", null, Now).Impact);
+        Assert.Null(PoolCauses.ForIncident(Incident(IncidentKind.Release, -GB, open: false, dropped: GB), "r", Now).Impact);
+        // Nor does a tag whose rate is not measured yet: one that grew in the hour but not in the last 10 minutes. One held is
+        // not growing: None, as the agreed rule says (an empty cell means "not known yet" only).
+        Assert.Null(PoolCauses.ForTag(Tag(TagState.Growing, 912 * MB, 0, 300 * MB), "x", null, Now).Impact);
+        Assert.Equal(ImpactLevel.None, PoolCauses.ForTag(Tag(TagState.Retained, 912 * MB, 0, 0), "x", null, Now).Impact);
+        Assert.Equal("", PoolCauses.ForTag(Tag(TagState.Growing, 912 * MB, 0, 300 * MB), "x", null, Now).Cells[PoolCauses.ImpactColumn]);
+        Assert.Equal(ImpactRules.FromGrowth(600 * MB), PoolCauses.ForTag(Tag(TagState.Growing, 912 * MB, 100 * MB, 300 * MB), "x", null, Now).Impact);
+    }
+
+    [Fact]
+    public void TheImpactMeterFillsOnePartPerLevelInTheDesignsColours()
+    {
+        Assert.Equal([0, 1, 2, 3], Enum.GetValues<ImpactLevel>().Select(ImpactScale.Filled));
+        Assert.Equal(new Color?[] { null, UiColors.Low, UiColors.Medium, UiColors.High }, Enum.GetValues<ImpactLevel>().Select(ImpactScale.ColorOf));
+        Assert.Equal((Color.FromArgb(212, 167, 44), Color.FromArgb(232, 89, 12), Color.FromArgb(201, 42, 42)), (UiColors.Low, UiColors.Medium, UiColors.High));
+        Assert.Equal(ImpactLevel.High, ImpactScale.Parse("High"));
+        Assert.Null(ImpactScale.Parse(""));
+        Assert.Null(ImpactScale.Parse("7"));
+        // Drawn: the filled parts in the level's colour, the rest grey, then the word.
+        using var bitmap = new Bitmap(120, 24);
+        using (var g = Graphics.FromImage(bitmap))
+        using (var font = new Font("Segoe UI", 9f))
+            ImpactScale.DrawCell(g, new Rectangle(0, 0, 120, 24), "Medium", font, Color.White, Color.Black);
+        var pixels = Enumerable.Range(0, 60).Select(x => bitmap.GetPixel(x, 12).ToArgb()).ToHashSet();
+        Assert.Contains(UiColors.Medium.ToArgb(), pixels);
+        Assert.Contains(UiColors.Track.ToArgb(), pixels);
+        Assert.DoesNotContain(UiColors.High.ToArgb(), pixels);
+    }
+
+    /// <summary>
+    /// The Impact column as the window opens it, at 100% to 200%: every level's word is drawn whole after the meter. Drawn
+    /// in the column and in a wider cell, the column's pixels are the same (no "Med..."), and no ink runs past the column.
+    /// At the design's 96 logical px the meter's bars left "Medium" too little room at every scale.
+    /// </summary>
+    [Theory]
+    [InlineData(100)]
+    [InlineData(125)]
+    [InlineData(150)]
+    [InlineData(200)]
+    public void EveryImpactWordShowsWholeInItsColumn(int percent)
+    {
+        using var font = new Font("Segoe UI", 9f * percent / 100);
+        int column = MainForm.CauseColumnWidths(font, n => n * percent / 100)[PoolCauses.ImpactColumn];
+        int height = font.Height * 2, wide = column + 80;
+        foreach (var level in Enum.GetValues<ImpactLevel>())
+        {
+            string word = ImpactScale.Word(level);
+            using var inColumn = Cell(new Rectangle(0, 0, column, height));
+            using var inWide = Cell(new Rectangle(0, 0, wide, height));
+            for (int x = 0; x < wide; x++)
+            for (int y = 0; y < height; y++)
+            {
+                int widePixel = inWide.GetPixel(x, y).ToArgb();
+                if (x < column) Assert.True(inColumn.GetPixel(x, y).ToArgb() == widePixel, $"\"{word}\" is cut at {percent}% in {column} px (x {x})");
+                else Assert.True(widePixel == Color.White.ToArgb(), $"\"{word}\" runs past the {column} px column at {percent}% (x {x})");
+            }
+
+            Bitmap Cell(Rectangle cell)
+            {
+                var b = new Bitmap(wide, height);
+                using var g = Graphics.FromImage(b);
+                g.Clear(Color.White);
+                ImpactScale.DrawCell(g, cell, word, font, Color.White, Color.Black, highContrast: false);
+                return b;
+            }
+        }
+    }
+
+    /// <summary>
+    /// High contrast: the meter's filled bars are in the text colour of the row they sit on, as its word is (a selected row's
+    /// highlight text on the highlight), not the window's text colour, which can match the highlight.
+    /// </summary>
+    [Fact]
+    public void UnderHighContrastTheMetersBarsAreInTheirRowsTextColour()
+    {
+        using var font = new Font("Segoe UI", 9f);
+        var cell = new Rectangle(0, 0, 140, 24);
+        using var bitmap = new Bitmap(cell.Width, cell.Height);
+        using (var g = Graphics.FromImage(bitmap))
+            ImpactScale.DrawCell(g, cell, "High", font, Color.Cyan, Color.Magenta, highContrast: true);
+        var (meter, gap, _) = ImpactScale.CellLayout(cell, font);
+        var middles = Enumerable.Range(0, 3)
+            .Select(i => bitmap.GetPixel((int)(meter.X + i * (meter.Width + gap) + meter.Width / 2), (int)(meter.Y + meter.Height / 2)).ToArgb()).ToList();
+        Assert.Equal(Enumerable.Repeat(Color.Magenta.ToArgb(), 3), middles);
+
+        // The cost meters too: with ink given, their bars take it; without, the window's text colour.
+        foreach (var (ink, want) in new (Color?, Color)[] { (Color.Magenta, Color.Magenta), (null, SystemColors.WindowText) })
+        {
+            using var b = new Bitmap(60, 20);
+            using (var g = Graphics.FromImage(b))
+            {
+                g.Clear(Color.Cyan);
+                ImpactScale.PaintMeter(g, new RectangleF(2, 8, 10, 4), 2, ImpactLevel.High, highContrast: true, ink);
+            }
+            Assert.Equal(want.ToArgb(), b.GetPixel(7, 10).ToArgb());
+        }
+    }
+
+    [Fact]
+    public void EveryWindowDrawsTheImpactScaleAndItsColoursFromOnePlace()
+    {
+        if (SystemInformation.HighContrast) return; // then every window uses the system's colours instead
+        // One meter: at either size (three bars of 14 by 5, 3 apart, or 10 by 4, 2 apart) it fills the same bars in the same
+        // colours.
+        foreach (var (bar, gap) in new[] { (new SizeF(14, 5), 3f), (new SizeF(10, 4), 2f) })
+        {
+            using var bitmap = new Bitmap(60, 20);
+            using (var g = Graphics.FromImage(bitmap))
+            {
+                g.Clear(Color.White);
+                ImpactScale.PaintMeter(g, new RectangleF(new PointF(2, 8), bar), gap, ImpactLevel.Medium, highContrast: false);
+            }
+            var middles = Enumerable.Range(0, 3).Select(i => bitmap.GetPixel((int)(2 + i * (bar.Width + gap) + bar.Width / 2), (int)(8 + bar.Height / 2)).ToArgb()).ToList();
+            Assert.Equal([UiColors.Medium.ToArgb(), UiColors.Medium.ToArgb(), UiColors.Track.ToArgb()], middles);
+        }
+        // One palette: Active changes takes the design's colours from UiColors.
+        Assert.Equal((UiColors.Ink, UiColors.Muted, UiColors.Faint, UiColors.Good, UiColors.RowLine, UiColors.Warn),
+            (ActiveChangesForm.Palette.Ink, ActiveChangesForm.Palette.Muted, ActiveChangesForm.Palette.Faint, ActiveChangesForm.Palette.Good,
+             ActiveChangesForm.Palette.RowLine, ActiveChangesForm.Palette.Warn));
+    }
+
+    [Fact]
+    public void TheDetailsSayWhatPoolWatchAlreadyDoesAboutARow()
+    {
+        var on = new HandledBy(HandledBy.ScheduleOf(true, 1, 8), GuardWorking: true);
+        var off = new HandledBy(HandledBy.ScheduleOf(false, 1, 8), GuardWorking: false);
+        var reff = PoolCauses.ForTag(Tag(TagState.Growing, 912 * MB, 100 * MB, 300 * MB), "File system metadata (Reff, refs.sys)", null, Now);
+        Assert.Equal(("Handled: the standby cache is emptied every hour, or at 8 GB.", true), PoolCauses.Handled(reff, on));
+        Assert.Equal(("Not handled yet: emptying the standby cache frees it. You can turn on automatic clearing in Settings.", false), PoolCauses.Handled(reff, off));
+        // The token leak's security tokens: the guard, and only while Windows' setting is on.
+        var toke = reff with { Tag = PoolTag.Parse("Toke") };
+        Assert.Equal(("Handled: the token-leak guard is on, so Windows does not leak these.", true), PoolCauses.Handled(toke, on));
+        Assert.DoesNotContain("sign out", PoolCauses.Handled(toke, on)!.Value.Text); // the protection does not end there: PoolWatch turns it on again
+        Assert.False(PoolCauses.Handled(toke, off)!.Value.Done);
+        // A tag the clears do not free, a process and a finding: nothing to say.
+        Assert.Null(PoolCauses.Handled(reff with { Tag = PoolTag.Parse("Abcd") }, on));
+        Assert.NotNull(PoolCauses.Handled(reff with { Tag = PoolTag.Parse("Abcd"), ClearedBytes = 50 * MB }, on)); // ... unless the clears did free it
+        Assert.Null(PoolCauses.Handled(reff with { Kind = CauseKind.Process }, on));
+        // The schedule in words, each rule on its own.
+        Assert.Equal(new string?[] { "every hour, or at 8 GB", "every 2 hours", "when the kernel pool reaches 7.5 GB", null, null },
+            new[] { HandledBy.ScheduleOf(true, 1, 8), HandledBy.ScheduleOf(true, 2, 0), HandledBy.ScheduleOf(true, 0, 7.5), HandledBy.ScheduleOf(true, 0, 0), HandledBy.ScheduleOf(false, 1, 8) });
+    }
+
+    [Fact]
+    public void TheDetailsSayTheHandledLineUnderTheWordsAsTheDesignHasIt()
+    {
+        // The title, the plain explanation, then what PoolWatch already does about it; the actions down the right.
+        using var form = new Form { Font = new Font("Segoe UI", 9f) };
+        var panel = new Panel { Size = new Size(700, 220) };
+        form.Controls.Add(panel);
+        var title = new WrapLabel { Text = "File system metadata (Reff, refs.sys): +3.9 GB (now 912 MB)" };
+        var words = new TextBox { Multiline = true, Text = "ReFS keeps a record for each file while the file sits in the standby cache." };
+        var handled = new WrapLabel { Text = "Handled: the standby cache is emptied every hour, or at 8 GB." };
+        var actions = new FlowLayoutPanel { Width = 140 };
+        MainForm.LayDetails(panel, title, words, handled, actions);
+        panel.PerformLayout();
+        Assert.True(title.Top == 0 && title.Bottom <= words.Top, $"title {title.Bounds}, words {words.Bounds}");
+        Assert.True(words.Bottom <= handled.Top, $"words {words.Bounds}, handled {handled.Bounds}");
+        Assert.Equal(panel.ClientSize.Height, handled.Bottom);
+        Assert.Equal((panel.ClientSize.Width, 0, panel.ClientSize.Height), (actions.Right, actions.Top, actions.Bottom));
+        Assert.True(title.Right <= actions.Left && words.Right <= actions.Left && handled.Right <= actions.Left);
     }
 }

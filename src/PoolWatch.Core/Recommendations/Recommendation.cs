@@ -48,6 +48,11 @@ public sealed record RecommendationInputs
     public GuardResult? SavedVerdict { get; init; }
     /// <summary>A token-leak finding of Warning or above in the last 24 hours.</summary>
     public bool TokenSpawnLast24h { get; init; }
+    /// <summary>
+    /// The token leak's known issue matches now (<see cref="TokenLeakWatch.Seen"/>): security tokens grew in the last hour
+    /// at least as fast as the pack's rule asks, on a Windows build it names, while the setting that stops the leak is off.
+    /// </summary>
+    public bool TokenLeakSeen { get; init; }
     /// <summary>A file-system metadata tag (Reff, MSb+, FMfn, ...) grew in the last 24 hours: an incident, or growing now.</summary>
     public bool FileSystemMetadataGrewLast24h { get; init; }
     /// <summary>Microsoft Defender's own process, in cores, averaged over the last 30 minutes.</summary>

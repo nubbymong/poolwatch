@@ -279,18 +279,49 @@ public class SimpleSettingsTests
     }
 
     [Fact]
-    public void TheAutomaticClearsLineSaysEachRuleWorksAloneAndThatAClearCanStutterOnce()
+    public void TheAutomaticClearsLineSaysThatAClearCanStutterOnceAndEachRuleCanBeSavedAlone()
     {
         string hint = SimpleSettings.AutoClearHint(new Settings());
         Assert.Equal("Clearing takes a few seconds, and video or the mouse may stutter while it runs.", SimpleSettings.ClearStutter);
         Assert.Equal(1, hint.Split(SimpleSettings.ClearStutter).Length - 1);
         Assert.StartsWith(SimpleSettings.ClearStutter, hint); // said first, not after the rules
-        Assert.Contains("Each rule works on its own: 0 hours clears only by size, 0 GB only on the schedule.", hint);
+        // The three rules are named by the form's choices, as the setup guide names them.
+        Assert.DoesNotContain("0 hours", hint);
+        Assert.Equal(["On a schedule", "At a pool size", "Whichever comes first"], new[] { SimpleSettings.ScheduleChoice, SimpleSettings.SizeChoice, SimpleSettings.EitherChoice });
         // And either rule alone can be saved: a schedule with no size rule, a size rule with no schedule.
         Assert.Empty(new SimpleSettings(true, 1m, 0m, false, false, true).Problems());
         Assert.Empty(new SimpleSettings(true, 0m, 8m, false, false, true).Problems());
         var s = new Settings();
         Assert.True(new SimpleSettings(true, 0m, 8m, false, false, true).ApplyTo(s, out _));
         Assert.Equal((true, 0.0, 8.0), (s.AutoClearEnabled, s.AutoClearEveryHours, s.AutoClearPoolGb));
+    }
+
+    [Fact]
+    public void TheThreeRulesAreChosenByNameAndKeepOnlyTheNumbersTheyUse()
+    {
+        Assert.Equal(ClearRule.Schedule, SimpleSettings.RuleOf(1m, 0m));
+        Assert.Equal(ClearRule.PoolSize, SimpleSettings.RuleOf(0m, 8m));
+        Assert.Equal(ClearRule.Either, SimpleSettings.RuleOf(1m, 8m));
+        Assert.Equal(ClearRule.Either, SimpleSettings.RuleOf(0m, 0m)); // nothing set: both fields to fill
+        Assert.Equal((2m, 0m), SimpleSettings.ForRule(ClearRule.Schedule, 2m, 8m));
+        Assert.Equal((0m, 8m), SimpleSettings.ForRule(ClearRule.PoolSize, 2m, 8m));
+        Assert.Equal((2m, 8m), SimpleSettings.ForRule(ClearRule.Either, 2m, 8m));
+
+        var fields = new SimpleSettingsFields();
+        Assert.Equal([SimpleSettings.ScheduleChoice, SimpleSettings.SizeChoice, SimpleSettings.EitherChoice], new[] { fields.Schedule.Text, fields.PoolSize.Text, fields.Either.Text });
+        // A schedule alone: the size field shows the usual 8 GB, unused, and is saved as no size rule.
+        fields.Fill(new SimpleSettings(true, 2m, 0m, false, false, true));
+        Assert.Equal((ClearRule.Schedule, 2m, 8m), (fields.Rule, fields.Hours.Value, fields.PoolGb.Value));
+        Assert.Equal((2m, 0m), (fields.Values().EveryHours, fields.Values().PoolGb));
+        // The owner picks whichever comes first: both numbers count.
+        fields.Either.Checked = true;
+        Assert.Equal((2m, 8m), (fields.Values().EveryHours, fields.Values().PoolGb));
+        // Then a pool size alone: the schedule is off.
+        fields.PoolSize.Checked = true;
+        Assert.Equal((0m, 8m), (fields.Values().EveryHours, fields.Values().PoolGb));
+        Assert.Empty(fields.Values().Problems());
+        // A size alone, read back as a size alone (the schedule field shows the usual hour).
+        fields.Fill(new SimpleSettings(true, 0m, 12m, false, false, true));
+        Assert.Equal((ClearRule.PoolSize, 1m, 12m), (fields.Rule, fields.Hours.Value, fields.PoolGb.Value));
     }
 }

@@ -3,8 +3,11 @@ using PoolWatch.Analysis;
 using PoolWatch.Core;
 using PoolWatch.Core.Correlation;
 using PoolWatch.Core.Detection;
+using PoolWatch.Core.Cache;
 using PoolWatch.Core.Findings;
+using PoolWatch.Core.Growth;
 using PoolWatch.Core.Identity;
+using PoolWatch.Core.Impact;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
@@ -18,12 +21,34 @@ internal enum CauseKind { Incident, Tag, Process, Finding }
 internal enum RowTone { Normal, Warning, Alert }
 
 /// <summary>
-/// One row of the Pool causes list: what is growing, how much and how fast, the likely cause, the confidence in words,
-/// and when. It merges what were four tabs (Incidents, Growing tags, Processes, Findings); the payload says where its
-/// details come from.
+/// One row of the Pool causes list: what is growing, what it grew, what PoolWatch's own clears freed of it, its net change
+/// and its growth per hour (over the window the graph's 1 h / 6 h / 24 h choice says, for a row about a tag the stats
+/// count), the likely cause, the confidence in words, its impact (<see cref="ImpactRules.FromGrowth(long)"/>), and when. It merges what were four tabs (Incidents, Growing tags, Processes,
+/// Findings); the payload says where its details come from. <paramref name="HowMuch"/> and <paramref name="HowFast"/> are
+/// the row's own figures (an incident's growth and rate), shown in Grew and Per hour while it has no window stats.
 /// </summary>
 internal sealed record CauseRow(string Key, CauseKind Kind, string What, string HowMuch, string HowFast, string Cause, string Confidence, string When)
 {
+    /// <summary>The four columns the window picker drives: "+4.9 GB (now 912 MB)", "4.8 GB", "+103 MB", "836.3 MB/h".</summary>
+    public string Grew { get; init; } = "";
+    public string Cleared { get; init; } = "";
+    public string Net { get; init; } = "";
+    public string PerHour { get; init; } = "";
+    /// <summary>The numbers behind the columns, for sorting (null: the cell says no number).</summary>
+    public long? GrewBytes { get; init; }
+    public long? ClearedBytes { get; init; }
+    public long? NetBytes { get; init; }
+    public double? PerHourBytes { get; init; }
+    /// <summary>The likely cause's confidence, for sorting.</summary>
+    public Confidence? Level { get; init; }
+    /// <summary>The four columns are the window's (the tag's stats), not the row's own figures.</summary>
+    public bool Windowed { get; init; }
+    /// <summary>
+    /// How much its growth costs this PC (<see cref="ImpactRules.FromGrowth(long)"/> of its growth per hour, PoolWatch's own
+    /// clears added back); null where the row has no rate (a release, a clear, a finding) or the rate is not known yet.
+    /// </summary>
+    public ImpactLevel? Impact { get; init; }
+
     /// <summary>Happening now (an open incident, a growing or retained tag, a process piling up): listed first.</summary>
     public bool Active { get; init; }
     public DateTime TimeUtc { get; init; }
@@ -35,7 +60,17 @@ internal sealed record CauseRow(string Key, CauseKind Kind, string What, string 
     public ProcessCandidate? Candidate { get; init; }
     public Finding? Finding { get; init; }
 
-    public string[] Cells => [What, HowMuch, HowFast, Cause, Confidence, When];
+    public string[] Cells => [What, Grew, Cleared, Net, PerHour, Cause, Confidence, ImpactScale.Text(Impact), When];
+
+    /// <summary>The details' title: "File system metadata (Reff, refs.sys): +4.9 GB (now 912 MB)".</summary>
+    public string Title
+    {
+        get
+        {
+            string much = Windowed ? Grew : HowMuch;
+            return much.Length > 0 ? $"{What}: {much}" : What;
+        }
+    }
 }
 
 /// <summary>A live process whose handles or pool charge rose over the last hour, or that became an orphan while PoolWatch watched and is still busy.</summary>
@@ -49,7 +84,9 @@ internal sealed record ProcessCandidate(ProcessKey Key, string Name, int Handles
 /// </summary>
 internal static class PoolCauses
 {
-    public static readonly string[] Columns = ["What is growing", "How much", "How fast", "Likely cause", "Confidence", "When"];
+    public static readonly string[] Columns = ["What is growing", "Grew", "Cleared", "Net", "Per hour", "Likely cause", "Confidence", "Impact", "When"];
+    /// <summary>The columns the window choice drives (<see cref="WithWindow"/>), and the others by place.</summary>
+    public const int GrewColumn = 1, ClearedColumn = 2, NetColumn = 3, PerHourColumn = 4, CauseColumn = 5, ConfidenceColumn = 6, ImpactColumn = 7, WhenColumn = 8;
 
     /// <summary>A process row needs one of: this many more handles in the hour ...</summary>
     public const int HandleRise = 5_000;
@@ -76,19 +113,25 @@ internal static class PoolCauses
     public static CauseRow ForIncident(IncidentRow r, string what, DateTime nowUtc)
     {
         var start = r.OnsetUtc ?? r.OpenedUtc;
-        string much = "", fast = "";
+        string much = "", fast = "", net = "";
+        long? grew = null, change = null;
+        double? rate = null;
         switch (r.Kind)
         {
             case IncidentKind.Release:
                 long freed = r.Dropped > 0 ? r.Dropped : Math.Abs(r.Growth);
-                much = freed > 0 ? $"freed {Fmt.Bytes(freed)}" : "";
+                much = freed > 0 ? $"freed {PlainWords.Amount(freed)}" : "";
+                if (freed > 0) { net = GrowthText.SignedAmount(-freed); change = -freed; }
                 what = $"{what} was released";
                 break;
             default:
                 if (r.Growth > 0)
                 {
-                    much = $"+{Fmt.Bytes(r.Growth)}";
-                    fast = PlainWords.PerHour(r.Growth, (r.Open ? nowUtc : r.EndUtc ?? r.OpenedUtc) - start);
+                    var over = (r.Open ? nowUtc : r.EndUtc ?? r.OpenedUtc) - start;
+                    much = $"+{PlainWords.Amount(r.Growth)}";
+                    fast = PlainWords.PerHour(r.Growth, over);
+                    grew = r.Growth;
+                    rate = r.Growth / Math.Max(1.0 / 60, over.Duration().TotalHours);
                 }
                 if (r.Kind == IncidentKind.NonPagedTotal) what += ", with non-paged pool over the limit";
                 else if (r.Kind == IncidentKind.Capture) what = "Manual capture: " + what;
@@ -99,47 +142,71 @@ internal static class PoolCauses
         {
             Active = r.Open, TimeUtc = r.OpenedUtc, Tone = r.Open ? RowTone.Alert : RowTone.Normal, Folder = r.Dir,
             Tag = PoolTag.TryParse(r.Tag, out var tag) ? tag : null, // for the known issues about it
+            Grew = grew is null ? "" : much, PerHour = fast, Net = net, GrewBytes = grew, PerHourBytes = rate, NetBytes = change, Level = r.Level,
+            Impact = rate is { } perHour ? ImpactRules.FromGrowth((long)perHour) : null,
         };
     }
 
     /// <summary>A growing, retained or released tag without an open incident; <paramref name="view"/> is its ranking, when there is one.</summary>
     public static CauseRow ForTag(TagStatus s, string what, TagViewData? view, DateTime nowUtc)
     {
-        string much, fast = "", when;
+        string much, fast = "", when, net = "";
+        long? grewBytes = null, change = null;
+        double? rate = null;
         switch (s.State)
         {
             case TagState.Released:
                 long fell = -Math.Min(Math.Min(s.Delta10m, s.Delta60m), 0);
                 what = $"{what} was released";
-                much = fell > 0 ? $"freed {Fmt.Bytes(fell)}" : "";
+                much = fell > 0 ? $"freed {PlainWords.Amount(fell)}" : "";
+                if (fell > 0) { net = GrowthText.SignedAmount(-fell); change = -fell; }
                 when = s.StateSinceUtc is { } r ? PlainWords.When(r, nowUtc) : "just now";
                 break;
             case TagState.Retained:
-                much = $"{Fmt.Bytes(s.Bytes)} held";
+                much = $"{PlainWords.Amount(s.Bytes)} held";
                 fast = "not falling";
                 when = s.StateSinceUtc is { } since ? $"since {PlainWords.When(since, nowUtc)}" : "now";
                 break;
             default:
                 long grew = s.Delta60m > 0 ? s.Delta60m : Math.Max(0, s.Delta10m);
-                much = grew > 0 ? $"+{Fmt.Bytes(grew)} (now {Fmt.Bytes(s.Bytes)})" : $"now {Fmt.Bytes(s.Bytes)}";
+                much = grew > 0 ? $"+{PlainWords.Amount(grew)} (now {PlainWords.Amount(s.Bytes)})" : $"now {PlainWords.Amount(s.Bytes)}";
                 fast = s.Delta10m > 0 ? PlainWords.PerHour(s.Delta10m, TimeSpan.FromMinutes(10)) : "";
+                grewBytes = grew;
+                if (s.Delta10m > 0) rate = s.Delta10m * 6.0;
                 when = "now";
                 break;
         }
         // The cause comes from the tag's ranking (built in the background, TagRankings): blank until there is one. A release
         // has no cause to name here (its incident report lists what exited then).
         string cause = "", conf = "";
+        Confidence? level = null;
         if (s.State != TagState.Released && view is not null)
         {
-            if (CauseOf(view) is { } c) { cause = c.name; conf = PlainWords.Confidence(c.level); }
+            if (CauseOf(view) is { } c) { cause = c.name; conf = PlainWords.Confidence(c.level); level = c.level; }
             else cause = "no clear cause yet";
         }
         return new CauseRow("tag:" + s.Tag.Raw.ToString("x8"), CauseKind.Tag, what, much, fast, cause, conf, when)
         {
             Active = s.State != TagState.Released, TimeUtc = s.StateSinceUtc ?? nowUtc,
             Tone = s.State == TagState.Released ? RowTone.Normal : RowTone.Warning, Tag = s.Tag,
+            Grew = s.State == TagState.Released ? "" : much, PerHour = fast, Net = net, GrewBytes = grewBytes, PerHourBytes = rate, NetBytes = change, Level = level,
+            // From a rate measured (the last 10 minutes' rise). A tag held is not growing, which the agreed rule calls None; one
+            // still growing but with no rise in them has no level known yet.
+            Impact = rate is { } perHour ? ImpactRules.FromGrowth((long)perHour) : s.State == TagState.Retained ? ImpactLevel.None : null,
         };
     }
+
+    /// <summary>
+    /// A row about a tag the stats count, with its four columns over the window (<paramref name="w"/>): what it grew counted
+    /// across PoolWatch's own clears and its level now, what the clears freed of it, its net change and its growth per hour
+    /// measured ("+4.9 GB (now 912 MB)", "4.8 GB", "+103 MB", "836.3 MB/h").
+    /// </summary>
+    public static CauseRow WithWindow(CauseRow row, GrowthWindow w, GrowthCounts c, long nowBytes) => row with
+    {
+        Grew = GrowthText.TagGrew(c, nowBytes), Cleared = GrowthText.TagCleared(c), Net = GrowthText.TagNet(c), PerHour = GrowthText.TagPerHour(w, c),
+        GrewBytes = c.Grew, ClearedBytes = c.Cleared, NetBytes = c.Net, PerHourBytes = c.Grew > 0 ? w.PerHour(c) : null, Windowed = true,
+        Impact = ImpactRules.FromGrowth(w, c),
+    };
 
     /// <summary>The top owner of a tag's ranking (the trace's first, when the trace backs it); null when nobody stood out.</summary>
     public static (string name, Confidence level)? CauseOf(TagViewData v) => TopOwner(v) is { } top ? (top.owner.Name, top.level) : null;
@@ -162,7 +229,7 @@ internal static class PoolCauses
         if (dq >= QuotaRise)
         {
             what = $"Pool charged to {p.Name}";
-            much = $"+{Fmt.Bytes(dq)} (now {Fmt.Bytes(p.Quota)})";
+            much = $"+{PlainWords.Amount(dq)} (now {PlainWords.Amount(p.Quota)})";
             fast = PlainWords.PerHour(dq, p.Over);
             conf = "charged to it";
         }
@@ -180,10 +247,13 @@ internal static class PoolCauses
             fast = "";
             conf = "worth a look";
         }
+        double? perHour = dq >= QuotaRise ? dq / Math.Max(1.0 / 60, p.Over.Duration().TotalHours) : null;
         return new CauseRow($"proc:{p.Key.Pid}:{p.Key.CreateTime}", CauseKind.Process, what, much, fast, PlainWords.WithPid(p.Name, p.Key.Pid), conf,
             p.StartUtc > DateTime.MinValue ? $"started {PlainWords.When(p.StartUtc, nowUtc)}" : "")
         {
             Active = true, TimeUtc = nowUtc, Tone = RowTone.Warning, Process = p.Key, Candidate = p,
+            Grew = much, PerHour = fast, GrewBytes = dq >= QuotaRise ? dq : null, PerHourBytes = perHour,
+            Impact = perHour is { } rate ? ImpactRules.FromGrowth((long)rate) : null,
         };
     }
 
@@ -193,13 +263,19 @@ internal static class PoolCauses
 
     public static CauseRow ForFinding(Finding f, DateTime nowUtc)
     {
-        string what = f.Title, much = "";
+        string what = f.Title, much = "", cleared = "";
+        long? clearedBytes = null;
         if (f.Kind == FindingKind.CacheClear)
         {
             int colon = f.Title.IndexOf(':');
             what = colon > 0 ? f.Title[..colon] : f.Title; // "Clear cache (standby list, manual)"
             if (f.Data.GetValueOrDefault("error") is null && f.Data.GetValueOrDefault("freedBytes") is long freed)
-                much = $"freed {Fmt.Bytes(Math.Max(0, freed))}";
+            {
+                much = freed >= ClearScheduleText.NothingBelow ? $"freed {PlainWords.Amount(freed)}" : "freed nothing";
+                // The Cleared column: what the clear freed ("1.2 GB"), "nothing" under half a megabyte (as the next-clear line says it).
+                cleared = freed >= ClearScheduleText.NothingBelow ? PlainWords.Amount(freed) : "nothing";
+                clearedBytes = Math.Max(0, freed);
+            }
             else if (f.Data.GetValueOrDefault("error") is string) what += " failed";
         }
         string cause = f.Image is { Length: > 0 } image ? (f.Pid > 0 ? PlainWords.WithPid(image, f.Pid) : image) : "";
@@ -207,8 +283,34 @@ internal static class PoolCauses
         {
             TimeUtc = f.TimeUtc, Folder = f.ReportDir, Finding = f,
             Tone = f.Severity switch { FindingSeverity.Alert => RowTone.Alert, FindingSeverity.Warning => RowTone.Warning, _ => RowTone.Normal },
+            Cleared = cleared, ClearedBytes = clearedBytes,
         };
     }
+
+    /// <summary>
+    /// What PoolWatch already does about a row, for the details' line under the title: "Handled: the standby cache is emptied
+    /// every hour, or at 8 GB." for the records a cache clear frees, "Handled: the token-leak guard is on." for the token
+    /// leak's security tokens; or what would handle it, when PoolWatch can but it is off ("Not handled yet: ..."). Null for
+    /// a row PoolWatch has nothing to do with. Pure.
+    /// </summary>
+    public static (string Text, bool Done)? Handled(CauseRow row, HandledBy by)
+    {
+        if (row.Kind is not (CauseKind.Tag or CauseKind.Incident) || row.Tag is not { } tag) return null;
+        if (tag == Toke)
+            return by.GuardWorking
+                ? ("Handled: the token-leak guard is on, so Windows does not leak these.", true)
+                : ("Not handled yet: the token-leak guard stops this leak. You can turn it on in Settings.", false);
+        if (!ClearFrees.Contains(tag) && row.ClearedBytes is not > 0) return null;
+        return by.Schedule is { } schedule
+            ? ($"Handled: the standby cache is emptied {schedule}.", true)
+            : ("Not handled yet: emptying the standby cache frees it. You can turn on automatic clearing in Settings.", false);
+    }
+
+    private static readonly PoolTag Toke = PoolTag.Parse("Toke");
+
+    /// <summary>The records a cache clear frees: the file systems' and the cache's own (as the clear's evidence counts them).</summary>
+    private static readonly IReadOnlySet<PoolTag> ClearFrees =
+        ClearEvidence.ReFsTags.Concat(ClearEvidence.NtfsTags).Concat(ClearEvidence.CacheTags).Concat(Engine.Setup.RecommendationInputsBuilder.FileSystemMetadataTags).ToHashSet();
 
     /// <summary>What is happening now first (open incidents, then growing tags, then processes), then the rest, newest first.</summary>
     public static List<CauseRow> Order(IEnumerable<CauseRow> rows) =>
@@ -219,8 +321,40 @@ internal static class PoolCauses
 
     // ---------------------------------------------------------------- reading the analysis
 
-    /// <summary>All rows, ordered. <paramref name="ranked"/> holds the tag rankings (<see cref="TagRankings"/>).</summary>
-    public static List<CauseRow> Build(AnalysisPipeline a, MonitorEngine engine, TagRankings ranked)
+    /// <summary>
+    /// All rows, ordered. <paramref name="ranked"/> holds the tag rankings (<see cref="TagRankings"/>); a row about a tag the
+    /// stats count takes its four columns from <paramref name="window"/> (<see cref="WithWindow"/>).
+    /// </summary>
+    public static List<CauseRow> Build(AnalysisPipeline a, MonitorEngine engine, TagRankings ranked, GrowthWindow? window = null)
+    {
+        var rows = Rows(a, engine, ranked);
+        if (window is null) return rows;
+        lock (a.History.SyncRoot)
+        {
+            var h = a.History;
+            long Now(PoolTag tag)
+            {
+                if (a.Detector.Status.TryGetValue(tag, out var s)) return s.Bytes;
+                var (p, np) = h.Count > 0 ? h.TagAt(tag, h.Count - 1) : (0, 0);
+                return p + np;
+            }
+            return Windowed(rows, window, Now);
+        }
+    }
+
+    /// <summary>
+    /// The rows with the window's four columns (<see cref="WithWindow"/>) on each row about a tag the stats count that is
+    /// happening now: a tag growing or held, and its open incident. Every other row keeps its own figures: an earlier
+    /// incident what it grew then, a release what it freed, a clear what it freed, a process its own rise.
+    /// </summary>
+    public static List<CauseRow> Windowed(List<CauseRow> rows, GrowthWindow window, Func<PoolTag, long> nowBytes)
+    {
+        for (int i = 0; i < rows.Count; i++)
+            if (rows[i].Active && rows[i].Tag is { } tag && window.Tags.TryGetValue(tag, out var c)) rows[i] = WithWindow(rows[i], window, c, nowBytes(tag));
+        return rows;
+    }
+
+    private static List<CauseRow> Rows(AnalysisPipeline a, MonitorEngine engine, TagRankings ranked)
     {
         var now = DateTime.UtcNow;
         var rows = new List<CauseRow>();
@@ -557,5 +691,20 @@ internal sealed class TagRankings
             }
         });
         return tag;
+    }
+}
+
+/// <summary>What PoolWatch does now that can handle a row (<see cref="PoolCauses.Handled"/>).</summary>
+/// <param name="Schedule">The automatic clear in words ("every hour, or at 8 GB"), or null while it is off.</param>
+/// <param name="GuardWorking">The token-leak guard is on and Windows' setting that stops the leak is on now.</param>
+internal sealed record HandledBy(string? Schedule, bool GuardWorking)
+{
+    /// <summary>The automatic clear's rules in words: "every hour, or at 8 GB", "every 2 hours", "when the kernel pool reaches 8 GB"; null when it is off or has no rule.</summary>
+    public static string? ScheduleOf(bool enabled, double everyHours, double poolGb)
+    {
+        if (!enabled || (everyHours <= 0 && poolGb <= 0)) return null;
+        string every = everyHours == 1 ? "every hour" : FormattableString.Invariant($"every {everyHours:0.#} hours");
+        string at = FormattableString.Invariant($"{poolGb:0.#} GB");
+        return everyHours > 0 && poolGb > 0 ? $"{every}, or at {at}" : everyHours > 0 ? every : $"when the kernel pool reaches {at}";
     }
 }

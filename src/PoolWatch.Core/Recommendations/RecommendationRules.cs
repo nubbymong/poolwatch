@@ -43,11 +43,27 @@ public static class RecommendationRules
     }
 
     /// <summary>
-    /// The Simple view: up to <paramref name="max"/> offers, each only on its evidence (in memory or in the cached facts),
-    /// never one hidden in the last 30 days, by priority.
+    /// Every offer the evidence backs (in memory or in the cached facts), never one hidden in the last 30 days, by priority,
+    /// at most <paramref name="max"/>: what this PC could change, whether or not the Simple view shows it. The app shows
+    /// <see cref="Current"/>; this whole list is the rules' own, read by their tests and the known issues' (each offer's
+    /// evidence and words, including the ones setup now asks about instead).
+    /// </summary>
+    internal static IReadOnlyList<Recommendation> OnEvidence(RecommendationInputs i, int max = 3) =>
+        Candidates(i).Where(r => !Hidden(i.Dismissed, r.Key, i.NowUtc)).OrderBy(r => r.Priority).Take(max).ToList();
+
+    /// <summary>
+    /// The offers the Simple view shows ahead of its feature cards: only what PoolWatch found on this PC after setup and
+    /// that one click puts right. The token-leak guard once the leak shows (a check, the token findings, or the known
+    /// issue's evidence), the cache clear when it is off and clearing is shown to help (setup's "decide later"), and a
+    /// report about an incident PoolWatch captured. What setup itself decides (starting at sign-in, a clear task of your
+    /// own, Defender, the Codex shortcut, the services) is not drip-fed here.
     /// </summary>
     public static IReadOnlyList<Recommendation> Current(RecommendationInputs i, int max = 3) =>
-        Candidates(i).Where(r => !Hidden(i.Dismissed, r.Key, i.NowUtc)).OrderBy(r => r.Priority).Take(max).ToList();
+        Candidates(i).Where(r => ShownLater.Contains(r.Id) && !Hidden(i.Dismissed, r.Key, i.NowUtc)).OrderBy(r => r.Priority).Take(max).ToList();
+
+    /// <summary>The offers <see cref="Current"/> may show.</summary>
+    public static readonly IReadOnlySet<RecommendationId> ShownLater =
+        new HashSet<RecommendationId> { RecommendationId.TokenLeakGuard, RecommendationId.HourlyCacheClear, RecommendationId.ReportIncident };
 
     /// <summary>True while a key hidden at its time is still within <see cref="DismissFor"/>.</summary>
     public static bool Hidden(IReadOnlyDictionary<string, DateTime> dismissed, string key, DateTime nowUtc) =>
@@ -57,10 +73,11 @@ public static class RecommendationRules
     {
         var f = i.Facts;
         bool leaksHere = i.LeakTestNow == LeakVerdict.Leak || (i.SavedVerdict == GuardResult.Leak && f is not null && i.SavedVerdictBuild == f.Build);
-        if (!i.TokenGuardOn && (i.TokenSpawnLast24h || leaksHere))
-            yield return TokenGuardOffer(i.TokenSpawnLast24h
-                ? "Security tokens pile up in the kernel pool each time a program starts another: PoolWatch saw it in the last day. " + TradeOff
-                : "PoolWatch's check found that this Windows build leaks a little of the kernel pool each time a program starts another. " + TradeOff);
+        if (!i.TokenGuardOn && (i.TokenSpawnLast24h || leaksHere || i.TokenLeakSeen))
+            yield return TokenGuardOffer(leaksHere
+                ? "PoolWatch's check found that this Windows build leaks a little of the kernel pool each time a program starts another. " + TradeOff
+                : "Security tokens pile up in the kernel pool each time a program starts another: PoolWatch saw it " +
+                  (i.TokenSpawnLast24h ? "in the last day. " : "in the last hour. ") + TradeOff);
         if (f is not null)
         {
             if (f.OwnClearTasks.Count > 0) yield return ReplaceTask();
@@ -69,7 +86,7 @@ public static class RecommendationRules
                 yield return new Recommendation(RecommendationId.CheckTokenLeak, "Check this Windows build for the token leak",
                     (i.SavedVerdictBuild is null ? "Some Windows 11 builds leak a little of the kernel pool each time a program starts another. "
                                                  : "Windows was updated since PoolWatch last checked for the token leak. ") +
-                    "The check takes about 20 seconds and changes nothing.", "Check", RecommendationAction.CheckTokenLeak, CheckLeakPriority);
+                    "The check usually takes about 20 seconds and changes nothing.", "Check", RecommendationAction.CheckTokenLeak, CheckLeakPriority);
             if (!f.LogonTaskExists && f.InstalledInProgramFiles) yield return SignIn();
         }
         if (i.ReportableIncident is { } inc)
@@ -109,8 +126,8 @@ public static class RecommendationRules
         var devDrives = f.Volumes.Where(v => v.IsDevDrive).ToList();
         if (devDrives.Count == 0 || f.DefenderRealTimeOn != true) return [];
         if (!i.FileSystemMetadataGrewLast24h && i.DefenderCoresAvg30Min is not >= 0.25) return [];
-        if (f.DefenderPerformanceModeOn == false) return devDrives.Select(v => v.Root).ToList();
-        return devDrives.Where(v => v.Trusted == false).Select(v => v.Root).ToList();
+        // The drives Defender checks before a file opens, by the same rule as the impact scan (setup names the same drives).
+        return devDrives.Where(v => Impact.ImpactRules.FromFacts.ScannedFirst(f.DefenderPerformanceModeOn, v.Trusted)).Select(v => v.Root).ToList();
     }
 
     // ------------------------------------------------------------------ the rows
@@ -144,7 +161,7 @@ public static class RecommendationRules
         {
             TokenLeakStatus.Leaks => TokenGuardOffer("This Windows build leaks a little of the kernel pool each time a program starts another. The guard turns on the " +
                                                      "Windows setting that stops it, each time PoolWatch starts. " + TradeOff),
-            TokenLeakStatus.NeedsTest => TokenGuardOffer("Checking whether this Windows build has the token leak (about 20 seconds)...") with
+            TokenLeakStatus.NeedsTest => TokenGuardOffer("Checking whether this Windows build has the token leak (usually about 20 seconds)...") with
             {
                 Button = "", Action = RecommendationAction.CheckTokenLeak, State = RecommendationState.Checking,
             },

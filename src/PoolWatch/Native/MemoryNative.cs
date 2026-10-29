@@ -24,6 +24,25 @@ internal static unsafe class MemoryNative
         public nuint ModifiedPageCountPageFile;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MEMORYSTATUSEX
+    {
+        public uint dwLength, dwMemoryLoad;
+        public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile, ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX buffer);
+
+    /// <summary>
+    /// The PC's physical RAM (GlobalMemoryStatusEx), or 0 when it cannot be read. Not the GC's own limit, which a job
+    /// object or a heap limit makes smaller than the PC's RAM.
+    /// </summary>
+    public static long TotalPhysical()
+    {
+        var status = new MEMORYSTATUSEX { dwLength = (uint)sizeof(MEMORYSTATUSEX) };
+        return GlobalMemoryStatusEx(ref status) ? (long)Math.Min(status.ullTotalPhys, long.MaxValue) : 0;
+    }
+
     [DllImport("ntdll.dll")] private static extern int NtQuerySystemInformation(int infoClass, void* buffer, int length, out int returnLength);
     [DllImport("ntdll.dll")] private static extern int NtSetSystemInformation(int infoClass, void* buffer, int length);
 

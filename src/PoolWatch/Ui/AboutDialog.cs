@@ -6,14 +6,21 @@ using PoolWatch.Engine;
 
 namespace PoolWatch.Ui;
 
+/// <summary>What About says about this PoolWatch: its version, what it monitors and what that costs, and its data folder.</summary>
+internal sealed record AboutFacts(string Version, string Monitoring, string Overhead, string DataRoot);
+
 /// <summary>
-/// About PoolWatch: the version, what it monitors and what that costs, the data folder, what PoolWatch changes, and the
-/// credits and licences (<see cref="Credits.All"/>), each name a link to its page. The form sizes itself to its content, so
-/// nothing is cut off at any scaling; on a screen too short for it, it scrolls vertically. Created when opened, disposed
-/// when closed.
+/// About PoolWatch, in three columns: the version, what it monitors and what that costs, and the data folder; what
+/// PoolWatch changes and what goes over the network; and the credits and licences (<see cref="Credits.All"/>), each name
+/// a link to its page, in a list that scrolls when it is longer than the other two columns. The form sizes itself to its
+/// content, so nothing is cut off at any scaling, and fits a 1024 x 600 screen whole (it was 857 px tall in one column);
+/// on a shorter one it scrolls vertically. Created when opened, disposed when closed.
 /// </summary>
 internal sealed class AboutDialog : Form
 {
+    /// <summary>Each column's width (logical pixels): the three side by side fit a 1024-wide screen.</summary>
+    public const int ColumnWidth = 300;
+
     /// <summary>Start-up (JIT, first scans, tag scan) is not steady state: overhead is judged only after this long.</summary>
     private const int SteadySeconds = 300;
 
@@ -34,12 +41,17 @@ internal sealed class AboutDialog : Form
 
     private readonly ToolTip _tips = new();
     private readonly List<LinkLabel> _credits = [];
+    /// <summary>The credits' list: it scrolls when it is longer than the other two columns.</summary>
+    private readonly Panel _creditsList;
     private readonly Font _bold, _title; // the labels never dispose the fonts they are given: the window does, after them
 
-    public AboutDialog(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions)
+    public AboutDialog(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions) : this(FactsOf(engine, analysis), actions) { }
+
+    /// <param name="actions">What the links and buttons do; null (tests) leaves them inert.</param>
+    internal AboutDialog(AboutFacts facts, UiActions? actions)
     {
         Text = "About PoolWatch";
-        Icon = TrayIcons.For(TrayState.Green);
+        Icon = TrayIcons.App;
         Font = new Font("Segoe UI", 9f);
         StartPosition = FormStartPosition.CenterScreen;
         MinimizeBox = false;
@@ -48,66 +60,98 @@ internal sealed class AboutDialog : Form
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
-        int width = S(620);
+        int width = S(ColumnWidth), gutter = S(24);
         var bold = _bold = new Font(Font, FontStyle.Bold);
         _title = new Font(Font.FontFamily, 12f, FontStyle.Bold);
-        var form = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Padding = Px(16, 12, 16, 12), Location = Point.Empty };
-        form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
-        void Row(Control c, int bottom = 4)
+        TableLayoutPanel Column()
+        {
+            var c = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Margin = Padding.Empty, Padding = Padding.Empty };
+            c.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
+            return c;
+        }
+        void Row(TableLayoutPanel column, Control c, int bottom = 4)
         {
             c.Margin = new Padding(0, 0, 0, S(bottom));
             if (c is Label { AutoSize: true } l) l.MaximumSize = new Size(width, 0);
-            form.Controls.Add(c);
+            column.Controls.Add(c);
         }
         Label Para(string text) => new() { Text = text, AutoSize = true, UseMnemonic = false };
         Label Heading(string text) => new() { Text = text, AutoSize = true, Font = bold };
+        void Open(string what, Action a) { if (actions is not null) actions.Guarded(this, what, a); }
 
-        Row(new Label { Text = $"PoolWatch {UiActions.AppVersion}", AutoSize = true, Font = _title });
-        Row(Para("Watches the Windows kernel pool, finds what makes it grow, and can clear the cache."), bottom: 2);
+        // The first column: PoolWatch itself.
+        var left = Column();
+        Row(left, new Label { Text = $"PoolWatch {facts.Version}", AutoSize = true, Font = _title });
+        Row(left, Para("Watches the Windows kernel pool, finds what makes it grow, and can clear the cache."), bottom: 2);
         // Where PoolWatch lives: its source, releases and issues.
         string home = Credits.RepoUrl["https://".Length..];
         var repo = new LinkLabel { Text = $"Source, releases and issues: {home}", AutoSize = true, UseMnemonic = false };
         repo.LinkArea = new LinkArea(repo.Text.Length - home.Length, home.Length);
-        repo.LinkClicked += (_, _) => actions.Guarded(this, "Open web page", () => UiActions.OpenWebPage(Credits.RepoUrl));
+        repo.LinkClicked += (_, _) => Open("Open web page", () => UiActions.OpenWebPage(Credits.RepoUrl));
         _tips.SetToolTip(repo, Credits.RepoUrl);
-        Row(repo, bottom: 10);
+        Row(left, repo, bottom: 10);
 
-        Row(Heading("Monitoring"));
-        Row(Para($"{engine.SampleCount:N0} samples; process events (ETW) {(engine.EtwRunning ? engine.EtwMode : "not running")}; " +
-                 $"pooltag.txt {(analysis.Knowledge.PoolTagTxtLoaded ? "loaded" : "not found (built-in tag table and driver scan)")}."));
-        Row(Para(Overhead(engine)), bottom: 10);
+        Row(left, Heading("Monitoring"));
+        Row(left, Para(facts.Monitoring));
+        Row(left, Para(facts.Overhead), bottom: 10);
 
-        Row(Heading("Data folder"));
+        Row(left, Heading("Data folder"));
         var open = new Button { Text = "Open", AutoSize = true, Margin = new Padding(S(8), 0, 0, 0) };
-        open.Click += (_, _) => UiActions.OpenFolder(engine.Paths.DataRoot);
+        open.Click += (_, _) => { if (actions is not null) UiActions.OpenFolder(facts.DataRoot); };
         var folder = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false };
-        folder.Controls.Add(new Label { Text = engine.Paths.DataRoot, AutoSize = true, UseMnemonic = false, Margin = new Padding(0, S(6), 0, 0) });
+        folder.Controls.Add(new Label { Text = facts.DataRoot, AutoSize = true, UseMnemonic = false, Margin = new Padding(0, S(6), 0, 0), MaximumSize = new Size(width - S(80), 0) });
         folder.Controls.Add(open);
-        Row(folder, bottom: 10);
+        Row(left, folder, bottom: 0);
 
-        Row(Heading("What PoolWatch changes"));
-        Row(Para(Changes), bottom: 6);
-        Row(Para(Network), bottom: 10);
+        // The second column: what PoolWatch changes, and what goes over the network.
+        var middle = Column();
+        Row(middle, Heading("What PoolWatch changes"));
+        Row(middle, Para(Changes), bottom: 6);
+        Row(middle, Para(Network), bottom: 0);
 
-        Row(Heading("Credits and licences"));
+        // The third column: the credits and licences, in a list as tall as the other two columns (it scrolls when longer).
+        var right = Column();
+        var heading = Heading("Credits and licences");
+        Row(right, heading);
+        int bar = SystemInformation.GetVerticalScrollBarWidthForDpi(DeviceDpi);
+        var list = Column();
+        list.ColumnStyles[0] = new ColumnStyle(SizeType.Absolute, width - bar - S(4));
         foreach (var c in Credits.All)
         {
             var link = new LinkLabel { Text = $"{c.Name} ({c.Licence}). {c.What}", AutoSize = true, UseMnemonic = false, LinkArea = new LinkArea(0, c.Name.Length) };
-            link.LinkClicked += (_, _) => actions.Guarded(this, "Open web page", () => UiActions.OpenWebPage(c.Url));
+            link.LinkClicked += (_, _) => Open("Open web page", () => UiActions.OpenWebPage(c.Url));
             _tips.SetToolTip(link, c.Url);
+            link.MaximumSize = new Size(width - bar - S(4), 0);
+            link.Margin = new Padding(0, 0, 0, S(5));
             _credits.Add(link);
-            Row(link, bottom: 3);
+            list.Controls.Add(link);
         }
+        int tallest = Math.Max(left.GetPreferredSize(Size.Empty).Height, middle.GetPreferredSize(Size.Empty).Height);
+        int listHeight = Math.Max(S(200), tallest - heading.GetPreferredSize(Size.Empty).Height - S(4));
+        _creditsList = new Panel { AutoScroll = true, Size = new Size(width, listHeight), Margin = Padding.Empty };
+        _creditsList.Controls.Add(list);
+        right.Controls.Add(_creditsList);
+
+        var columns = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
+        for (int i = 0; i < 3; i++) columns.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        left.Margin = middle.Margin = new Padding(0, 0, gutter, 0);
+        columns.Controls.Add(left, 0, 0);
+        columns.Controls.Add(middle, 1, 0);
+        columns.Controls.Add(right, 2, 0);
+
+        var form = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Padding = Px(16, 12, 16, 12), Location = Point.Empty };
+        form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 3 * width + 2 * gutter));
+        form.Controls.Add(columns);
 
         var licences = new Button { Text = "Licences", AutoSize = true, Margin = Padding.Empty };
-        licences.Click += (_, _) => actions.Guarded(this, "Licences", ShowLicences);
+        licences.Click += (_, _) => Open("Licences", ShowLicences);
         // The report window belongs to whoever opened About, so closing About leaves it open.
         var report = new Button { Text = "Report an issue...", AutoSize = true, Margin = new Padding(S(6), 0, 0, 0) };
-        report.Click += (_, _) => actions.Guarded(this, "Report an issue", () => actions.ReportIssue(Owner));
+        report.Click += (_, _) => { if (actions is not null) actions.Guarded(this, "Report an issue", () => actions.ReportIssue(Owner)); };
         var close = new Button { Text = "Close", AutoSize = true, Margin = Padding.Empty };
         close.Click += (_, _) => Close();
         CancelButton = close;
-        var buttons = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 4, RowCount = 1, Margin = new Padding(0, S(8), 0, 0), Dock = DockStyle.Fill };
+        var buttons = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 4, RowCount = 1, Margin = new Padding(0, S(10), 0, 0), Dock = DockStyle.Fill };
         buttons.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         buttons.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -121,6 +165,12 @@ internal sealed class AboutDialog : Form
 
     private int S(int logical) => LogicalToDeviceUnits(logical);
     private Padding Px(int l, int t, int r, int b) => new(S(l), S(t), S(r), S(b));
+
+    /// <summary>About's facts from the running app.</summary>
+    private static AboutFacts FactsOf(MonitorEngine engine, AnalysisPipeline analysis) => new(UiActions.AppVersion,
+        $"{engine.SampleCount:N0} samples; process events (ETW) {(engine.EtwRunning ? engine.EtwMode : "not running")}; " +
+        $"pooltag.txt {(analysis.Knowledge.PoolTagTxtLoaded ? "loaded" : "not found (built-in tag table and driver scan)")}.",
+        Overhead(engine), engine.Paths.DataRoot);
 
     /// <summary>The overhead since start-up against its budget, then the last 10 minutes.</summary>
     private static string Overhead(MonitorEngine engine)
@@ -157,7 +207,7 @@ internal sealed class AboutDialog : Form
     {
         var problems = new List<string>();
         MainForm.ClippedControls(this, problems);
-        return new { credits = _credits.Select(l => l.Text[..l.LinkArea.Length]).ToList(), layoutProblems = problems };
+        return new { credits = _credits.Select(l => l.Text[..l.LinkArea.Length]).ToList(), layoutProblems = problems, size = new { width = Width, height = Height, dpi = DeviceDpi } };
     }
 
     protected override void Dispose(bool disposing)

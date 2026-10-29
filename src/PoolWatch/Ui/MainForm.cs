@@ -3,6 +3,7 @@ using PoolWatch.Core;
 using PoolWatch.Core.Correlation;
 using PoolWatch.Core.Detection;
 using PoolWatch.Core.Findings;
+using PoolWatch.Core.Growth;
 using PoolWatch.Core.Util;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Knowledge;
@@ -14,13 +15,17 @@ using PoolWatch.Engine.Changes;
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// The main window (DESIGN.md section 11), in one of two views. The Simple view, the default: the status line, the
-/// Clear cache now button, the line about the next cache clear, the pool graph and up to three suggestions. The Advanced
-/// view: the status line, three buttons (Clear cache now, Export report, Settings), the graph and two tabs (Pool causes,
-/// Services). Both have Active changes, the update notice when a newer release is out, and the Advanced view switch at
-/// the bottom; everything else is in the tray menu. The one graph moves between the two layouts. Refreshes on a 10 s
-/// timer that runs only while the window is visible and not minimised, the Simple view's line and suggestions at most
-/// once a minute; nothing is rendered or recomputed while it is hidden, and hiding it drops what only it shows.
+/// The main window (DESIGN.md section 11), in one of two views under one header. The header says the kernel pool now
+/// (paged and non-paged), which way it went in the last 10 minutes, when the next cache clear runs and what the last one
+/// freed, one statement per fact, with Clear now (and Settings on Pool causes). The Simple view, the default: four
+/// tiles over the graph's 6 hours (growth per hour without the clears, what they cleared, the net change, and the memory
+/// in use), the graph, and "Get more from PoolWatch" cards. The Advanced view: the graph with its 1 h / 6 h / 24 h choice
+/// (the graph's axis always spans the whole window, the time before PoolWatch started a labelled band) and the growth
+/// and clear stats beside it, then the tabs (Pool causes with the Impact column, Services). Both have Active changes
+/// with the count of changes in effect, the update notice when a newer release is out, and the Advanced view switch at
+/// the bottom; everything else is in the tray menu. Refreshes on a 10 s timer that runs only while the window is visible
+/// and not minimised, the Simple view's tiles and cards at most once a minute; nothing is rendered or recomputed while it
+/// is hidden, and hiding it drops what only it shows.
 /// </summary>
 internal sealed class MainForm : Form
 {
@@ -32,10 +37,10 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 10_000 };
     private readonly ToolTip _tips = new() { AutoPopDelay = 30_000, InitialDelay = 400 };
 
-    // The header: the status line on the left, the buttons on the right (only Clear cache now in the Simple view). The line
-    // draws itself (a Label flashed blank each time a refresh changed its text).
+    // The header: the facts on the left (they draw themselves, so a refresh never blanks them), the buttons on the right
+    // (only Clear now in the Simple view).
     private readonly Panel _header = new() { Dock = DockStyle.Top };
-    private readonly PaintedLabel _status = new(centerVertically: true) { Dock = DockStyle.Fill };
+    private readonly PoolHeaderView _headerView = new() { Dock = DockStyle.Fill };
     private readonly FlowLayoutPanel _buttons = new() { Dock = DockStyle.Right, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false };
     private readonly List<Button> _headerButtons = [];
     private readonly List<Button> _advancedButtons = [];
@@ -44,9 +49,14 @@ internal sealed class MainForm : Form
     // The two views and the footer they share.
     private readonly SimpleView _simple = new() { Dock = DockStyle.Fill };
     private readonly TableLayoutPanel _advanced = new() { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = SystemColors.Window };
-    private readonly TableLayoutPanel _footer = new() { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 3, RowCount = 1 };
-    private readonly Button _appliedChanges = new() { Text = "Active changes", AutoSize = true, UseVisualStyleBackColor = true };
-    private readonly CheckBox _advancedBox = new() { Text = "Advanced view", AutoSize = true };
+    private readonly TableLayoutPanel _footer = new() { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 5, RowCount = 1 };
+    /// <summary>Active changes: the window that lists every change in effect, with the count beside it.</summary>
+    private readonly LinkLabel _activeChanges = new() { Text = "Active changes", AutoSize = true, UseMnemonic = false, LinkBehavior = LinkBehavior.HoverUnderline };
+    private readonly CountBadge _changesCount = new();
+    private readonly ListIcon _changesIcon = new();
+    private readonly ToggleSwitch _advancedBox = new() { Text = "Advanced view" };
+    /// <summary>When the count of active changes is read (off the UI thread).</summary>
+    private readonly ChangeCountSchedule _countSchedule = new();
     /// <summary>"PoolWatch 1.2.0 is available. See what's new", while a newer release is out and update notices are on.</summary>
     private readonly LinkLabel _updateNotice = new() { AutoSize = true, UseMnemonic = false, Visible = false };
     private readonly Func<UpdateRelease?> _update;
@@ -58,19 +68,37 @@ internal sealed class MainForm : Form
 
     private readonly PoolChart _chart = new() { Dock = DockStyle.Fill };
     private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
+    // The Advanced view's top row: the graph with its 1 h / 6 h / 24 h choice, and beside it the growth and clear stats of
+    // that window (the session's choice: it is not kept across starts).
+    private readonly Panel _graphRow = new() { Dock = DockStyle.Fill };
+    private readonly GrowthPanel _growth = new() { Dock = DockStyle.Right };
+    private StatsWindow _window = StatsWindow.Default;
+    /// <summary>The Advanced view's rows are the Services tab's (the tabs alone), not the graph over the tabs.</summary>
+    private bool _servicesRows;
 
     // Pool causes: the merged list and the selected row's details. The list is drawn off screen and kept in step in place
     // (ListSync): its cells change while it shows.
     private readonly BufferedListView _causes = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false };
     private readonly SplitContainer _causesSplit = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
     private readonly WrapLabel _detailTitle = new() { Dock = DockStyle.Top };
+    /// <summary>What PoolWatch already does about the selected row ("Handled: the standby cache is emptied every hour, or at 8 GB."), in green, under its words.</summary>
+    private readonly WrapLabel _detailHandled = new() { Dock = DockStyle.Bottom, Visible = false };
     private readonly TextBox _detailText = new() { Dock = DockStyle.Fill, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical, WordWrap = true, BackColor = SystemColors.Window, BorderStyle = BorderStyle.None };
     private readonly Button _openFolder = new() { Text = "Open report folder", AutoSize = true, Visible = false };
+    private readonly Button _copySummary = new() { Text = "Copy summary", AutoSize = true, Visible = false };
+    private readonly Button _exportReport = new() { Text = "Export report...", AutoSize = true };
     private readonly TagRankings _rankings = new();
     private List<CauseRow> _causeRows = [];
     private Dictionary<string, CauseRow> _causeByKey = new();
     private bool _causeSelectPending;
     private long _causesSamples = -1;
+    /// <summary>The stats the Pool causes rows were built with, and for which window (the details say the same).</summary>
+    private (StatsWindow Picked, GrowthWindow Stats)? _causesWindow;
+    /// <summary>Which window the stats columns are for, on the right of the legend (it draws itself, as the other texts a refresh writes).</summary>
+    private readonly PaintedLabel _causesNote = new(centerVertically: true) { ForeColor = SystemColors.GrayText, Anchor = AnchorStyles.Right };
+    /// <summary>The column the owner sorted Pool causes by (-1: the list's own order), and which way.</summary>
+    private int _sortColumn = -1;
+    private bool _sortDescending, _sortChanged;
 
     // Services (the former Background services page; same behaviour). Its list is drawn off screen: its Cost cells change
     // on every refresh.
@@ -95,7 +123,7 @@ internal sealed class MainForm : Form
         _update = update;
         _tasksEngine = new Engine.TasksAndStartup(_engine.Log);
         Text = "PoolWatch";
-        Icon = TrayIcons.For(TrayState.Green);
+        Icon = TrayIcons.App;
         Font = new Font("Segoe UI", 9f);
         BackColor = SystemColors.Window;
         StartPosition = FormStartPosition.CenterScreen;
@@ -106,38 +134,63 @@ internal sealed class MainForm : Form
         MinimumSize = LogicalToDeviceUnits(new Size(760, 540));
 
         // Header.
-        _status.Font = new Font("Segoe UI Semibold", 13f);
-        _status.Text = "Kernel pool: collecting the first sample…";
-        var clear = HeaderButton("Clear cache now", () => _actions.Guarded(this, "Clear cache", () => _actions.ClearCacheNow(this)));
+        var clear = HeaderButton("Clear now", () => _actions.Guarded(this, "Clear cache", () => _actions.ClearCacheNow(this)));
         clear.MouseEnter += (_, _) => _tips.SetToolTip(clear, _actions.ClearCacheTip());
-        var export = HeaderButton("Export report", () => _actions.Guarded(this, "Export report", () => _actions.ExportReport(this, SelectedRow()?.Folder)), advancedOnly: true);
-        _tips.SetToolTip(export, "Zip the selected row's report (or the newest incident's) to share it. Redacted by default.");
         var settings = HeaderButton("Settings", () => _actions.Guarded(this, "Settings", OpenSettings), advancedOnly: true);
         _tips.SetToolTip(settings, "Detection thresholds, the automatic cache clear, redaction, and Start at logon.");
-        _header.Controls.Add(_status);  // fill first, then the docked edge
+        _header.Controls.Add(_headerView);  // fill first, then the docked edge
         _header.Controls.Add(_buttons);
+        _header.BackColor = SystemColors.Window;
+        _header.Paint += (_, e) => { using var rule = new Pen(UiColors.Rule); e.Graphics.DrawLine(rule, 0, _header.Height - 1, _header.Width, _header.Height - 1); };
 
-        // The Advanced view's body: the graph above the two tabs. The Simple view lays itself out (SimpleView).
+        // The Advanced view's body: the graph above the tabs. The Simple view lays itself out (SimpleView).
         _chart.HelpText = "Committed paged and non-paged pool: the figures Task Manager shows (Performance, Memory).";
+        _growth.Width = S(250);
+        _graphRow.Margin = Px(0, 0, 0, 8);
+        _graphRow.Padding = Px(0, 0, 0, 0);
+        _graphRow.Controls.Add(_growth);
+        _chart.SpanPicked += w => SafeRefresh(() =>
+        {
+            _window = w;
+            _chart.Span = w.Span;
+            _causesSamples = -1;
+            _statusSamples = -1;
+            RefreshNow(force: true);
+        });
+        _chart.ShowRamChanged += on => _actions.Guarded(this, "Show RAM", () =>
+        {
+            _context.Live.Apply("Show RAM", s => s.ShowRam = on); // kept in the settings, so it stays as you left it
+            _statusSamples = -1;
+            RefreshNow(force: true);
+        });
         _tabs.TabPages.Add(CausesPage());
         _tabs.TabPages.Add(ServicesPage());
-        _advanced.Padding = Px(12, 0, 12, 4);
+        _advanced.Padding = Px(16, 12, 16, 4);
         _advanced.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        _advanced.RowStyles.Add(new RowStyle(SizeType.Percent, 36));
-        _advanced.RowStyles.Add(new RowStyle(SizeType.Percent, 64));
+        var (graphRow, tabsRow) = AdvancedRows(servicesTab: false);
+        _advanced.RowStyles.Add(graphRow);
+        _advanced.RowStyles.Add(tabsRow);
         _tabs.Margin = Padding.Empty;
+        _advanced.Controls.Add(_graphRow, 0, 0);
         _advanced.Controls.Add(_tabs, 0, 1);
 
         // The footer, the same in both views.
-        _footer.Padding = Px(12, 6, 12, 10);
+        _footer.Padding = Px(16, 8, 16, 8);
+        _footer.BackColor = SystemColors.Window;
+        _footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         _footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         _footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         _footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        _appliedChanges.Padding = Px(6, 2, 6, 2);
-        _appliedChanges.Margin = Padding.Empty;
-        _appliedChanges.Click += (_, _) => _actions.Guarded(this, "Active changes", _context.Shell.ShowActiveChanges);
-        _tips.SetToolTip(_appliedChanges, "Every change PoolWatch made on this PC, each with Undo.");
-        _advancedBox.Margin = new Padding(0, S(4), 0, 0);
+        _changesIcon.Size = new Size(S(16), S(16));
+        _changesIcon.Margin = new Padding(0, S(4), S(6), 0);
+        _footer.Paint += (_, e) => { using var rule = new Pen(UiColors.Rule); e.Graphics.DrawLine(rule, 0, 0, _footer.Width, 0); };
+        _activeChanges.Margin = new Padding(0, S(4), S(6), 0);
+        _activeChanges.LinkColor = UiColors.Accent;
+        _activeChanges.LinkClicked += (_, _) => _actions.Guarded(this, "Active changes", _context.Shell.ShowActiveChanges);
+        _tips.SetToolTip(_activeChanges, "What PoolWatch has changed on this PC and is still in effect, each with a way to put it back.");
+        _changesCount.Margin = new Padding(0, S(3), 0, 0);
+        _advancedBox.Margin = new Padding(0, S(1), 0, 0);
         _advancedBox.CheckedChanged += (_, _) =>
         {
             if (_advancedBox.Checked == _isAdvanced) return; // set by the window itself
@@ -148,9 +201,11 @@ internal sealed class MainForm : Form
         _updateNotice.Margin = new Padding(S(16), S(5), S(12), 0);
         _updateNotice.LinkClicked += (_, _) => _actions.Guarded(this, "Open the release page", () => { if (_shownUpdate is { } r) UiActions.OpenWebPage(r.PageUrl); });
         _tips.SetToolTip(_updateNotice, "Opens the release's page on GitHub in your browser. PoolWatch never downloads or installs anything itself.");
-        _footer.Controls.Add(_appliedChanges, 0, 0);
-        _footer.Controls.Add(_updateNotice, 1, 0);
-        _footer.Controls.Add(_advancedBox, 2, 0);
+        _footer.Controls.Add(_changesIcon, 0, 0);
+        _footer.Controls.Add(_activeChanges, 1, 0);
+        _footer.Controls.Add(_changesCount, 2, 0);
+        _footer.Controls.Add(_updateNotice, 3, 0);
+        _footer.Controls.Add(_advancedBox, 4, 0);
 
         Controls.Add(_simple); // fill first, then the docked edges
         Controls.Add(_advanced);
@@ -160,6 +215,12 @@ internal sealed class MainForm : Form
         _simple.HideClicked += r =>
         {
             _context.Store.Dismiss(r.Key, DateTime.UtcNow);
+            ReadSimpleNow();
+        };
+        _simple.FeatureClicked += c => _actions.Guarded(this, c.Link, () => OpenFeature(c));
+        _simple.FeatureHidden += c =>
+        {
+            _context.Store.HideFeature(c.Key);
             ReadSimpleNow();
         };
 
@@ -175,17 +236,29 @@ internal sealed class MainForm : Form
         };
         _causes.DoubleClick += (_, _) => { if (SelectedRow()?.Folder is { } d && Directory.Exists(d)) _actions.OpenIncidentFolder(d); };
         _causes.Resize += (_, _) => FitCauseColumns();
+        _causes.ColumnClick += (_, e) => SafeRefresh(() => SortCausesBy(e.Column));
+        _causes.HandleCreated += (_, _) => PoolCausesHeader.Show(_causes, _sortColumn, _sortDescending);
         _openFolder.Click += (_, _) => { if (SelectedRow()?.Folder is { } d) _actions.OpenIncidentFolder(d); };
-        _tabs.SelectedIndexChanged += (_, _) => RefreshNow();
+        _copySummary.Click += (_, _) => _actions.Guarded(this, "Copy summary", () => { if (SummaryOf(SelectedRow()) is { } text) _actions.Copy(text); });
+        _exportReport.Click += (_, _) => _actions.Guarded(this, "Export report", () => _actions.ExportReport(this, SelectedRow()?.Folder));
+        _tips.SetToolTip(_exportReport, "Zip the selected row's report (or the newest incident's) to share it. Redacted by default.");
+        _tabs.SelectedIndexChanged += (_, _) =>
+        {
+            LayoutAdvancedRows();
+            LayoutHeader(); // the Services tabs have the smaller header: their lists need the rows
+            RefreshNow();
+        };
         _timer.Tick += (_, _) => RefreshNow();
         VisibleChanged += (_, _) =>
         {
             if (Disposing) return; // the app is exiting: nothing to read or release
-            if (Visible) ReadFactsIfStale();
+            if (Visible) { ReadFactsIfStale(); _countSchedule.Soon(); }
             else ReleaseWhileHidden();
             UpdateTimer();
         };
         Resize += (_, _) => { UpdateTimer(); LayoutHeader(); };
+        // Back from Active changes (or anything else that may have put a change back): the count is read again, once.
+        Activated += (_, _) => _countSchedule.Activated(DateTime.UtcNow);
         Load += (_, _) => { LayoutHeader(); FitCauseColumns(); };
         SplitAt(_causesSplit, 0.58);
         SplitAt(_servicesSplit, 0.6);
@@ -197,7 +270,7 @@ internal sealed class MainForm : Form
 
     private Button HeaderButton(string text, Action click, bool advancedOnly = false)
     {
-        var b = new Button { Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = Px(10, 4, 10, 4), Margin = Px(8, 0, 0, 0), UseVisualStyleBackColor = true };
+        var b = HeaderButtonOf(text, S);
         b.Click += (_, _) => click();
         _buttons.Controls.Add(b);
         _headerButtons.Add(b);
@@ -205,12 +278,26 @@ internal sealed class MainForm : Form
         return b;
     }
 
-    /// <summary>The header buttons of the view shown now.</summary>
-    private IEnumerable<Button> ShownButtons => _isAdvanced ? _headerButtons : _headerButtons.Except(_advancedButtons);
+    /// <summary>A button on the header's right, as the window makes it (and its layout test).</summary>
+    internal static Button HeaderButtonOf(string text, Func<int, int> s) => new()
+    {
+        Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(s(10), s(4), s(10), s(4)), Margin = new Padding(s(8), 0, 0, 0),
+        UseVisualStyleBackColor = true,
+    };
+
+    /// <summary>The header buttons of the view and tab shown now.</summary>
+    private IEnumerable<Button> ShownButtons => _headerButtons.Where(b => !_advancedButtons.Contains(b) || SettingsShown(_isAdvanced, _tabs.SelectedIndex));
 
     /// <summary>
-    /// Shows the Advanced view (the graph above the tabs, all three header buttons) or the Simple view (its line, the graph
-    /// and the suggestions, Clear cache now only), moving the one graph between them. The view's contents are read at once.
+    /// Settings is on the header in the Advanced view on Pool causes. The Simple view has Clear now alone, and so has the
+    /// smaller header of the Services tabs, as the design has them.
+    /// </summary>
+    internal static bool SettingsShown(bool advanced, int tab) => advanced && tab == 0;
+
+    /// <summary>
+    /// Shows the Advanced view (the graph with its 1 h / 6 h / 24 h choice and stats above the tabs, Clear now and Settings)
+    /// or the Simple view (the tiles, the graph and the cards, Clear now only), moving the one graph between them. The
+    /// view's contents are read at once.
     /// </summary>
     private void SetView(bool advanced)
     {
@@ -218,18 +305,51 @@ internal sealed class MainForm : Form
         _isAdvanced = advanced;
         if (advanced)
         {
-            _chart.Margin = Px(0, 0, 0, 8);
-            _advanced.Controls.Add(_chart, 0, 0);
+            _chart.Margin = Px(0, 0, 12, 0);
+            _graphRow.Controls.Add(_chart);
+            _chart.BringToFront(); // the fill docks last, after the stats panel
+            _chart.Span = _window.Span;
+            _chart.SpanBox.SelectedIndex = StatsWindow.All.ToList().IndexOf(_window);
+            _chart.SpanOption = true;
+            _chart.RamOption = true;
+            _chart.ShowRam = _context.Live.Running.ShowRam;
         }
-        else _simple.SetChart(_chart);
+        else
+        {
+            _simple.SetChart(_chart);
+            _chart.Span = PoolChart.SimpleSpan;
+            _chart.SpanOption = false;
+            _chart.RamOption = false;
+        }
         _advanced.Visible = advanced;
         _simple.Visible = !advanced;
-        foreach (var b in _advancedButtons) b.Visible = advanced;
         _advancedBox.Checked = advanced;
         ResumeLayout(true);
         LayoutHeader();
         _simpleReadUtc = DateTime.MinValue;
         RefreshNow(force: true);
+    }
+
+    /// <summary>
+    /// The Advanced view's rows: the graph with its stats over the tabs (36% and 64%), or, on the Services tab, the tabs
+    /// alone: picking services needs the list's rows more than the graph, which is back on Pool causes.
+    /// </summary>
+    internal static (RowStyle Graph, RowStyle Tabs) AdvancedRows(bool servicesTab) => servicesTab
+        ? (new RowStyle(SizeType.Absolute, 0), new RowStyle(SizeType.Percent, 100))
+        : (new RowStyle(SizeType.Percent, 36), new RowStyle(SizeType.Percent, 64));
+
+    /// <summary>The rows as the tab picked now wants them (<see cref="AdvancedRows"/>).</summary>
+    private void LayoutAdvancedRows()
+    {
+        bool services = _tabs.SelectedIndex == 1;
+        if (services == _servicesRows) return;
+        _servicesRows = services;
+        var (graph, tabs) = AdvancedRows(services);
+        _advanced.SuspendLayout();
+        _advanced.RowStyles[0] = graph;
+        _advanced.RowStyles[1] = tabs;
+        _graphRow.Visible = !services;
+        _advanced.ResumeLayout(true);
     }
 
     /// <summary>Switches to the Advanced view on a tab (0 Pool causes, 1 Services), as the owner asked from a suggestion; kept like the switch.</summary>
@@ -240,47 +360,126 @@ internal sealed class MainForm : Form
         _tabs.SelectedIndex = Math.Clamp(tab, 0, _tabs.TabCount - 1);
     }
 
-    /// <summary>The header's height follows the status text (wrapped to the room left of the buttons) and the buttons.</summary>
+    /// <summary>
+    /// The header for the view and tab shown now (<see cref="LayoutHeader(Panel, PoolHeaderView, FlowLayoutPanel, IReadOnlyList{Button}, int, bool, int)"/>),
+    /// then the Advanced view's graph row, which keeps its room under it (<see cref="FitGraphRow(TableLayoutPanel, Control, PoolChart, GrowthPanel, bool)"/>).
+    /// </summary>
     private void LayoutHeader()
     {
         if (_buttons.Controls.Count == 0) return;
-        _header.Padding = Px(14, 10, 12, 8);
-        var shown = ShownButtons.ToList();
-        int btnH = shown.Max(b => b.GetPreferredSize(Size.Empty).Height + b.Margin.Vertical);
-        int btnW = shown.Sum(b => b.GetPreferredSize(Size.Empty).Width + b.Margin.Horizontal) + S(12);
-        int textW = Math.Max(S(200), ClientSize.Width - _header.Padding.Horizontal - btnW);
-        // Measured a little narrower than the label: wrapping earlier can only add a line, never cut one off.
-        int textH = PaintedLabel.Measure(_status.Text, _status.Font, textW - S(4));
-        int inner = Math.Max(textH + S(2), btnH);
-        _buttons.Padding = new Padding(S(12), Math.Max(0, (inner - btnH) / 2), 0, 0);
-        int h = inner + _header.Padding.Vertical;
-        if (_header.Height != h) _header.Height = h;
+        bool settings = SettingsShown(_isAdvanced, _tabs.SelectedIndex);
+        foreach (var b in _advancedButtons) if (b.Visible != settings) b.Visible = settings;
+        LayoutHeader(_header, _headerView, _buttons, ShownButtons.ToList(), ClientSize.Width, _isAdvanced, _tabs.SelectedIndex);
+        FitGraphRow();
     }
 
-    // The tray icon's red and amber (UiData.State: red only for a real risk), and green for a fall.
-    private static readonly Color Risk = Color.FromArgb(178, 34, 34), Watched = Color.FromArgb(150, 90, 0), Fell = Color.FromArgb(0, 110, 50);
+    /// <summary>
+    /// The header's layout at the window's client width (the window, and its layout test with the same controls): its
+    /// height follows its facts (one row, or two on a narrow window) and the buttons shown. On a tab after Pool causes (the
+    /// services' lists) it is the smaller header, as the design has it there; so it is in the Advanced view on a window too
+    /// narrow for the full facts in one row, where two rows would leave the graph and Pool causes too little room.
+    /// </summary>
+    internal static void LayoutHeader(Panel header, PoolHeaderView view, FlowLayoutPanel buttons, IReadOnlyList<Button> shown, int clientWidth, bool advanced, int tab)
+    {
+        int S(int logical) => header.LogicalToDeviceUnits(logical);
+        int btnH = shown.Max(b => b.GetPreferredSize(Size.Empty).Height + b.Margin.Vertical);
+        int btnW = shown.Sum(b => b.GetPreferredSize(Size.Empty).Width + b.Margin.Horizontal) + S(16);
+        int factsW = Math.Max(S(200), clientWidth - S(24) - S(20) - btnW); // the padding's sides are the same in both headers
+        bool compact = CompactHeader(advanced, tab, view.FitsOneRow(factsW, compact: false));
+        view.Compact = compact;
+        header.Padding = compact ? new Padding(S(24), S(10), S(20), S(10)) : new Padding(S(24), S(14), S(20), S(14));
+        int inner = Math.Max(view.NeededHeight(factsW), btnH);
+        buttons.Padding = new Padding(S(16), Math.Max(0, (inner - btnH) / 2), 0, 0);
+        int h = inner + header.Padding.Vertical;
+        if (header.Height != h) header.Height = h;
+    }
+
+    /// <summary>
+    /// The smaller header: in the Advanced view on any tab but Pool causes (the first), and on Pool causes too when the full
+    /// facts do not fit in one row (<paramref name="fullFitsOneRow"/>).
+    /// </summary>
+    internal static bool CompactHeader(bool advanced, int tab, bool fullFitsOneRow = true) => advanced && (tab > 0 || !fullFitsOneRow);
+
+    /// <summary>The graph's row as the window has it now (<see cref="FitGraphRow(TableLayoutPanel, Control, PoolChart, GrowthPanel, bool)"/>).</summary>
+    private void FitGraphRow()
+    {
+        if (_isAdvanced) FitGraphRow(_advanced, _graphRow, _chart, _growth, servicesRows: _servicesRows);
+    }
+
+    /// <summary>
+    /// On Pool causes the graph's row keeps its share of the height (<see cref="AdvancedRows"/>), but never less than the
+    /// graph needs to draw its plot (<see cref="PoolChart.NeededHeight"/>) and the stats beside it need for every row
+    /// (<see cref="GrowthPanel.RowsHeight"/>): on a small window the tabs below give up the difference. The Services tabs'
+    /// rows are left as they are.
+    /// </summary>
+    internal static void FitGraphRow(TableLayoutPanel advanced, Control graphRow, PoolChart chart, GrowthPanel growth, bool servicesRows)
+    {
+        if (servicesRows || advanced.RowStyles.Count < 2) return;
+        int available = advanced.ClientSize.Height - advanced.Padding.Vertical;
+        var row = GraphRow(available, Math.Max(chart.NeededHeight, growth.RowsHeight) + graphRow.Margin.Vertical);
+        var now = advanced.RowStyles[0];
+        if (now.SizeType == row.SizeType && Math.Abs(now.Height - row.Height) < 0.5f) return;
+        advanced.RowStyles[0] = row;
+    }
+
+    /// <summary>
+    /// The graph's row out of <paramref name="available"/> pixels: its share (<see cref="AdvancedRows"/>) when that is at
+    /// least <paramref name="need"/>, else <paramref name="need"/> (all there is, at most). Pure.
+    /// </summary>
+    internal static RowStyle GraphRow(int available, int need)
+    {
+        var (share, _) = AdvancedRows(servicesTab: false);
+        return available * share.Height / 100 >= need ? share : new RowStyle(SizeType.Absolute, Math.Max(0, Math.Min(need, available)));
+    }
+
     private static readonly TimeSpan OwnClearSaidFor = TimeSpan.FromMinutes(10);
 
     /// <summary>
-    /// The status line, calm on purpose: a growth alone is plain text with when the next clear runs, its colour is the tray
-    /// icon's, and PoolWatch's own clear of the last 10 minutes is said as its result, not as the pool shrinking.
+    /// The header, calm on purpose: its facts (<see cref="HeaderText"/>: the pool now, its trend, the next clear and the
+    /// last one's result), and a note only when there is something to watch (<see cref="HeaderNote"/>). Over the trend, the
+    /// fuller status sentence; over the next clear, the whole line about clearing.
     /// </summary>
-    private void UpdateStatus(TrayState state)
+    private void UpdateHeader(TrayState state)
     {
+        var now = DateTime.UtcNow;
         var t = UiData.Totals(_analysis);
         var lead = PoolCauses.Lead(_analysis, _rankings, _engine.Services, t.Held, out _leadTag);
-        string? ownClear = t.Clear is { } c && DateTime.UtcNow - c.TimeUtc <= OwnClearSaidFor ? c.Result : null;
-        var s = PoolStatusLine.Describe(t.Total, t.Held, t.Change10Min, t.ChangeHour, lead, UiData.SaturatedBusiest(_analysis), ownClear, UiData.NextClearContext(_analysis));
+        string? busiest = UiData.SaturatedBusiest(_analysis);
+        string? ownClear = t.Clear is { } c && now - c.TimeUtc <= OwnClearSaidFor ? c.Result : null;
+        var s = PoolStatusLine.Describe(t.Total, t.Held, t.Change10Min, t.ChangeHour, lead, busiest, ownClear, UiData.NextClearContext(_analysis));
         _statusKind = s.Kind;
-        var color = state switch
+        var (note, tone) = HeaderNote(lead, busiest, s.Kind, state);
+        var cache = _analysis.Diagnostics.Cache;
+        var facts = HeaderText.Of(t, UiData.Latest(_analysis), cache.Next(now), cache.History(), _engine.Settings.AutoClearEveryHours, now, note, tone);
+        _headerView.Show(facts, s.Text, UiData.NextClearLine(_analysis));
+        LayoutHeader();
+    }
+
+    /// <summary>A tag's growth is said in the note from this much (it rounds to at least 1 MB).</summary>
+    private const long LeastNoted = 512L << 10;
+
+    /// <summary>
+    /// The header's one note, and its colour (the tray icon's: red only for a real risk): a likely cause PoolWatch is sure
+    /// of ("PoolWatch is keeping an eye on Stream Deck.") or a tag that grew while the total held, a saturated PC, and
+    /// where to look while the tray is amber or red and nothing else says why. Null when there is nothing to watch.
+    /// </summary>
+    internal static (string? Note, HeaderTone Tone) HeaderNote(PoolStatusLead? lead, string? saturatedBusiest, PoolStatusKind kind, TrayState state)
+    {
+        var parts = new List<string>();
+        if (lead is { Cause: { Length: > 0 } } && PoolStatusLine.CauseSentence(lead.Cause, lead.Confidence) is { Length: > 0 } cause) parts.Add(cause.Trim());
+        else if (kind == PoolStatusKind.TagGrowing && lead is { Growth: >= LeastNoted } grew)
+            parts.Add($"{char.ToUpperInvariant(grew.What[0])}{grew.What[1..]} grew {PlainWords.Amount(grew.Growth)} in {PlainWords.Span(grew.Over)}.");
+        if (saturatedBusiest is not null)
+            parts.Add(saturatedBusiest.Length > 0 ? $"Your PC is saturated; busiest: {saturatedBusiest}." : "Your PC is saturated: every core is busy.");
+        if (parts.Count == 0 && state != TrayState.Green)
+            parts.Add((state == TrayState.Red ? "PoolWatch sees a real risk." : "PoolWatch is watching something that grew.") + " Pool causes in the Advanced view has the details.");
+        var tone = state switch
         {
-            TrayState.Red => Risk,
-            TrayState.Amber => Watched,
-            _ when s.Saturated => Watched,
-            _ => s.Kind switch { PoolStatusKind.Dropping => Fell, PoolStatusKind.Collecting => SystemColors.GrayText, _ => SystemColors.ControlText },
+            TrayState.Red => HeaderTone.Risk,
+            TrayState.Amber => HeaderTone.Watch,
+            _ => saturatedBusiest is not null ? HeaderTone.Watch : HeaderTone.Calm,
         };
-        if (_status.ForeColor != color) _status.ForeColor = color;
-        if (_status.Text != s.Text) { _status.Text = s.Text; LayoutHeader(); }
+        return (parts.Count == 0 ? null : string.Join(" ", parts), tone);
     }
 
     /// <summary>Settings, created for this opening and disposed when it closes, so it always starts from what is saved, with the settings in effect now.</summary>
@@ -290,23 +489,72 @@ internal sealed class MainForm : Form
         settings.ShowDialog(this);
     }
 
-    /// <summary>Settings for one opening (the caller disposes it).</summary>
-    private SettingsDialog NewSettings() => new(_engine, _analysis, _actions, _context.Live, _context.Shell);
+    /// <summary>
+    /// Settings for one opening (the caller disposes it), with the offer to make the Codex shortcut again when the ChatGPT
+    /// desktop app is installed, the launcher is there and the shortcut is not on the desktop.
+    /// </summary>
+    private SettingsDialog NewSettings()
+    {
+        bool onDesktop = ShortcutOffer.OnDesktop(() => Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), File.Exists);
+        var offer = ShortcutOffer.Offered(_context.Probe.Last?.ChatGptInstalled == true, ChatGptShortcut.Launcher() is not null, onDesktop)
+            ? new ShortcutOffer(() => _context.Recommendations.CreateCodexShortcut("Settings"))
+            : null;
+        return new(_engine, _analysis, _actions, _context.Live, _context.Shell, offer);
+    }
 
     // ---------------------------------------------------------------- Simple view
 
     /// <summary>
-    /// The Simple view's line about clearing and its suggestions, read at most once a minute while it shows (from memory
-    /// and the cached facts: nothing is scanned), and at once after a suggestion's button or Hide.
+    /// The Simple view's tiles (over the graph's own 6 hours) and its cards, read at most once a minute while it shows
+    /// (from memory and the cached facts: nothing is scanned), and at once after a card's button or Hide. The token-leak
+    /// watch looks in at the same time.
     /// </summary>
     private void ReadSimple(bool force)
     {
         var now = DateTime.UtcNow;
         if (!force && now - _simpleReadUtc < SimpleEvery) return;
         _simpleReadUtc = now;
-        _simple.ShowNextClear(UiData.NextClearLine(_analysis));
-        _simple.ShowRecommendations(_context.Suggestions());
+        _simple.ShowTiles(TileText.Of(GrowthOf(PoolChart.SimpleSpan), UiData.MemoryNow(_analysis)));
+        WatchTokenLeak();
+        _simple.ShowCards(_context.Suggestions(), Discovery.Shown(_context.Store.HiddenFeatures));
     }
+
+    /// <summary>
+    /// The token-leak watch (<see cref="RecommendationActions.WatchTokenLeak"/>): a check it starts runs in the background
+    /// (it changes nothing), and when it ends the cards are read again, so the guard is offered once the leak shows. It runs
+    /// from the refresh and from events, outside <see cref="SafeRefresh"/>: anything that goes wrong is logged here, never
+    /// left to WinForms' error dialog.
+    /// </summary>
+    private async void WatchTokenLeak()
+    {
+        try
+        {
+            // Only where the check could run at all (the cached facts say so), the rules' inputs are gathered.
+            if (_context.Probe.Last?.TokenLeak != Core.Setup.TokenLeakStatus.NeedsTest) return;
+            if (_context.Recommendations.WatchTokenLeak(_context.Inputs()) is not { } check) return;
+            await check;
+            if (!IsDisposed && Visible) ReadSimpleNow();
+        }
+        catch (Exception ex)
+        {
+            try { _engine.Log.Info("the token-leak watch did not finish: " + ex.Message); } catch { }
+        }
+    }
+
+    /// <summary>A feature card's link: Pool causes or Services in the Advanced view (<see cref="FeatureTab"/>), or how Mark works.</summary>
+    private void OpenFeature(DiscoveryCard card)
+    {
+        if (FeatureTab(card.Id) is { } tab) ShowAdvanced(tab);
+        else MessageBox.Show(this, Discovery.MarkHowTo(_engine.Settings.MarkHotkey is { Length: > 0 } keys ? keys : null), "PoolWatch: mark a slow moment");
+    }
+
+    /// <summary>The Advanced view's tab a feature card opens (0 Pool causes, 1 Services); null for one that explains instead (Mark).</summary>
+    internal static int? FeatureTab(DiscoveryId id) => id switch
+    {
+        DiscoveryId.PoolCauses => 0,
+        DiscoveryId.Services => 1,
+        _ => null,
+    };
 
     private void ReadSimpleNow() => RefreshNow(force: true);
 
@@ -315,17 +563,27 @@ internal sealed class MainForm : Form
     {
         var (ok, message) = await _context.Recommendations.Run(r, this);
         if (IsDisposed) return;
+        _countSchedule.Soon(); // a change it made is an active change
         _simple.ShowOutcome(r, ok, message);
         ReadSimpleNow();
     }
 
-    /// <summary>The window became visible: the PC's facts are read again when they are old or Windows was updated, in the background.</summary>
+    /// <summary>
+    /// The window became visible: the PC's facts are read again when they are old or Windows was updated, in the
+    /// background; then the token-leak watch looks at them (a Windows update is when it checks again).
+    /// </summary>
     private async void ReadFactsIfStale()
     {
-        if (!_context.Probe.Stale(DateTime.UtcNow)) return;
-        try { await _context.Probe.ScanAsync(); }
-        catch (Exception ex) { _engine.Log.Info("the PC's facts were not read: " + ex.Message); return; }
-        if (!IsDisposed && !_isAdvanced) ReadSimpleNow();
+        bool scanned = false;
+        if (_context.Probe.Stale(DateTime.UtcNow))
+        {
+            try { await _context.Probe.ScanAsync(); }
+            catch (Exception ex) { _engine.Log.Info("the PC's facts were not read: " + ex.Message); return; }
+            scanned = true;
+        }
+        if (IsDisposed) return;
+        WatchTokenLeak();
+        if (scanned && !_isAdvanced) ReadSimpleNow();
     }
 
     /// <summary>
@@ -337,6 +595,8 @@ internal sealed class MainForm : Form
         _rankings.Clear();
         _causeRows = [];
         _causeByKey = new();
+        _causesWindow = null;
+        _growthRead = null;
         _rankTags = [];
         _knownIssues = null;
         _reportText.Clear();
@@ -355,48 +615,151 @@ internal sealed class MainForm : Form
 
     private TabPage CausesPage()
     {
-        int[] widths = [300, 150, 100, 250, 130, 110];
-        for (int i = 0; i < PoolCauses.Columns.Length; i++) _causes.Columns.Add(PoolCauses.Columns[i], S(widths[i]));
+        var widths = CauseColumnWidths(_causes.Font, S);
+        for (int i = 0; i < PoolCauses.Columns.Length; i++) _causes.Columns.Add(PoolCauses.Columns[i], widths[i]);
+        _causes.FontChanged += (_, _) => FitCauseColumns(); // another display's scaling: the Impact column keeps room for its words
+        // The Impact column draws its meter (owner draw for it alone); every other cell is the list's own.
+        _causes.OwnerDraw = true;
+        _causes.DrawColumnHeader += (_, e) => e.DrawDefault = true;
+        _causes.DrawItem += (_, _) => { }; // the cells draw themselves (DrawSubItem)
+        _causes.DrawSubItem += (_, e) => DrawCauseCell(e);
         _causesSplit.Panel1.Controls.Add(_causes); // fill first, then the legend above it
         _causesSplit.Panel1.Controls.Add(Legend());
+        // The details: the title, the words, what PoolWatch already does about it (green) under them, and the actions on the right.
         _detailTitle.Font = new Font("Segoe UI Semibold", 10f);
-        _detailTitle.Padding = Px(2, 6, 2, 4);
+        _detailTitle.Padding = Px(4, 8, 4, 2);
+        _detailHandled.Font = new Font("Segoe UI", 9f);
+        _detailHandled.Padding = Px(4, 6, 4, 4);
         _detailText.Font = new Font("Segoe UI", 9.5f);
-        var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = Px(0, 4, 0, 0) };
-        bar.Controls.Add(_openFolder);
+        _detailText.BackColor = UiColors.Panel;
+        var actions = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Right, FlowDirection = FlowDirection.TopDown, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false,
+            Padding = Px(8, 8, 4, 0), BackColor = UiColors.Panel,
+        };
+        foreach (var b in new[] { _openFolder, _copySummary, _exportReport })
+        {
+            b.Margin = Px(0, 0, 0, 6);
+            b.UseVisualStyleBackColor = true;
+            actions.Controls.Add(b);
+        }
         _causesSplit.Panel2.Padding = Px(4, 0, 4, 4);
-        _causesSplit.Panel2.Controls.Add(_detailText); // fill first, then the docked edges
-        _causesSplit.Panel2.Controls.Add(_detailTitle);
-        _causesSplit.Panel2.Controls.Add(bar);
+        _causesSplit.Panel2.BackColor = UiColors.Panel;
+        LayDetails(_causesSplit.Panel2, _detailTitle, _detailText, _detailHandled, actions);
         _causesSplit.SplitterWidth = S(6);
         var page = new TabPage("Pool causes") { UseVisualStyleBackColor = true, Padding = Px(4, 4, 4, 4) };
         page.Controls.Add(_causesSplit);
         return page;
     }
 
-    /// <summary>What the row colours mean (the tones PoolCauses gives each row).</summary>
-    private FlowLayoutPanel Legend()
+    /// <summary>
+    /// The Pool causes details in the design's order: the title on top, the plain explanation, then the line about what
+    /// PoolWatch already does about it ("Handled: ...") under it, and the actions down the right.
+    /// </summary>
+    internal static void LayDetails(Control panel, Control title, Control words, Control handled, Control actions)
     {
-        var legend = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Padding = Px(0, 0, 0, 4) };
+        (title.Dock, words.Dock, handled.Dock, actions.Dock) = (DockStyle.Top, DockStyle.Fill, DockStyle.Bottom, DockStyle.Right);
+        panel.Controls.Add(words); // fill first, then the docked edges (the last added takes its edge first: the actions the whole height)
+        panel.Controls.Add(handled);
+        panel.Controls.Add(title);
+        panel.Controls.Add(actions);
+    }
+
+    /// <summary>
+    /// A Pool causes cell: the list's own drawing, except the Impact column, whose meter is drawn in the level's colour on
+    /// the row's colour (or the selection's, as the list draws it: the highlight while the list has the focus, grey without).
+    /// </summary>
+    private void DrawCauseCell(DrawListViewSubItemEventArgs e)
+    {
+        if (e.ColumnIndex != PoolCauses.ImpactColumn || e.Item is not { } item || e.SubItem is not { } cell) { e.DrawDefault = true; return; }
+        bool selected = item.Selected, focused = _causes.Focused;
+        var back = selected ? (focused ? SystemColors.Highlight : SystemColors.Control) : item.BackColor;
+        var fore = selected && focused ? SystemColors.HighlightText : item.ForeColor;
+        ImpactScale.DrawCell(e.Graphics, e.Bounds, cell.Text, _causes.Font, back, fore);
+    }
+
+    /// <summary>What the row colours mean (the tones PoolCauses gives each row), and on the right which window the stats columns are for.</summary>
+    private Control Legend()
+    {
+        var chips = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Margin = Padding.Empty, Dock = DockStyle.Fill };
         Label Chip(string text, Color back) => new() { Text = text, AutoSize = true, BackColor = back, Padding = Px(6, 2, 6, 2), Margin = Px(0, 0, 8, 2) };
-        legend.Controls.AddRange([
+        chips.Controls.AddRange([
             Chip("Pink: an open incident, or an alert", AlertBack),
             Chip("Yellow: growing or held now, or a warning", WarningBack),
             new Label { Text = "No colour: earlier, or for information", AutoSize = true, ForeColor = SystemColors.GrayText, Margin = Px(0, 2, 0, 2) },
         ]);
+        var legend = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, RowCount = 1, Padding = Px(0, 0, 0, 4) };
+        legend.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        legend.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _causesNote.Margin = Px(12, 2, 0, 2);
+        _tips.SetToolTip(_causesNote, WindowNoteTip);
+        SetCausesNote(GrowthText.WindowNote(_window));
+        legend.Controls.Add(chips, 0, 0);
+        legend.Controls.Add(_causesNote, 1, 0);
         return legend;
     }
 
-    /// <summary>The fixed columns keep their width; "What is growing" and "Likely cause" share the rest.</summary>
+    /// <summary>The note's tooltip: which rows follow the graph's window, and what the others show.</summary>
+    internal const string WindowNoteTip = "These four columns follow the window chosen on the graph (1 h, 6 h or 24 h) for the tags growing or held now " +
+        "and their open incidents. Other rows show their own figures: what a process's pool charge rose by, what an earlier incident grew, and what " +
+        "a clear or a release freed.";
+
+    /// <summary>The legend's note, sized to its text (set only when it changed).</summary>
+    private void SetCausesNote(string text)
+    {
+        if (_causesNote.Text == text) return;
+        _causesNote.Text = text;
+        var size = TextRenderer.MeasureText(text, _causesNote.Font, Size.Empty, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+        _causesNote.Size = new Size(size.Width + S(2), size.Height + S(4));
+    }
+
+    /// <summary>The legend's note as shown (tests, CI).</summary>
+    internal string CausesNote => _causesNote.Text;
+
+    /// <summary>
+    /// Pool causes' column widths as the list opens, in device pixels (<paramref name="s"/> scales logical ones): the
+    /// design's, with the Impact column wide enough for its meter and every level's word in the list's
+    /// <paramref name="font"/> (<see cref="ImpactScale.ColumnWidth"/>), so "Medium" is never cut to "Med...".
+    /// </summary>
+    internal static int[] CauseColumnWidths(Font font, Func<int, int> s)
+    {
+        int[] logical = [300, 150, 76, 82, 90, 200, 112, 96, 100];
+        var widths = logical.Select(s).ToArray();
+        widths[PoolCauses.ImpactColumn] = ImpactScale.ColumnWidth(font, widths[PoolCauses.ImpactColumn]);
+        return widths;
+    }
+
+    /// <summary>
+    /// The fixed columns keep their width (the Impact column at least as wide as its words need in the list's font, which
+    /// changes with the display's scaling); "What is growing" and "Likely cause" share the rest.
+    /// </summary>
     private void FitCauseColumns()
     {
-        if (_causes.Columns.Count < 6 || _causes.ClientSize.Width <= 0) return;
-        int fixedW = _causes.Columns[1].Width + _causes.Columns[2].Width + _causes.Columns[4].Width + _causes.Columns[5].Width;
+        if (_causes.Columns.Count < PoolCauses.Columns.Length || _causes.ClientSize.Width <= 0) return;
+        var impact = _causes.Columns[PoolCauses.ImpactColumn];
+        if (ImpactScale.ColumnWidth(_causes.Font, 0) is var need && impact.Width < need) impact.Width = need;
+        int fixedW = 0;
+        for (int c = 1; c < PoolCauses.Columns.Length; c++) if (c != PoolCauses.CauseColumn) fixedW += _causes.Columns[c].Width;
         int rest = _causes.ClientSize.Width - fixedW - S(4);
-        int what = Math.Max(S(180), rest * 55 / 100), cause = Math.Max(S(150), rest - what);
+        int what = Math.Max(S(180), rest * 60 / 100), cause = Math.Max(S(120), rest - what);
         if (_causes.Columns[0].Width != what) _causes.Columns[0].Width = what;
-        if (_causes.Columns[3].Width != cause) _causes.Columns[3].Width = cause;
+        if (_causes.Columns[PoolCauses.CauseColumn].Width != cause) _causes.Columns[PoolCauses.CauseColumn].Width = cause;
     }
+
+    /// <summary>
+    /// A click on a column header sorts Pool causes by it; a second click on the same column turns the order round. The
+    /// order applies at once, also with a row selected (it stays selected), and every refresh after keeps it.
+    /// </summary>
+    private void SortCausesBy(int column)
+    {
+        (_sortColumn, _sortDescending) = PoolCausesSort.Click((_sortColumn, _sortDescending), column);
+        _sortChanged = true;
+        RefreshCauses(force: true);
+        PoolCausesHeader.Show(_causes, _sortColumn, _sortDescending);
+    }
+
+    /// <summary>The column Pool causes is sorted by (-1 for none) and whether it is descending (tests, CI).</summary>
+    internal (int Column, bool Descending) CausesSort => (_sortColumn, _sortDescending);
 
     /// <summary>Puts the splitter at <paramref name="fraction"/> of the container once it has its real size (then the panels keep the ratio).</summary>
     private static void SplitAt(SplitContainer s, double fraction)
@@ -431,7 +794,13 @@ internal sealed class MainForm : Form
             return;
         }
         _causesSamples = _engine.SampleCount;
-        _causeRows = PoolCauses.Build(_analysis, _engine, _rankings);
+        var picked = _window;
+        var stats = GrowthOf(picked.Span);
+        _causesWindow = (picked, stats);
+        var rows = PoolCauses.Build(_analysis, _engine, _rankings, stats);
+        _causeRows = _sortColumn >= 0 ? PoolCausesSort.Sort(rows, _sortColumn, _sortDescending) : rows;
+        string note = GrowthText.WindowNote(picked);
+        SetCausesNote(note);
         _rankTags = PoolCauses.TagsToRank(_causeRows);
         _causeByKey = _causeRows.GroupBy(r => r.Key).ToDictionary(g => g.Key, g => g.First());
         var items = _causeRows.GroupBy(r => r.Key).Select(g => g.First()).Select(r =>
@@ -441,13 +810,17 @@ internal sealed class MainForm : Form
             else if (r.Tone == RowTone.Warning) it.BackColor = WarningBack;
             return it;
         }).ToList();
-        Update(_causes, items);
+        Update(_causes, items, forceOrder: _sortChanged);
+        _sortChanged = false;
         ShowCauseDetails();
     }
 
     private void ShowCauseDetails()
     {
         var row = SelectedRow();
+        ShowHandled(row is null ? null : PoolCauses.Handled(row, HandledNow()));
+        bool summary = row is not null && CauseCopy(row.Key) is { } copy && (copy.Summary is not null || copy.Evidence is not null);
+        if (_copySummary.Visible != summary) _copySummary.Visible = summary;
         if (row is null)
         {
             _openFolder.Visible = false;
@@ -455,7 +828,7 @@ internal sealed class MainForm : Form
             {
                 SetTitle("Nothing stands out right now");
                 SetText(_detailText, "No pool tag is growing, no incident is open, and no process is piling up handles or pool. When something grows, " +
-                    "it is listed here with how much, how fast, the likely cause and how sure PoolWatch is.", "empty");
+                    "it is listed here with what it grew, what PoolWatch's own clears freed of it, how fast it grows, the likely cause and how sure PoolWatch is.", "empty");
             }
             else
             {
@@ -464,10 +837,10 @@ internal sealed class MainForm : Form
             }
             return;
         }
-        SetTitle(row.HowMuch.Length > 0 ? $"{row.What}: {row.HowMuch}" : row.What);
+        SetTitle(row.Title);
         string text = row.Kind switch
         {
-            CauseKind.Incident => IncidentDetails(row),
+            CauseKind.Incident => WindowSentence(row.Tag) is { } said ? said + "\r\n\r\n" + IncidentDetails(row) : IncidentDetails(row),
             CauseKind.Tag => TagDetails(row),
             CauseKind.Process => ProcessDetails(row),
             _ => FindingDetails(row),
@@ -480,6 +853,36 @@ internal sealed class MainForm : Form
     }
 
     private void SetTitle(string text) { if (_detailTitle.Text != text) _detailTitle.Text = text; }
+
+    /// <summary>The details' green line: what PoolWatch already does about the row (grey when it would but is off); hidden for none.</summary>
+    private void ShowHandled((string Text, bool Done)? handled)
+    {
+        string text = handled?.Text ?? "";
+        var color = handled is { Done: true } ? (UiColors.HighContrast ? SystemColors.WindowText : UiColors.Good) : UiColors.Secondary;
+        if (_detailHandled.Text != text) _detailHandled.Text = text;
+        if (_detailHandled.ForeColor != color) _detailHandled.ForeColor = color;
+        if (_detailHandled.Visible != text.Length > 0) _detailHandled.Visible = text.Length > 0;
+    }
+
+    /// <summary>What PoolWatch does now that can handle a row: the automatic clear's rules, and whether the token-leak guard is working.</summary>
+    private HandledBy HandledNow()
+    {
+        var s = _engine.Settings;
+        return new HandledBy(HandledBy.ScheduleOf(s.AutoClearEnabled, s.AutoClearEveryHours, s.AutoClearPoolGb),
+            s.TokenGuardEnabled && _analysis.Diagnostics.Guard.LiveTimeout == 0);
+    }
+
+    /// <summary>What Copy summary copies for a row: its summary (an incident's report, a tag's suspects) or a finding's evidence; null for none.</summary>
+    private string? SummaryOf(CauseRow? row) =>
+        row is not null && CauseCopy(row.Key) is { } copy ? copy.Summary?.Invoke() ?? copy.Evidence : null;
+
+    /// <summary>
+    /// The window's sentence for a tag the stats count, as its row's columns say it: "Last 6 hours: it grew 4.9 GB,
+    /// PoolWatch's own cache clears freed 4.8 GB of it, and it is 103 MB higher. Without the clears it would grow 836.3
+    /// MB/h."; null for any other row.
+    /// </summary>
+    private string? WindowSentence(PoolTag? tag) =>
+        tag is { } t && _causesWindow is { } w && w.Stats.Tags.TryGetValue(t, out var c) ? GrowthText.TagSentence(w.Picked, w.Stats, c) : null;
 
     /// <summary>The known issues matched with the Simple view's cards (SetupContext), and when: read at most once a minute, only for a selected row.</summary>
     private (DateTime Utc, IReadOnlyList<Recommendation> Cards, IReadOnlyList<KnownIssueMatch> Matches)? _knownIssues;
@@ -528,6 +931,7 @@ internal sealed class MainForm : Form
         var info = _analysis.Knowledge.Lookup(tag);
         string driver = PlainWords.Driver(info.Owner);
         sb.Append($"Pool tag {tag.ToDisplay()}{(driver.Length > 0 ? $", allocated by {driver}" : "")}{(info.Description.Length > 0 ? $": {info.Description}" : "")}.\r\n\r\n");
+        if (WindowSentence(tag) is { } said) sb.Append(said).Append("\r\n\r\n");
         if (row.Active is false) return sb.Append("Released: whatever exited or was deleted then was holding this memory.").ToString();
         // The ranking is built in the background (PumpRankings); this text is replaced when it arrives.
         if (_rankings.Get(tag) is not { } v)
@@ -960,6 +1364,18 @@ internal sealed class MainForm : Form
 
     // ---------------------------------------------------------------- refresh
 
+    /// <summary>The last window read, by sample and span: the panel and Pool causes read the same one once per new sample.</summary>
+    private (long Samples, TimeSpan Span, GrowthWindow Stats)? _growthRead;
+
+    private GrowthWindow GrowthOf(TimeSpan span)
+    {
+        long samples = _engine.SampleCount;
+        if (_growthRead is { } read && read.Samples == samples && read.Span == span) return read.Stats;
+        var stats = UiData.Growth(_analysis, span);
+        _growthRead = (samples, span, stats);
+        return stats;
+    }
+
     private void UpdateTimer()
     {
         bool active = Visible && WindowState != FormWindowState.Minimized;
@@ -981,12 +1397,22 @@ internal sealed class MainForm : Form
     {
         using var _ui = Core.Util.Profiler.Stage("ui.refresh");
         var state = UiData.State(_analysis);
-        if (_engine.SampleCount != _statusSamples || force) // the chart and the status line change only with a new sample
+        if (_engine.SampleCount != _statusSamples || force) // the chart and the header change only with a new sample
         {
             _statusSamples = _engine.SampleCount;
-            _chart.SetData(UiData.Chart(_analysis, PoolChart.Span));
-            _chart.SetClears(UiData.Clears(_analysis, PoolChart.Span));
-            UpdateStatus(state);
+            _chart.StartedUtc = UiData.StartedUtc(_analysis);
+            _chart.SetData(UiData.Chart(_analysis, _chart.Span));
+            _chart.SetClears(UiData.Clears(_analysis, _chart.Span));
+            if (_isAdvanced)
+            {
+                _growth.Show(_window, GrowthOf(_window.Span));
+                if (_chart.ShowRam)
+                {
+                    var (columns, total) = UiData.Ram(_analysis, _chart.Span);
+                    _chart.SetRam(columns, total);
+                }
+            }
+            UpdateHeader(state);
         }
         if (!_isAdvanced)
             using (Core.Util.Profiler.Stage("ui.simple")) ReadSimple(force);
@@ -997,10 +1423,38 @@ internal sealed class MainForm : Form
                     case 0: RefreshCauses(force); break;
                     case 1: RefreshServices(); break;
                 }
-        Icon = TrayIcons.For(state);
         ShowUpdate(_update());
+        RefreshChangeCount();
         PumpRankings();
     }
+
+    /// <summary>
+    /// The count beside Active changes: the changes in effect, read off the UI thread when <see cref="ChangeCountSchedule"/>
+    /// says it is due, and shown back on the UI thread.
+    /// </summary>
+    private void RefreshChangeCount()
+    {
+        if (!_countSchedule.Start(DateTime.UtcNow)) return;
+        var ledger = _context.Ledger;
+        Task.Run(() => ledger.List().Count).ContinueWith(t =>
+        {
+            void ShowCount()
+            {
+                _countSchedule.Done();
+                if (t.IsFaulted) _engine.Log.Info("the active changes were not counted: " + t.Exception!.GetBaseException().Message);
+                else _changesCount.Count = t.Result;
+            }
+            try
+            {
+                if (!IsDisposed && IsHandleCreated) BeginInvoke(ShowCount);
+                else _countSchedule.Done();
+            }
+            catch (InvalidOperationException) { _countSchedule.Done(); } // the window is closing
+        }, TaskScheduler.Default);
+    }
+
+    /// <summary>The count beside Active changes as shown, or null before it was read (CI, tests).</summary>
+    internal int? ActiveChangesCount => _changesCount.Count;
 
     /// <summary>The update notice at the bottom of the window, set only when the release to tell about changed.</summary>
     internal void ShowUpdate(UpdateRelease? release)
@@ -1181,7 +1635,8 @@ internal sealed class MainForm : Form
     /// selection and scroll position stay, and the order is held while a row is selected or the mouse is over the list.
     /// </summary>
     /// <returns>False when the rows were unchanged (nothing was touched).</returns>
-    private bool Update(ListView lv, List<ListViewItem> items)
+    /// <param name="forceOrder">The owner sorted the list: its new order applies at once, also with a row selected.</param>
+    private bool Update(ListView lv, List<ListViewItem> items, bool forceOrder = false)
     {
         // Unchanged rows: nothing to do (even an in-place sync walks every row).
         var sig = new System.Text.StringBuilder(items.Count * 64);
@@ -1193,14 +1648,14 @@ internal sealed class MainForm : Form
         }
         string signature = sig.ToString();
         if (!_syncs.TryGetValue(lv, out var sync)) _syncs[lv] = sync = new ListSync(lv);
-        if (!sync.OrderHeld && _listSignature.TryGetValue(lv, out var last) && last == signature) return false;
+        if (!sync.OrderHeld && !forceOrder && _listSignature.TryGetValue(lv, out var last) && last == signature) return false;
         _listSignature[lv] = signature;
         _repopulating = true;
         try
         {
             sync.Update(items.Select(i => new ListSync.Row(i.Tag!, i.SubItems.Cast<ListViewItem.ListViewSubItem>().Select(s => s.Text).ToArray(),
                 i.BackColor == Color.Empty || i.BackColor == SystemColors.Window ? null : i.BackColor,
-                Fore: i.ForeColor == Color.Empty || i.ForeColor == SystemColors.WindowText ? null : i.ForeColor)).ToList());
+                Fore: i.ForeColor == Color.Empty || i.ForeColor == SystemColors.WindowText ? null : i.ForeColor)).ToList(), forceOrder);
         }
         catch (Exception) { /* the handle may not exist yet (hidden tab) */ }
         finally { _repopulating = false; }
@@ -1285,9 +1740,10 @@ internal sealed class MainForm : Form
         var simple = new
         {
             buttons = VisibleButtons(),
-            footer = new[] { _appliedChanges.Text, _advancedBox.Text },
+            footer = new[] { _activeChanges.Text, _advancedBox.Text },
+            activeChanges = _changesCount.Count,
             tabsShown = _tabs.Visible,
-            view = _simple.SmokeStats(),
+            view = _simple.SmokeStats(_headerView.Facts.NextTitle),
             layoutProblems = LayoutProblems(),
         };
         SetView(true);
@@ -1380,7 +1836,8 @@ internal sealed class MainForm : Form
         return new
         {
             simple,
-            status = _status.Text, statusKind = _statusKind.ToString(), chartPoints = _chart.PointCount,
+            status = _headerView.Facts.Spoken, statusKind = _statusKind.ToString(), chartPoints = _chart.PointCount, growth = _growth.Texts,
+            chartTitle = _chart.LastTitle, chartBand = _chart.BandWords,
             tabs = _tabs.TabPages.Cast<TabPage>().Select(p => p.Text).ToList(),
             buttons = advancedButtons,
             rows, causeKinds = kinds, detailsTitle, details = details.Length > 600 ? details[..600] : details,
@@ -1400,10 +1857,14 @@ internal sealed class MainForm : Form
     {
         PerformLayout();
         _chart.Refresh(); // paint now, so the chart's layout is the current one
+        if (_isAdvanced) _growth.Refresh();
+        _headerView.Refresh();
         var p = new List<string>();
-        int need = PaintedLabel.Measure(_status.Text, _status.Font, Math.Max(1, _status.ClientSize.Width));
-        if (need > _status.ClientSize.Height) p.Add($"the status line needs {need} px, has {_status.ClientSize.Height}");
-        if (_header.Bottom > ClientSize.Height || _status.Width < S(150)) p.Add($"the header does not fit ({_header.Bounds}, status {_status.Bounds})");
+        if (_isAdvanced && _growth.NeededHeight > _growth.Height + 1) p.Add($"the growth and clear stats need {_growth.NeededHeight} px, have {_growth.Height}");
+        int need = _headerView.NeededHeight(_headerView.Width);
+        if (need > _headerView.Height + 1) p.Add($"the header's facts need {need} px, have {_headerView.Height}");
+        p.AddRange(_headerView.Problems());
+        if (_header.Bottom > ClientSize.Height || _headerView.Width < S(200)) p.Add($"the header does not fit ({_header.Bounds}, facts {_headerView.Bounds})");
         ClippedControls(this, p);
         if (_chart.LastLayout is { } l) p.AddRange(l.Problems().Select(x => "chart: " + x));
         return p;
@@ -1412,14 +1873,17 @@ internal sealed class MainForm : Form
     /// <summary>
     /// Visible controls outside their parent, and buttons, check boxes and labels whose text does not fit (CI). A parent
     /// that scrolls (AutoScroll: About on a screen too short for it) may hold controls above or below what it shows, as
-    /// the user scrolls to them; never beside it, as no PoolWatch window scrolls sideways.
+    /// the user scrolls to them; never beside it, as no PoolWatch window scrolls sideways. <paramref name="shown"/> says
+    /// which controls count (default: those visible now); in a window that is not shown none is visible, so a test passes
+    /// each control's own visibility instead.
     /// </summary>
-    internal static void ClippedControls(Control parent, List<string> p)
+    internal static void ClippedControls(Control parent, List<string> p, Func<Control, bool>? shown = null)
     {
+        shown ??= c => c.Visible;
         bool scrolls = parent is ScrollableControl { AutoScroll: true };
         foreach (Control c in parent.Controls)
         {
-            if (!c.Visible) continue;
+            if (!shown(c)) continue;
             var area = parent.ClientRectangle;
             if (c.Left < -1 || c.Right > area.Width + 1 || (!scrolls && (c.Top < -1 || c.Bottom > area.Height + 1)))
                 p.Add($"{Describe(c)} at {c.Bounds} is outside {Describe(parent)} ({area.Size})");
@@ -1430,7 +1894,7 @@ internal sealed class MainForm : Form
                 if (pref.Width > c.Width + 1 || pref.Height > c.Height + 1) p.Add($"{Describe(c)} needs {pref}, has {c.Size}");
             }
             if (c is WrapLabel w && w.NeededHeight > w.Height + 1) p.Add($"{Describe(c)} needs {w.NeededHeight} px, has {w.Height}");
-            if (c is Panel or TabControl or GroupBox or SplitContainer) ClippedControls(c, p);
+            if (c is Panel or TabControl or GroupBox or SplitContainer) ClippedControls(c, p, shown);
         }
 
         static string Describe(Control c) => $"{c.GetType().Name} \"{(c.Text.Length > 40 ? c.Text[..40] + "…" : c.Text)}\"";

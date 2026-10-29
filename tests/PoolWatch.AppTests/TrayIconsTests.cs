@@ -40,7 +40,25 @@ public class TrayIconsTests
             Assert.InRange(Body(icon).GetHue(), 190, 230);
         // Where a state icon has its dot, the windows' icon has the binoculars' own colours: no green, amber or red.
         float hue = Dot(icons.App).GetHue();
-        Assert.False(hue is > 25 and < 170 || hue < 15 || hue > 340 && Dot(icons.App).GetSaturation() > 0.5, $"the windows' icon shows a state's colour (hue {hue})");
+        Assert.False((hue is > 25 and < 170 || hue < 15 || hue > 340) && Dot(icons.App).GetSaturation() > 0.5, $"the windows' icon shows a state's colour (hue {hue})");
+    }
+
+    [Fact]
+    public void TheWindowsShowTheBinocularsNeverATrayState()
+    {
+        // The windows the tests can build, as they open: each has the app's own icon, the very one the app loads.
+        using (var settings = new SettingsDialog(new PoolWatch.Core.Settings(), null)) Assert.Same(TrayIcons.App, settings.Icon);
+        using (var about = new AboutDialog(new AboutFacts("1.0.0", "samples", "overhead", @"C:\ProgramData\PoolWatch"), actions: null)) Assert.Same(TrayIcons.App, about.Icon);
+        using (var f = new ChangeFixture())
+        using (var advanced = new AdvancedSettingsDialog(new SettingsEditor(engine: null!, analysis: null!, actions: null!, f.Live(), shell: null!)))
+            Assert.Same(TrayIcons.App, advanced.Icon);
+        using (var notice = GuardNotices.NewNotice("The token-leak guard is on.", ("OK", null))) Assert.Same(TrayIcons.App, notice.Icon);
+        Assert.False(TrayIcons.App.Size.IsEmpty);
+        // The main window needs the whole app to build: its source sets the same icon, and no window here sets a state's.
+        string ui = Path.Combine(RepoRoot(), "src", "PoolWatch", "Ui");
+        Assert.Contains("Icon = TrayIcons.App;", File.ReadAllText(Path.Combine(ui, "MainForm.cs")));
+        foreach (var file in new[] { "MainForm.cs", "SettingsDialog.cs", "AboutDialog.cs", "AdvancedSettingsDialog.cs", "GuardNotice.cs" })
+            Assert.DoesNotContain("Icon = TrayIcons.For(", File.ReadAllText(Path.Combine(ui, file)));
     }
 
     [Theory]
@@ -105,13 +123,15 @@ public class TrayIconsTests
 
     private static Stream? FromCheckout(string name)
     {
-        // The test runs from bin/<config>/<tfm>/ inside the checkout; the repo root is the folder holding PoolWatch.slnx.
+        string path = Path.Combine(RepoRoot(), "src", "PoolWatch", "Assets", name);
+        return File.Exists(path) ? File.OpenRead(path) : null;
+    }
+
+    /// <summary>The test runs from bin/&lt;config&gt;/&lt;tfm&gt;/ inside the checkout; the repo root is the folder holding PoolWatch.slnx.</summary>
+    private static string RepoRoot()
+    {
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
-            if (File.Exists(Path.Combine(dir.FullName, "PoolWatch.slnx")))
-            {
-                string path = Path.Combine(dir.FullName, "src", "PoolWatch", "Assets", name);
-                return File.Exists(path) ? File.OpenRead(path) : null;
-            }
+            if (File.Exists(Path.Combine(dir.FullName, "PoolWatch.slnx"))) return dir.FullName;
         throw new InvalidOperationException("PoolWatch.slnx not found above " + AppContext.BaseDirectory);
     }
 

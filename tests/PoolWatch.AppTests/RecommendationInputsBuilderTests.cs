@@ -162,4 +162,37 @@ public class RecommendationInputsBuilderTests
 
     private static ProcessSample Sample(ProcessKey key, double cpuSeconds) =>
         new() { Pid = key.Pid, CreateTime = key.CreateTime, ImageName = "x.exe", KernelTime = (long)(cpuSeconds * 10_000_000) };
+
+    // ------------------------------------------------------------------ the token leak, seen in the history
+
+    private const long MB = 1L << 20;
+
+    /// <summary>A sample a minute for the last 70 minutes, security tokens (Toke) growing <paramref name="mbPerMinute"/> a minute in the paged pool.</summary>
+    private static Core.History.History TokensGrowing(double mbPerMinute)
+    {
+        var h = new Core.History.History();
+        for (int i = 0; i <= 70; i++)
+        {
+            ulong toke = (ulong)(200 * MB + i * mbPerMinute * MB);
+            h.Add(new Sample(Now.AddMinutes(i - 70), new PoolTotals(8UL << 30, 4UL << 30, 0, 0), [new PoolTagEntry(PoolTag.Parse("Toke"), 1, 0, toke, 0, 0, 0)], []));
+        }
+        return h;
+    }
+
+    [Theory]
+    [InlineData(1.0, "26220.7344", 200_000u, true)]    // 60 MB an hour on 25H2, the setting that stops it off: the guard is offered
+    [InlineData(0.1, "26220.7344", 200_000u, false)]   // 6 MB an hour: slower than the pack's 20
+    [InlineData(1.0, "22631.4317", 200_000u, false)]   // 23H2: not a build the pack names
+    [InlineData(1.0, "26220.7344", 0u, false)]         // the setting is on already: what grows has another cause
+    [InlineData(1.0, "26220.7344", null, true)]        // the setting could not be read: the evidence alone
+    public void TheTokenLeakIsSeenInTheHistoryAsPoolCausesSeesIt(double mbPerMinute, string build, uint? lockTimeout, bool seen)
+    {
+        var inputs = new Core.Recommendations.RecommendationInputs { NowUtc = Now, Facts = Facts() with { Build = build } };
+        var with = RecommendationInputsBuilder.WithTokenLeakSeen(inputs, TokensGrowing(mbPerMinute), [], lockTimeout, []);
+        Assert.Equal(seen, with.TokenLeakSeen);
+        Assert.Equal(inputs with { TokenLeakSeen = seen }, with); // nothing else is touched
+        // And what the rules make of it: the guard offered, with the leak's reason, only while it is seen.
+        Assert.Equal(seen, Core.Recommendations.RecommendationRules.Current(with with { AutoClearOn = true })
+            .Any(r => r.Id == Core.Recommendations.RecommendationId.TokenLeakGuard));
+    }
 }

@@ -10,9 +10,11 @@ namespace PoolWatch.AppTests;
 
 /// <summary>
 /// The Simple view: its graph marks every cache clear, inside the plot, with what it freed on hover; the status leaves out
-/// what PoolWatch's own clear did and keeps the tray icon calm; its suggestion cards each have one button, fit at the
-/// window's sizes and change only when what they say changed. The controls here are painted off screen and never shown.
+/// what PoolWatch's own clear did and keeps the tray icon calm; its cards (the offers first, then the features you may not
+/// have found) each have one action and Hide, fit at the window's sizes and change only when what they say changed. The
+/// controls here are painted off screen and never shown.
 /// </summary>
+[Collection(nameof(WholeWindowLayout))] // lays windows out: one class at a time, after the parallel ones
 public class SimpleViewTests
 {
     private const long GB = 1L << 30;
@@ -33,7 +35,7 @@ public class SimpleViewTests
     public void ClearMarksSitInsideThePlotAndSayWhatEachClearFreed(int width, int height)
     {
         using var host = new Form();
-        var chart = new PoolChart { Size = new Size(width, height) };
+        var chart = new PoolChart { Size = new Size(width, height), Span = TimeSpan.FromHours(3) };
         host.Controls.Add(chart);
         var end = DateTime.UtcNow;
         chart.SetData(ThreeHours(end));
@@ -51,8 +53,8 @@ public class SimpleViewTests
         Assert.Equal(3, layout.Markers.Count);
         Assert.Empty(layout.Problems());
         var middle = layout.Markers[1];
-        Assert.Equal(clears[1].Text, chart.TipAt(new Point(middle.Left + middle.Width / 2, middle.Bottom + 20))); // on its line, below the mark
-        Assert.Equal(clears[0].Text, chart.TipAt(layout.Markers[0].Location));
+        Assert.Equal(clears[1].TextOn(end), chart.TipAt(new Point(middle.Left + middle.Width / 2, middle.Bottom + 20))); // on its line, below the mark
+        Assert.Equal(clears[0].TextOn(end), chart.TipAt(layout.Markers[0].Location));
         Assert.Equal("Committed paged and non-paged pool.", chart.TipAt(new Point(layout.Plot.Left + layout.Plot.Width / 4, layout.Plot.Top + 5)));
     }
 
@@ -70,7 +72,7 @@ public class SimpleViewTests
         var marks = Paint(chart).Markers;
         var both = Rectangle.Intersect(marks[0], marks[1]);
         Assert.False(both.IsEmpty);
-        Assert.Equal(light.Text + Environment.NewLine + full.Text, chart.TipAt(new Point(both.Left + both.Width / 2, both.Top + 1)));
+        Assert.Equal(light.TextOn(end) + Environment.NewLine + full.TextOn(end), chart.TipAt(new Point(both.Left + both.Width / 2, both.Top + 1)));
         Assert.EndsWith("(automatic, light): freed nothing", light.Text);
     }
 
@@ -180,6 +182,15 @@ public class SimpleViewTests
         long Grow(int i) => 12 * GB + i * MB;
         Assert.EndsWith(", up 360 MB in the last hour", Line(Grow, (300, -50 * MB)));
         Assert.EndsWith(", up 360 MB in the last hour", Line(Grow, (300, 100 << 10)));
+        // A clear whose purge failed after its measurement was taken: not PoolWatch's clear, so it freed nothing of the hour.
+        var flat = Core.History.History.ForInterval(10);
+        for (int i = 0; i <= 420; i++) flat.Add(new Sample(At(i), new PoolTotals((ulong)Flat(i), 0, 0, 0), [], []));
+        var failedLate = new ClearRecord
+        {
+            TimeUtc = At(300).AddSeconds(1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals((ulong)Flat(300), 0, 0, 0),
+            After = new PoolTotals((ulong)(Flat(300) - 300 * MB), 0, 0, 0), Error = "the purge failed",
+        };
+        Assert.Equal((0L, (DateTime?)null), UiData.Totals(flat, [failedLate]).ClearedHour);
         // A clear still being measured: no change is known across it yet.
         Assert.EndsWith($", change in the last hour not known yet: PoolWatch's own cache clear at {Hm(414)} is being measured", Line(Refill, (300, 1331 * MB), (414, 0)));
         // With no clear in the hour, before an hour is held, and before the first sample, as it always read.
@@ -225,16 +236,15 @@ public class SimpleViewTests
         Assert.Contains("clear mark", Assert.Single(layout.Problems()));
     }
 
-    // ------------------------------------------------------------------ the Simple view
+    // ------------------------------------------------------------------ the Simple view's cards
 
-    private static readonly Recommendation SignIn = new(RecommendationId.StartAtSignIn, "Start PoolWatch when you sign in",
-        "So it watches from the moment you sign in, without asking for permission each time.", "Turn on", RecommendationAction.Apply, 40);
-    /// <summary>The guard's offer as the suggestions make it, its reason ending with their one-line trade-off.</summary>
+    /// <summary>The guard's offer as the suggestions make it.</summary>
     private static readonly Recommendation Guard = RecommendationRules.Current(new RecommendationInputs { NowUtc = DateTime.UtcNow, TokenSpawnLast24h = true }).Single();
-    private static readonly Recommendation Services = new(RecommendationId.ReviewServices, "Review the background services",
-        "Windows Search used noticeable processor time in the background over the last half hour.", "Review", RecommendationAction.OpenServices, 60);
     private static readonly Recommendation Report = new(RecommendationId.ReportIncident, "Report what PoolWatch found", "It grew.", "Report",
         RecommendationAction.ReportIssue, 50) { Subject = "20261028-0412-Reff" };
+    private static readonly Recommendation Hourly = new(RecommendationId.HourlyCacheClear, "Clear the cache every hour", "It frees what the kernel pool keeps of recently used files.",
+        "Turn on", RecommendationAction.Apply, 30);
+    private static IReadOnlyList<DiscoveryCard> Features => Discovery.All;
 
     private static (Form Host, SimpleView View) View(int width, int height, Func<DateTime>? utcNow = null)
     {
@@ -252,84 +262,147 @@ public class SimpleViewTests
         c.GetType().GetMethod(method, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, [e.GetType()])!.Invoke(c, [e]);
 
     [Theory]
-    [InlineData(1000, 640, 3)]
-    [InlineData(744, 400, 1)]   // the main window at its smallest, less its status line and footer
-    [InlineData(744, 280, 0)]   // smaller still: the graph keeps its height, the suggestions wait for room
-    public void UpToThreeCardsThatFitEachWithOneButtonAndNothingClipped(int width, int height, int atLeast)
+    [InlineData(1068, 640, 3)]  // the window at its own size, less its header and footer
+    [InlineData(728, 560, 1)]   // a narrow window: the tiles in two rows, room for one card
+    [InlineData(728, 320, 0)]   // the main window at its smallest: the graph keeps its height, the cards wait for room
+    public void TheOffersComeFirstThenTheFeaturesThreeAtMostAndNothingClipped(int width, int height, int atLeast)
     {
         var (host, view) = View(width, height);
         using var _ = host;
-        view.ShowNextClear("Next cache clear in 23 min (sooner if the kernel pool reaches 8 GB). Last clear at 09:12 freed 4.7 GB, mostly ReFS file records.");
-        view.ShowRecommendations([Guard, SignIn, Report, Services]);
+        view.ShowCards([Guard, Report], Features);
 
         Assert.InRange(view.ShownCards.Count, atLeast, 3);
-        Assert.Equal(new[] { Guard, SignIn, Report }[..view.ShownCards.Count], view.ShownCards); // the first ones, by priority
+        Assert.Equal(new[] { Guard.Key, Report.Key, Features[0].Key }[..view.ShownCards.Count], view.ShownCards.Select(c => c.Key)); // the first ones, offers first
         Assert.Empty(view.LayoutProblems());
         if (atLeast == 3)
         {
-            Assert.Equal(["Turn on", "Turn on", "Report"], All<Button>(view).Select(b => b.Text));
+            // An offer has a button, a feature a link, and each has Hide.
+            Assert.Equal(["Turn on", "Report"], All<Button>(view).Select(b => b.Text));
+            Assert.Contains(All<LinkLabel>(view), l => l.Text == "Open Pool causes");
             Assert.Equal(3, All<LinkLabel>(view).Count(l => l.Text == "Hide"));
+            // The token-leak guard says what you will notice and how to undo it, and says the trade-off once.
+            var texts = All<WrapLabel>(view).Select(l => l.Text).ToList();
+            Assert.Contains(TokenGuardWords.Details, texts);
+            Assert.Equal(1, texts.Sum(t => t.Split("to the front").Length - 1));
+            Assert.DoesNotContain(SimpleSettings.ClearStutter, texts); // no card here clears the cache
         }
-        // The token-leak guard says what you will notice and how to undo it, and says the trade-off once.
-        var texts = All<WrapLabel>(view).Select(l => l.Text).ToList();
-        Assert.Contains(TokenGuardWords.Details, texts);
-        Assert.Equal(1, texts.Sum(t => t.Split("to the front").Length - 1));
-        Assert.DoesNotContain(SimpleSettings.ClearStutter, texts); // no card here clears the cache
+    }
+
+    [Fact]
+    public void WithNoOfferTheFeatureCardsShowInTheDesignsWords()
+    {
+        var (host, view) = View(1068, 640);
+        using var _ = host;
+        view.ShowCards([], Features);
+        Assert.Equal(["See what grows the pool", "Trim background services", "Mark a slow moment"], view.ShownCards.Select(c => c.Title));
+        Assert.Equal(["Open Pool causes", "Open Services", "Show me"], view.ShownCards.Select(c => c.Action));
+        Assert.All(view.ShownCards, c => Assert.False(c.IsButton));
+        Assert.Single(All<Label>(view), l => l.Text == SimpleView.Heading);
+        Assert.Equal(SimpleView.Heading, "Get more from PoolWatch".ToUpperInvariant());
+        Assert.Empty(view.LayoutProblems());
+        // All three hidden: no cards, and the graph takes the room.
+        view.ShowCards([], []);
+        Assert.Empty(view.ShownCards);
+        Assert.Empty(view.LayoutProblems());
     }
 
     [Fact]
     public void TheCardThatTurnsClearingOnSaysOnceThatAClearCanStutter()
     {
-        var (host, view) = View(1000, 640);
+        var (host, view) = View(1068, 640);
         using var _ = host;
-        var hourly = new Recommendation(RecommendationId.HourlyCacheClear, "Clear the cache every hour", "It frees what the kernel pool keeps of recently used files.",
-            "Turn on", RecommendationAction.Apply, 50);
-        view.ShowRecommendations([hourly, SignIn]);
+        view.ShowCards([Hourly], Features);
         var texts = All<WrapLabel>(view).Select(l => l.Text).ToList();
         Assert.Equal(1, texts.Count(t => t == SimpleSettings.ClearStutter));
         Assert.Empty(view.LayoutProblems());
     }
 
     [Fact]
-    public void ALongerLineAboutClearingLeavesTheCardsLessRoom()
+    public void AtEveryHeightTheGraphKeepsItsRoomUnderTheTilesAndTheCards()
     {
-        var (host, view) = View(744, 400);
+        // From the smallest window up: the tiles, the cards that fit and the graph's least height never overlap, and the
+        // cards show wherever they fit.
+        for (int height = 300; height <= 760; height += 4)
+        {
+            var (host, view) = View(1068, height);
+            using var _ = host;
+            view.ShowCards([Guard, Report], Features);
+            Assert.Empty(view.LayoutProblems());
+            if (height >= 560) Assert.Equal(3, view.ShownCards.Count);
+        }
+    }
+
+    [Fact]
+    public void TilesThatTakeASecondRowAfterTheCardsWerePlacedLeaveTheGraphItsRoom()
+    {
+        // A later read lengthens the tiles' words (since when, once PoolWatch has run for less than the window): four no
+        // longer fit in a row, the tiles go two by two, and the cards placed under one row must be placed again.
+        IReadOnlyList<Tile> Tiles(string sub) =>
+            [new("Growth per hour", "1.3 GB", sub), new("Cleared", "7.1 GB", "6 clears, " + sub), new("Net change", "up 307 MB", sub), new("Memory in use", "41 GB", "of 127 GB, 71 GB cache")];
+        for (int height = 360; height <= 480; height += 8)
+        {
+            var (host, view) = View(1068, height);
+            using var _ = host;
+            view.ShowTiles(Tiles("last 6 h"));
+            view.ShowCards([Guard, Report], Features);
+            Assert.Equal(4, view.Tiles.Columns); // one row
+            int before = view.ShownCards.Count;
+            view.ShowTiles(Tiles("without the clears, since yesterday at 23:10"));
+            Assert.Equal(2, view.Tiles.Columns); // two rows now
+            Assert.Empty(view.LayoutProblems());
+            Assert.True(view.ShownCards.Count <= before, $"{height}: {view.ShownCards.Count} cards, {before} before");
+        }
+    }
+
+    [Fact]
+    public void AFeatureCardOpensItsTabOrExplains()
+    {
+        Assert.Equal(0, MainForm.FeatureTab(DiscoveryId.PoolCauses));
+        Assert.Equal(1, MainForm.FeatureTab(DiscoveryId.Services));
+        Assert.Null(MainForm.FeatureTab(DiscoveryId.Mark)); // "Show me" says how Mark works
+        Assert.All(Enum.GetValues<DiscoveryId>(), id => Assert.Contains(Discovery.All, c => c.Id == id)); // every card, one way or the other
+    }
+
+    [Fact]
+    public void ANarrowerWindowShowsFewerButWiderCards()
+    {
+        var (host, view) = View(1068, 470);
         using var _ = host;
-        view.ShowNextClear("Automatic clearing is off.");
-        view.ShowRecommendations([Guard, SignIn, Report]);
-        int before = view.ShownCards.Count;
-        view.ShowNextClear(string.Join(" ", Enumerable.Repeat("Last clear yesterday at 09:12 (light) freed nothing, so PoolWatch ran a full clear at 09:14: it freed 5.1 GB.", 5)));
+        view.ShowCards([Guard, Report], Features);
+        int wide = view.ShownCards.Count;
+        host.ClientSize = new Size(728, 470);
+        Assert.True(view.ShownCards.Count <= wide);
         Assert.Empty(view.LayoutProblems());
-        Assert.True(view.ShownCards.Count < before);
     }
 
     [Fact]
     public void AnAnswerStaysForAMinuteAfterItsCardHasGone()
     {
         var now = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
-        var (host, view) = View(1000, 640, () => now);
+        var (host, view) = View(1068, 640, () => now);
         using var _ = host;
-        view.ShowRecommendations([SignIn, Services]);
+        view.ShowCards([Hourly], Features);
 
-        view.ShowOutcome(SignIn, ok: true, "PoolWatch starts when you sign in.");
+        view.ShowOutcome(Hourly, ok: true, "PoolWatch clears the cache every hour.");
         Assert.Null(view.ShownAnswer);                                     // its card still shows it
-        view.ShowRecommendations([Services]);                              // the refresh after the change takes the card away
-        Assert.Equal("PoolWatch starts when you sign in.", view.ShownAnswer);
-        Assert.Equal([Services], view.ShownCards);
+        view.ShowCards([], Features);                                      // the refresh after the change takes the card away
+        Assert.Equal("PoolWatch clears the cache every hour.", view.ShownAnswer);
+        Assert.Equal(Features.Select(f => f.Key), view.ShownCards.Select(c => c.Key));
         Assert.Empty(view.LayoutProblems());
 
         now = now.AddSeconds(59);
-        view.ShowRecommendations([Services]);
+        view.ShowCards([], Features);
         Assert.NotNull(view.ShownAnswer);
         now = now.AddSeconds(1);
-        view.ShowRecommendations([Services]);                              // the refresh a minute later
+        view.ShowCards([], Features);                                      // the refresh a minute later
         Assert.Null(view.ShownAnswer);
         Assert.Empty(view.LayoutProblems());
 
         // An error too, in red: a change that went only part of the way can also take its card away.
-        view.ShowOutcome(Services, ok: false, "That did not work: access denied");
+        view.ShowCards([Report], Features);
+        view.ShowOutcome(Report, ok: false, "That did not work: access denied");
         Assert.Null(view.ShownAnswer);                                     // its card still shows it
-        view.ShowRecommendations([]);
+        view.ShowCards([], Features);
         Assert.Equal("That did not work: access denied", view.ShownAnswer);
         Assert.Contains(All<WrapLabel>(view), l => l.Text == "That did not work: access denied" && l.ForeColor == Color.Firebrick);
         Assert.Empty(view.LayoutProblems());
@@ -338,40 +411,66 @@ public class SimpleViewTests
     [Fact]
     public void TheCardsAreRebuiltOnlyWhenWhatTheySayChanged()
     {
-        var (host, view) = View(1000, 640);
+        var (host, view) = View(1068, 640);
         using var _ = host;
-        view.ShowRecommendations([SignIn, Services]);
+        view.ShowCards([Report], Features);
         var first = All<Button>(view).First();
-        view.ShowRecommendations([SignIn with { }, Services with { }]); // equal: the same cards stay
+        view.ShowCards([Report with { }], Features.Select(f => f with { }).ToList()); // equal: the same cards stay
         Assert.Same(first, All<Button>(view).First());
-        view.ShowRecommendations([SignIn with { Why = "Something new." }, Services]);
+        view.ShowCards([Report with { Why = "Something new." }], Features);
         Assert.NotSame(first, All<Button>(view).First());
-        view.ShowRecommendations([]);
+        view.ShowCards([], []);
         Assert.Empty(All<Button>(view));
     }
 
     [Fact]
-    public void AButtonWaitsForItsAnswerAndHideIsPassedOn()
+    public void AButtonWaitsForItsAnswerALinkOpensItsFeatureAndHideIsPassedOn()
     {
-        var (host, view) = View(1000, 640);
+        var (host, view) = View(1068, 640);
         using var _ = host;
         var pressed = new List<Recommendation>();
         var hidden = new List<Recommendation>();
+        var opened = new List<DiscoveryCard>();
+        var gone = new List<DiscoveryCard>();
         view.ActionClicked += pressed.Add;
         view.HideClicked += hidden.Add;
-        view.ShowRecommendations([SignIn, Services]);
+        view.FeatureClicked += opened.Add;
+        view.FeatureHidden += gone.Add;
+        view.ShowCards([Report], Features);
 
-        var button = All<Button>(view).First();
+        var button = All<Button>(view).Single();
         Raise(button, "OnClick", EventArgs.Empty);
-        Assert.Equal([SignIn], pressed);
+        Assert.Equal([Report], pressed);
         Assert.False(button.Enabled);                                      // until the answer
-        view.ShowOutcome(SignIn, ok: false, "PoolWatch could not set itself to start when you sign in.");
+        view.ShowOutcome(Report, ok: false, "PoolWatch cannot find that incident.");
         Assert.True(button.Enabled);
-        Assert.Contains(All<WrapLabel>(view), l => l.Text == "PoolWatch could not set itself to start when you sign in." && l.ForeColor == Color.Firebrick);
+        Assert.Contains(All<WrapLabel>(view), l => l.Text == "PoolWatch cannot find that incident." && l.ForeColor == Color.Firebrick);
         Assert.Empty(view.LayoutProblems());
 
-        var hide = All<LinkLabel>(view).Last();
-        Raise(hide, "OnLinkClicked", new LinkLabelLinkClickedEventArgs(hide.Links[0]));
-        Assert.Equal([Services], hidden);
+        var link = All<LinkLabel>(view).Single(l => l.Text == "Open Pool causes");
+        Raise(link, "OnLinkClicked", new LinkLabelLinkClickedEventArgs(link.Links[0]));
+        Assert.Equal([Features[0]], opened);
+        var hides = All<LinkLabel>(view).Where(l => l.Text == "Hide").ToList();
+        Raise(hides[0], "OnLinkClicked", new LinkLabelLinkClickedEventArgs(hides[0].Links[0]));
+        Raise(hides[1], "OnLinkClicked", new LinkLabelLinkClickedEventArgs(hides[1].Links[0]));
+        Assert.Equal([Report], hidden);
+        Assert.Equal([Features[0]], gone);
+        Assert.Single(pressed);
+    }
+
+    [Fact]
+    public void TheCiSeesEachCardsOneAction()
+    {
+        var (host, view) = View(1068, 640);
+        using var _ = host;
+        view.ShowCards([Report], Features);
+        var stats = view.SmokeStats("Next clear in 37 min");
+        string json = System.Text.Json.JsonSerializer.Serialize(stats);
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        Assert.Equal("Next clear in 37 min", doc.RootElement.GetProperty("nextClear").GetString());
+        var cards = doc.RootElement.GetProperty("cards").EnumerateArray().ToList();
+        Assert.Equal(3, cards.Count);
+        Assert.All(cards, c => Assert.Equal(1, c.GetProperty("buttons").GetArrayLength()));
+        Assert.Equal(12, doc.RootElement.GetProperty("tiles").GetArrayLength()); // four tiles: caption, value and line each
     }
 }

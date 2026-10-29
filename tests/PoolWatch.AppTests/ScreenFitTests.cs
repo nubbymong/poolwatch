@@ -17,6 +17,7 @@ namespace PoolWatch.AppTests;
 /// says so on a smaller one), except the one that is meant to be cut, which is made taller than this machine's largest
 /// window.
 /// </remarks>
+[Collection(nameof(WholeWindowLayout))] // lays windows out: one class at a time, after the parallel ones
 public class ScreenFitTests
 {
     /// <summary>About's column (620 logical px with 16 on each side), 440 px of it, so its window (668 x 479) fits a 1024 x 600 desktop.</summary>
@@ -237,7 +238,7 @@ public class ScreenFitTests
         List<string> Problems()
         {
             var p = new List<string>();
-            MainForm.ClippedControls(parent, p);
+            MainForm.ClippedControls(parent, p, WindowFitTests.OwnVisible);
             return p;
         }
 

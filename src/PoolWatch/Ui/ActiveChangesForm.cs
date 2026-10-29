@@ -324,19 +324,19 @@ internal sealed class ActiveChangesForm : Form
         base.Dispose(disposing);
     }
 
-    /// <summary>The window's colours, as the approved design has them; the system's own in high contrast.</summary>
+    /// <summary>The window's colours, from the app's one palette (<see cref="UiColors"/>); the system's own in high contrast.</summary>
     internal static class Palette
     {
         private static bool Contrast => SystemInformation.HighContrast;
         public static Color Window => Contrast ? SystemColors.Window : Color.White;
-        public static Color Ink => Contrast ? SystemColors.WindowText : Color.FromArgb(0x1f, 0x23, 0x28);
-        public static Color Muted => Contrast ? SystemColors.WindowText : Color.FromArgb(0x59, 0x63, 0x6e);
-        public static Color Faint => Contrast ? SystemColors.GrayText : Color.FromArgb(0x66, 0x70, 0x7a);
-        public static Color Good => Contrast ? SystemColors.WindowText : Color.FromArgb(0x1a, 0x7f, 0x37);
-        public static Color Warn => Contrast ? SystemColors.WindowText : Color.FromArgb(0x9a, 0x67, 0x00);
-        public static Color Line => Contrast ? SystemColors.WindowFrame : Color.FromArgb(0xe3, 0xe6, 0xea);
-        public static Color RowLine => Contrast ? SystemColors.WindowFrame : Color.FromArgb(0xee, 0xf0, 0xf2);
-        private static readonly Color Accent = Color.FromArgb(0x0f, 0x6c, 0xbd);
+        public static Color Ink => Contrast ? SystemColors.WindowText : UiColors.Ink;
+        public static Color Muted => Contrast ? SystemColors.WindowText : UiColors.Muted;
+        public static Color Faint => Contrast ? SystemColors.GrayText : UiColors.Faint;
+        public static Color Good => Contrast ? SystemColors.WindowText : UiColors.Good;
+        public static Color Warn => Contrast ? SystemColors.WindowText : UiColors.Warn;
+        public static Color Line => Contrast ? SystemColors.WindowFrame : UiColors.Line;
+        public static Color RowLine => Contrast ? SystemColors.WindowFrame : UiColors.RowLine;
+        private static readonly Color Accent = UiColors.Accent;
 
         /// <summary>The window's one primary button, filled with the accent colour (a standard button in high contrast).</summary>
         /// <param name="pad">The padding on each side, in the window's device pixels (8 logical).</param>

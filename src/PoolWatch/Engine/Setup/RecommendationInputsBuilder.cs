@@ -1,17 +1,20 @@
 using System.Globalization;
 using PoolWatch.Analysis;
 using PoolWatch.Core;
+using PoolWatch.Core.Cache;
 using PoolWatch.Core.Correlation;
 using PoolWatch.Core.Detection;
 using PoolWatch.Core.Findings;
 using PoolWatch.Core.Identity;
 using PoolWatch.Core.Incidents;
+using PoolWatch.Core.Knowledge;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Recommendations;
 using PoolWatch.Core.Services;
 using PoolWatch.Core.Setup;
 using PoolWatch.Core.TokenGuard;
 using PoolWatch.Core.Util;
+using PoolWatch.Native;
 using PoolWatch.Ui;
 
 namespace PoolWatch.Engine.Setup;
@@ -46,6 +49,12 @@ internal static class RecommendationInputsBuilder
         facts = WithClearTasksNow(facts, d.Cache.HelperStatus);
         var saved = d.Guard.ReadState();
         var lastDay = d.Findings.Between(nowUtc - TimeSpan.FromDays(1), nowUtc);
+        // What the token leak's known issue is matched against, read before the history's lock (as Pool causes reads it).
+        var clears = d.Cache.History();
+        var running = engine.Registry.LiveRecords();
+        // Windows' foreground lock timeout now: 0 stops the token leak, so the guard is never offered for growth it cannot help
+        // (WithTokenLeakSeen, tested with each value; this read is the live one).
+        uint? lockTimeout = TokenGuardNative.GetForegroundLockTimeout();
         bool metadataGrew, chatGptNamed;
         (string Id, string Dir, string Headline)? reportable;
         lock (analysis.History.SyncRoot)
@@ -56,18 +65,36 @@ internal static class RecommendationInputsBuilder
             chatGptNamed = incidents.Any(NamesChatGpt);
             reportable = Reportable(incidents, dismissed, nowUtc);
         }
-        return new RecommendationInputs
+        var inputs = new RecommendationInputs
         {
             NowUtc = nowUtc, Facts = facts, AutoClearOn = engine.Settings.AutoClearEnabled, TokenGuardOn = engine.Settings.TokenGuardEnabled,
             LeakTestNow = leakTestNow, SavedVerdictBuild = saved?.Build, SavedVerdict = saved?.Result,
             TokenSpawnLast24h = lastDay.Any(f => f.Kind == FindingKind.TokenSpawn && f.Severity >= FindingSeverity.Warning),
             SaturationOfferedTurnOffLast24h = lastDay.Any(f => f.Kind == FindingKind.Saturation && f.Data.TryGetValue("offerTurnOff", out var offer) && offer is true),
             FileSystemMetadataGrewLast24h = metadataGrew,
-            DefenderCoresAvg30Min = engine.Registry.LiveRecords().FirstOrDefault(r => r.Image.Equals("MsMpEng.exe", StringComparison.OrdinalIgnoreCase)) is { } defender
+            DefenderCoresAvg30Min = running.FirstOrDefault(r => r.Image.Equals("MsMpEng.exe", StringComparison.OrdinalIgnoreCase)) is { } defender
                 ? CoresOverWhole(d.Costs, defender.Key, CostWindow, nowUtc) : null,
             CostlyOptionalServices = CostlyOptionalServices(engine, d, nowUtc), ReportableIncident = reportable, ChatGptNamedInGrowth = chatGptNamed,
             ChatGptLauncherInstalled = chatGptLauncherInstalled, ChatGptShortcutMade = chatGptShortcutMade, Dismissed = dismissed,
         };
+        return WithTokenLeakSeen(inputs, analysis.History, clears, lockTimeout, running);
+    }
+
+    /// <summary>
+    /// <paramref name="inputs"/> with <see cref="RecommendationInputs.TokenLeakSeen"/> set: the token leak's known issue
+    /// matches what <paramref name="history"/> holds (<see cref="TokenLeakWatch.Seen"/>): security tokens grew at the pack's
+    /// rate over the last hour, measured across PoolWatch's own <paramref name="clears"/>, on a build the pack names, while
+    /// the setting that stops the leak is not on (<paramref name="liveForegroundLockTimeout"/> is not 0). Takes the
+    /// history's lock.
+    /// </summary>
+    internal static RecommendationInputs WithTokenLeakSeen(RecommendationInputs inputs, Core.History.History history, IReadOnlyList<ClearRecord> clears,
+        uint? liveForegroundLockTimeout, IEnumerable<ProcessRecord> running)
+    {
+        var knowledge = KnowledgeBase.Embedded();
+        KnowledgeEvidence evidence;
+        lock (history.SyncRoot)
+            evidence = KnowledgeEvidence.Gather(knowledge, history, clears, CacheClearer.MeasureAfter, inputs, liveForegroundLockTimeout, running);
+        return inputs with { TokenLeakSeen = TokenLeakWatch.Seen(knowledge, evidence) };
     }
 
     /// <summary>

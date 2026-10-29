@@ -69,6 +69,23 @@ internal sealed class RecommendationActions
     /// </summary>
     public LeakVerdict? LeakTestNow { get; private set; }
 
+    /// <summary>The Windows builds the token-leak watch has checked (or tried to) in this session.</summary>
+    private readonly HashSet<string> _watchTried = new(StringComparer.Ordinal);
+    private Task<(bool Ok, string Message)>? _watching;
+
+    /// <summary>
+    /// The token-leak watch (<see cref="TokenLeakWatch.ShouldCheck"/>): after setup found no leak, or could not tell,
+    /// PoolWatch runs the check-only test again by itself in the background once Windows was updated (or when no check
+    /// ever gave a verdict), once per Windows build in a session. It changes nothing on the PC and never turns the guard
+    /// on: when the leak shows, the Simple view offers the guard. Returns the check it started, else null. UI thread.
+    /// </summary>
+    public Task<(bool Ok, string Message)>? WatchTokenLeak(RecommendationInputs inputs)
+    {
+        if (_smoke || _watching is { IsCompleted: false } || !TokenLeakWatch.ShouldCheck(inputs, _watchTried)) return null;
+        _watchTried.Add(inputs.Facts!.Build);
+        return _watching = CheckTokenLeak(CancellationToken.None);
+    }
+
     /// <param name="via">Where the button was, for the timeline and the change list: "a suggestion", "the setup guide".</param>
     public async Task<(bool Ok, string Message)> Run(Recommendation r, IWin32Window owner, string via = "a suggestion")
     {
@@ -99,7 +116,18 @@ internal sealed class RecommendationActions
     }
 
     /// <summary>
-    /// The token-leak check (about 20 seconds; it changes nothing). <paramref name="stop"/>: the setup guide closed.
+    /// Settings' "Create shortcut": the Codex shortcut made again (the desktop shortcut that starts ChatGPT desktop without
+    /// its shader cache), recorded for Undo as every shortcut PoolWatch makes. Refused in the CI UI test.
+    /// </summary>
+    public async Task<(bool Ok, string Message)> CreateCodexShortcut(string via)
+    {
+        if (_smoke) return (false, Refused);
+        try { return await CreateShortcut(via); }
+        catch (Exception ex) { return (false, $"That did not work: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// The token-leak check (usually about 20 seconds; it changes nothing). <paramref name="stop"/>: the setup guide closed.
     /// </summary>
     public async Task<(bool Ok, string Message)> CheckTokenLeak(CancellationToken stop)
     {
@@ -218,9 +246,15 @@ internal static class ClearAdvice
     public static bool HasReFs(EnvironmentFacts? facts) =>
         facts?.Volumes.Any(v => v.IsDevDrive || v.FileSystem.Equals("ReFS", StringComparison.OrdinalIgnoreCase)) == true;
 
-    /// <summary>The Simple view's cards: <paramref name="current"/> without the hourly clear where it is not shown to help, at most <paramref name="max"/>.</summary>
-    public static IReadOnlyList<Recommendation> ForSimpleView(IReadOnlyList<Recommendation> current, EnvironmentFacts? facts, ClearEvidence evidence, int max = 3) =>
-        current.Where(r => r.Id != RecommendationId.HourlyCacheClear || HasReFs(facts) || evidence.Helps == true)
+    /// <summary>
+    /// The Simple view's cards: <paramref name="current"/> without the hourly clear where it is not shown to help, at most
+    /// <paramref name="max"/>. It is shown with a ReFS drive or a Dev Drive, once a clear here freed enough, or when file
+    /// records a clear frees grew in the last day (<paramref name="fileRecordsGrew"/>): so on an NTFS-only PC where setup's
+    /// "Decide later" left clearing off, PoolWatch still suggests it when the pool shows it would help.
+    /// </summary>
+    public static IReadOnlyList<Recommendation> ForSimpleView(IReadOnlyList<Recommendation> current, EnvironmentFacts? facts, ClearEvidence evidence, int max = 3,
+        bool fileRecordsGrew = false) =>
+        current.Where(r => r.Id != RecommendationId.HourlyCacheClear || HasReFs(facts) || evidence.Helps == true || fileRecordsGrew)
             .Select(r => r.Id == RecommendationId.HourlyCacheClear && evidence is { Helps: true, Sentence: { } shown } ? r with { Why = shown } : r)
             .Take(max).ToList();
 

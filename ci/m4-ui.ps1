@@ -1,7 +1,8 @@
 # Milestone 4 acceptance: the tray app starts and every window under review renders, each drawn to a PNG (the
-# ui-screenshots artifact) and checked: the main window's Simple view (status line, Clear cache now, the next-clear line,
-# the graph, up to three suggestions) and Advanced view (three buttons, the Pool causes and Services tabs), the plain
-# Settings form and its Advanced grid, the setup guide, Active changes, Report an issue, About and the update notice.
+# ui-screenshots artifact) and checked: the main window's Simple view (the header with the next clear, Clear now, the
+# graph, up to three suggestions) and Advanced view (Clear now and Settings; the Pool causes and Services tabs), the
+# plain Settings form and its Advanced grid, the setup guide, Active changes, Report an issue, About and the update
+# notice.
 # Nothing in them is clipped or overlaps, no internal name shows, everything taken off the window is in the tray menu,
 # every window made for the test is closed again, and the app exits cleanly. Runs a small File-handle leak meanwhile so
 # Pool causes has content, and turns one harmless service off first so Active changes has a service to list.
@@ -68,12 +69,12 @@ if (Test-Path $smokeFile) {
     Assert-True ($f.status -notmatch '\(PID \d+\)|keeping an eye on \S+\.exe') "the status line names a cause as people know it: $($f.status)"
     Assert-True ([int]$f.chartPoints -ge 2) "the graph has data ($($f.chartPoints) points)"
 
-    # The Simple view, as the window opens: one button, the footer, no tabs, the next-clear line, at most three cards.
+    # The Simple view, as the window opens: one button, the footer, no tabs, the next clear in the header, at most three cards.
     $simple = $f.simple
-    Assert-True ((@($simple.buttons) -join '|') -eq 'Clear cache now') "the Simple view has one button: $(@($simple.buttons) -join ', ')"
+    Assert-True ((@($simple.buttons) -join '|') -eq 'Clear now') "the Simple view has one button: $(@($simple.buttons) -join ', ')"
     Assert-True ((@($simple.footer) -join '|') -eq 'Active changes|Advanced view') "the footer has Active changes and Advanced view: $(@($simple.footer) -join ', ')"
     Assert-True ($simple.tabsShown -eq $false) "the Simple view shows no tabs"
-    Assert-True ($simple.view.nextClear -match '^Next cache clear in (under a minute|\d+ (min|h))') "the next-clear line shows the schedule: $($simple.view.nextClear)"
+    Assert-True ($simple.view.nextClear -match '^Next clear (in (under a minute|\d+ (min|h))|at )') "the header's next clear shows the schedule: $($simple.view.nextClear)"
     $cards = @($simple.view.cards)
     Assert-True ($cards.Count -le 3) "at most three suggestions ($($cards.Count): $(@($cards | ForEach-Object { $_.title }) -join ' | '))"
     foreach ($c in $cards) { Assert-True (@($c.buttons).Count -eq 1) "the suggestion '$($c.title)' has one button ($(@($c.buttons) -join ', '))" }
@@ -81,8 +82,8 @@ if (Test-Path $smokeFile) {
     Assert-True ($simpleProblems.Count -eq 0) "the Simple view: nothing clipped or overlapping: $($simpleProblems -join '; ')"
     Assert-Plain 'the Simple view' (@($f.status, $simple.view.nextClear) + @($cards | ForEach-Object { $_.title, $_.why }) + @($cards | ForEach-Object { $_.buttons }))
 
-    # The Advanced view: three buttons, two tabs.
-    Assert-True ((@($f.buttons) -join '|') -eq 'Clear cache now|Export report|Settings') "the Advanced view has three buttons: $(@($f.buttons) -join ', ')"
+    # The Advanced view on Pool causes: two buttons (Export report is in a row's details), two tabs.
+    Assert-True ((@($f.buttons) -join '|') -eq 'Clear now|Settings') "the Advanced view has two buttons: $(@($f.buttons) -join ', ')"
     Assert-True ((@($f.tabs) -join '|') -eq 'Pool causes|Services') "two tabs: $(@($f.tabs) -join ', ')"
 
     # Pool causes: the leak's incident is listed, and selecting a row shows its details.

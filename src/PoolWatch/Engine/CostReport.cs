@@ -20,6 +20,7 @@ internal static class CostReport
         var gc = GC.GetGCMemoryInfo();
         double elapsed = (DateTime.Now - p.StartTime).TotalSeconds;
         int historyProcs; long historyPoints; int minutes; long minuteEntries; int events;
+        int growthMinutes, growthTags; long growthTagEntries, growthBytes;
         (int incidents, int owners, int ownerMembers, int events) held;
         lock (analysis.History.SyncRoot)
         {
@@ -29,6 +30,10 @@ internal static class CostReport
             minuteEntries = analysis.History.Minutes.Sum(m => (long)m.Processes.Length);
             events = analysis.Incidents.EventCount;
             held = analysis.Incidents.Held();
+            growthMinutes = analysis.Growth.MinuteCount;
+            growthTags = analysis.Growth.TagCount;
+            growthTagEntries = analysis.Growth.TagEntries;
+            growthBytes = analysis.Growth.ApproxBytes();
         }
         int stormTraceRows;
         lock (analysis.Diagnostics.Spawns) stormTraceRows = analysis.Diagnostics.Spawns.OpenStorms.Sum(s => s.Trace.Count);
@@ -80,6 +85,8 @@ internal static class CostReport
                 incidentOwners = held.owners,
                 incidentOwnerMembers = held.ownerMembers,
                 incidentEventsKept = held.events,
+                growthMinutes, growthTags, growthTagEntries, growthKB = growthBytes / 1024,
+                ramReadings = analysis.Diagnostics.Cache.RamReadings, ramKB = Core.Growth.RamHistory.ApproxBytes / 1024,
                 findings = analysis.Diagnostics.Findings.Count,
                 stormTraceRows,
                 tagRankingsCached = window?.rankings,

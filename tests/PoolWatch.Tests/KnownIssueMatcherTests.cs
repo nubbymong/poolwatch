@@ -184,7 +184,7 @@ public class KnownIssueMatcherTests
     [Fact]
     public void TheNoteSaysWhatPoolWatchSeesWhatHelpsAndWhoFoundIt()
     {
-        var shown = RecommendationRules.Current(ThreeOffers());
+        var shown = RecommendationRules.OnEvidence(ThreeOffers());
         var lines = Single(Grew(Quiet(), ("Toke", 60, 0)), "windows-token-leak").Note(shown).Split(Environment.NewLine);
         Assert.Equal("Known issue: The Windows 11 token leak", lines[0]);
         Assert.Equal("What PoolWatch sees: Security tokens grew 60 MB in the last hour. This PC runs Windows build 26200.9106.", lines[1]);
@@ -201,14 +201,14 @@ public class KnownIssueMatcherTests
     }
 
     /// <summary>The title of a suggestion the rules offer on <see cref="ThreeOffers"/>: the note names the card by it.</summary>
-    private static string Title(RecommendationId id) => RecommendationRules.Current(ThreeOffers()).Single(r => r.Id == id).Title;
+    private static string Title(RecommendationId id) => RecommendationRules.OnEvidence(ThreeOffers()).Single(r => r.Id == id).Title;
 
     [Fact]
     public void TheNoteSaysWhatPoolWatchAlreadyDoesAndPointsOnlyAtASuggestionOnOffer()
     {
         // The note's line about the action, with the actions in effect and the suggestions shown on these inputs.
         string? ActionLine(KnowledgeEvidence e, RecommendationInputs inputs, string id) =>
-            Single(e with { ActionsOn = KnownActions.InEffect(inputs, DefaultLockTimeout) }, id).Note(RecommendationRules.Current(inputs))
+            Single(e with { ActionsOn = KnownActions.InEffect(inputs, DefaultLockTimeout) }, id).Note(RecommendationRules.OnEvidence(inputs))
                 .Split(Environment.NewLine).SingleOrDefault(l => l.StartsWith("PoolWatch "));
 
         // The hourly clear is on and each clear still frees gigabytes of ReFS records: the issue is named, as already handled.
@@ -279,7 +279,7 @@ public class KnownIssueMatcherTests
     [Fact]
     public void AMatchedIssueGivesTheRulesOwnSuggestionItsReason()
     {
-        var rules = RecommendationRules.Current(ThreeOffers());
+        var rules = RecommendationRules.OnEvidence(ThreeOffers());
         Assert.Equal([RecommendationId.TokenLeakGuard, RecommendationId.HourlyCacheClear, RecommendationId.ChatGptShortcut], rules.Select(r => r.Id));
         var at = Now.AddHours(-1);
         var matches = KnownIssueMatcher.Match(KnowledgeBase.Embedded(),
@@ -297,7 +297,7 @@ public class KnownIssueMatcherTests
     [Fact]
     public void TheGuardsReasonKeepsItsTradeOff()
     {
-        var rules = RecommendationRules.Current(ThreeOffers());
+        var rules = RecommendationRules.OnEvidence(ThreeOffers());
         var matches = KnownIssueMatcher.Match(KnowledgeBase.Embedded(), Grew(Quiet(), ("Toke", 120, 0)));
         var guard = KnownIssueMatcher.Explain(rules, matches)[0];
         Assert.Equal("Security tokens grew 120 MB in the last hour. This is the known Windows token leak. The guard turns on the " +
@@ -318,7 +318,7 @@ public class KnownIssueMatcherTests
     [Fact]
     public void TheShortcutSuggestionGetsTheShaderCacheReason()
     {
-        var rules = RecommendationRules.Current(ThreeOffers());
+        var rules = RecommendationRules.OnEvidence(ThreeOffers());
         var matches = KnownIssueMatcher.Match(KnowledgeBase.Embedded(), Grew(Quiet() with { Running = [CodexDesktop] }, ("NtFC", 0, 6144)));
         Assert.Equal("NTFS file records grew 6.0 GB in the last hour. Starting the app without its GPU shader disk cache stopped this for one " +
                      "user (found by Faarfarin on GitHub). The shortcut starts it that way.", KnownIssueMatcher.Explain(rules, matches)[2].Why);
@@ -334,14 +334,14 @@ public class KnownIssueMatcherTests
 
         // Everything already done: the rules offer nothing, and the known issues add nothing.
         var done = ThreeOffers() with { AutoClearOn = true, TokenGuardOn = true, ChatGptShortcutMade = true };
-        Assert.Empty(KnownIssueMatcher.Explain(RecommendationRules.Current(done), matches));
+        Assert.Empty(KnownIssueMatcher.Explain(RecommendationRules.OnEvidence(done), matches));
 
         // The guide's rows that are not offers keep their own words.
         var guide = RecommendationRules.FirstRun(done);
         Assert.Equal(guide, KnownIssueMatcher.Explain(guide, matches));
 
         // No match: the suggestions come back as they were.
-        var rules = RecommendationRules.Current(ThreeOffers());
+        var rules = RecommendationRules.OnEvidence(ThreeOffers());
         Assert.Equal(rules, KnownIssueMatcher.Explain(rules, []));
     }
 
@@ -360,7 +360,7 @@ public class KnownIssueMatcherTests
         var knowledge = KnowledgeBase.Load([("wordy.json", pack)]);
         var matches = KnownIssueMatcher.Match(knowledge, Grew(Quiet(), ("Abcd", 999_000, 0)));
         Assert.Single(matches);
-        var rules = RecommendationRules.Current(ThreeOffers());
+        var rules = RecommendationRules.OnEvidence(ThreeOffers());
         Assert.Equal(rules, KnownIssueMatcher.Explain(rules, matches));
     }
 
