@@ -21,12 +21,13 @@ internal interface IGuardUi
 }
 
 /// <summary>
-/// The token-leak guard (addendum 3), re-implemented from the public fix gunrgbcr/windows-token-leak-logon-fix: on some
-/// Windows 11 Insider builds the kernel leaks a token reference (Toke) each time a process that is not allowed to take
-/// the foreground starts a child. The workaround sets the LIVE ForegroundLockTimeout to 0 for the logon (never the
-/// registry). At start-up it decides whether to test first, runs the leak test in a hidden helper, turns the workaround
-/// on or leaves Windows alone, records the state and one timeline finding, and while running re-checks the live value
-/// every few minutes. It runs only when the TokenGuardEnabled setting is on (off by default) or headless with --token-guard.
+/// The token-leak guard: an independent re-implementation of the workaround gunrgbcr/windows-token-leak-logon-fix describes
+/// (no code copied). On Windows 11 24H2 and 25H2 builds (documented on several, retail and Insider; others are untested)
+/// the kernel can leak a token reference (Toke) each time a process that is not allowed to take the foreground starts a
+/// child. The workaround sets the LIVE ForegroundLockTimeout to 0 for the logon (never the registry). At start-up it
+/// decides whether to test first, runs the leak test in a hidden helper, turns the workaround on or leaves Windows alone,
+/// records the state and one timeline finding, and while running re-checks the live value every few minutes. It runs
+/// only when the TokenGuardEnabled setting is on (off by default) or headless with --token-guard.
 /// </summary>
 internal sealed class TokenLeakGuard
 {
@@ -43,7 +44,19 @@ internal sealed class TokenLeakGuard
     private readonly Log _log;
     private readonly Action<Finding> _finding;
     private readonly object _lock = new();
+    /// <summary>
+    /// Which check runs: none, the logon check, or the setup guide's <see cref="TestOnly"/>. One field, claimed and released
+    /// in one step, so the exit failsafe can never mistake one check for the other.
+    /// </summary>
     private int _checking;
+    private const int NotChecking = 0, LogonCheck = 1, CheckOnly = 2;
+    /// <summary>
+    /// Held for the whole of a <see cref="TestOnly"/> check. A logon check that starts meanwhile (the guard turned on while
+    /// the setup guide checks) waits for it here, then decides from the verdict it saved, instead of finding a check
+    /// running and doing nothing.
+    /// </summary>
+    private readonly SemaphoreSlim _testOnlyGate = new(1, 1);
+    private bool _stateRead;
     private int _asking;
     /// <summary>C4 (review round 2): the ONE gate for every "click to turn it on" prompt (logon check, Turn on, recheck).</summary>
     private int _prompting;
@@ -84,8 +97,13 @@ internal sealed class TokenLeakGuard
     /// <summary>Whether a "click to turn it on" prompt is open now (C4: never two).</summary>
     public bool Prompting => Volatile.Read(ref _prompting) != 0;
     public uint? LiveTimeout { get; private set; }
-    public string LastMessage { get; private set; } = "Token leak guard: checking…";
-    public bool Checking => Volatile.Read(ref _checking) != 0;
+    public string LastMessage { get; private set; } = "Token-leak guard: checking…";
+    public bool Checking => Volatile.Read(ref _checking) != NotChecking;
+    /// <summary>
+    /// Whether the leak test's helper is told this PoolWatch's PID, so that, orphaned, it offers to protect the logon: only
+    /// in the logon check. The setup guide's check leaves the workaround off before and after, so there is nothing to offer.
+    /// </summary>
+    internal bool HelperWatchesParent => Volatile.Read(ref _checking) != CheckOnly;
     /// <summary>The raw helper numbers of this logon's test (two runs x three ways), for the summary and CI.</summary>
     public List<long> TestNumbers { get; } = new();
     public string? TestError { get; private set; }
@@ -107,7 +125,11 @@ internal sealed class TokenLeakGuard
     /// <summary>The check at start-up (a worker thread). Never throws; whatever happens, it tries to leave Windows protected.</summary>
     public async Task RunAtLogon(IGuardUi? ui, CancellationToken stop)
     {
-        if (Interlocked.Exchange(ref _checking, 1) != 0) return;
+        await _testOnlyGate.WaitAsync(); // a setup-guide check finishes first (at most its two helper runs)
+        bool claimed;
+        try { claimed = Interlocked.CompareExchange(ref _checking, LogonCheck, NotChecking) == NotChecking; }
+        finally { _testOnlyGate.Release(); }
+        if (!claimed) return;
         GuardOutcome? outcome = null;
         try
         {
@@ -128,6 +150,8 @@ internal sealed class TokenLeakGuard
                 File.WriteAllText(TestMarker, JsonSerializer.Serialize(new { build, startedUtc = DateTime.UtcNow, pid = Environment.ProcessId }));
                 var (numbers, error) = await Task.Run(() => _runTest(stop), stop);
                 TestError = error;
+                TestNumbers.Clear();
+                TestNumbers.AddRange(numbers);
                 var verdict = error is null ? GuardPolicy.Verdict(numbers) : LeakVerdict.Unclear;
                 string text = error ?? Numbers(numbers);
                 outcome = GuardPolicy.AfterTest(verdict, last, build, DateTime.UtcNow, text);
@@ -147,10 +171,10 @@ internal sealed class TokenLeakGuard
             WorkaroundWanted = on || WorkaroundWanted;
             // Not protected (and protection was wanted): the marker stays, so the next start turns the workaround on.
             if (on || outcome is { TurnOn: false }) RemoveTestMarker();
-            Report(on ? "Token leak guard: the check failed (see poolwatch.log), but the workaround is ON."
-                      : "Token leak guard: the check failed and the workaround is NOT on: click to turn it on.", on, ui, FindingSeverity.Warning);
+            Report(on ? "Token-leak guard: the check failed (see poolwatch.log), but the workaround is ON."
+                      : "Token-leak guard: the check failed and the workaround is NOT on: click to turn it on.", on, ui, FindingSeverity.Warning);
         }
-        finally { Volatile.Write(ref _checking, 0); }
+        finally { Volatile.Write(ref _checking, NotChecking); }
     }
 
     private void RemoveTestMarker()
@@ -166,10 +190,12 @@ internal sealed class TokenLeakGuard
     /// A process that is killed (Task Manager "End task", TerminateProcess) or dies in native code runs no managed
     /// handler, so this failsafe is skipped. M3: the test marker it leaves behind makes the next PoolWatch start turn the
     /// workaround on without testing (until then, which is the next logon or a manual restart, that logon is unprotected).
+    /// Not during the setup guide's <see cref="TestOnly"/> check: the workaround was off before it (the guard may not even
+    /// be on), and the check leaves it so.
     /// </summary>
     public void OnExit()
     {
-        if (!Checking) return;
+        if (Volatile.Read(ref _checking) != LogonCheck) return;
         bool on = TrySetNow();
         _log.Info(on ? "token guard: PoolWatch exited during the check; the workaround is ON" : "token guard: PoolWatch exited during the check; the workaround could NOT be turned on");
     }
@@ -179,7 +205,7 @@ internal sealed class TokenLeakGuard
         lock (_lock) State = outcome.State;
         SaveState(outcome.State);
         string message = outcome.TurnOn && !on
-            ? "Token leak guard: NOT protected (Windows refused the change): click to turn it on."
+            ? "Token-leak guard: NOT protected (Windows refused the change): click to turn it on."
             : outcome.Message + (on && outcome.TurnOn ? " With it on, any app may take the focus." : "");
         Report(message, on || !outcome.TurnOn, ui, outcome.TurnOn && !on ? FindingSeverity.Warning : FindingSeverity.Info, outcome.State);
     }
@@ -225,7 +251,7 @@ internal sealed class TokenLeakGuard
         {
             while (!stop.IsCancellationRequested)
             {
-                if (!await ui.AskForClick("Token leak guard: Windows only accepts this from the program in front. Click OK to put PoolWatch in front and turn the workaround on."))
+                if (!await ui.AskForClick("Token-leak guard: Windows only accepts this from the program in front. Click OK to put PoolWatch in front and turn the workaround on."))
                     return TrySetNow();
                 for (int i = 0; i < Attempts; i++)
                 {
@@ -243,8 +269,8 @@ internal sealed class TokenLeakGuard
     {
         bool on = await TurnOn(ui, CancellationToken.None);
         if (on) WorkaroundWanted = true;
-        Report(on ? "Token leak guard: workaround ON, safe to start work. With it on, any app may take the focus."
-                  : "Token leak guard: still NOT protected: click to turn on.", on, ui, on ? FindingSeverity.Info : FindingSeverity.Warning, State);
+        Report(on ? "Token-leak guard: workaround ON, safe to start work. With it on, any app may take the focus."
+                  : "Token-leak guard: still NOT protected: click to turn on.", on, ui, on ? FindingSeverity.Info : FindingSeverity.Warning, State);
         return on;
     }
 
@@ -267,7 +293,7 @@ internal sealed class TokenLeakGuard
         if (!WorkaroundWanted || live is null or 0) return;
         _log.Info($"token guard: the live timeout was set back to {live}; turning the workaround on again");
         bool on = TrySetNow();
-        if (on) { Report($"Token leak guard: something set the foreground lock timeout back to {live} ms; turned the workaround on again.", true, null, FindingSeverity.Warning, State); return; }
+        if (on) { Report($"Token-leak guard: something set the foreground lock timeout back to {live} ms; turned the workaround on again.", true, null, FindingSeverity.Warning, State); return; }
         // C4 (review): the silent re-set failed, so we must ask the owner for a click. That prompt loop is long-lived;
         // without a guard every recheck interval would start another one and stack prompts. Allow only one recheck task at
         // a time; the prompt itself goes through the one gate in TurnOn shared with the logon check and "Turn on" (round 2).
@@ -278,8 +304,8 @@ internal sealed class TokenLeakGuard
             {
                 var u = ui();
                 bool ok = u is not null && await TurnOn(u, CancellationToken.None);
-                Report(ok ? "Token leak guard: the timeout had been set back; workaround ON again."
-                          : $"Token leak guard: something set the timeout back to {live} ms and it could not be turned on again: NOT protected, click to turn on.", ok, u, FindingSeverity.Warning, State);
+                Report(ok ? "Token-leak guard: the timeout had been set back; workaround ON again."
+                          : $"Token-leak guard: something set the timeout back to {live} ms and it could not be turned on again: NOT protected, click to turn on.", ok, u, FindingSeverity.Warning, State);
             }
             finally { Volatile.Write(ref _asking, 0); }
         });
@@ -298,17 +324,95 @@ internal sealed class TokenLeakGuard
             ? $"last test: {GuardState.ResultText(s.Result)} on {s.Build}" + (s.TestedUtc > DateTime.MinValue ? $" ({s.TestedUtc.ToLocalTime():yyyy-MM-dd})" : "")
             : "not tested yet";
         string toke = tokeOutstanding is { } n ? $"; Toke outstanding {n:N0}" + (tokeBytes is { } b ? $" ({Core.Detection.Fmt.Bytes(b)})" : "") : "";
-        return $"Token leak guard: {(Checking ? "checking…; " : "")}{on}; {last}{toke}.";
+        return $"Token-leak guard: {(Checking ? "checking…; " : "")}{on}; {last}{toke}.";
+    }
+
+    // ------------------------------------------------------------------ the check alone (the setup guide)
+
+    /// <summary>
+    /// The setup guide's "does this Windows build have the token leak?" (about 20 seconds): the logon check's two hidden
+    /// helper runs and nothing else. The workaround is left as it is (the test needs it off, so it runs only while the live
+    /// timeout is not 0), no notice is shown, and neither the exit failsafe nor an orphaned helper offers to change it.
+    /// <see cref="Checking"/> is set meanwhile, so the spawn diagnostics ignore the helper's children as they do at logon.
+    /// The verdict is saved as the logon check saves it (<see cref="GuardPolicy.AfterTest"/>), so the next logon check
+    /// decides from it, and goes on the timeline; a helper run that fails (a timeout, an error) gives an unclear verdict,
+    /// saved the same way. Null when it cannot run now (the timeout is 0 or not reported, or a check is running), when it is
+    /// stopped (<paramref name="stop"/>: the guide closed, or PoolWatch is stopping) or when it fails with an exception;
+    /// nothing is saved then.
+    /// </summary>
+    public async Task<LeakVerdict?> TestOnly(CancellationToken stop)
+    {
+        if (!_testOnlyGate.Wait(0)) return null;
+        try
+        {
+            uint? live = _getLive();
+            if (live is null or 0 || Interlocked.CompareExchange(ref _checking, CheckOnly, NotChecking) != NotChecking) return null;
+            try
+            {
+                string build = _build();
+                var last = LoadState();
+                var (numbers, error) = await Task.Run(() => _runTest(stop), stop);
+                if (stop.IsCancellationRequested)
+                {
+                    _log.Info("token guard: the check (setup) was stopped; nothing saved");
+                    return null;
+                }
+                var verdict = error is null ? GuardPolicy.Verdict(numbers) : LeakVerdict.Unclear;
+                string text = error ?? Numbers(numbers);
+                var state = GuardPolicy.AfterTest(verdict, last, build, DateTime.UtcNow, text).State;
+                lock (_lock) State = state;
+                SaveState(state);
+                string found = verdict switch
+                {
+                    LeakVerdict.Leak => "this Windows build has the token leak",
+                    LeakVerdict.Clean => "no token leak on this Windows build",
+                    _ => "the result was unclear",
+                };
+                _log.Info($"token guard: check only (setup): {text} -> {verdict}");
+                _finding(new Finding
+                {
+                    TimeUtc = DateTime.UtcNow, Kind = FindingKind.TokenGuard, Severity = FindingSeverity.Info,
+                    Title = $"Token leak check: {found}; nothing was changed.",
+                    Data = new Dictionary<string, object?>
+                    {
+                        ["build"] = build, ["result"] = GuardState.ResultText(state.Result), ["detail"] = state.Detail, ["liveTimeout"] = live,
+                        ["numbers"] = numbers, ["step"] = "CheckOnly",
+                    },
+                });
+                return verdict;
+            }
+            catch (Exception ex)
+            {
+                _log.Info("token guard: the check (setup) did not finish: " + ex.Message);
+                return null;
+            }
+            finally { Volatile.Write(ref _checking, NotChecking); }
+        }
+        finally { _testOnlyGate.Release(); }
     }
 
     // ------------------------------------------------------------------ state
+
+    /// <summary>
+    /// The saved verdict (token-guard.json): read from the file the first time, then the copy in memory, which every save
+    /// of this process updates (so the Simple view's once-a-minute refresh reads no file).
+    /// </summary>
+    public GuardState? ReadState()
+    {
+        lock (_lock) if (_stateRead) return State;
+        return LoadState();
+    }
 
     private GuardState? LoadState()
     {
         GuardState? s = null;
         try { if (File.Exists(StateFile) && new FileInfo(StateFile).Length < 64 * 1024) s = GuardState.Parse(File.ReadAllText(StateFile)); }
         catch (Exception ex) { _log.Info("token guard state not read: " + ex.Message); }
-        lock (_lock) State = s;
+        lock (_lock)
+        {
+            State = s;
+            _stateRead = true;
+        }
         return s;
     }
 
@@ -330,14 +434,14 @@ internal sealed class TokenLeakGuard
     /// <summary>Two hidden helper runs (each at most 300 s). Error text instead of numbers when a run failed.</summary>
     public (List<long> numbers, string? error) RunTest(CancellationToken stop)
     {
-        TestNumbers.Clear();
+        var numbers = new List<long>();
         for (int run = 1; run <= 2; run++)
         {
             var (d, err) = RunHelper(run, stop);
-            if (err is not null) return (TestNumbers.ToList(), $"helper run {run}: {err}");
-            TestNumbers.AddRange(d);
+            if (err is not null) return (numbers, $"helper run {run}: {err}");
+            numbers.AddRange(d);
         }
-        return (TestNumbers.ToList(), null);
+        return (numbers, null);
     }
 
     private (List<long> deltas, string? error) RunHelper(int run, CancellationToken stop)
@@ -351,8 +455,11 @@ internal sealed class TokenLeakGuard
         // M3 (review S2): the helper is told this PoolWatch's PID, so if PoolWatch is killed or crashes while the test runs
         // (the window in which the workaround is off), the orphaned helper sees its starter gone and offers the one click
         // that protects this logon — the only way, since a background process cannot set the foreground lock timeout itself.
+        // Not in the setup guide's check (HelperWatchesParent): the workaround was off before it and stays off, so PoolWatch
+        // stopping during it leaves nothing to put right.
+        string parentArgs = HelperWatchesParent ? $" --token-test-parent {Environment.ProcessId}" : "";
         var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"),
-            $"/d /c \"\"{exe}\" --token-leak-test {GuardPolicy.Children} \"{outFile}\"{outArgs} --token-test-parent {Environment.ProcessId}\"")
+            $"/d /c \"\"{exe}\" --token-leak-test {GuardPolicy.Children} \"{outFile}\"{outArgs}{parentArgs}\"")
         { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Environment.SystemDirectory };
         using var p = Process.Start(psi) ?? throw new InvalidOperationException("the helper did not start");
         if (!p.WaitForExit((int)HelperTimeout.TotalMilliseconds))
@@ -413,7 +520,7 @@ internal sealed class TokenLeakGuard
         System.Windows.Forms.Application.EnableVisualStyles();
         using var f = new System.Windows.Forms.Form
         {
-            Text = "PoolWatch: token leak guard", FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedToolWindow,
+            Text = "PoolWatch: token-leak guard", FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedToolWindow,
             StartPosition = System.Windows.Forms.FormStartPosition.Manual, TopMost = true, ShowInTaskbar = true,
             Width = 460, Height = 170, Font = new System.Drawing.Font("Segoe UI", 9f),
         };

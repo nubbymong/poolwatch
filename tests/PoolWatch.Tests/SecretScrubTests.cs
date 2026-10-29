@@ -49,8 +49,8 @@ public class SecretScrubTests
     }
 
     [Theory]
-    [InlineData("Token leak guard: workaround ON (foreground lock timeout 0: any app may take the focus)")]
-    [InlineData("Token leak guard: last test: clean-once on 26100.1000; Toke outstanding 1,234 (5 MB).")]
+    [InlineData("Token-leak guard: workaround ON (foreground lock timeout 0: any app may take the focus)")]
+    [InlineData("Token-leak guard: last test: clean-once on 26100.1000; Toke outstanding 1,234 (5 MB).")]
     [InlineData("the token-leak guard's test started 600 children")]
     [InlineData(@"git -C D:\repo status --porcelain")]
     [InlineData("find / -maxdepth 6 -type d -name release-notes-*")]
