@@ -1158,14 +1158,19 @@ internal sealed class MainForm : Form
         return p;
     }
 
-    /// <summary>Visible controls outside their parent, and buttons, check boxes and labels whose text does not fit (CI).</summary>
+    /// <summary>
+    /// Visible controls outside their parent, and buttons, check boxes and labels whose text does not fit (CI). A parent
+    /// that scrolls (AutoScroll: About on a screen too short for it) may hold controls above or below what it shows, as
+    /// the user scrolls to them; never beside it, as no PoolWatch window scrolls sideways.
+    /// </summary>
     internal static void ClippedControls(Control parent, List<string> p)
     {
+        bool scrolls = parent is ScrollableControl { AutoScroll: true };
         foreach (Control c in parent.Controls)
         {
             if (!c.Visible) continue;
             var area = parent.ClientRectangle;
-            if (c.Left < -1 || c.Top < -1 || c.Right > area.Width + 1 || c.Bottom > area.Height + 1)
+            if (c.Left < -1 || c.Right > area.Width + 1 || (!scrolls && (c.Top < -1 || c.Bottom > area.Height + 1)))
                 p.Add($"{Describe(c)} at {c.Bounds} is outside {Describe(parent)} ({area.Size})");
             // (A label with a maximum width wraps by design: its height follows its text.)
             if (c is Button or CheckBox || c is Label { AutoSize: true, MaximumSize.Width: 0 })

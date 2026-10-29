@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using PoolWatch.Analysis;
-using PoolWatch.Core.Detection;
+using PoolWatch.Core;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Util;
 using PoolWatch.Engine;
@@ -10,17 +10,15 @@ namespace PoolWatch.Ui;
 
 /// <summary>
 /// The actions the main window and the tray menu share (DESIGN.md section 11): Clear cache, the exports, the Since boot
-/// report, copying a summary, the clear-task removals and About. Each takes the window to parent its dialogs on (null from
-/// the tray). Nothing here changes what an action does; it only gives the tray and the window one copy of it.
+/// report, copying a summary, the clear-task removals, Report an issue, About and opening a web page. Each takes the
+/// window to parent its dialogs on (null from the tray). Nothing here changes what an action does; it only gives the tray
+/// and the window one copy of it.
 /// </summary>
 internal sealed class UiActions
 {
     private readonly MonitorEngine _engine;
     private readonly AnalysisPipeline _analysis;
     private readonly SynchronizationContext _ui;
-
-    /// <summary>Start-up (JIT, first scans, tag scan) is not steady state: overhead is shown only after this long.</summary>
-    private const int SteadySeconds = 300;
 
     public UiActions(MonitorEngine engine, AnalysisPipeline analysis, SynchronizationContext ui)
     {
@@ -192,25 +190,34 @@ internal sealed class UiActions
         MessageBox.Show(owner, "There is no incident yet.", "PoolWatch");
     }
 
-    // ---------------------------------------------------------------- About
+    // ---------------------------------------------------------------- Report an issue and About
 
+    /// <summary>The version people see and report: "1.0.0".</summary>
+    public static string AppVersion => typeof(UiActions).Assembly.GetName().Version?.ToString(3) ?? "?";
+
+    /// <summary>Opens Report an issue, with an incident's summary offered when <paramref name="incidentDir"/> is given.</summary>
+    public void ReportIssue(IWin32Window? owner, string? incidentDir = null) => ShowWindow(new ReportIssueDialog(_engine, _analysis, this, incidentDir), owner);
+
+    private AboutDialog? _about;
+
+    /// <summary>Opens About, or brings the open one to the front.</summary>
     public void About(IWin32Window? owner)
     {
-        var o = _engine.Meter.Report();
-        string monitoring = $"{_engine.SampleCount:N0} samples; process events (ETW) {(_engine.EtwRunning ? _engine.EtwMode : "not running")}; " +
-                            $"pooltag.txt {(_analysis.Knowledge.PoolTagTxtLoaded ? "loaded" : "not found (built-in tag table and driver scan)")}.";
-        MessageBox.Show(owner,
-            $"PoolWatch {typeof(UiActions).Assembly.GetName().Version}\n\n{monitoring}\n\n" +
-            $"Overhead (budget in brackets){(o.SteadyStateSeconds >= SteadySeconds ? $", steady state over {Fmt.Duration(TimeSpan.FromSeconds(o.SteadyStateSeconds))}" : " - still warming up, numbers include start-up")}:\n" +
-            $"CPU {o.CpuPercentOfOneCore:0.00}% of one core (< {SelfMeter.CpuBudgetPercent.ToString(System.Globalization.CultureInfo.InvariantCulture)}%)\n" +
-            $"Peak working set {Fmt.Bytes(o.PeakWorkingSetBytes)} (< {SelfMeter.RamBudgetBytes >> 20} MB)\n" +
-            $"Disk writes {Fmt.Bytes(o.DiskWriteBytesPerHour)}/h (< {SelfMeter.DiskBudgetBytesPerHour >> 20} MB/h)\n" +
-            $"{_engine.Meter.OwnCostLine()}\n\nData: {_engine.Paths.DataRoot}\n\n" +
-            "PoolWatch watches and reads. It changes the system where you choose to (Clear cache, background " +
-            "services, scheduled tasks, startup apps, End process, start at logon) and, when you turn it on, in the token-leak " +
-            "guard's live focus setting at logon; and, on its own, it secures its data folder and removes an older PoolWatch's " +
-            "leftover clear-cache tasks. SECURITY.md in the source repository (github.com/nubbymong/poolwatch) lists every such " +
-            "action. No network calls, no telemetry.", "About PoolWatch");
+        if (_about is { IsDisposed: false } open) { open.Activate(); return; }
+        _about = new AboutDialog(_engine, _analysis, this);
+        _about.FormClosed += (_, _) => _about = null; // nothing holds a closed window
+        ShowWindow(_about, owner);
+    }
+
+    /// <summary>
+    /// Shows a window created for this opening; closing a window shown this way disposes it. Opened from the tray (no
+    /// owner), it gets a taskbar button, so it cannot get lost behind other windows.
+    /// </summary>
+    private static void ShowWindow(Form form, IWin32Window? owner)
+    {
+        form.ShowInTaskbar = owner is null;
+        if (owner is null) form.Show();
+        else form.Show(owner);
     }
 
     // ---------------------------------------------------------------- Explorer
@@ -232,5 +239,16 @@ internal sealed class UiActions
     public static void ShowFile(string file)
     {
         try { Process.Start(new ProcessStartInfo(ExplorerPath, $"/select,\"{Path.GetFullPath(file)}\"") { UseShellExecute = false }); } catch { }
+    }
+
+    /// <summary>
+    /// Opens a web page in the user's browser: only an address PoolWatch knows or built (<see cref="Credits.IsAllowedLink"/>;
+    /// anything else throws), handed to explorer.exe by full path, so the running Explorer starts the browser as the user,
+    /// never as administrator, and this elevated process never resolves a shell association itself.
+    /// </summary>
+    public static void OpenWebPage(string url)
+    {
+        if (!Credits.IsAllowedLink(url)) throw new ArgumentException("not one of PoolWatch's web pages", nameof(url));
+        try { Process.Start(new ProcessStartInfo(ExplorerPath, $"\"{url}\"") { UseShellExecute = false }); } catch { }
     }
 }
