@@ -13,5 +13,7 @@
   "incidentMaxMinutes": 10,
   "growingDisplayBytesPer10Min": 1048576,
   "autoClearEnabled": true,
-  "autoClearEveryHours": 1
+  "autoClearEveryHours": 1,
+  // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
+  "checkForUpdates": false
 }

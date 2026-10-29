@@ -22,5 +22,7 @@
   "settingsVersion": 3,
   "cpuTraceEnabled": true,
   "deeperCapture": true,
-  "cpuTraceSeconds": 10
+  "cpuTraceSeconds": 10,
+  // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
+  "checkForUpdates": false
 }

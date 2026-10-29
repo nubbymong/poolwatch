@@ -10,5 +10,7 @@
   "retentionMinutes": 0.5,
   "incidentQuietMinutes": 0.5,
   "incidentMaxMinutes": 10,
-  "growingDisplayBytesPer10Min": 1048576
+  "growingDisplayBytesPer10Min": 1048576,
+  // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
+  "checkForUpdates": false
 }

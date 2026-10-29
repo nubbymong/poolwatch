@@ -48,6 +48,16 @@ public sealed class AgentsGuideTests : IDisposable
     }
 
     [Fact]
+    public void TheGuideAndAboutSayThatGitHubSeesTheAddressTheUpdateCheckComesFrom()
+    {
+        // The one connection PoolWatch makes itself carries nothing about the PC, but GitHub still sees where it comes from.
+        string guide = AgentsGuide.Text.ReplaceLineEndings(" ");
+        Assert.Contains("api.github.com", guide);
+        Assert.Contains("GitHub sees the IP address it comes from", guide);
+        Assert.Contains("GitHub sees your IP address", Ui.AboutDialog.Network);
+    }
+
+    [Fact]
     public void ItIsWrittenOnceAndLeftAloneWhileUnchanged()
     {
         AgentsGuide.EnsureInDataRoot(_paths, _log);

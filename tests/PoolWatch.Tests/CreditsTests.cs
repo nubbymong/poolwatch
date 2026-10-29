@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using PoolWatch.Core;
 using PoolWatch.Core.Report;
+using PoolWatch.Core.Updates;
 
 namespace PoolWatch.Tests;
 
@@ -87,4 +88,13 @@ public class CreditsTests
     [Fact]
     public void AnIssueAddressOverTheLimitMayNotBeOpened() =>
         Assert.False(Credits.IsAllowedLink(IssueReport.NewIssueUrl + "?title=" + new string('a', IssueReport.MaxUrlLength)));
+
+    [Fact]
+    public void AnUpdateNoticeMayOpenItsReleasesOwnPageAndNothingElseThere()
+    {
+        Assert.True(Credits.IsAllowedLink(ReleasePage.For("v1.2.0")));
+        Assert.False(Credits.IsAllowedLink(ReleasePage.Prefix + "tag/v1\" x"));
+        Assert.False(Credits.IsAllowedLink(ReleasePage.Prefix + "download/v1.2.0/PoolWatch-v1.2.0-setup-win-x64.exe"));
+        Assert.False(Credits.IsAllowedLink(ReleasePage.Prefix + "latest"));
+    }
 }

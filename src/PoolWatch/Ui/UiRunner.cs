@@ -1,6 +1,7 @@
 using System.Text.Json;
 using PoolWatch.Analysis;
 using PoolWatch.Core.Detection;
+using PoolWatch.Core.Updates;
 using PoolWatch.Engine;
 using PoolWatch.Engine.Changes;
 using PoolWatch.Headless;
@@ -100,8 +101,9 @@ internal static class UiRunner
     /// <summary>
     /// CI: every window under review, drawn to a PNG and checked, in the order of the screenshots: the main window
     /// (its Simple and Advanced views, Services, Settings and its Advanced grid), the setup guide once it has read the PC
-    /// (it runs no leak check in the test), Active changes once its list is read, Report an issue with a sample text, and
-    /// About. Each window made for the test is closed again, so at the end only the main window is open.
+    /// (it runs no leak check in the test), Active changes once its list is read, Report an issue with a sample text,
+    /// About, and the main window's update notice for a sample release. Each window made for the test is closed again, so
+    /// at the end only the main window is open.
     /// </summary>
     private static async Task<(List<string> files, object stats)> Smoke(TrayApp app, MonitorEngine engine, AnalysisPipeline analysis, AppPaths paths, string dir)
     {
@@ -137,6 +139,16 @@ internal static class UiRunner
         Shot(about, "9-about.png");
         about.Close();
 
+        // The update notice as the Simple view shows it when a newer release is out, for a sample release given to the
+        // window in the check's place. The sample skips the update-notices setting (CI turns notices off), so it shows
+        // whatever the setting. Its text is read after the shot, so the check is of what the image holds.
+        app.ShowWindow();
+        app.ShowSampleUpdate(new UpdateRelease("1.0.1", ReleasePage.For("v1.0.1")));
+        var updateProblems = app.Form.LayoutProblems();
+        string updateShot = Shot(app.Form, "10-update-notice.png");
+        var updateStats = new { text = app.Form.UpdateNotice, layoutProblems = updateProblems, shot = updateShot };
+        app.Form.Hide();
+
         // The tray icon's colour and what decides it (UiData.State), under one lock so no sample comes between them (the
         // lock is re-entrant, and UiData.State takes it too).
         int openIncidents, retainedTags;
@@ -154,6 +166,7 @@ internal static class UiRunner
             activeChanges = activeStats,
             report = reportStats,
             about = aboutStats,
+            updateNotice = updateStats,
             openForms = Application.OpenForms.Cast<Form>().Select(f => f.Text).ToList(),
             trayMenu = app.MenuItemTexts(),
             trayIcon = app.IconState.ToString(),
