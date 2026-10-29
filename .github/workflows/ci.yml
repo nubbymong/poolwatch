@@ -1,9 +1,10 @@
 name: CI
 
 # Pull requests and pushes to main: build, unit tests (Windows and Linux), the end-to-end and diagnostics scenarios, the
-# installer test and the UI smoke test. The soak and overhead checks run on demand (workflow_dispatch) and on a release
-# tag, where they are required. A tag v* also signs the build and the installer, verifies every signature and publishes
-# the release.
+# installer test and the UI smoke test, and on Windows on Arm the unit tests, then the x64 build's self-test, headless
+# checks and the same scenarios under emulation. The soak and overhead checks run on demand (workflow_dispatch) and on a
+# release tag, where they are required. A tag v* also signs the build and the installer, verifies every signature and
+# publishes the release.
 #
 # Fork pull requests are safe: this runs on pull_request (never pull_request_target), no job a pull request can reach
 # holds a secret or a write token, and the signing secrets live in the "release" environment, which only a v* tag can use.
@@ -268,6 +269,111 @@ jobs:
       - run: dotnet restore src/PoolWatch/PoolWatch.csproj --force-evaluate -p:RestoreLockedMode=false
       - run: dotnet build src/PoolWatch/PoolWatch.csproj -c Release --no-restore
 
+  # Windows on Arm, on GitHub's Windows 11 Arm runners. There is no Arm64 build: Windows on Arm runs the x64 build through
+  # its built-in x64 emulation. PoolWatch.Tests run natively on Arm64; PoolWatch.AppTests build the app for x64, as it
+  # ships, so they run on the x64 .NET under emulation.
+  arm64-unit-tests:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The x64 .NET goes to %ProgramFiles%\dotnet\x64, where Windows on Arm keeps it. The Arm64 .NET is set up second, so
+      # it comes first on PATH and in DOTNET_ROOT: `dotnet` is the native one.
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+          architecture: x64
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Unit tests (Arm64)
+        run: dotnet test tests/PoolWatch.Tests -c Release --logger "console;verbosity=normal"
+      - name: App-layer unit tests (x64 under emulation)
+        shell: pwsh
+        run: |
+          # DOTNET_ROOT names the Arm64 .NET: the x64 test host finds its own through DOTNET_ROOT_X64.
+          $env:DOTNET_ROOT_X64 = "$env:ProgramFiles\dotnet\x64"
+          & "$env:DOTNET_ROOT_X64\dotnet.exe" test tests/PoolWatch.AppTests -c Release --logger "console;verbosity=normal"
+          if ($LASTEXITCODE -ne 0) { throw "app-layer unit tests failed ($LASTEXITCODE)" }
+
+  # What Windows on Arm users run: the self-contained x64 build from the build job, laid out as the setup installs it,
+  # under emulation: the build job's self-test and headless checks, then every e2e and diag scenario, each on a runner of
+  # its own.
+  arm64:
+    needs: build
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # In the build, e2e and diag jobs' order: keep this list in step with theirs.
+        check: [selftest, headless, e2e-handles, e2e-files, e2e-orphan, e2e-capture,
+                diag-spawn, diag-clearcache, diag-tokenguard, diag-services, diag-identity, diag-tokens, diag-filters,
+                diag-shape, diag-lag, diag-experiment, diag-versions, diag-accumulation, diag-bundle]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Leaker, the test helper, is a framework-dependent x64 build: it runs on the x64 .NET.
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+          architecture: x64
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: PoolWatch-exe
+          path: publish
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: leaker
+          path: publish/leaker
+      - name: Lay out the self-contained build as the setup does (exe name and folders)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The setup installs PoolWatch-selfcontained.exe as PoolWatch.exe, with the build's folders next to it.
+          $app = "$env:RUNNER_TEMP\PoolWatch"
+          New-Item -ItemType Directory $app | Out-Null
+          Copy-Item publish/sc/* $app -Recurse
+          Rename-Item "$app\PoolWatch-selfcontained.exe" PoolWatch.exe
+          # Stop unless this is the x64 build on Arm64 Windows: emulation is what this job tests.
+          $fs = [IO.File]::OpenRead("$app\PoolWatch.exe")
+          try { $h = [byte[]]::new(4096); [void]$fs.Read($h, 0, $h.Length) } finally { $fs.Dispose() }
+          $machine = [BitConverter]::ToUInt16($h, [BitConverter]::ToInt32($h, 0x3C) + 4)
+          $os = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+          if ($machine -ne 0x8664 -or $os -ne 'Arm64') { throw "expected the x64 build on Arm64 Windows: machine 0x$($machine.ToString('X4')) on $os" }
+          "POOLWATCH=$app\PoolWatch.exe" >> $env:GITHUB_ENV
+      - name: ${{ matrix.check }} (x64 build under emulation)
+        shell: pwsh
+        env:
+          CHECK: ${{ matrix.check }}
+        run: |
+          $out = "$env:RUNNER_TEMP\$env:CHECK"
+          $leaker = "$PWD\publish\leaker\Leaker.exe"
+          $kind, $scenario = $env:CHECK -split '-', 2
+          switch ($kind) {
+            'selftest' {
+              . ./ci/common.ps1
+              $p = Start-PoolWatch $env:POOLWATCH @('--selftest', '--out', $out)
+              $code = Wait-PoolWatch $p 180
+              Get-Content "$out\selftest.json"
+              if ($code -ne 0) { throw "selftest failed ($code)" }
+            }
+            'headless' { ./ci/m1-headless.ps1 -Exe $env:POOLWATCH -Out $out }
+            'e2e' { ./ci/m2-e2e.ps1 -Scenario $scenario -Exe $env:POOLWATCH -Leaker $leaker -Out $out }
+            'diag' { ./ci/diag-e2e.ps1 -Scenario $scenario -Exe $env:POOLWATCH -Leaker $leaker -Out $out }
+            default { throw "unknown check '$env:CHECK'" }
+          }
+      - name: Upload output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arm64-${{ matrix.check }}
+          path: ${{ runner.temp }}/${{ matrix.check }}
+          if-no-files-found: warn
+
   # The long checks: on demand and on a release tag (where the release needs them).
   overhead:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
@@ -342,7 +448,7 @@ jobs:
   # signed and is not, or is signed by anyone else, or has no RFC 3161 timestamp, stops the release.
   sign:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, e2e, diag, ui, installer, overhead, soak, linux-unit-tests]
+    needs: [build, e2e, diag, ui, installer, overhead, soak, linux-unit-tests, arm64-unit-tests, arm64]
     runs-on: windows-latest
     environment: release
     timeout-minutes: 30   # a hung silent installer must not hold the runner (and the signing session) for the 6 h default
@@ -371,7 +477,7 @@ jobs:
           $version = $Matches[1]
           foreach ($exe in 'publish/fd/PoolWatch.exe', 'publish/sc/PoolWatch-selfcontained.exe') {
             $product = ((Get-Item $exe).VersionInfo.ProductVersion -split '\+')[0]
-            if ($product -ne $version) { throw "$exe is version '$product' but the tag is $tag: set <Version> in Directory.Build.props before tagging" }
+            if ($product -ne $version) { throw "$exe is version '$product' but the tag is ${tag}: set <Version> in Directory.Build.props before tagging" }
           }
 
       # SSL.com eSigner CKA (cloud HSM), the same setup as the maintainer's other signed project: the key never exists as

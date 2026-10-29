@@ -54,16 +54,16 @@ function Get-StartMode([string]$service) { (Get-CimInstance Win32_Service -Filte
 # The uninstaller's own log (/LOG): what it listed and what it chose.
 function Get-UninstallLog([string]$name) { "$(Get-Content "$Out\$name.log" -Raw -ErrorAction SilentlyContinue)" }
 
-# Starts the installed PoolWatch headless and waits until it runs and samples. Returns the process and the number of log
-# lines before it started, for Assert-StoppedBySignal.
+# Starts the installed tray app as the logon task does (--tray: no window) and waits until it runs and samples. Returns the
+# process and the number of log lines before it started, for Assert-StoppedBySignal.
 function Start-Running([string]$name) {
     $skip = @(Get-Content $log -ErrorAction SilentlyContinue).Count
-    $p = Start-Process $exe -ArgumentList '--headless' -PassThru -RedirectStandardOutput "$Out\$name.txt"
+    $p = Start-Process $exe -ArgumentList '--tray' -PassThru -RedirectStandardOutput "$Out\$name.txt"
     $null = $p.Handle   # keeps the exit code readable after the process ends
     $deadline = (Get-Date).AddSeconds(90)
     do {
         Start-Sleep -Seconds 2
-        $started = @(Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Skip $skip) -match ' headless; '
+        $started = @(Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Skip $skip) -match ' UI; '
     } until ($started -or $p.HasExited -or (Get-Date) -gt $deadline)
     Assert-True ($started -and -not $p.HasExited) "${name}: the installed PoolWatch is running"
     Start-Sleep -Seconds 10   # past start-up, sampling
@@ -120,7 +120,7 @@ Assert-True ($code -eq 0 -and @($changes | Where-Object { $_.id -eq "service:$($
 Register-ScheduledTask -TaskName 'PoolWatch' -TaskPath '\' -Action (New-ScheduledTaskAction -Execute $exe -Argument '--tray') `
     -Trigger (New-ScheduledTaskTrigger -AtLogOn) -RunLevel Highest -Force | Out-Null
 
-$pw = Start-Running 'headless-1'
+$pw = Start-Running 'tray-1'
 Uninstall 'uninstall-1'
 Assert-StoppedBySignal $pw 'uninstaller'
 Assert-True ((Get-StartMode $service) -eq $before) "the uninstaller put $service back to $before (got $(Get-StartMode $service))"
@@ -141,7 +141,7 @@ Assert-True (-not (Test-Path (Join-Path $data 'uninstall-list.json'))) 'the unin
 
 Write-Host '--- Pass 2: an upgrade while PoolWatch runs, then an uninstall with /KEEPCHANGES'
 Install 'install-2'
-$pw = Start-Running 'headless-2'
+$pw = Start-Running 'tray-2'
 Install 'upgrade-2'
 Assert-StoppedBySignal $pw 'upgrade'
 Assert-True ((Test-Path $exe) -and (Test-Path (Join-Path $app 'unins000.exe')) -and (Test-Path $uninstallKey)) 'the upgrade left PoolWatch installed'

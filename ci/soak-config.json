@@ -1,11 +1,11 @@
 {
   // CI soak: the in-memory windows are shortened (defaults 70 / 15 / 90 min) so each one is full before the
-  // steady-state window starts at 15 min: "private memory flat" then tests that nothing grows without bound, which a
+  // steady-state window starts at 15 min: the memory-flat check then tests that nothing grows without bound, which a
   // 45-minute run with 70-minute windows cannot show. Everything else is at its default.
   "rawHistoryMinutes": 8,
   "shortLivedKeepMinutes": 5,
   "incidentEventKeepMinutes": 8,
-  // The soak measures steady-state overhead; the on-alert CPU trace (addendum 2 C) is a legitimate alert-time cost
+  // The soak measures steady-state overhead; the on-alert CPU trace is a legitimate alert-time cost
   // that spikes working set and disk while it records and parses a 30 s ETL, so it is off here. The diag/lag scenario
   // still exercises the CPU-trace-on-lag-trip path.
   "cpuTraceEnabled": false,
