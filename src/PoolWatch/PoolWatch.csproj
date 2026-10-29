@@ -26,6 +26,10 @@
     <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
   </ItemGroup>
   <ItemGroup>
+    <!-- The guide for a user's AI assistant (Engine/AgentsGuide.cs): written into the data folder and every export. -->
+    <EmbeddedResource Include="Assets\AGENTS.md" LogicalName="AGENTS.md" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\PoolWatch.Core\PoolWatch.Core.csproj" />
     <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.30" />
     <PackageReference Include="System.Management" Version="10.0.0" />

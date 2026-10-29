@@ -129,7 +129,10 @@ internal sealed class UiActions
     public void OpenIncidentFolder(string? dir = null) =>
         OpenFolder(dir is not null && Directory.Exists(dir) ? dir : _engine.Paths.EnsureDir(_engine.Paths.IncidentsDir));
 
-    /// <summary>Zips <paramref name="dir"/> (the selected report folder; null: the newest incident), redacted by default.</summary>
+    /// <summary>
+    /// Zips <paramref name="dir"/> (the selected report folder; null: the newest incident), redacted by default, with the guide
+    /// for AI assistants at its root.
+    /// </summary>
     public void ExportReport(IWin32Window? owner, string? dir)
     {
         dir ??= LatestIncidentDir();
@@ -141,7 +144,8 @@ internal sealed class UiActions
             "Redaction is best-effort: read the export before you post it.)",
             "Export report", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
         if (answer == DialogResult.Cancel) return;
-        var zip = Exporter.Export(dir, _engine.Paths.ExportsDir, answer == DialogResult.Yes ? MainForm.CurrentRedaction() : null, _engine.Paths.Guard.CheckReal);
+        var zip = Exporter.Export(dir, _engine.Paths.ExportsDir, answer == DialogResult.Yes ? MainForm.CurrentRedaction() : null, _engine.Paths.Guard.CheckReal,
+            new Dictionary<string, string> { [AgentsGuide.FileName] = AgentsGuide.Text });
         OpenFolder(Path.GetDirectoryName(zip)!);
     }
 
