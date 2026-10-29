@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -8,7 +9,7 @@ namespace PoolWatch.Core.Aicc;
 public sealed record TranscriptHit(string SessionId, string Project, string? WorkflowId, string? SubagentId, DateTime? TimestampUtc, string File, string Command);
 
 /// <summary>Limits that keep the search from becoming a crawler (DESIGN.md section 3).</summary>
-public sealed record SearchBudget(int MaxFiles = 400, int MaxEntries = 20_000, long MaxBytes = 64L << 20, int TailBytes = 8 << 20, int MaxLineBytes = 1 << 20);
+public sealed record SearchBudget(int MaxFiles = 400, int MaxEntries = 20_000, long MaxBytes = 16L << 20, int TailBytes = 8 << 20, int MaxLineBytes = 1 << 20);
 
 /// <summary>
 /// "Which Claude Code session issued it?" (DESIGN.md section 9). Looks for the command in transcripts
@@ -147,40 +148,64 @@ public static partial class TranscriptSearch
         return result;
     }
 
-    /// <summary>Scans the file's tail as bytes; keeps the latest matching tool call not later than the process start.</summary>
+    /// <summary>
+    /// Scans the file's tail as bytes, read a piece at a time into one pooled buffer longer than the longest line
+    /// considered (the pool rounds the default 1 MB + 1 up to a 2 MB array, which it keeps for the next search); keeps the
+    /// latest matching tool call not later than the process start.
+    /// </summary>
     private static TranscriptHit? SearchFile(FileInfo fi, IReadOnlyList<string> core, DateTime startUtc, TimeSpan window, SearchBudget budget, ref long bytesLeft)
     {
+        byte[]? buf = null;
         try
         {
             using var fs = new FileStream(fi.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1, FileOptions.SequentialScan);
             long len = fs.Length;
-            int take = (int)Math.Min(Math.Min(len, budget.TailBytes), Math.Max(0, bytesLeft));
+            long take = Math.Min(Math.Min(len, budget.TailBytes), Math.Max(0, bytesLeft));
             if (take <= 0) return null;
             fs.Seek(len - take, SeekOrigin.Begin);
-            var buf = new byte[take];
-            int read = 0;
-            while (read < take) { int n = fs.Read(buf, read, take - read); if (n <= 0) break; read += n; }
-            bytesLeft -= read;
-            var data = buf.AsSpan(0, read);
-            if (len > take) { int nl = data.IndexOf((byte)'\n'); data = nl >= 0 ? data[(nl + 1)..] : default; } // start at a whole line
+            buf = ArrayPool<byte>.Shared.Rent(budget.MaxLineBytes + 1);
             var coreBytes = core.Select(Encoding.UTF8.GetBytes).ToArray();
             TranscriptHit? best = null;
-            while (!data.IsEmpty)
+            bool skipping = len > take; // the tail starts inside a line: from the first whole one
+            int kept = 0;               // a line's start carried over to the front of the buffer
+            while (true)
             {
-                int nl = data.IndexOf((byte)'\n');
-                var line = nl >= 0 ? data[..nl] : data;
-                data = nl >= 0 ? data[(nl + 1)..] : default;
-                if (line.Length > budget.MaxLineBytes || line.IndexOf(ToolUse) < 0 || !InOrder(line, coreBytes)) continue;
-                var hit = Parse(fi.FullName, Encoding.UTF8.GetString(line), core);
-                if (hit is null) continue;
-                // The call must precede the process (allowing a little clock skew) and fall inside the window.
-                if (hit.TimestampUtc is { } ts && (ts > startUtc.AddSeconds(5) || ts < startUtc - window)) continue;
-                best = hit; // later lines are later calls: the last match is the one closest to the start
+                int n = take > 0 ? fs.Read(buf, kept, (int)Math.Min(buf.Length - kept, take)) : 0;
+                if (n <= 0)
+                {
+                    if (!skipping && kept > 0) Consider(buf.AsSpan(0, kept)); // the last line, without a newline
+                    break;
+                }
+                take -= n;
+                bytesLeft -= n;
+                var data = buf.AsSpan(0, kept + n);
+                for (int nl; (nl = data.IndexOf((byte)'\n')) >= 0; data = data[(nl + 1)..])
+                {
+                    if (!skipping) Consider(data[..nl]);
+                    skipping = false;
+                }
+                // The rest waits for the next read; a line that fills the whole buffer is over the limit: skipped to its end.
+                if (skipping || data.Length == buf.Length) { skipping = true; kept = 0; }
+                else { data.CopyTo(buf); kept = data.Length; }
             }
             return best;
+
+            void Consider(ReadOnlySpan<byte> line)
+            {
+                if (line.Length > budget.MaxLineBytes || line.IndexOf(ToolUse) < 0 || !InOrder(line, coreBytes)) return;
+                var hit = Parse(fi.FullName, Encoding.UTF8.GetString(line), core);
+                if (hit is null) return;
+                // The call must precede the process (allowing a little clock skew) and fall inside the window.
+                if (hit.TimestampUtc is { } ts && (ts > startUtc.AddSeconds(5) || ts < startUtc - window)) return;
+                best = hit; // later lines are later calls: the last match is the one closest to the start
+            }
         }
         catch (IOException) { return null; }
         catch (UnauthorizedAccessException) { return null; }
+        finally
+        {
+            if (buf is not null) ArrayPool<byte>.Shared.Return(buf);
+        }
     }
 
     /// <summary>The tokens occur in order, each within a short gap (spaces, quotes, JSON escapes) of the previous one.</summary>

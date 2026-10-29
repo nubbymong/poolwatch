@@ -22,7 +22,7 @@ public enum PoolStatusKind
 /// The growth that matters most right now: an open incident's tag, else the tag the detector sees growing fastest.
 /// </summary>
 /// <param name="What">The tag in plain words (<see cref="PlainWords.Tag"/>: "File system metadata (Reff, refs.sys)").</param>
-/// <param name="Growth">How much it grew, in bytes (only a positive growth is ever shown).</param>
+/// <param name="Growth">How much it grew, in bytes (only a positive growth is named, and its amount only when it rounds to at least 1 MB).</param>
 /// <param name="Over">Over how long it grew.</param>
 /// <param name="Cause">The top suspect (process, service, driver or session), if any.</param>
 /// <param name="Confidence">How strongly the evidence ties <paramref name="Cause"/> to the growth.</param>
@@ -35,8 +35,9 @@ public sealed record PoolStatus(PoolStatusKind Kind, string Text)
 }
 
 /// <summary>
-/// The one-line, plain-English status at the top of the main window ("Kernel pool is steady (9.6 GB)."), built from what
-/// the analysis already knows. Pure, so every wording is unit-tested; it never prints a negative rise.
+/// The one-line, plain-English status at the top of the main window ("Kernel pool grew 709 MB in the last hour."), built
+/// from what the analysis already knows. Pure, so every wording is unit-tested; it never prints a sign (the words say
+/// which way the pool went).
 /// </summary>
 public static class PoolStatusLine
 {
@@ -50,6 +51,8 @@ public static class PoolStatusLine
     public const long DropBytesHour = 200L << 20;
     /// <summary>Fewer minutes of samples than this: too early to say whether the pool grows.</summary>
     public static readonly TimeSpan MinHistory = TimeSpan.FromMinutes(3);
+    /// <summary>A tag's growth is said with its amount from this much: half a megabyte reads "1 MB", less would read "0 MB".</summary>
+    private const long LeastShownGrowth = 512L << 10;
 
     /// <param name="totalBytes">Committed paged + non-paged pool now (what Task Manager shows); null before the first sample.</param>
     /// <param name="held">How far back the samples go.</param>
@@ -72,32 +75,34 @@ public static class PoolStatusLine
     {
         if (totalBytes is not { } total) return new PoolStatus(PoolStatusKind.Collecting, "Kernel pool: collecting the first sample…");
         if (lead is { Growth: <= 0 }) lead = null; // only a real growth is ever named
+        // A tag's growth is said with its amount only when the amount shows (never "grew 0 MB"); while the total grows,
+        // only its name is said, so there any growth counts.
+        var shown = lead is { Growth: >= LeastShownGrowth } ? lead : null;
         if (held < MinHistory)
         {
             // Too early to judge the total; a growth the detector has already caught is still said.
-            if (lead is null)
-                return new PoolStatus(PoolStatusKind.Collecting,
-                    $"Kernel pool is {Fmt.Bytes(total)}. Not enough data yet to tell whether it is growing (PoolWatch needs a few minutes of samples).");
+            if (shown is null)
+                return new PoolStatus(PoolStatusKind.Collecting, $"Kernel pool is {PlainWords.Amount(total)}. It takes a few minutes to tell whether it is growing.");
             return new PoolStatus(PoolStatusKind.TagGrowing,
-                $"Kernel pool is {Fmt.Bytes(total)}, and {lead.What} grew {Fmt.Bytes(lead.Growth)} in {PlainWords.Span(lead.Over)}." + CauseSentence(lead, growingMost: false));
+                $"Kernel pool is {PlainWords.Amount(total)}, and {shown.What} grew {PlainWords.Amount(shown.Growth)} in {PlainWords.Span(shown.Over)}." + CauseSentence(shown, growingMost: false));
         }
         string shortSpan = held >= TimeSpan.FromMinutes(9.5) ? "the last 10 minutes" : $"the last {PlainWords.Span(held)}";
 
         // The last 10 minutes first: a fall just now (a cache clear, an app closed) is the current news even after an hour of growth.
         if (change10Min <= -DropBytes10Min)
-            return new PoolStatus(PoolStatusKind.Dropping, $"Kernel pool dropped {Fmt.Bytes(-change10Min)} in {shortSpan}.");
+            return new PoolStatus(PoolStatusKind.Dropping, $"Kernel pool shrank {PlainWords.Amount(-change10Min)} in {shortSpan}.");
         bool hourGrew = changeHour is { } h && h >= GrowBytesHour;
         if (hourGrew || change10Min >= GrowBytes10Min)
         {
             var (amount, span) = hourGrew ? (changeHour!.Value, "the last hour") : (change10Min, shortSpan);
-            return new PoolStatus(PoolStatusKind.Growing, $"Kernel pool is growing: +{Fmt.Bytes(amount)} in {span}." + CauseSentence(lead, growingMost: true));
+            return new PoolStatus(PoolStatusKind.Growing, $"Kernel pool grew {PlainWords.Amount(amount)} in {span}." + CauseSentence(lead, growingMost: true));
         }
         if (changeHour is { } fell && fell <= -DropBytesHour)
-            return new PoolStatus(PoolStatusKind.Dropping, $"Kernel pool dropped {Fmt.Bytes(-fell)} in the last hour.");
-        if (lead is not null)
+            return new PoolStatus(PoolStatusKind.Dropping, $"Kernel pool shrank {PlainWords.Amount(-fell)} in the last hour.");
+        if (shown is not null)
             return new PoolStatus(PoolStatusKind.TagGrowing,
-                $"Kernel pool is steady at {Fmt.Bytes(total)}, but {lead.What} grew {Fmt.Bytes(lead.Growth)} in {PlainWords.Span(lead.Over)}." + CauseSentence(lead, growingMost: false));
-        return new PoolStatus(PoolStatusKind.Steady, $"Kernel pool is steady ({Fmt.Bytes(total)}).");
+                $"Kernel pool is steady at {PlainWords.Amount(total)}, but {shown.What} grew {PlainWords.Amount(shown.Growth)} in {PlainWords.Span(shown.Over)}." + CauseSentence(shown, growingMost: false));
+        return new PoolStatus(PoolStatusKind.Steady, $"Kernel pool is steady at {PlainWords.Amount(total)}.");
     }
 
     /// <summary>" Most likely cause: X, with strong evidence." when the evidence is at least "some"; otherwise " No clear cause yet."</summary>
@@ -127,6 +132,17 @@ public static class PlainWords
     /// <summary>A process name with its PID, in one pair of brackets: "Leaker.exe (PID 7716)", "svchost.exe (Schedule, PID 1234)".</summary>
     public static string WithPid(string name, int pid) =>
         name.EndsWith(')') && name.Contains('(') ? $"{name[..^1]}, PID {pid})" : $"{name} (PID {pid})";
+
+    /// <summary>
+    /// An amount without a sign (the words around it say which way): whole megabytes below a gigabyte ("709 MB"), then
+    /// gigabytes with one decimal ("1.2 GB"). The status line rounds this way so that a move smaller than the shown
+    /// precision (under half a megabyte, or under 0.05 GB above a gigabyte) leaves its text as it was.
+    /// </summary>
+    public static string Amount(long bytes)
+    {
+        double mb = Math.Abs((double)bytes) / (1L << 20);
+        return mb < 1023.5 ? FormattableString.Invariant($"{mb:0} MB") : FormattableString.Invariant($"{mb / 1024:0.0} GB");
+    }
 
     /// <summary>A span in words: "40 seconds", "a minute", "25 minutes", "the last hour", "2 hours 10 minutes".</summary>
     public static string Span(TimeSpan t)

@@ -5,23 +5,33 @@ using PoolWatch.Core.Util;
 
 namespace PoolWatch.Engine;
 
-/// <summary>Where PoolWatch's own time, memory and disk writes go (profile.json): stages, files, heap and the sizes of what it holds.</summary>
+/// <summary>
+/// Where PoolWatch's own time, memory and disk writes go (profile.json): stages, files, heap, the floors the heap returns
+/// to, and the sizes of what it holds. Built at the end of a CI run, once the sampler has stopped, and every hour on the
+/// sampler thread (<see cref="MonitorEngine.Profile"/>): the trim floors are the sampler's own, and the history and the
+/// spawn tracker are read under their locks.
+/// </summary>
 internal static class CostReport
 {
-
-    public static object Build(MonitorEngine engine, AnalysisPipeline analysis)
+    /// <param name="window">What the main window's Pool causes rankings hold (TagRankings.Held), when there is a window.</param>
+    public static object Build(MonitorEngine engine, AnalysisPipeline analysis, (int rankings, int owners, int ownerMembers, int events)? window = null)
     {
         using var p = Process.GetCurrentProcess();
         var gc = GC.GetGCMemoryInfo();
         double elapsed = (DateTime.Now - p.StartTime).TotalSeconds;
-        int historyProcs; long historyPoints; int minutes; int events;
+        int historyProcs; long historyPoints; int minutes; long minuteEntries; int events;
+        (int incidents, int owners, int ownerMembers, int events) held;
         lock (analysis.History.SyncRoot)
         {
             historyProcs = analysis.History.ProcessTrackCount;
             historyPoints = analysis.History.ProcessPointCount;
             minutes = analysis.History.Minutes.Count;
+            minuteEntries = analysis.History.Minutes.Sum(m => (long)m.Processes.Length);
             events = analysis.Incidents.EventCount;
+            held = analysis.Incidents.Held();
         }
+        int stormTraceRows;
+        lock (analysis.Diagnostics.Spawns) stormTraceRows = analysis.Diagnostics.Spawns.OpenStorms.Sum(s => s.Trace.Count);
         return new
         {
             elapsedSeconds = Math.Round(elapsed, 1),
@@ -44,14 +54,38 @@ internal static class CostReport
                 server = System.Runtime.GCSettings.IsServerGC,
                 latency = System.Runtime.GCSettings.LatencyMode.ToString(),
             },
+            // The heap after each full collection: PoolWatch's own compactions (with private memory right after them)
+            // and the GC's, the last day of them.
+            memory = new
+            {
+                compactions = engine.Trim.Compactions,
+                workingSetEmptied = engine.Trim.WorkingSetEmptied,
+                floors = engine.Trim.Floors.Select(f => new
+                {
+                    seconds = f.Seconds, heapMB = Math.Round(f.HeapBytes / 1048576.0, 1),
+                    privateMB = f.PrivateBytes is { } b ? Math.Round(b / 1048576.0, 1) : (double?)null,
+                }),
+            },
             held = new
             {
                 registryRecords = engine.Registry.Count,
+                compactRecords = engine.Registry.CompactCount,
+                stringPool = StringPool.Count,
                 historyProcessTracks = historyProcs,
                 historyProcessPoints = historyPoints,
                 historyMinutes = minutes,
+                historyMinuteEntries = minuteEntries,
                 incidentEvents = events,
+                incidents = held.incidents,
+                incidentOwners = held.owners,
+                incidentOwnerMembers = held.ownerMembers,
+                incidentEventsKept = held.events,
                 findings = analysis.Diagnostics.Findings.Count,
+                stormTraceRows,
+                tagRankingsCached = window?.rankings,
+                tagRankingOwners = window?.owners,
+                tagRankingOwnerMembers = window?.ownerMembers,
+                tagRankingEvents = window?.events,
                 etwEvents = engine.EtwEvents,
                 samples = engine.SampleCount,
                 lastHandleScanMs = engine.LatestHandles?.Elapsed.TotalMilliseconds,
@@ -63,6 +97,6 @@ internal static class CostReport
         };
     }
 
-    public static string Json(MonitorEngine engine, AnalysisPipeline analysis) =>
-        JsonSerializer.Serialize(Build(engine, analysis), new JsonSerializerOptions { WriteIndented = true });
+    public static string Json(MonitorEngine engine, AnalysisPipeline analysis, (int rankings, int owners, int ownerMembers, int events)? window = null) =>
+        JsonSerializer.Serialize(Build(engine, analysis, window), new JsonSerializerOptions { WriteIndented = true });
 }

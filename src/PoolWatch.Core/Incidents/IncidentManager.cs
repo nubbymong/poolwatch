@@ -50,6 +50,14 @@ public sealed class IncidentManager
     public int EventCount => _events.Count;
     public IReadOnlyList<Incident> Closed => _closed;
     public IEnumerable<Incident> All => _closed.Concat(_open.Values).OrderBy(i => i.OpenedUtc);
+
+    /// <summary>What the incidents in memory hold, for PoolWatch's own cost report. Under the history lock.</summary>
+    public (int incidents, int owners, int ownerMembers, int events) Held()
+    {
+        var all = _closed.Concat(_open.Values).ToList();
+        return (all.Count, all.Sum(i => i.Owners?.Count ?? 0), all.Sum(i => i.Owners?.Sum(o => o.Members.Count) ?? 0), all.Sum(i => i.Events.Count));
+    }
+
     /// <summary>
     /// Incidents created since PoolWatch started, all of them (C6: <see cref="Closed"/> keeps only those closed in the last
     /// 6 hours, so the boot summary undercounted). A re-opened incident is not counted again; a capture incident discarded
@@ -441,7 +449,7 @@ public sealed class IncidentManager
         var window = new CorrelationWindow(from, onset, end, to);
         inc.Window = window;
         // Owners are grouped from every active process (a session's many short commands are one owner), then the
-        // per-process list keeps its top 10.
+        // per-process list keeps its top 10 and the owners what the reports read (OwnerRanking.Keep).
         inc.Suspects = Correlator.Rank(h, _registry, inc.Tag, window, maxSuspects: 2000);
         // The confirmation trace's attribution survives re-ranks (applied to the full list, before the owners are built).
         if (inc.Capture is { } cap)
@@ -461,8 +469,8 @@ public sealed class IncidentManager
         }
         try
         {
-            inc.Owners = OwnerRanking.Rank(h, inc.Suspects, inc.Tag, window, Math.Max(0, inc.Growth),
-                s => Identity.ProcessIdentities.Of(_registry.Ancestry(s.Key) is { Count: > 0 } c ? c : [new ProcessRecord { Key = s.Key, Image = s.Image }]));
+            inc.Owners = OwnerRanking.Keep(OwnerRanking.Rank(h, inc.Suspects, inc.Tag, window, Math.Max(0, inc.Growth),
+                s => Identity.ProcessIdentities.Of(_registry.Ancestry(s.Key) is { Count: > 0 } c ? c : [new ProcessRecord { Key = s.Key, Image = s.Image }])));
         }
         catch { inc.Owners = null; }
         inc.Suspects = inc.Suspects.Take(10).ToList();
@@ -527,11 +535,11 @@ public sealed class IncidentManager
     }
 
     /// <summary>Time of the last sample in which the process did any I/O (null if it never did in the raw history).</summary>
-    private static DateTime? LastActivity(History.History h, ProcessKey key)
+    internal static DateTime? LastActivity(History.History h, ProcessKey key)
     {
-        var pts = h.ProcessSeries(key);
-        for (int i = pts.Length - 1; i > 0; i--)
-            if (pts[i] is { } b && pts[i - 1] is { } a && b.TotalOps > a.TotalOps) return h.Times[i];
+        var pts = h.Points(key); // read in place: this runs for every closed incident on every sample
+        for (int i = pts.Last; i > Math.Max(0, pts.First); i--)
+            if (pts[i].TotalOps > pts[i - 1].TotalOps) return h.Times[i];
         return null;
     }
 
@@ -556,19 +564,20 @@ public sealed class IncidentManager
         foreach (var key in h.ProcessesSince(iLive))
         {
             if (key.Pid is 0) continue;
-            var pts = h.ProcessSeries(key, iWindow);
-            int lastAt = Array.FindLastIndex(pts, p => p is not null);
-            if (lastAt < 0) continue;
-            bool gone = iWindow + lastAt < iTo;
-            int firstAt = Array.FindIndex(pts, gone ? 0 : iLive - iWindow, p => p is not null);
-            if (firstAt < 0 || firstAt > lastAt) continue;
-            long ops = pts[lastAt]!.Value.TotalOps - pts[firstAt]!.Value.TotalOps;
+            // Read in place: releases come in bursts after a cache clear, each over every process of the window.
+            var pts = h.Points(key);
+            int lastAt = pts.Last;
+            if (lastAt < iWindow) continue;
+            bool gone = lastAt < iTo;
+            int firstAt = Math.Max(pts.First, gone ? iWindow : iLive); // a process's points are contiguous
+            if (firstAt > lastAt) continue;
+            long ops = pts[lastAt].TotalOps - pts[firstAt].TotalOps;
             if (ops <= 0) continue;
             var rec = _registry.Get(key);
             string name = rec?.DisplayName ?? "unknown process";
             string text = gone
                 ? $"{name} (PID {key.Pid}{(key.CreateTime > 0 ? $", started {Fmt.Clock(key.CreateTimeUtc)}" : "")}): {ops:N0} I/O ops up to its " +
-                  $"last sample at {Fmt.Clock(h.Times[iWindow + lastAt])}, " +
+                  $"last sample at {Fmt.Clock(h.Times[lastAt])}, " +
                   (rec?.ExitUtc is { } x ? $"exited {Fmt.Clock(x)}" : $"exited by {Fmt.Clock(h.Times[iTo])}") + " (I/O after its last sample is not seen)"
                 : $"{name} (PID {key.Pid}): {ops:N0} I/O ops{(rec?.ExitUtc is { } y ? $", exited {Fmt.Clock(y)}" : "")}";
             active.Add((text, ops));

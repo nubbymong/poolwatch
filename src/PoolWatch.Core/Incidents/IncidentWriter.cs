@@ -137,7 +137,11 @@ internal sealed class IncidentWriter
         fileSystemTag = _knowledge.IsFileSystemTag(inc.Tag),
         headline = Headline(inc, info),
         plainAnswer = PlainOwners(inc)?.Line,
-        allocationShape = Shape(inc) is { } sh ? new { allocsPerMin = Math.Round(sh.AllocsPerMin, 1), freesPerMin = Math.Round(sh.FreesPerMin, 1), shape = sh.Shape.ToString(), text = sh.Text } : null,
+        allocationShape = Shape(inc) is { During: var sh, Before: var before } ? new
+        {
+            allocsPerMin = Math.Round(sh.AllocsPerMin, 1), freesPerMin = Math.Round(sh.FreesPerMin, 1), shape = sh.Shape.ToString(), text = sh.Text,
+            before = before is { } b ? new { allocsPerMin = Math.Round(b.AllocsPerMin, 1), freesPerMin = Math.Round(b.FreesPerMin, 1) } : null,
+        } : null,
         systemAtEnd = SystemAtEnd() is { } sc && sc.CommitLimitBytes > 0 ? new { commitBytes = sc.CommitBytes, commitLimitBytes = sc.CommitLimitBytes, availableBytes = sc.AvailableBytes, compressionWsBytes = sc.CompressionWsBytes, handles = sc.Handles, processes = sc.Processes } : null,
         openedUtc = inc.OpenedUtc,
         closedUtc = inc.ClosedUtc,
@@ -227,8 +231,9 @@ internal sealed class IncidentWriter
         if (inc.Kind != IncidentKind.Release)
             sb.AppendLine($"- Growth: {Fmt.Bytes(inc.StartBytes)} -> {Fmt.Bytes(inc.PeakBytes)} (+{Fmt.Bytes(inc.Growth)}) from {Fmt.Clock(inc.OnsetUtc)}" +
                           (inc.EndUtc is { } e ? $" to {Fmt.Clock(e)}" : " (still climbing at the last sample)") + $"; now {Fmt.Bytes(inc.CurrentBytes)}");
-        if (Shape(inc) is { Shape: not AllocShape.Idle } shape)
-            sb.AppendLine($"- Allocation shape {ShapeSpan(inc)}: {shape.AllocsPerMin:N0} allocations/min, {shape.FreesPerMin:N0} frees/min: {shape.Text}");
+        if (Shape(inc) is { During: { Shape: not AllocShape.Idle } shape, Before: var before })
+            sb.AppendLine($"- Allocation shape {ShapeSpan(inc)}: {shape.AllocsPerMin:N0} allocations/min, {shape.FreesPerMin:N0} frees/min" +
+                          (before is { } b ? $", against {b.AllocsPerMin:N0} and {b.FreesPerMin:N0} a minute just before it" : "") + $": {shape.Text}");
         if (SystemAtEnd() is { CommitLimitBytes: > 0 } sys)
             sb.AppendLine($"- System at the last sample: commit {Fmt.Bytes((long)sys.CommitBytes)} of {Fmt.Bytes((long)sys.CommitLimitBytes)}, {Fmt.Bytes((long)sys.AvailableBytes)} RAM available, " +
                           $"compression store {Fmt.Bytes((long)sys.CompressionWsBytes)}, {sys.Handles:N0} handles, {sys.Processes:N0} processes");
@@ -436,22 +441,23 @@ internal sealed class IncidentWriter
         }
     }
 
-    /// <summary>Allocation / free rates of the tag over the growth episode (null when the history does not hold it).</summary>
-    private TagRates? Shape(Incident inc)
+    /// <summary>
+    /// Allocation / free rates of the tag over the growth episode (null when the history does not hold it), and its rates
+    /// just before the growth when the shape was judged against them.
+    /// </summary>
+    private (TagRates During, TagRates? Before)? Shape(Incident inc)
     {
         if (_history is not { } h || h.Count < 2) return null;
         int i0 = h.IndexAtOrAfter(inc.OnsetUtc), i1 = Math.Min(h.Count - 1, h.IndexAtOrAfter((inc.EndUtc ?? inc.ClosedUtc ?? h.Times[^1]).AddTicks(1)) - 1);
         if (i1 <= i0) return null;
         var r = h.TagRatesBetween(inc.Tag, i0, i1);
-        // The same span (at most 10 min) just before the onset: the tag's background churn to compare against.
+        // The same span (at most 10 min) just before the onset: the tag's background churn to compare against. An idle
+        // baseline (or none kept: the tag was too small) changes nothing, so it is not reported either.
         var span = TimeSpan.FromMinutes(Math.Min(10, (h.Times[i1] - h.Times[i0]).TotalMinutes));
         int b0 = h.IndexAtOrAfter(inc.OnsetUtc - span);
-        if (b0 >= 0 && i0 - b0 >= 2)
-        {
-            var baseline = h.TagRatesBetween(inc.Tag, b0, i0);
-            r = r with { Shape = LeakShapes.Classify(r.AllocsPerMin, r.FreesPerMin, baseline) };
-        }
-        return r;
+        if (b0 >= 0 && i0 - b0 >= 2 && h.TagRatesBetween(inc.Tag, b0, i0) is { Shape: not AllocShape.Idle } baseline)
+            return (r with { Shape = LeakShapes.Classify(r.AllocsPerMin, r.FreesPerMin, baseline) }, baseline);
+        return (r, null);
     }
 
     /// <summary>"during the growth", or "from 10:42 (...)" when the counters cover only part of it.</summary>

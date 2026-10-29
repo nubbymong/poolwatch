@@ -5,13 +5,13 @@ using PoolWatch.Core.Model;
 namespace PoolWatch.Core.Parsing;
 
 /// <summary>
-/// Parses the SYSTEM_PROCESS_INFORMATION chain (x64) returned by NtQuerySystemInformation(SystemProcessInformation).
+/// Parses the SYSTEM_PROCESS_INFORMATION chain (64-bit) returned by NtQuerySystemInformation(SystemProcessInformation).
 /// The ImageName buffer pointer is an absolute address inside the caller's buffer, so the caller passes the
 /// buffer's base address to translate it into an offset.
 /// </summary>
 public static class ProcessInfoParser
 {
-    // x64 offsets inside SYSTEM_PROCESS_INFORMATION.
+    // 64-bit offsets inside SYSTEM_PROCESS_INFORMATION.
     internal const int NextEntryOffset = 0x00;
     internal const int NumberOfThreads = 0x04;
     internal const int WorkingSetPrivateSize = 0x08;

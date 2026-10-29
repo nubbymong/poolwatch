@@ -35,11 +35,40 @@ public sealed class OwnerSuspect
 
     public string Name => Owner.Name;
 
+    private int? _memberCount;
+    private string? _summary;
+
+    /// <summary>How many processes this owner groups (after <see cref="Trim"/>, <see cref="Members"/> holds only the first of them).</summary>
+    public int MemberCount => _memberCount ?? Members.Count;
+
+    /// <summary>
+    /// Keeps the first <paramref name="members"/> members and their identities, plus the first member with a command line
+    /// when none of those has one (the details show it). <see cref="MemberCount"/> and <see cref="Summary"/> still describe all.
+    /// </summary>
+    public void Trim(int members)
+    {
+        _summary = Summary;
+        _memberCount = MemberCount;
+        if (Members.Count <= members) return;
+        int withCommandLine = Members.FindIndex(m => m.CommandLine is not null);
+        if (withCommandLine >= members)
+        {
+            Members[members] = Members[withCommandLine];
+            Identities[members] = Identities[withCommandLine];
+            members++;
+        }
+        Members.RemoveRange(members, Members.Count - members);
+        Identities.RemoveRange(members, Identities.Count - members);
+        Members.TrimExcess();
+        Identities.TrimExcess();
+    }
+
     /// <summary>"Codex (2 processes: node.exe · Codex cua_node, codex.exe)"; an owner only the trace saw: "... 412 traced processes (...)".</summary>
     public string Summary
     {
         get
         {
+            if (_summary is not null) return _summary;
             if (Members.Count == 0)
             {
                 if (Trace is not { } t) return Name;
@@ -90,9 +119,9 @@ public static class OwnerRanking
                 var ops = new double[tagDeltas.Length];
                 foreach (var m in g.Members)
                 {
-                    var pts = h.ProcessSeries(m.Key, from);
-                    for (int i = 0; i < ops.Length && i + 1 < pts.Length; i++)
-                        if (pts[i] is { } a && pts[i + 1] is { } b) ops[i] += Math.Max(0, b.TotalOps - a.TotalOps);
+                    var pts = h.Points(m.Key);
+                    for (int i = Math.Max(0, pts.First - from); i < ops.Length && from + i + 1 <= pts.Last; i++)
+                        ops[i] += Math.Max(0, pts[from + i + 1].TotalOps - pts[from + i].TotalOps);
                 }
                 g.Correlation = Stats.Spearman(tagDeltas, ops);
                 if (g.Confidence < Confidence.Correlated && g.Correlation >= Correlator.MinSpearman && g.IoShare >= Correlator.MinIoShare)
@@ -108,6 +137,21 @@ public static class OwnerRanking
         var ranked = groups.Values.OrderByDescending(g => g.Meaningful).ThenByDescending(g => g.Score).ThenByDescending(g => g.IoShare).ToList();
         for (int i = 0; i < ranked.Count; i++) ranked[i].Rank = i + 1;
         return ranked;
+    }
+
+    /// <summary>Members kept per owner once a ranking is final: the most any report or page lists (20).</summary>
+    public const int KeptMembers = 20;
+
+    /// <summary>
+    /// What a finished ranking keeps (it was built from up to 2,000 suspects): its meaningful owners in order, at most
+    /// <paramref name="maxOwners"/>, each trimmed to <see cref="KeptMembers"/> members. Every reader looks only at meaningful
+    /// owners and the answer line sums all of them, so an incident keeps them all and a Pool causes row the few it shows.
+    /// </summary>
+    public static List<OwnerSuspect> Keep(IEnumerable<OwnerSuspect> ranked, int maxOwners = int.MaxValue)
+    {
+        var kept = ranked.Where(o => o.Meaningful).Take(maxOwners).ToList();
+        foreach (var o in kept) o.Trim(KeptMembers);
+        return kept;
     }
 
     /// <summary>Bytes a suspect's own evidence accounts for: the larger of its handle-share estimate, its quota rise and its traced net.</summary>

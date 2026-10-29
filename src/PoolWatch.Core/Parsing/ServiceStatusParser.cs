@@ -4,7 +4,7 @@ using System.Text;
 namespace PoolWatch.Core.Parsing;
 
 /// <summary>
-/// Parses the ENUM_SERVICE_STATUS_PROCESSW array (x64) that EnumServicesStatusExW(SC_ENUM_PROCESS_INFO) writes. The
+/// Parses the ENUM_SERVICE_STATUS_PROCESSW array (64-bit) that EnumServicesStatusExW(SC_ENUM_PROCESS_INFO) writes. The
 /// service and display names are absolute addresses inside the caller's buffer, so the caller passes the address the
 /// buffer had when the API filled it, and every name is read through the span at its offset. A name whose address lies
 /// outside the buffer, or that has no terminating NUL inside it, is rejected rather than read. The caller's buffer must
@@ -13,7 +13,7 @@ namespace PoolWatch.Core.Parsing;
 /// </summary>
 public static class ServiceStatusParser
 {
-    // x64 layout: LPWSTR lpServiceName, LPWSTR lpDisplayName, SERVICE_STATUS_PROCESS (9 DWORDs), padded to 8 bytes.
+    // 64-bit layout: LPWSTR lpServiceName, LPWSTR lpDisplayName, SERVICE_STATUS_PROCESS (9 DWORDs), padded to 8 bytes.
     internal const int ServiceNamePointer = 0x00;
     internal const int DisplayNamePointer = 0x08;
     internal const int CurrentState = 0x10 + 0x04;

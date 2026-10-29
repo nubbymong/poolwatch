@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 // Test helper for the PoolWatch end-to-end scenarios (DESIGN.md section 12). Only touches the directory it is given.
@@ -17,6 +18,11 @@ using Microsoft.Win32.SafeHandles;
 //                end it until the hold (helpers piling up), then end its own children
 //   crash        --dir D                                           an unhandled exception (Application Error 1000 for Leaker.exe)
 //   spawn        --dir D --exe E [--args A] [--count 120] [--seconds 30]  start E (A with {dir} replaced) count times, each waited for
+//   agent-load   --dir D [--seconds 7200] [--sessions 12] [--starts-per-minute 3000] [--idle 600] [--transcript-mb 30]
+//                a PC under heavy agentic coding: session parents (the first one named claude.exe, with Claude Code
+//                transcripts to search) start short commands with unique multi-line command lines in rotating bursts,
+//                beside idle long-lived processes
+//   agent-session --dir D [--seconds 600] [--starts-per-minute 250] [--index 0] [--transcript F]  (one of those sessions)
 
 var opts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 for (int i = 1; i + 1 < args.Length; i += 2) opts[args[i].TrimStart('-')] = args[i + 1];
@@ -43,7 +49,9 @@ switch (mode)
     case "crash": Crash(); break;
     case "accumulate": Accumulate(Int("count", 15), Int("every", 6), Int("hold", 30)); break;
     case "spawn": Spawn(opts.GetValueOrDefault("exe") ?? "git", opts.GetValueOrDefault("args") ?? "-C {dir} status --porcelain", Int("count", 120), Int("seconds", 30)); break;
-    default: Console.Error.WriteLine("usage: Leaker leak-handles|touch-files|orphan|child-io|spawn|token-spawn|shell-load --dir <dir> [...]"); return 2;
+    case "agent-load": AgentLoad(Int("seconds", 7200), Int("sessions", 12), Int("starts-per-minute", 3000), Int("idle", 600), Int("transcript-mb", 30)); break;
+    case "agent-session": AgentSession(Int("seconds", 600), Int("starts-per-minute", 250), Int("index", 0), opts.GetValueOrDefault("transcript")); break;
+    default: Console.Error.WriteLine("usage: Leaker leak-handles|touch-files|orphan|child-io|spawn|token-spawn|shell-load|agent-load --dir <dir> [...]"); return 2;
 }
 return 0;
 
@@ -187,17 +195,170 @@ void ShellLoad(int seconds, int chainsPerMinute, int filesPerSecond, int handleC
     Log($"shell-load: done, {chainsRun} chains, {files} file operations");
 
     static string ToPosix(string p) => "/" + char.ToLowerInvariant(p[0]) + p[2..].Replace('\\', '/');
-    void Run(string exe, string args)
+    void Run(string exe, string args) => RunWaited(new ProcessStartInfo(exe, args) { WorkingDirectory = dir }, "shell-load");
+}
+
+// Starts a command without a window and waits for it, its output read and dropped. A failed start is logged: for a load
+// it is one start fewer, not a failed run.
+void RunWaited(ProcessStartInfo psi, string mode)
+{
+    psi.UseShellExecute = false;
+    psi.CreateNoWindow = true;
+    psi.RedirectStandardOutput = psi.RedirectStandardError = true;
+    try
     {
-        try
+        using var p = Process.Start(psi)!;
+        p.StandardOutput.ReadToEnd();
+        p.StandardError.ReadToEnd();
+        p.WaitForExit();
+    }
+    catch (Exception ex) { Log($"{mode}: {ex.Message}"); }
+}
+
+// A PC under heavy agentic coding, on a runner: about 3,000 starts a minute from a dozen sessions, nearly every command
+// line unique, spawn storms opening and closing, about 800 live processes, and a Claude Code session whose transcripts
+// PoolWatch searches. Everything it starts ends with it, however it is stopped.
+void AgentLoad(int seconds, int sessions, int startsPerMinute, int idleCount, int transcriptMb)
+{
+    // Leaker joins a job the system ends, with every process in it, when the job's last handle (Leaker's) closes: the
+    // sessions, their commands and the idle processes are all started in it.
+    var job = Native.CreateJobObjectW(IntPtr.Zero, null);
+    var limits = new Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+    limits.BasicLimitInformation.LimitFlags = Native.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (job == IntPtr.Zero
+        || !Native.SetInformationJobObject(job, Native.JobObjectExtendedLimitInformation, ref limits, System.Runtime.InteropServices.Marshal.SizeOf(limits))
+        || !Native.AssignProcessToJobObject(job, Process.GetCurrentProcess().Handle))
+        Log($"agent-load: no job (error {System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}): stop Leaker with its process tree");
+    // Idle long-lived processes, suspended and without a console (no console host each): about 600 of them cost little.
+    var idle = new List<Native.PROCESS_INFORMATION>();
+    string cmd = Path.Combine(Environment.SystemDirectory, "cmd.exe");
+    for (int i = 0; i < idleCount; i++)
+    {
+        var si = new Native.STARTUPINFO { cb = System.Runtime.InteropServices.Marshal.SizeOf<Native.STARTUPINFO>() };
+        if (!Native.CreateProcessW(cmd, new StringBuilder($"cmd.exe /c rem idle {i}"), IntPtr.Zero, IntPtr.Zero, false,
+                Native.CREATE_SUSPENDED | Native.DETACHED_PROCESS, IntPtr.Zero, dir, ref si, out var pi)) break;
+        idle.Add(pi);
+    }
+    // Claude Code transcripts (projects\<project>\*.jsonl under the session's CLAUDE_CONFIG_DIR), each longer than the
+    // search reads of a file's tail.
+    string config = Path.Combine(dir, "claude-config");
+    string project = Path.Combine(config, "projects", "D--agent-load");
+    Directory.CreateDirectory(project);
+    var transcripts = Enumerable.Range(0, 4).Select(f => Path.Combine(project, $"00000000-0000-4000-8000-00000000000{f}.jsonl")).ToList();
+    var filler = $"{{\"type\":\"assistant\",\"sessionId\":\"agent-load\",\"timestamp\":\"{DateTime.UtcNow:o}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{new string('x', 900)}\"}}]}}}}\n";
+    foreach (var t in transcripts)
+        using (var w = new StreamWriter(t))
+            for (long written = 0; written < (long)transcriptMb << 20; written += filler.Length) w.Write(filler);
+    // The first session is a copy of this tool named claude.exe, so PoolWatch treats its commands as Claude Code's.
+    string claudeDir = Path.Combine(dir, "claude");
+    Directory.CreateDirectory(claudeDir);
+    foreach (var f in Directory.GetFiles(AppContext.BaseDirectory, "Leaker.*")) File.Copy(f, Path.Combine(claudeDir, Path.GetFileName(f)), overwrite: true);
+    string claude = Path.Combine(claudeDir, "claude.exe");
+    File.Move(Path.Combine(claudeDir, "Leaker.exe"), claude, overwrite: true);
+    Log($"agent-load: {seconds} s, {sessions} sessions, {startsPerMinute} starts/min, {idle.Count} idle processes, {transcripts.Count} x {transcriptMb} MB transcripts");
+    var children = new List<Process>();
+    for (int s = 0; s < sessions; s++)
+    {
+        var psi = new ProcessStartInfo(s == 0 ? claude : Environment.ProcessPath!)
         {
-            var psi = new ProcessStartInfo(exe, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = dir };
-            using var p = Process.Start(psi)!;
-            p.StandardOutput.ReadToEnd();
-            p.StandardError.ReadToEnd();
-            p.WaitForExit();
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
+        };
+        foreach (var a in new[] { "agent-session", "--dir", Path.Combine(dir, $"session{s}"), "--seconds", seconds.ToString(CultureInfo.InvariantCulture),
+                     "--starts-per-minute", (startsPerMinute / Math.Max(1, sessions)).ToString(CultureInfo.InvariantCulture), "--index", s.ToString(CultureInfo.InvariantCulture) })
+            psi.ArgumentList.Add(a);
+        if (s == 0)
+        {
+            psi.ArgumentList.Add("--transcript");
+            psi.ArgumentList.Add(transcripts[0]);
+            psi.Environment["CLAUDE_CONFIG_DIR"] = config;
         }
-        catch (Exception ex) { Log("shell-load: " + ex.Message); }
+        var p = Process.Start(psi)!;
+        _ = p.StandardOutput.BaseStream.CopyToAsync(Stream.Null);
+        _ = p.StandardError.BaseStream.CopyToAsync(Stream.Null);
+        children.Add(p);
+    }
+    for (var until = DateTime.UtcNow.AddSeconds(seconds); DateTime.UtcNow < until && children.Any(c => !c.HasExited); Thread.Sleep(60_000))
+        foreach (var t in transcripts)
+            try { File.SetLastWriteTimeUtc(t, DateTime.UtcNow); } // kept inside the search's 30-minute window
+            catch (IOException) { }
+    foreach (var p in children) { p.WaitForExit(); p.Dispose(); }
+    foreach (var pi in idle)
+    {
+        Native.TerminateProcess(pi.hProcess, 0);
+        Native.CloseHandle(pi.hThread);
+        Native.CloseHandle(pi.hProcess);
+    }
+    Log("agent-load: done");
+}
+
+// One session of agent-load: short commands at an average rate, in bursts. Busy for 60 s, then 90 s at 20 a minute, so
+// its spawn storm opens and closes every 2.5 minutes; sessions are offset so that some are always busy. The claude.exe
+// session writes half of its commands into its transcript first, as Claude Code does, so searches both hit and miss.
+void AgentSession(int seconds, int perMinute, int index, string? transcript)
+{
+    var stop = DateTime.UtcNow.AddSeconds(seconds);
+    string bash = new[] { @"C:\Program Files\Git\bin\bash.exe", @"C:\Program Files\Git\usr\bin\bash.exe" }.FirstOrDefault(File.Exists) ?? "";
+    double busyPerMinute = Math.Max(20, 2.5 * perMinute - 30), offset = index * 12.5;
+    var transcriptLock = new object();
+    // As Claude Code writes them: only quotes, backslashes and control characters escaped.
+    var asTranscript = new System.Text.Json.JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    // The repositories its git commands work in, each a git root to PoolWatch: Windows paths, which it resolves.
+    var repos = Enumerable.Range(0, 40).Select(r => Path.Combine(dir, $"repo{r:D2}")).ToList();
+    foreach (var r in repos)
+    {
+        foreach (var sub in new[] { "objects", "refs" }) Directory.CreateDirectory(Path.Combine(r, ".git", sub));
+        File.WriteAllText(Path.Combine(r, ".git", "HEAD"), "ref: refs/heads/main\n");
+    }
+    long started = 0;
+    const int Workers = 2;
+    var threads = Enumerable.Range(0, Workers).Select(w => new Thread(() =>
+    {
+        var rnd = new Random(Environment.ProcessId * 31 + w);
+        var sw = Stopwatch.StartNew();
+        var next = TimeSpan.Zero;
+        while (DateTime.UtcNow < stop)
+        {
+            long k = Interlocked.Increment(ref started);
+            string script = Script(rnd, k, repos);
+            if (transcript is not null && k % 2 == 0)
+                lock (transcriptLock)
+                    try
+                    {
+                        File.AppendAllText(transcript, $"{{\"type\":\"assistant\",\"sessionId\":\"agent-load\",\"timestamp\":\"{DateTime.UtcNow:o}\",\"message\":{{\"content\":" +
+                                                       $"[{{\"type\":\"tool_use\",\"id\":\"t{k}\",\"name\":\"Bash\",\"input\":{{\"command\":{System.Text.Json.JsonSerializer.Serialize(script, asTranscript)}}}}}]}}}}\n");
+                    }
+                    catch (IOException) { } // the transcript is busy: this command is one the search will miss
+            if (bash.Length > 0) Run(bash, ["-c", script]);
+            else Run(Path.Combine(Environment.SystemDirectory, "cmd.exe"), ["/c", $"rem {script.Length} {k} & exit 0"]);
+            double rate = (sw.Elapsed.TotalSeconds + offset) % 150 < 60 ? busyPerMinute : 20;
+            next += TimeSpan.FromSeconds(60.0 * Workers / rate);
+            var wait = next - sw.Elapsed;
+            if (wait > TimeSpan.FromMilliseconds(15)) Thread.Sleep(wait);
+            else if (wait < TimeSpan.FromSeconds(-5)) next = sw.Elapsed; // fell behind: do not burst to catch up
+        }
+    }) { IsBackground = true }).ToList();
+    threads.ForEach(t => t.Start());
+    threads.ForEach(t => t.Join());
+    Log($"agent-session {index}: {started} commands");
+
+    // A unique script of about 200 to 3,000 characters over several lines; one in eight runs git in one of the session's
+    // repositories, one in three pipes into grep (a second process). Its most distinctive words are on the first line,
+    // which is what the transcript search can match (it matches words within one line of the transcript).
+    static string Script(Random rnd, long k, List<string> repos)
+    {
+        string Hex(int bytes) => Convert.ToHexString(BitConverter.GetBytes(rnd.NextInt64()).AsSpan(0, Math.Min(8, bytes)));
+        var sb = new StringBuilder($"cd /tmp && echo {Hex(8)}{Hex(8)} {Hex(8)}{Hex(8)} {Hex(8)}{Hex(8)} > /dev/null");
+        for (int i = 0, lines = 1 + rnd.Next(80); i < lines; i++) sb.Append($"\n# step {k}.{i} {Hex(1 + rnd.Next(8))}");
+        if (k % 8 == 0) sb.Append($"\ngit -C '{repos[rnd.Next(repos.Count)].Replace('\\', '/')}' status --porcelain 2>/dev/null");
+        sb.Append(k % 3 == 0 ? "\necho done | grep -q done" : "\ntrue");
+        return sb.ToString();
+    }
+
+    void Run(string exe, string[] args)
+    {
+        var psi = new ProcessStartInfo(exe);
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        RunWaited(psi, $"agent-session {index}");
     }
 }
 
@@ -312,5 +473,62 @@ static class Native
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     public static extern IntPtr CreateEventW(IntPtr attributes, bool manualReset, bool initialState, string? name);
+
+    public const uint CREATE_SUSPENDED = 0x00000004, DETACHED_PROCESS = 0x00000008;
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    public struct STARTUPINFO
+    {
+        public int cb;
+        public string? lpReserved, lpDesktop, lpTitle;
+        public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+        public short wShowWindow, cbReserved2;
+        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    public struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess, hThread;
+        public int dwProcessId, dwThreadId;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    public static extern bool CreateProcessW(string applicationName, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes,
+        bool inheritHandles, uint creationFlags, IntPtr environment, string currentDirectory, ref STARTUPINFO startupInfo, out PROCESS_INFORMATION processInformation);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+    public const int JobObjectExtendedLimitInformation = 9;
+    public const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    public struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass, SchedulingClass;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount, ReadTransferCount, WriteTransferCount, OtherTransferCount; // IO_COUNTERS
+        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr CreateJobObjectW(IntPtr attributes, string? name);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, int length);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
 }
 
