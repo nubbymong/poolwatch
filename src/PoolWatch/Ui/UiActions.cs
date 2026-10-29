@@ -4,6 +4,7 @@ using PoolWatch.Core.Detection;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Util;
 using PoolWatch.Engine;
+using PoolWatch.Engine.Changes;
 
 namespace PoolWatch.Ui;
 
@@ -77,18 +78,29 @@ internal sealed class UiActions
     public void RemoveLegacyTask(IWin32Window? owner)
     {
         if (!CacheHelper.IsElevated) { MessageBox.Show(owner, NotElevated, "PoolWatch"); return; }
-        int code = LegacyInProcess(owner);
+        int code = LegacyInProcess(owner, "the tray menu", out string? note);
         _analysis.Diagnostics.Cache.RefreshStatus();
         if (code == 0) MessageBox.Show(owner, "Removed (RAMMap itself is left in place).", "PoolWatch");
+        else if (note is not null) MessageBox.Show(owner, note, "PoolWatch");
     }
 
-    /// <summary>The same step as <c>--remove-legacy-clear-task</c>. 0 none/removed, 4 kept.</summary>
-    public int LegacyInProcess(IWin32Window? owner)
+    /// <summary>
+    /// The same step as <c>--remove-legacy-clear-task</c>, with its exit codes. 0: removed, or no clear task of your own is
+    /// there; 4: one is still there (you kept it, or the note says why). Only 0 lets the automatic clear go on. Every task
+    /// is recorded, with its definition, before it is removed, so Active changes can put it back.
+    /// </summary>
+    /// <param name="via">Where the removal was asked for, in plain words ("the tray menu", "Settings").</param>
+    /// <param name="note">Why your tasks were left in place when it was not your No, for the caller to show; null otherwise.</param>
+    public int LegacyInProcess(IWin32Window? owner, string via, out string? note)
     {
-        var (outcome, _) = CacheHelper.ResolveLegacy(t =>
-            MessageBox.Show(owner, CacheHelper.LegacyQuestion(t), "PoolWatch: your own clear task", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes);
+        (var outcome, _, note) = CacheHelper.ResolveLegacy(t =>
+            MessageBox.Show(owner, CacheHelper.LegacyQuestion(t), "PoolWatch: your own clear task", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes,
+            ChangeRecords.Open(_engine.Paths, _engine.Log), via);
         return outcome == CacheHelper.LegacyOutcome.Kept ? 4 : 0;
     }
+
+    /// <summary><see cref="LegacyInProcess(IWin32Window?, string, out string?)"/> from Settings, for a caller that shows its own words.</summary>
+    public int LegacyInProcess(IWin32Window? owner) => LegacyInProcess(owner, "Settings", out _);
 
     /// <summary>
     /// S5 (review round 2): removes the two \PoolWatch\ SYSTEM tasks and the helper files an older PoolWatch's Clear cache
