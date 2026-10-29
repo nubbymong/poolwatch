@@ -1,3 +1,4 @@
+using PoolWatch.Engine.Changes;
 using PoolWatch.Headless;
 using PoolWatch.Native;
 
@@ -81,14 +82,22 @@ internal static class Program
         return 0;
     }
 
-    /// <summary>Exit 0: no clear task of your own (any more); 4: you kept it, so the automatic clear must stay off.</summary>
+    /// <summary>
+    /// Exit 0: no clear task of your own (any more); 4: a clear task of your own is still there (you kept it, or the note
+    /// says why), so the automatic clear must stay off.
+    /// </summary>
     private static int Legacy(CommandLineOptions opt)
     {
-        var (outcome, tasks) = Engine.CacheHelper.ResolveLegacy(t => opt.LegacyAnswer ??
-            MessageBox.Show(Engine.CacheHelper.LegacyQuestion(t), "PoolWatch: your own clear task", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes);
+        // First: a data folder that cannot be made safe stops this before any task is removed.
+        var paths = new Engine.AppPaths(opt.OutDir);
+        // Each task is recorded with its definition before it is removed, so Active changes and the uninstaller can put it back.
+        var (outcome, tasks, note) = Engine.CacheHelper.ResolveLegacy(t => opt.LegacyAnswer ??
+            MessageBox.Show(Engine.CacheHelper.LegacyQuestion(t), "PoolWatch: your own clear task", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes,
+            ChangeRecords.Open(paths, paths.OpenLog()), "the command line");
         Console.WriteLine(outcome switch
         {
             Engine.CacheHelper.LegacyOutcome.Removed => "Removed your clear task (" + Engine.CacheHelper.LegacyNames(tasks) + "); what it ran is left in place.",
+            Engine.CacheHelper.LegacyOutcome.Kept when note is not null => $"{note.TrimEnd('.')}. The automatic clear stays off.",
             Engine.CacheHelper.LegacyOutcome.Kept => "Kept your clear task (" + Engine.CacheHelper.LegacyNames(tasks) + "): the automatic clear stays off.",
             _ => "No clear task of your own found.",
         });

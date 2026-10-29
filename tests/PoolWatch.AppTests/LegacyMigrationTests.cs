@@ -268,6 +268,10 @@ public sealed class LegacyMigrationTests : IDisposable
     [InlineData(@"data\x.dll", 10, "not PoolWatch's data")]
     [InlineData(@"cache\clears.json", 10, "a cache (rebuilt)")]
     [InlineData("logon-task.xml", 10, "not PoolWatch's data")]
+    // Undo puts back what these hold as an administrator: never taken from a folder an unelevated program could write.
+    [InlineData("applied-changes.json", 10, "not PoolWatch's data")]
+    [InlineData(@"removed-tasks\Clear standby.xml", 10, "not PoolWatch's data")]
+    [InlineData("service-changes.json", 10, "service records are never taken")]
     public void OnlyKnownFilesAreMoved(string rel, long length, string? why)
     {
         var got = LegacyMigration.WhyNotMoved(rel, length);

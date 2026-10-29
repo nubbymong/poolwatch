@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Win32;
 using PoolWatch.Core.Services;
 using PoolWatch.Core.Util;
+using PoolWatch.Engine.Changes;
 
 namespace PoolWatch.Engine;
 
@@ -15,8 +16,9 @@ internal sealed record StartupView(string Name, string Command, string Location,
 /// Scheduled tasks and startup apps (addendum 4 C): enumerate the non-Microsoft ones, and enable/disable them
 /// reversibly — a task through its Enabled property, a startup entry through the same Explorer StartupApproved bytes
 /// Task Manager uses, so the owner can flip it back there too. Microsoft's own tasks and entries are left alone.
+/// Put back under Active changes flips them back through <see cref="ITaskToggles"/>.
 /// </summary>
-internal sealed class TasksAndStartup
+internal sealed class TasksAndStartup : ITaskToggles
 {
     private readonly Log _log;
     public TasksAndStartup(Log log) => _log = log;
@@ -94,6 +96,26 @@ internal sealed class TasksAndStartup
         }
         catch (Exception ex) { return ex.Message; }
     }
+
+    /// <summary>Whether the task is still there. Throws when Task Scheduler cannot be read (that is not "gone").</summary>
+    public bool TaskExists(string path)
+    {
+        using var com = new ComScope();
+        dynamic svc = com.Track(Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service")!)!)!;
+        svc.Connect();
+        int slash = path.LastIndexOf('\\');
+        try
+        {
+            dynamic folder = com.Track(svc.GetFolder(slash <= 0 ? "\\" : path[..slash]))!;
+            com.Track(folder.GetTask(path[(slash + 1)..]));
+            return true;
+        }
+        catch (Exception ex) when (ex.HResult is FileNotFound or PathNotFound) { return false; }
+    }
+
+    /// <summary>HRESULT_FROM_WIN32 of ERROR_FILE_NOT_FOUND and ERROR_PATH_NOT_FOUND: no such task, no such folder. The COM
+    /// binder raises them as a COMException or as the matching FileNotFound / DirectoryNotFound exception.</summary>
+    private const int FileNotFound = unchecked((int)0x80070002), PathNotFound = unchecked((int)0x80070003);
 
     // ---- startup entries (Run keys of both views, the two Startup folders; StartupApproved)
 
@@ -184,11 +206,7 @@ internal sealed class TasksAndStartup
         try
         {
             using var hive = Hive(loc);
-            // The entry must exist there now (by name only: no shortcut is parsed for this).
-            bool exists = loc.RunKey is { } run
-                ? hive.OpenSubKey(run) is { } rk && Using(rk, k => k.GetValueNames().Contains(name, StringComparer.OrdinalIgnoreCase))
-                : name.Length > 0 && name.IndexOfAny(['\\', '/', ':']) < 0 && name != "." && name != ".." && File.Exists(Path.Combine(StartupFolder(loc), name));
-            if (!exists) return $"'{name}' is no longer a startup entry in {location}";
+            if (!Exists(loc, hive, name)) return $"'{name}' is no longer a startup entry in {location}";
             using var appKey = hive.CreateSubKey(loc.ApprovedKey, writable: true);
             var existing = appKey!.GetValue(name) as byte[];
             appKey.SetValue(name, StartupApproved.Set(existing, enabled, DateTime.UtcNow), RegistryValueKind.Binary);
@@ -197,6 +215,19 @@ internal sealed class TasksAndStartup
         }
         catch (Exception ex) { return ex.Message; }
     }
+
+    /// <summary>Whether the entry is still in that location. Throws when the location cannot be read (that is not "gone").</summary>
+    public bool StartupExists(string location, string name)
+    {
+        if (StartupLocation.Find(location) is not { } loc) return false;
+        using var hive = Hive(loc);
+        return Exists(loc, hive, name);
+    }
+
+    /// <summary>The entry exists in that location now: by name only, no shortcut is parsed for this.</summary>
+    private static bool Exists(StartupLocation loc, RegistryKey hive, string name) => loc.RunKey is { } run
+        ? hive.OpenSubKey(run) is { } rk && Using(rk, k => k.GetValueNames().Contains(name, StringComparer.OrdinalIgnoreCase))
+        : name.Length > 0 && name.IndexOfAny(['\\', '/', ':']) < 0 && name != "." && name != ".." && File.Exists(Path.Combine(StartupFolder(loc), name));
 
     private static bool Using(RegistryKey key, Func<RegistryKey, bool> f) { using (key) return f(key); }
 
