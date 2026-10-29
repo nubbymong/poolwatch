@@ -44,6 +44,14 @@ internal sealed class CommandLineOptions
     public double? CaptureNowAfter { get; private set; }
     /// <summary>S4: run elevated from a folder that is not administrator-only (CI and development only: the build output).</summary>
     public bool AllowAnyLocation { get; private set; }
+    /// <summary>Ask a running PoolWatch to exit (the installer, before it replaces the files), then exit.</summary>
+    public bool StopRunning { get; private set; }
+    /// <summary>The uninstaller's step: stop PoolWatch, put back what it changed, write the summary, then exit.</summary>
+    public bool UninstallCleanup { get; private set; }
+    /// <summary>With <see cref="UninstallCleanup"/>: put back only the logon task and the desktop shortcut.</summary>
+    public bool KeepChanges { get; private set; }
+    /// <summary>Write the list of changes PoolWatch made (Active changes) to this file, then exit.</summary>
+    public string? ChangesDump { get; private set; }
     public List<string> Errors { get; } = [];
 
     public static string Usage => """
@@ -73,6 +81,12 @@ internal sealed class CommandLineOptions
                                              root that runs RAMMap with an -E option), show it, remove it on a yes
                                              (exit 4: kept, so the automatic clear stays off)
         PoolWatch.exe --remove-legacy-clear-task [--yes|--no]  (elevated) the same step
+        PoolWatch.exe --changes-dump <file>  write the changes PoolWatch made (the Active changes list) to <file>
+        PoolWatch.exe --stop-running         ask a running PoolWatch to exit and wait up to 60 s (exit 7: still running)
+        PoolWatch.exe --uninstall-cleanup [--keep-changes]  (elevated; run by the uninstaller) stop PoolWatch, put back
+                                             what it changed (--keep-changes: only the logon task and the desktop
+                                             shortcut) and write uninstall-summary.txt in the data folder
+                                             (exit 7: still running, nothing changed; 8: something was not put back)
         PoolWatch.exe --selftest --out <dir>  native sanity checks, writes selftest.json
         Any mode: --allow-any-location      run elevated from a folder that is not administrator-only (CI / development;
                                              without it an elevated PoolWatch refuses to run outside %ProgramFiles%)
@@ -135,6 +149,10 @@ internal sealed class CommandLineOptions
                 case "--no": o.LegacyAnswer = false; break;
                 case "--capture-now": o.CaptureNowAfter = NextDouble(); break;
                 case "--allow-any-location": o.AllowAnyLocation = true; break;
+                case "--stop-running": o.StopRunning = true; break;
+                case "--uninstall-cleanup": o.UninstallCleanup = true; break;
+                case "--keep-changes": o.KeepChanges = true; break;
+                case "--changes-dump": o.ChangesDump = Next(); break;
                 case "--clear-cache":
                     o.ClearCache = Next();
                     if (o.ClearCache is not null and not ("standby" or "lowpriority")) o.Errors.Add("--clear-cache: standby or lowpriority");
@@ -142,6 +160,7 @@ internal sealed class CommandLineOptions
                 default: o.Errors.Add($"unknown option '{a}'"); break;
             }
         }
+        if (o.KeepChanges && !o.UninstallCleanup) o.Errors.Add("--keep-changes goes with --uninstall-cleanup");
         return o;
     }
 }

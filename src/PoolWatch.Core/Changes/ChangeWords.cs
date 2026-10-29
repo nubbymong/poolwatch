@@ -58,6 +58,17 @@ public static class ChangeWords
         : why.Contains("cannot put", StringComparison.OrdinalIgnoreCase) ? why
         : CannotPutBack + " " + why;
 
+    /// <summary>The line on a row the uninstaller leaves as it is, before why.</summary>
+    public const string UninstallLeaves = "Uninstalling does not put this back:";
+    /// <summary>
+    /// Why the uninstaller leaves a clear task of your own that needs your yes (it never gives one): in the window's row
+    /// and in the uninstaller's own list.
+    /// </summary>
+    public const string UninstallNeedsYourYes = "PoolWatch puts it back only after your yes in its Active changes window. If you uninstall first, " +
+                                                "its definition is saved in PoolWatch's data folder for you to import in Task Scheduler.";
+
+    // ---------------------------------------------------------------- the timeline's line after a row's button
+
     /// <summary>
     /// The timeline's line after a row's button ran (<paramref name="button"/>: <see cref="TurnOff"/>, <see cref="Remove"/>
     /// or <see cref="PutBack"/>): "Turned off in Active changes: Token-leak guard. The token-leak guard is off. ...", or
@@ -68,14 +79,6 @@ public static class ChangeWords
         string past = button switch { TurnOff => "Turned off", Remove => "Removed", _ => "Put back" };
         return $"{(done ? past : "Not " + past.ToLowerInvariant())} in Active changes: {name}. {message}";
     }
-    /// <summary>The line on a row the uninstaller leaves as it is, before why.</summary>
-    public const string UninstallLeaves = "Uninstalling does not put this back:";
-    /// <summary>
-    /// Why the uninstaller leaves a clear task of your own that needs your yes (it never gives one): in the window's row
-    /// and in the uninstaller's own list.
-    /// </summary>
-    public const string UninstallNeedsYourYes = "PoolWatch puts it back only after your yes in its Active changes window. If you uninstall first, " +
-                                                "its definition is saved in PoolWatch's data folder for you to import in Task Scheduler.";
 
     public const string LogonTaskTitle = "Start PoolWatch when you sign in";
     /// <summary>

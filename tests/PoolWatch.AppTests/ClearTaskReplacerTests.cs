@@ -535,6 +535,20 @@ public sealed class ClearTaskReplacerTests : IDisposable
     }
 
     [Fact]
+    public void TheUninstallerNeverAcceptsAWarning()
+    {
+        var record = _f.Records.PutRemovedTask(Own(xml: TaskXml.Ram(@"C:\Tools\RAMMap64.exe")), "the setup guide").Record;
+        var ledger = new ChangeLedger([_f.Recorded(_f.Live())], _f.Records, _f.Log);
+
+        var (change, result) = Assert.Single(Program.UninstallUndo(ledger, Program.UndoSelection(keepChanges: false)));
+        Assert.Equal(ChangeKind.RemovedClearTask, change.Kind);
+        Assert.False(result.Done); // so the uninstall exits 8 and keeps the data folder
+        Assert.Contains(_f.Records.ImportFile(record), result.Message);
+        Assert.Empty(_f.ClearTasks.Calls);
+        Assert.Single(_f.Records.All());
+    }
+
+    [Fact]
     public void YourYesCoversEveryFolderTheTaskRunsFrom()
     {
         _f.Records.PutRemovedTask(Own(xml: TaskXml.Ram(@"C:\Tools\RAMMap64.exe")), "the setup guide");
