@@ -17,10 +17,10 @@ namespace PoolWatch.Ui;
 /// The main window (DESIGN.md section 11), in one of two views. The Simple view, the default: the status line, the
 /// Clear cache now button, the line about the next cache clear, the pool graph and up to three suggestions. The Advanced
 /// view: the status line, three buttons (Clear cache now, Export report, Settings), the graph and two tabs (Pool causes,
-/// Services). Both have Active changes and the Advanced view switch at the bottom; everything else is in the tray menu.
-/// The one graph moves between the two layouts. Refreshes on a 10 s timer that runs only while the window is visible and
-/// not minimised, the Simple view's line and suggestions at most once a minute; nothing is rendered or recomputed while
-/// it is hidden, and hiding it drops what only it shows.
+/// Services). Both have Active changes, the update notice when a newer release is out, and the Advanced view switch at
+/// the bottom; everything else is in the tray menu. The one graph moves between the two layouts. Refreshes on a 10 s
+/// timer that runs only while the window is visible and not minimised, the Simple view's line and suggestions at most
+/// once a minute; nothing is rendered or recomputed while it is hidden, and hiding it drops what only it shows.
 /// </summary>
 internal sealed class MainForm : Form
 {
@@ -47,6 +47,10 @@ internal sealed class MainForm : Form
     private readonly TableLayoutPanel _footer = new() { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 3, RowCount = 1 };
     private readonly Button _appliedChanges = new() { Text = "Active changes", AutoSize = true, UseVisualStyleBackColor = true };
     private readonly CheckBox _advancedBox = new() { Text = "Advanced view", AutoSize = true };
+    /// <summary>"PoolWatch 1.2.0 is available. See what's new", while a newer release is out and update notices are on.</summary>
+    private readonly LinkLabel _updateNotice = new() { AutoSize = true, UseMnemonic = false, Visible = false };
+    private readonly Func<UpdateRelease?> _update;
+    private UpdateRelease? _shownUpdate;
     private bool _isAdvanced;
     /// <summary>When the Simple view's line and suggestions were last read (they are read at most once a minute).</summary>
     private DateTime _simpleReadUtc = DateTime.MinValue;
@@ -80,13 +84,15 @@ internal sealed class MainForm : Form
     private bool _repopulating;
 
     /// <param name="view">The view to open in, and where the owner's switch is kept; null (the CI UI test): the Simple view, and a switch is not kept.</param>
-    public MainForm(SetupContext context, ViewState? view)
+    /// <param name="update">The newer release to tell the owner about now, or null (read at each refresh: it can change without notice).</param>
+    public MainForm(SetupContext context, ViewState? view, Func<UpdateRelease?> update)
     {
         _context = context;
         _engine = context.Engine;
         _analysis = context.Analysis;
         _actions = context.Actions;
         _view = view;
+        _update = update;
         _tasksEngine = new Engine.TasksAndStartup(_engine.Log);
         Text = "PoolWatch";
         Icon = TrayIcons.For(TrayState.Green);
@@ -139,7 +145,11 @@ internal sealed class MainForm : Form
             SafeRefresh(() => SetView(_advancedBox.Checked));
         };
         _tips.SetToolTip(_advancedBox, "Pool causes, background services, exports and every setting.");
+        _updateNotice.Margin = new Padding(S(16), S(5), S(12), 0);
+        _updateNotice.LinkClicked += (_, _) => _actions.Guarded(this, "Open the release page", () => { if (_shownUpdate is { } r) UiActions.OpenWebPage(r.PageUrl); });
+        _tips.SetToolTip(_updateNotice, "Opens the release's page on GitHub in your browser. PoolWatch never downloads or installs anything itself.");
         _footer.Controls.Add(_appliedChanges, 0, 0);
+        _footer.Controls.Add(_updateNotice, 1, 0);
         _footer.Controls.Add(_advancedBox, 2, 0);
 
         Controls.Add(_simple); // fill first, then the docked edges
@@ -988,8 +998,24 @@ internal sealed class MainForm : Form
                     case 1: RefreshServices(); break;
                 }
         Icon = TrayIcons.For(state);
+        ShowUpdate(_update());
         PumpRankings();
     }
+
+    /// <summary>The update notice at the bottom of the window, set only when the release to tell about changed.</summary>
+    internal void ShowUpdate(UpdateRelease? release)
+    {
+        if (release == _shownUpdate) return;
+        _shownUpdate = release;
+        _updateNotice.Visible = release is not null;
+        if (release is null) return;
+        const string link = "See what's new";
+        _updateNotice.Text = $"{release.Text}. {link}";
+        _updateNotice.LinkArea = new LinkArea(_updateNotice.Text.Length - link.Length, link.Length);
+    }
+
+    /// <summary>The update notice as shown, or null (CI).</summary>
+    internal string? UpdateNotice => _updateNotice.Visible ? _updateNotice.Text : null;
 
     private PoolTag? _leadTag;
     private List<PoolTag> _rankTags = [];
@@ -1339,6 +1365,7 @@ internal sealed class MainForm : Form
         var rows = new Dictionary<string, int> { ["Pool causes"] = _causeRows.Count, ["Services"] = Math.Max(serviceRows, Rows(_services)) };
         var likelyCauses = _causeRows.Take(20).Select(r => r.Cause).ToList();
         int unrankedTagRows = _causeRows.Count(r => r.Kind == CauseKind.Tag && r.Active && r.Cause.Length == 0);
+        SetView(false); // as the window opens again
         bool timerWhileVisible = _timer.Enabled;
         Hide();
         bool timerWhileHidden = _timer.Enabled;

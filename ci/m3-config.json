@@ -18,5 +18,7 @@
   "autoCaptureMinMinutes": 1,
   // An automatic (on-alert) capture records pool events only unless deeperCapture is on. On here so the trace also
   // records Kernel-File and the scenario keeps testing the file-activity attribution (the opens Leaker.exe makes).
-  "deeperCapture": true
+  "deeperCapture": true,
+  // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
+  "checkForUpdates": false
 }

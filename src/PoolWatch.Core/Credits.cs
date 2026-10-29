@@ -1,4 +1,5 @@
 using PoolWatch.Core.Report;
+using PoolWatch.Core.Updates;
 
 namespace PoolWatch.Core;
 
@@ -39,13 +40,13 @@ public static class Credits
 
     /// <summary>
     /// The web pages PoolWatch may open (UiActions.OpenWebPage): the credits' pages, the repository, its notices and
-    /// private advisory pages, and a new-issue address PoolWatch built (<see cref="IssueReport.Url"/>): short enough for
-    /// explorer.exe to pass on whole, and with a query of escaped characters only, so it can never carry a quote or a
-    /// space onto explorer.exe's command line.
+    /// private advisory pages, one release's own page (an update notice's, <see cref="ReleasePage.IsValid"/>), and a
+    /// new-issue address PoolWatch built (<see cref="IssueReport.Url"/>): short enough for explorer.exe to pass on whole,
+    /// and with a query of escaped characters only, so it can never carry a quote or a space onto explorer.exe's command line.
     /// </summary>
     public static bool IsAllowedLink(string url)
     {
-        if (url is RepoUrl or NoticesUrl or IssueReport.AdvisoryUrl || All.Any(c => c.Url == url)) return true;
+        if (url is RepoUrl or NoticesUrl or IssueReport.AdvisoryUrl || All.Any(c => c.Url == url) || ReleasePage.IsValid(url)) return true;
         const string issue = IssueReport.NewIssueUrl + "?";
         // An escaped query holds unreserved characters, '%' escapes and the '=' and '&' between fields.
         return url.Length <= IssueReport.MaxUrlLength && url.StartsWith(issue, StringComparison.Ordinal) &&

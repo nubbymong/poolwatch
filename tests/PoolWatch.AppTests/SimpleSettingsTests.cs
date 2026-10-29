@@ -1,12 +1,14 @@
 using PoolWatch.Core;
+using PoolWatch.Core.Updates;
+using PoolWatch.Engine;
 using PoolWatch.Ui;
 
 namespace PoolWatch.AppTests;
 
 /// <summary>
 /// The plain Settings form's mapping onto <see cref="Settings"/> (automatic cache clearing, deeper capture, the token leak
-/// guard and update notices), its checks, its words and its fields, and what Save puts into effect at once. Nothing is
-/// saved and no window is opened.
+/// guard and update notices), its checks, its words and its fields, what Save puts into effect at once, and when an update
+/// notice shows. Nothing is saved and no window is opened.
 /// </summary>
 public class SimpleSettingsTests
 {
@@ -47,6 +49,15 @@ public class SimpleSettingsTests
         Assert.Equal("Tell me when a new version is out. Checks GitHub once a day; information only, nothing is downloaded or installed.",
             SimpleSettings.UpdatesLabel + " " + SimpleSettings.UpdatesHint);
         Assert.Equal(SimpleSettings.UpdatesLabel, new SimpleSettingsFields().Updates.Text);
+    }
+
+    [Fact]
+    public void ANewerReleaseIsToldAboutOnlyWhileUpdateNoticesAreOn()
+    {
+        var release = new UpdateRelease("1.0.1", ReleasePage.For("v1.0.1"));
+        Assert.Same(release, TrayApp.ToShow(new Settings { CheckForUpdates = true }, release));
+        Assert.Null(TrayApp.ToShow(new Settings { CheckForUpdates = false }, release));
+        Assert.Null(TrayApp.ToShow(new Settings { CheckForUpdates = true }, available: null));
     }
 
     [Fact]
@@ -212,6 +223,26 @@ public class SimpleSettingsTests
         Assert.True(edit.DeeperCapture);
         Assert.Equal(5, edit.SampleIntervalSeconds);
         Assert.Equal(AtOnceSettings.Of(running), AtOnceSettings.Of(edit));
+    }
+
+    [Fact]
+    public void AnOpeningOfSettingsStartsFromTheSavedFileWithThePartsInEffectNow()
+    {
+        using var f = new ChangeFixture();
+        Directory.CreateDirectory(f.Paths.DataRoot);
+        new Settings { DeeperCapture = true }.Save(f.Paths.SettingsFile); // saved for the next start
+        var running = new Settings { AutoClearEnabled = true, AutoClearEveryHours = 1 }; // in effect now, not saved yet
+
+        // The editor as Settings makes it; its constructor only keeps the engine, the analysis, the actions and the shell.
+        static Settings Opened(LiveSettings live) => new SettingsEditor(engine: null!, analysis: null!, actions: null!, live, shell: null!).Edit;
+        var edit = Opened(f.Live(running, persist: true));
+        Assert.True(edit.DeeperCapture);
+        Assert.True(edit.AutoClearEnabled);
+
+        // With --config, settings.json is never written: the running copy is what the next start reads.
+        var fromConfig = Opened(f.Live(running, persist: false));
+        Assert.False(fromConfig.DeeperCapture);
+        Assert.True(fromConfig.AutoClearEnabled);
     }
 
     [Fact]

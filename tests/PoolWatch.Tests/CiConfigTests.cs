@@ -13,14 +13,16 @@ public sealed class CiConfigTests
 {
     private static Settings Config(string name)
     {
-        // The test runs from bin/<config>/<tfm>/ inside the checkout; the repo root is the folder holding PoolWatch.slnx.
+        string path = Path.Combine(CiFolder(), name);
+        Assert.True(File.Exists(path), $"{path} is missing");
+        return Settings.Load(path, explicitConfig: true);
+    }
+
+    /// <summary>The checkout's ci folder: the test runs from bin/&lt;config&gt;/&lt;tfm&gt;/ inside it, under the folder holding PoolWatch.slnx.</summary>
+    private static string CiFolder()
+    {
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
-            if (File.Exists(Path.Combine(dir.FullName, "PoolWatch.slnx")))
-            {
-                string path = Path.Combine(dir.FullName, "ci", name);
-                Assert.True(File.Exists(path), $"{path} is missing");
-                return Settings.Load(path, explicitConfig: true);
-            }
+            if (File.Exists(Path.Combine(dir.FullName, "PoolWatch.slnx"))) return Path.Combine(dir.FullName, "ci");
         throw new InvalidOperationException("PoolWatch.slnx not found above " + AppContext.BaseDirectory);
     }
 
@@ -35,6 +37,17 @@ public sealed class CiConfigTests
         m2.AutoClearEnabled = true;
         m2.AutoClearEveryHours = 1;
         Assert.Equal(m2.ToJson(), ui.ToJson());
+    }
+
+    [Fact]
+    public void NoCiRunAsksGitHubForANewVersion()
+    {
+        // The update check is on by default; from shared runner addresses it would hit GitHub's rate limit, and in the soak
+        // it would be a cost a user's PC has once a day, not once a run.
+        var configs = Directory.GetFiles(CiFolder(), "*-config.json");
+        Assert.True(configs.Length >= 5, string.Join(", ", configs));
+        Assert.All(configs, path => Assert.False(Settings.Load(path, explicitConfig: true).CheckForUpdates, path));
+        Assert.True(new Settings().CheckForUpdates); // the control: on by default
     }
 
     [Fact]

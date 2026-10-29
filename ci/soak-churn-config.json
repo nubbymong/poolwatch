@@ -12,5 +12,7 @@
   "autoClearMinMinutes": 30,
   "autoClearPoolGb": 0,
   // As in the 45-minute soak: the on-alert CPU trace is an alert-time cost, not steady-state overhead.
-  "cpuTraceEnabled": false
+  "cpuTraceEnabled": false,
+  // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
+  "checkForUpdates": false
 }

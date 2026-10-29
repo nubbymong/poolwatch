@@ -1,7 +1,7 @@
 # Milestone 4 acceptance: the tray app starts and every window under review renders, each drawn to a PNG (the
 # ui-screenshots artifact) and checked: the main window's Simple view (status line, Clear cache now, the next-clear line,
 # the graph, up to three suggestions) and Advanced view (three buttons, the Pool causes and Services tabs), the plain
-# Settings form and its Advanced grid, the setup guide, Active changes, Report an issue and About.
+# Settings form and its Advanced grid, the setup guide, Active changes, Report an issue, About and the update notice.
 # Nothing in them is clipped or overlaps, no internal name shows, everything taken off the window is in the tray menu,
 # every window made for the test is closed again, and the app exits cleanly. Runs a small File-handle leak meanwhile so
 # Pool causes has content, and turns one harmless service off first so Active changes has a service to list.
@@ -54,7 +54,7 @@ if (Test-Path $smokeFile) {
     $f = $s.form
     $shots = @($s.screenshots)
     $names = '1-simple-view.png', '2-advanced-view.png', '3-services.png', '4-settings.png', '5-settings-advanced.png', '6-setup-guide.png',
-             '7-active-changes.png', '8-report-issue.png', '9-about.png'
+             '7-active-changes.png', '8-report-issue.png', '9-about.png', '10-update-notice.png'
     Assert-True ($shots.Count -eq $names.Count) "$($names.Count) screenshots ($($shots -join ', '))"
     foreach ($n in $names) { Assert-True ($n -in $shots) "screenshot $n taken" }
 
@@ -124,6 +124,7 @@ if (Test-Path $smokeFile) {
     foreach ($row in 'Start PoolWatch when you sign in', 'Clear the cache every hour', 'Protect this PC from the Windows token leak') {
         Assert-True ($row -in $titles) "the setup guide lists '$row' ($($titles -join ' | '))"
     }
+    Assert-True ($null -ne $g.stats.updates) "the setup guide has the update notices switch"
     Assert-True ($g.stats.done -eq 'Done') "the setup guide closes with Done"
     Assert-True (@($g.stats.layoutProblems).Count -eq 0) "the setup guide: nothing clipped: $(@($g.stats.layoutProblems) -join '; ')"
     Assert-Plain 'the setup guide' (@($g.stats.facts) + @($g.stats.rows | ForEach-Object { $_.title, $_.why, $_.button }))
@@ -156,6 +157,10 @@ if (Test-Path $smokeFile) {
         Assert-True (@($credits | Where-Object { $_ -like "*$name*" }).Count -ge 1) "About credits $name"
     }
     Assert-True (@($s.about.layoutProblems).Count -eq 0) "About: nothing clipped: $(@($s.about.layoutProblems) -join '; ')"
+
+    # The update notice for a sample release, at the bottom of the main window.
+    Assert-True ($s.updateNotice.text -eq "PoolWatch 1.0.1 is available. See what's new") "the update notice reads: $($s.updateNotice.text)"
+    Assert-True (@($s.updateNotice.layoutProblems).Count -eq 0) "the update notice: nothing clipped: $(@($s.updateNotice.layoutProblems) -join '; ')"
 
     # Everything taken off the window is in the tray menu (the clear-task removals show only when there is one to remove).
     $tray = @($s.trayMenu)

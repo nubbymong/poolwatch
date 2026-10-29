@@ -9,11 +9,11 @@ namespace PoolWatch.Ui;
 /// <summary>
 /// The tray app: an icon coloured by state (grey while starting, then green / amber / red) with the paged + non-paged
 /// totals in its tooltip, a balloon when an incident opens, and the main window on demand. Its menu opens the setup guide
-/// and Active changes, and holds the tools that are not on the main window (DESIGN.md section 11): Capture now, Since boot
-/// report, Open incident folder, Export vendor bundle, Copy latest incident summary, the clear-task removals (shown only
-/// while there is something to remove), Report an issue and About. It is the shell the setup guide and the suggestions
-/// call (<see cref="IShell"/>): one of each window at a time, and the token-leak guard's sign-in check with its notices.
-/// The installer's exit signal ends it cleanly.
+/// and Active changes, says when a newer release is out (update notices, information only), and holds the tools that
+/// are not on the main window (DESIGN.md section 11): Capture now, Since boot report, Open incident folder, Export vendor
+/// bundle, Copy latest incident summary, the clear-task removals (shown only while there is something to remove), Report
+/// an issue and About. It is the shell the setup guide and the suggestions call (<see cref="IShell"/>): one of each window
+/// at a time, and the token-leak guard's sign-in check with its notices. The installer's exit signal ends it cleanly.
 /// </summary>
 internal sealed class TrayApp : ApplicationContext, IShell
 {
@@ -33,6 +33,11 @@ internal sealed class TrayApp : ApplicationContext, IShell
     private readonly HotkeyWindow _hotkey;
     private readonly ToolStripMenuItem _experimentItem;
     private readonly IDisposable? _exitSignal;
+    private readonly LiveSettings _live;
+    /// <summary>Update notices (none in the CI UI test): started once the setup guide has been completed.</summary>
+    private readonly UpdateCheck? _updates;
+    /// <summary>The CI UI test's sample release (<see cref="ShowSampleUpdate"/>); null otherwise.</summary>
+    private UpdateRelease? _sampleUpdate;
     private bool _markOpen;
     private GuardNotices? _guardNotices;
     private SetupGuideForm? _guide;
@@ -52,11 +57,24 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _actions = new UiActions(engine, analysis, _ui);
         _view = smoke ? null : new ViewState(engine.Paths, engine.Log);
-        Setup = new SetupContext(engine, analysis, _actions, live, ledger, this, smoke);
+        _live = live;
+        Setup = new SetupContext(engine, analysis, _actions, live, ledger, this, smoke, new UpdateSwitch(live));
+        if (!smoke)
+        {
+            // The check reads the setting at each wake, so turning notices off or on needs no call here.
+            _updates = new UpdateCheck(engine.Paths, engine.Log, () => live.Running.CheckForUpdates);
+            _updates.Found += _ => _ui.Post(_ => _form?.ShowUpdate(UpdateToShow), null);
+        }
         var menu = _menu;
         menu.Items.Add("Open PoolWatch", null, (_, _) => ShowWindow());
         menu.Items.Add("Set up PoolWatch...", null, (_, _) => OpenGuide());
         menu.Items.Add("Active changes...", null, (_, _) => _actions.Guarded(null, "Active changes", ShowActiveChanges));
+        // "PoolWatch 1.2.0 is available": shown only while a newer release is out; it opens that release's page.
+        var update = new ToolStripMenuItem("", null, (_, _) => _actions.Guarded(null, "Open the release page", () =>
+        {
+            if (UpdateToShow is { } r) UiActions.OpenWebPage(r.PageUrl);
+        })) { Visible = false };
+        menu.Items.Add(update);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Capture now", null, (_, _) => _actions.Guarded(null, "Capture now", () =>
         {
@@ -92,6 +110,9 @@ internal sealed class TrayApp : ApplicationContext, IShell
             clearLag.Enabled = !active;
             removeLegacy.Visible = _actions.LegacyTaskPresent;
             removeOld.Visible = _actions.OldTasksPresent;
+            var newer = UpdateToShow;
+            update.Visible = newer is not null;
+            update.Text = newer?.Text ?? "";
         };
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
@@ -119,8 +140,10 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _timer.Start();
         UpdateIcon();
         if (showWindow) ShowWindow();
-        // The first start (the guide was never completed): the guide over the main window, or, started at sign-in, a balloon.
-        if (!smoke && !Setup.Store.GuideCompleted)
+        // The first start (the guide was never completed): the guide over the main window, or, started at sign-in, a
+        // balloon. The update check starts once the guide has been completed, so the owner has seen its switch first.
+        if (Setup.Store.GuideCompleted) _updates?.Start();
+        else if (!smoke)
         {
             if (showWindow) OpenGuide();
             else Balloon("PoolWatch is running. Click here to set it up.", 10_000, opensGuide: true);
@@ -130,7 +153,24 @@ internal sealed class TrayApp : ApplicationContext, IShell
     /// <summary>What the setup guide and the suggestions use (made once).</summary>
     public SetupContext Setup { get; }
 
-    public MainForm Form => _form ??= new MainForm(Setup, _view);
+    public MainForm Form => _form ??= new MainForm(Setup, _view, () => UpdateToShow);
+
+    /// <summary>The newer release to tell the owner about: read each time (a release taken back changes it), and none while notices are off.</summary>
+    private UpdateRelease? UpdateToShow => _sampleUpdate ?? ToShow(_live.Running, _updates?.Available);
+
+    /// <summary>A newer release is told about only while update notices are on in <paramref name="running"/>.</summary>
+    internal static UpdateRelease? ToShow(Core.Settings running, UpdateRelease? available) => running.CheckForUpdates ? available : null;
+
+    /// <summary>
+    /// CI UI test: the window and the tray tell about <paramref name="release"/> in the check's place (the test never asks
+    /// GitHub), so a refresh while the screenshot is drawn keeps the notice. The sample skips the update-notices setting
+    /// (CI turns notices off), so it shows whatever the setting: <see cref="UpdateToShow"/> must return it first.
+    /// </summary>
+    internal void ShowSampleUpdate(UpdateRelease release)
+    {
+        _sampleUpdate = release;
+        Form.ShowUpdate(UpdateToShow);
+    }
 
     /// <summary>What the main window's Pool causes rankings hold, for PoolWatch's own cost report (any thread; none before the window was made).</summary>
     public (int rankings, int owners, int ownerMembers, int events) RankingsHeld() => _form?.Rankings.Held() ?? default;
@@ -168,14 +208,28 @@ internal sealed class TrayApp : ApplicationContext, IShell
     /// <summary>The setup guide from the menu, the balloon or a first start: a failure to open it is shown, never thrown (PoolWatch keeps running).</summary>
     private void OpenGuide() => _actions.Guarded(null, "Set up PoolWatch", ShowGuide);
 
-    /// <summary>The setup guide, one at a time. It marks itself completed when it closes.</summary>
+    /// <summary>The setup guide, one at a time. It marks itself completed when it closes; the update check then starts (once).</summary>
     private void ShowGuide()
     {
         _balloonOpensGuide = false;
         if (_guide is { IsDisposed: false } open) { Bring(open); return; }
         _guide = new SetupGuideForm(Setup);
-        _guide.FormClosed += (_, _) => _guide = null;
+        _guide.FormClosed += (_, _) =>
+        {
+            _guide = null;
+            _updates?.Start();
+        };
         Open(_guide);
+    }
+
+    /// <summary>The setup guide's update switch: the setting itself, applied at once.</summary>
+    private sealed class UpdateSwitch(LiveSettings live) : IUpdateCheck
+    {
+        public bool Enabled
+        {
+            get => live.Running.CheckForUpdates;
+            set => live.Apply($"update notices {(value ? "on" : "off")} (the setup guide)", s => s.CheckForUpdates = value);
+        }
     }
 
     // ---------------------------------------------------------------- IShell
@@ -264,6 +318,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
     protected override void ExitThreadCore()
     {
         _exitSignal?.Dispose(); // first: a second request finds nothing to signal
+        _updates?.Dispose();
         _analysis.Incidents.Opened -= _onOpened; // the sampler may still raise it until the engine stops
         _analysis.Diagnostics.ExperimentStep -= _onExperiment;
         _hotkey.Dispose();

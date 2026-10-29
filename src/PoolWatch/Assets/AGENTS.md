@@ -8,7 +8,10 @@ PoolWatch's data. It is written in plain words, so the person can read it too.
 PoolWatch is a free, open-source Windows app (https://github.com/nubbymong/poolwatch, MIT licence). It watches the
 Windows kernel's memory pools (the paged and non-paged pool; the app calls them "the kernel pool"), finds which program
 or driver makes them grow, and can clear the standby cache. It sends nothing about the PC anywhere: the person shares
-only what they choose.
+only what they choose. Its one connection of its own is an optional check for a new version, about once a day: an HTTPS
+request to api.github.com for PoolWatch's latest release, which carries PoolWatch's version and nothing about the PC.
+GitHub sees the IP address it comes from, as for any web page. Nothing is downloaded or installed, and the person can
+turn the check off in Settings or in the setup guide.
 
 This folder is one of these:
 
@@ -50,6 +53,7 @@ In the data folder:
 | `cache\tagscan.json` | which driver each pool tag belongs to, from PoolWatch's scan of the drivers |
 | `cache\environment.json` | the last look at the PC: Windows version and build, memory, drives and their file systems, the AI tools found and what is set up. No user names, and no paths except drive roots |
 | `cache\profile.json` | PoolWatch's own cost, written every hour: its processor time, memory and heap, what it holds in memory, and what it wrote to each file |
+| `cache\update-check.json` | the last check for a new version: when it ran, its result, and the newest release seen |
 | `service-changes.json` | every background service PoolWatch changed, with its original start type (Restore needs it) |
 | `applied-changes.json` | the other changes PoolWatch made that can be put back (Active changes needs it) |
 | `removed-tasks\<name>.xml` | only when a clear task of the owner's that PoolWatch removed could not be put back by itself: its definition, to import in Task Scheduler |

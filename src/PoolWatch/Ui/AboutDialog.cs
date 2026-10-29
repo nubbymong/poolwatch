@@ -17,7 +17,7 @@ internal sealed class AboutDialog : Form
     /// <summary>Start-up (JIT, first scans, tag scan) is not steady state: overhead is judged only after this long.</summary>
     private const int SteadySeconds = 300;
 
-    /// <summary>What PoolWatch changes, and that only the browser talks to the network (SECURITY.md has every action).</summary>
+    /// <summary>What PoolWatch changes (SECURITY.md has every action).</summary>
     private const string Changes =
         "PoolWatch watches and reads. It changes your PC only where you choose to: clearing the cache (now or automatically), " +
         "background services, scheduled tasks, startup apps, ending a program, starting at sign-in, replacing your own clear task, " +
@@ -25,8 +25,11 @@ internal sealed class AboutDialog : Form
         "On its own it only secures its data folder and removes an older PoolWatch's unused clear-cache tasks. Active changes " +
         "lists every lasting change, with a way to put it back; SECURITY.md in the source repository lists every action.";
 
-    private const string Network =
-        "PoolWatch sends nothing about your PC and has no telemetry. Report an issue and the links below open a page in your " +
+    /// <summary>What goes over the network: the update check, the one connection PoolWatch makes itself, and pages the browser opens.</summary>
+    internal const string Network =
+        "PoolWatch sends nothing about your PC and has no telemetry. The only connection it makes itself is the daily check for a " +
+        "new version on GitHub, which you can turn off in Set up PoolWatch or in Settings; GitHub sees your IP address, as it does for any " +
+        "web page. Report an issue and the links below open a page in your " +
         "browser; Report an issue copies its text for you to paste into GitHub's form, and nothing is public until you submit it.";
 
     private readonly ToolTip _tips = new();

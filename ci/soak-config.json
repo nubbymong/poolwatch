@@ -8,5 +8,7 @@
   // The soak measures steady-state overhead; the on-alert CPU trace (addendum 2 C) is a legitimate alert-time cost
   // that spikes working set and disk while it records and parses a 30 s ETL, so it is off here. The diag/lag scenario
   // still exercises the CPU-trace-on-lag-trip path.
-  "cpuTraceEnabled": false
+  "cpuTraceEnabled": false,
+  // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
+  "checkForUpdates": false
 }
