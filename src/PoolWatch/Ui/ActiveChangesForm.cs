@@ -43,7 +43,7 @@ internal sealed class ActiveChangesForm : Form
         _actions = actions;
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         Text = ChangeWords.WindowTitle;
-        Icon = TrayIcons.For(TrayState.Green);
+        Icon = TrayIcons.App;
         Font = new Font("Segoe UI", 9f);
         _bold = new Font(Font, FontStyle.Bold);
         _heading = new Font(Font.FontFamily, 14f, FontStyle.Bold);

@@ -76,7 +76,7 @@ internal sealed class TrayApp : ApplicationContext
         };
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
-        _icon = new NotifyIcon { ContextMenuStrip = menu, Visible = true, Text = "PoolWatch: starting", Icon = TrayIcons.For(TrayState.Green) };
+        _icon = new NotifyIcon { ContextMenuStrip = menu, Visible = true, Text = "PoolWatch: starting", Icon = TrayIcons.Starting };
         _icon.DoubleClick += (_, _) => ShowWindow();
         _onOpened = (inc, a) => _ui.Post(_ => Balloon($"{inc.Tag.ToDisplay()}: {a.Rule}. {inc.Suspects.FirstOrDefault()?.DisplayName ?? ""}"), null);
         _analysis.Incidents.Opened += _onOpened;
@@ -139,9 +139,9 @@ internal sealed class TrayApp : ApplicationContext
 
     private void UpdateIcon()
     {
-        var state = UiData.State(_analysis);
-        if (state != _state) { _icon.Icon = TrayIcons.For(state); _state = state; }
         var t = _engine.Latest?.Totals;
+        var state = UiData.State(_analysis);
+        if (t is not null && state != _state) { _icon.Icon = TrayIcons.For(state); _state = state; }
         string text = t is { } x ? $"PoolWatch: paged {Fmt.Bytes((long)x.CommittedPaged)}, non-paged {Fmt.Bytes((long)x.CommittedNonPaged)}" : "PoolWatch: starting";
         if (_analysis.Diagnostics.AnyExperimentActive) text += "\n" + _analysis.Diagnostics.ExperimentStatus().Replace("Experiment: ", "");
         _icon.Text = text.Length > 127 ? text[..127] : text;
