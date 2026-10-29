@@ -31,6 +31,8 @@ Show the images at their own proportions, and at half their pixel width or less 
 - `src/PoolWatch/Assets/tray-*.ico`: the binoculars in the tray with a dot in the status's colour: `tray-healthy`
   green, `tray-warning` amber and `tray-critical` red; `tray-inactive`, grey binoculars while PoolWatch has no reading
   yet.
+- `docs/screenshots/compare-*.svg` and `docs/screenshots/pillar-*.svg`: the README's with and without picture and the
+  four icons under "What PoolWatch does", each in a light and a dark version.
 - `installer/`: the setup's side image and its small top-corner image, in the sizes of Setup's image areas, so it picks
   the closest one for the display scale: the side image at 202 x 386 and 269 x 515 (100% and 125%) and 328 x 628 (close
   to 150%), the corner image at 58, 77, 97 and 124 px square (100%, 125%, 150% and 200%).
