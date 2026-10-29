@@ -1,4 +1,5 @@
 using PoolWatch.Core;
+using PoolWatch.Core.Services;
 using PoolWatch.Engine;
 
 namespace PoolWatch.AppTests;
@@ -62,6 +63,49 @@ public sealed class LiveSettingsTests : IDisposable
         Assert.True(live.Running.TokenGuardEnabled);
         Assert.False(File.Exists(_f.Paths.SettingsFile));
     }
+
+    [Fact]
+    public void SettingsSaveWritesNothingWithAConfigFileSoItsProfileIsNeverAppliedAtTheNextStart()
+    {
+        // A --config file's settings, with a service profile chosen to apply at start, as Settings' editor holds them.
+        var fromConfig = new Settings
+        {
+            DeeperCapture = true,
+            ServiceProfiles = new ServiceProfileSet { Profiles = [new("P", ["SysMain", "MapsBroker"])], AtStart = "P" },
+        };
+        var live = _f.Live(fromConfig, persist: false);
+        Assert.False(live.SaveForNextStart(Clone(fromConfig)));
+        Assert.False(File.Exists(_f.Paths.SettingsFile));
+
+        // PoolWatch's own settings.json is left byte for byte as it was, so the next start applies no profile from that file.
+        new ProfileStore(_f.Live()).Save("Mine", ["Fax"], atStart: false, 3);
+        byte[] before = File.ReadAllBytes(_f.Paths.SettingsFile);
+        Assert.False(live.SaveForNextStart(Clone(fromConfig)));
+        Assert.Equal(before, File.ReadAllBytes(_f.Paths.SettingsFile));
+        Assert.Null(_f.Saved().ServiceProfiles.AtStart);
+    }
+
+    [Fact]
+    public void SettingsSaveKeepsTheServiceProfilesAsTheyAreNowAndWritesEveryOtherSetting()
+    {
+        var live = _f.Live();
+        var store = new ProfileStore(live);
+        store.Save("Build box", ["SysMain"], atStart: true, 5);
+        var opened = Clone(_f.Saved());                                   // Settings opened now...
+        store.Save("Build box", ["SysMain", "MapsBroker"], atStart: false, 5); // ...then the Services tab changed the profiles
+        store.Save("Second", ["Fax"], atStart: true, 7);
+        opened.DeeperCapture = true;
+
+        Assert.True(live.SaveForNextStart(opened));
+        var saved = _f.Saved();
+        Assert.True(saved.DeeperCapture);
+        Assert.Equal(["Build box", "Second"], saved.ServiceProfiles.Profiles.Select(p => p.Name));
+        Assert.Equal(["SysMain", "MapsBroker"], saved.ServiceProfiles.Find("Build box")!.Services);
+        Assert.Equal(("Second", 7), (saved.ServiceProfiles.AtStart, saved.ServiceProfiles.DelayMinutes));
+        Assert.False(File.Exists(_f.Paths.SettingsFile + ".tmp"));
+    }
+
+    private static Settings Clone(Settings s) => Settings.Parse(s.ToJson());
 
     [Fact]
     public void AFailedWriteChangesNothing()

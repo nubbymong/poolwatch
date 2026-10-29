@@ -106,6 +106,7 @@ public class ChangeRecordTests
         { "Microsoft clear task", ClearTask(@"\MicrosoftClear") },
         { "relative task path", Task(@"Vendor\Updater") },
         { "dot segment", Task(@"\Vendor\..\Updater") },
+        { "task path with a forward slash", Task(@"\Vendor/Updater") },
         { "no state before", Task() with { EnabledBefore = null } },
         { "clear task in a folder", ClearTask(@"\Tools\Clear standby") },
         { "clear task in a folder by a forward slash", ClearTask(@"\Tools/Clear standby") },
@@ -173,6 +174,13 @@ public class ChangeRecordTests
         Assert.Equal("Turned off Downloaded Maps Manager (MapsBroker)", ChangeWords.Service("Downloaded Maps Manager", "MapsBroker", turnedOff: true));
         Assert.Equal("Set Fax back to its Windows default", ChangeWords.Service("Fax", "Fax", turnedOff: false));
         Assert.Equal("Turned off MapsBroker", ChangeWords.Service("", "MapsBroker", turnedOff: true));
+        // A row a profile made says which (an Apply by hand, or a built-in, says nothing more).
+        Assert.Equal("Turned off MapsBroker (profile Build box, at start)", ChangeWords.Service("", "MapsBroker", turnedOff: true, "profile Build box, at start"));
+        Assert.Equal("Turned off MapsBroker (profile Build box, edited)", ChangeWords.Service("", "MapsBroker", turnedOff: true, "profile Build box, edited"));
+        Assert.Equal("Turned off MapsBroker", ChangeWords.Service("", "MapsBroker", turnedOff: true, "manual"));
+        Assert.Equal("Turned off MapsBroker", ChangeWords.Service("", "MapsBroker", turnedOff: true, "Telemetry only"));
+        Assert.Equal("Build box, the profile PoolWatch applies when it starts, turns Maps (MapsBroker) off again then. Putting it back also takes it out of Build box, so it stays on.",
+            ChangeWords.KeptOffAtStart("Build box", "Maps (MapsBroker)"));
     }
 
     [Fact]
@@ -189,7 +197,8 @@ public class ChangeRecordTests
         var texts = new List<string>
         {
             ChangeWords.LogonTask, ChangeWords.TokenGuard, ChangeWords.TokenGuardNote, ChangeWords.TokenGuardOff, ChangeWords.AutoClearKeepsTaskNote, ChangeWords.NotListed,
-            ChangeWords.AutoClear(1, 8), ChangeWords.AutoClear(0, 0), ChangeWords.Service("Downloaded Maps Manager", "maps", true),
+            ChangeWords.AutoClear(1, 8), ChangeWords.AutoClear(0, 0), ChangeWords.Service("Downloaded Maps Manager", "maps", true, "profile Build box, at start"),
+            ChangeWords.KeptOffAtStart("Build box", "maps"),
             ChangeWords.Of(ClearTask()), ChangeWords.Of(Task()), ChangeWords.Of(Startup()), ChangeWords.Of(Shortcut()),
             ChangeWords.Unread("the services it changed"), ChangeWords.UnreadNote(""),
         };

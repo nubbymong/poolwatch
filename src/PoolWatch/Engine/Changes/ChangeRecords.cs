@@ -72,13 +72,8 @@ internal sealed class ChangeRecords
 
     /// <summary>
     /// Removes the record once its change is undone (with a removed clear task's definition saved for import, no longer
-    /// needed). A failure is logged: the change was undone either way.
-    /// </summary>
-    public void Remove(string id) => RemoveWhere(id, r => SameId(r, id));
-
-    /// <summary>
-    /// Like <see cref="Remove(string)"/>, but only while the record there is still <paramref name="undone"/> as it was
-    /// saved: a record another removal of that target saved since is that removal's to keep.
+    /// needed), only while the record there is still <paramref name="undone"/> as it was saved: a record another change
+    /// of that target saved since is that change's to keep. A failure is logged: the change was undone either way.
     /// </summary>
     public void Remove(ChangeRecord undone) => RemoveWhere(undone.Id, r => SameSave(r, undone));
 
@@ -91,12 +86,32 @@ internal sealed class ChangeRecords
     }
 
     /// <summary>
-    /// A scheduled task (<paramref name="location"/> is its path, <paramref name="name"/> its name) or a startup entry
-    /// (<paramref name="location"/> is the StartupLocation label) was switched: the first switch records the state before
-    /// it, switching it back removes the record (nothing is left to undo), switching it the same way again keeps the first
-    /// record. The switch has happened, so a record that cannot be saved is logged, not thrown.
+    /// Switches a scheduled task (<paramref name="location"/> is its path, <paramref name="name"/> its name) or a startup
+    /// entry (<paramref name="location"/> is the StartupLocation label) with <paramref name="toggle"/> (null, or why it
+    /// failed), recorded for Undo first: the first switch records the state before it, switching it back removes the
+    /// record once it is switched back (nothing is left to undo), switching it the same way again keeps the first record.
+    /// When the record cannot be saved, nothing is switched and that is the error; when the first switch fails or
+    /// throws, its record is taken back (only while the record there is still the one this switch saved). So a switch
+    /// is never left in place without its record, even when PoolWatch stops in between. Runs one at a time with Undo's
+    /// switch back (<see cref="OneSwitchAtATime{T}"/>). Returns null, or why it was not switched.
     /// </summary>
-    public void RecordToggle(ChangeKind kind, string location, string name, bool enabledNow, string via)
+    public string? Toggle(ChangeKind kind, string location, string name, bool enable, string via, Func<string?> toggle)
+    {
+        lock (_switching) return ToggleNow(kind, location, name, enable, via, toggle);
+    }
+
+    /// <summary>
+    /// Held across a switch of a scheduled task or startup entry with its record: <see cref="Toggle"/> (the Services tab,
+    /// on the UI thread) and Undo's switch back (on a worker, through <see cref="OneSwitchAtATime{T}"/>). So in this
+    /// process a switch never runs between another's record and its switch, which could leave a task switched with no
+    /// record; no lock spans processes. Nothing done under it waits for the UI thread.
+    /// </summary>
+    private readonly object _switching = new();
+
+    /// <summary>Runs Undo's switch back of a task or startup entry, its record's removal included, one at a time with <see cref="Toggle"/>.</summary>
+    public T OneSwitchAtATime<T>(Func<T> switchBack) { lock (_switching) return switchBack(); }
+
+    private string? ToggleNow(ChangeKind kind, string location, string name, bool enable, string via, Func<string?> toggle)
     {
         var recordKind = kind switch
         {
@@ -107,19 +122,36 @@ internal sealed class ChangeRecords
         string id = recordKind == RecordKind.ScheduledTask ? ChangeIds.ScheduledTask(location) : ChangeIds.StartupEntry(location, name);
         var record = new ChangeRecord
         {
-            Id = id, Kind = recordKind, ChangedUtc = DateTime.UtcNow, Via = via, Name = name, Location = location, EnabledBefore = !enabledNow,
+            Id = id, Kind = recordKind, ChangedUtc = DateTime.UtcNow, Via = via, Name = name, Location = location, EnabledBefore = !enable,
         };
+        if (ChangeRecordFile.Invalid(record) is { } invalid) return "not switched, because PoolWatch cannot record it to put it back later: " + invalid;
+        ChangeRecord? added = null, back = null;
         try
         {
-            ThrowIfInvalid(record);
-            Edit(now => now.FirstOrDefault(r => SameId(r, id)) switch
+            Edit(now =>
             {
-                null => With(now, record),
-                { EnabledBefore: var before } when before == enabledNow => now.Where(r => !SameId(r, id)).ToList(),
-                _ => null,
+                added = back = null;
+                var there = now.FirstOrDefault(r => SameId(r, id));
+                if (there is null) { added = record; return With(now, record); }
+                if (there.EnabledBefore == enable) back = there; // back as it was: its record goes once that is done
+                return null; // switched back, or the same way again (the first record, with the state before it, stays)
             });
         }
-        catch (Exception ex) { _log.Info($"{FileName}: {location} {name} was switched but not recorded: {ex.Message}"); }
+        catch (Exception ex) { return "not switched, because PoolWatch could not save how it was set: " + ex.Message; }
+        string? error;
+        try { error = toggle(); }
+        catch (Exception) { TakeBack(added); throw; }
+        if (error is not null) TakeBack(added);
+        else if (back is not null) Remove(back);
+        return error;
+    }
+
+    /// <summary>A first switch that failed: the record it saved goes, unless another save has replaced it since. A failure is logged.</summary>
+    private void TakeBack(ChangeRecord? added)
+    {
+        if (added is null) return;
+        try { Edit(now => now.Any(r => SameSave(r, added)) ? now.Where(r => !SameSave(r, added)).ToList() : null); }
+        catch (Exception ex) { _log.Info($"{FileName}: {added.Location} was not switched, but its record was not taken back: {ex.Message}"); }
     }
 
     /// <summary>
@@ -324,7 +356,8 @@ internal sealed class ChangeRecords
         try
         {
             // Never read through a link either: no folder on the way (the guard), nor the file itself (its own handle).
-            json = ReadPlainFile(_paths.DataRoot, _paths.Guard.CheckReal(FilePath), ChangeRecordFile.MaxBytes) ?? throw Unreadable($"it is over {ChangeRecordFile.MaxBytes >> 20} MB");
+            json = ReadPlainFile(_paths.DataRoot, _paths.Guard.CheckReal(FilePath), ChangeRecordFile.MaxBytes)
+                   ?? throw Unreadable($"it is over {ChangeRecordFile.MaxBytes >> 20} MB");
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { return _records = []; }
         return _records = ChangeRecordFile.Parse(json) ?? throw (string.IsNullOrWhiteSpace(json)

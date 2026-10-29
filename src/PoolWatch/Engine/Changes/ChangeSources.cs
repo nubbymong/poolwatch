@@ -83,34 +83,72 @@ internal sealed class SettingsSource(LiveSettings live, ChangeRecords records, A
         new("unread:settings", ChangeKind.AutoClear, null, ChangeWords.Unread("its automatic clear and token-leak guard settings"), false, ChangeWords.UnreadNote(error));
 }
 
-/// <summary>Services PoolWatch changed: listed from service-changes.json, put back through the services page's gated Restore.</summary>
-internal sealed class ServicesSource(ServicesController services) : IChangeSource
+/// <summary>
+/// Services PoolWatch changed: listed from service-changes.json as it is now (a file that cannot be read is a row that
+/// cannot be put back), put back through the services page's gated Restore.
+/// </summary>
+/// <param name="profiles">The running profiles (the app; null for the command line): a service the profile applied at start
+/// lists, and that is on once put back, has a warning before it is put back, and a put-back the owner confirmed takes it
+/// out of that profile, so it stays on.</param>
+internal sealed class ServicesSource(ServicesController services, ProfileStore? profiles = null) : IChangeSource
 {
-    public IEnumerable<ActiveChange> List() => services.Changes.Select(c =>
+    public IEnumerable<ActiveChange> List()
     {
-        bool turnedOff = c.NewStart == ServiceStartType.Disabled;
-        return new ActiveChange(ChangeIds.Service(c.Service), ChangeKind.Service, c.ChangedUtc, ChangeWords.Service(c.DisplayName, c.Service, turnedOff),
-            CanUndo: true, Note: null)
+        var set = profiles?.Current;
+        return services.Current().Select(c =>
         {
-            Title = ChangeWords.ServiceTitle(c.DisplayName, c.Service),
-            Detail = ChangeWords.ServiceDetail(c.OriginalStart, c.OriginalRunning, turnedOff),
-            Group = turnedOff ? ChangeGroup.TurnedOff : ChangeGroup.Other,
-        };
-    });
+            bool turnedOff = c.Via != ServicePlan.ViaWindowsDefault;
+            // Only a service putting back turns on would be turned off again by the profile (not one put back to Disabled).
+            string? atStart = set is not null && OnOnceBack(c) ? ServiceProfileRules.AtStartHolding(set, [c.Service]).Profile : null;
+            return new ActiveChange(ChangeIds.Service(c.Service), ChangeKind.Service, c.ChangedUtc, ChangeWords.Service(c.DisplayName, c.Service, turnedOff, c.Via),
+                CanUndo: true, Note: null)
+            {
+                Title = ChangeWords.ServiceTitle(c.DisplayName, c.Service),
+                Detail = ChangeWords.ServiceDetail(c.OriginalStart, c.OriginalRunning, turnedOff, c.Via),
+                Group = turnedOff ? ChangeGroup.TurnedOff : ChangeGroup.Other,
+                Warning = atStart is null ? null : ChangeWords.KeptOffAtStart(atStart, ChangeWords.ServiceName(c.DisplayName, c.Service)),
+                AtStart = atStart is null ? null : new AtStartHold(atStart, c.Service),
+            };
+        }).ToList();
+    }
+
+    private bool OnOnceBack(ServiceChange c) => ServicePlan.OnAfterRestore(c, services.Catalogue.Find(c.Service));
+
+    /// <summary>
+    /// Put all back puts a service that another of its rows depends on back first (<see cref="ServicesController.PutBackOrder"/>):
+    /// Windows does not start a service again while one it needs is still Disabled.
+    /// </summary>
+    public IReadOnlyList<ActiveChange> PutBackOrder(IReadOnlyList<ActiveChange> rows)
+    {
+        var records = services.Current();
+        return services.PutBackOrder(rows, r => Find(records, r.Id)?.Service ?? "");
+    }
 
     public UndoResult Undo(ActiveChange change, bool confirmed)
     {
-        if (Find(change.Id) is not { } record) return new(true, "This service is already back to how it was.");
-        string? error = services.Restore(record.Service).Select(r => r.error).FirstOrDefault();
+        if (Find(services.Current(), change.Id) is not { } record) return new(true, "This service is already back to how it was.");
+        string profileSaid = "";
+        // The owner accepted this row's warning, and the service is on now: the profile applied at start no longer turns it
+        // off again. A row with no warning (Put all back confirms every row) or a service put back to off leaves the profile.
+        // It comes out in the restore's own operation, so the run at start never turns it off again in between.
+        string? error = services.Restore(record.Service, out _, putBack =>
+        {
+            if (confirmed && change.Warning is not null && profiles is not null && putBack.Any(OnOnceBack))
+            {
+                try { if (profiles.KeepOn([record.Service]) is { } p) profileSaid = $" It is out of {p} now, so it stays on."; }
+                catch (Exception ex) { profileSaid = $" PoolWatch could not take it out of the profile applied at start, which turns it off again then: {ex.Message}"; }
+            }
+            return [];
+        }).Select(r => r.error).FirstOrDefault();
         string name = ChangeWords.ServiceName(record.DisplayName, record.Service);
-        // Restore removes the record once the start type is back, even when starting the service again failed.
-        bool back = Find(change.Id) is null;
-        return back
-            ? new(true, error is null ? $"{name} is back to how it was." : $"{name}: {error}.")
-            : new(false, $"PoolWatch could not put back {name}: {error ?? "it is still changed"}.");
+        // Restore removes the record once the start type is back, even when starting the service again failed (from
+        // memory too when the file could not be saved: the service is back either way).
+        bool back = Find(services.Changes, change.Id) is null;
+        if (!back) return new(false, $"PoolWatch could not put back {name}: {error ?? "it is still changed"}.");
+        return new(true, (error is null ? $"{name} is back to how it was." : $"{name}: {error}.") + profileSaid);
     }
 
-    private ServiceChange? Find(string id) => services.Changes.FirstOrDefault(c => ChangeIds.Service(c.Service) == id);
+    private static ServiceChange? Find(IReadOnlyList<ServiceChange> changes, string id) => changes.FirstOrDefault(c => ChangeIds.Service(c.Service) == id);
 
     public ActiveChange Unread(string error) =>
         new("unread:services", ChangeKind.Service, null, ChangeWords.Unread("the services it changed"), false, ChangeWords.UnreadNote(error));
@@ -190,7 +228,11 @@ internal sealed class RecordedSource : IChangeSource
         };
     }
 
-    private UndoResult SwitchBack(ChangeRecord r, string what, Func<bool> exists, Func<string?> set)
+    /// <summary>Puts a task or startup entry back as it was and removes its record, one at a time with the Services tab's switch.</summary>
+    private UndoResult SwitchBack(ChangeRecord r, string what, Func<bool> exists, Func<string?> set) =>
+        _records.OneSwitchAtATime(() => SwitchBackNow(r, what, exists, set));
+
+    private UndoResult SwitchBackNow(ChangeRecord r, string what, Func<bool> exists, Func<string?> set)
     {
         bool there;
         try { there = exists(); }

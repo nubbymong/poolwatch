@@ -681,7 +681,9 @@ public class PoolCausesTests
             var middles = Enumerable.Range(0, 3).Select(i => bitmap.GetPixel((int)(2 + i * (bar.Width + gap) + bar.Width / 2), (int)(8 + bar.Height / 2)).ToArgb()).ToList();
             Assert.Equal([UiColors.Medium.ToArgb(), UiColors.Medium.ToArgb(), UiColors.Track.ToArgb()], middles);
         }
-        // One palette: Active changes takes the design's colours from UiColors.
+        // One palette: the Services and Tasks tabs and Active changes take the design's colours from UiColors.
+        Assert.Equal((UiColors.Ink, UiColors.Muted, UiColors.Faint, UiColors.Good, UiColors.Line), (ListTabStyle.Ink, ListTabStyle.Muted, ListTabStyle.Faint,
+            ListTabStyle.Good, ListTabStyle.Line));
         Assert.Equal((UiColors.Ink, UiColors.Muted, UiColors.Faint, UiColors.Good, UiColors.RowLine, UiColors.Warn),
             (ActiveChangesForm.Palette.Ink, ActiveChangesForm.Palette.Muted, ActiveChangesForm.Palette.Faint, ActiveChangesForm.Palette.Good,
              ActiveChangesForm.Palette.RowLine, ActiveChangesForm.Palette.Warn));

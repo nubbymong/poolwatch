@@ -82,6 +82,11 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
     public const string Saved =
         "Saved. Automatic clearing, the token-leak guard and update notices apply now; any other change applies the next time PoolWatch starts.";
 
+    /// <summary>What Save says when PoolWatch was started with --config, whose file it never writes (nor its own settings then).</summary>
+    public const string NotSavedWithConfig =
+        "Automatic clearing, the token-leak guard and update notices apply now. Nothing is saved for the next time PoolWatch starts: " +
+        "it was started with --config, so it keeps no settings.";
+
     /// <summary>The line at the bottom of the form.</summary>
     public const string WhenChangesApply =
         "Start at logon changes as soon as you tick it. Save puts automatic clearing, the token-leak guard and update notices into effect at once; " +

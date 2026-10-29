@@ -7,7 +7,8 @@ namespace PoolWatch.Ui;
 
 /// <summary>
 /// The settings being edited, shared by the plain Settings form and the Advanced grid, and the one Save both use. Save
-/// writes settings.json and puts the automatic clear, the token-leak guard and update notices into effect at once
+/// writes settings.json (<see cref="LiveSettings.SaveForNextStart"/>: never with --config, and with the service profiles
+/// as they are then) and puts the automatic clear, the token-leak guard and update notices into effect at once
 /// (<see cref="LiveSettings"/>, so the next-clear line and Active changes are right straight away); every other setting
 /// applies at PoolWatch's next start. Turning the automatic clear on first deals with any clear task of your own;
 /// turning the guard on starts its sign-in check. A change made elsewhere while Settings is open (a suggestion, the setup
@@ -17,16 +18,14 @@ namespace PoolWatch.Ui;
 /// </summary>
 internal sealed class SettingsEditor
 {
-    private readonly MonitorEngine _engine;
     private readonly AnalysisPipeline _analysis;
     private readonly LiveSettings _live;
     private readonly IShell _shell;
     /// <summary>The settings as this opening of Settings last showed them: <see cref="Edit"/> without the edits made here.</summary>
     private readonly Settings _shown;
 
-    public SettingsEditor(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions, LiveSettings live, IShell shell)
+    public SettingsEditor(AnalysisPipeline analysis, UiActions actions, LiveSettings live, IShell shell)
     {
-        _engine = engine;
         _analysis = analysis;
         Actions = actions;
         _live = live;
@@ -77,13 +76,14 @@ internal sealed class SettingsEditor
         string? clearStaysOff = apply.TurnsClearOn(running) ? ClearTaskStays(owner) : null;
         if (clearStaysOff is not null) apply = apply with { AutoClear = apply.AutoClear with { Enabled = false } };
         apply.ApplyTo(Edit);
-        Edit.Save(_engine.Paths.Guard.CheckReal(_engine.Paths.SettingsFile)); // every setting, for the next start
-        _live.Apply("Settings", apply.ApplyTo);                              // and these at once
+        bool kept = _live.SaveForNextStart(Edit); // every setting, for the next start (nothing with --config)
+        _live.Apply("Settings", apply.ApplyTo);   // and these at once
         apply.ApplyTo(_shown);
         if (apply.TurnsGuardOn(running)) _ = _shell.StartTokenGuard(); // its notices say how the check went
         else if (apply.TurnsGuardOff(running)) _analysis.Diagnostics.Guard.WorkaroundWanted = false;
         _analysis.Diagnostics.Cache.RefreshStatus();
-        MessageBox.Show(owner, clearStaysOff is null ? SimpleSettings.Saved : SimpleSettings.Saved + "\n\n" + clearStaysOff, "PoolWatch");
+        string said = kept ? SimpleSettings.Saved : SimpleSettings.NotSavedWithConfig;
+        MessageBox.Show(owner, clearStaysOff is null ? said : said + "\n\n" + clearStaysOff, "PoolWatch");
     }
 
     /// <summary>

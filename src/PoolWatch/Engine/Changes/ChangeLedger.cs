@@ -44,7 +44,7 @@ internal sealed class ChangeLedger
         [
             new LogonTaskSource(new Ui.WindowsLogonTasks(engine.Paths)),
             new SettingsSource(live, records, () => d.Guard.WorkaroundWanted = false),
-            new ServicesSource(d.Services),
+            new ServicesSource(d.Services, new ProfileStore(live)),
             new RecordedSource(records, new TasksAndStartup(engine.Log), new WindowsClearTaskStore(), live),
         ];
         return new ChangeLedger(sources, records, engine.Log, (change, result) =>
@@ -96,14 +96,40 @@ internal sealed class ChangeLedger
     public IReadOnlyList<ActiveChange> List() => Rows().Select(r => r.Change).ToList();
 
     /// <summary>
-    /// Puts back every change <paramref name="which"/> selects (null: all) in <see cref="UndoOrder"/>. A change that cannot
-    /// be put back, or whose put-back fails, is reported and the next one runs. Worker thread.
+    /// Puts back every change <paramref name="which"/> selects (null: all) in <see cref="UndoOrder"/>, and the rows of one
+    /// kind from one source in that source's order (<see cref="IChangeSource.PutBackOrder"/>: services, one that another
+    /// depends on first). A change that cannot be put back, or whose put-back fails, is reported and the next one runs.
+    /// Worker thread.
     /// </summary>
-    public IReadOnlyList<(ActiveChange Change, UndoResult Result)> UndoAll(Func<ActiveChange, bool>? which = null, bool confirmed = false) =>
-        Rows().Where(r => which?.Invoke(r.Change) ?? true)
-            .OrderBy(r => IndexOf(r.Change.Kind))
-            .Select(r => (r.Change, Run(r.Source, r.Change, confirmed)))
-            .ToList();
+    public IReadOnlyList<(ActiveChange Change, UndoResult Result)> UndoAll(Func<ActiveChange, bool>? which = null, bool confirmed = false)
+    {
+        var picked = Rows().Where(r => which?.Invoke(r.Change) ?? true).OrderBy(r => IndexOf(r.Change.Kind)).ToList();
+        var ordered = new List<(IChangeSource Source, ActiveChange Change)>(picked.Count);
+        for (int i = 0, end; i < picked.Count; i = end)
+        {
+            var (source, kind) = (picked[i].Source, picked[i].Change.Kind);
+            for (end = i; end < picked.Count && picked[end].Source == source && picked[end].Change.Kind == kind; end++) { }
+            var rows = picked.GetRange(i, end - i).Select(r => r.Change).ToList();
+            ordered.AddRange(InPutBackOrder(source, rows).Select(c => (source, c)));
+        }
+        return ordered.Select(r => (r.Change, Run(r.Source, r.Change, confirmed))).ToList();
+    }
+
+    /// <summary><paramref name="rows"/> in their source's put-back order; as they are when that fails or would lose a row.</summary>
+    private IReadOnlyList<ActiveChange> InPutBackOrder(IChangeSource source, List<ActiveChange> rows)
+    {
+        if (rows.Count < 2) return rows;
+        try
+        {
+            var order = source.PutBackOrder(rows);
+            return order.Count == rows.Count && rows.All(order.Contains) ? order : rows;
+        }
+        catch (Exception ex)
+        {
+            _log.Info($"active changes: {source.GetType().Name}: put back in the order listed: {ex.Message}");
+            return rows;
+        }
+    }
 
     private static int IndexOf(ChangeKind kind)
     {

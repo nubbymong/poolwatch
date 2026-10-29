@@ -59,17 +59,18 @@ public class ListSyncTests
         foreach (var c in PoolCauses.Columns) list.Columns.Add(c);
         host.Controls.Add(list);
         _ = list.Handle;
-        Assert.All(Enumerable.Range(0, 8), i => Assert.Null(PoolCausesHeader.Arrow(list, i)));
-        PoolCausesHeader.Show(list, PoolCauses.GrewColumn, descending: false);
-        Assert.Equal(false, PoolCausesHeader.Arrow(list, PoolCauses.GrewColumn)); // up: ascending
-        Assert.Null(PoolCausesHeader.Arrow(list, 0));
-        PoolCausesHeader.Show(list, PoolCauses.GrewColumn, descending: true);
-        Assert.Equal(true, PoolCausesHeader.Arrow(list, PoolCauses.GrewColumn)); // down: the other way
-        PoolCausesHeader.Show(list, 7, descending: false);
-        Assert.Null(PoolCausesHeader.Arrow(list, PoolCauses.GrewColumn));
-        Assert.Equal(false, PoolCausesHeader.Arrow(list, 7));
-        PoolCausesHeader.Show(list, -1, descending: false);
-        Assert.All(Enumerable.Range(0, 8), i => Assert.Null(PoolCausesHeader.Arrow(list, i)));
+        // Pool causes uses the same header arrow as the Services and tasks lists (ListSort).
+        Assert.All(Enumerable.Range(0, 8), i => Assert.Equal(0, ListSort.ArrowOf(list, i)));
+        ListSort.SetArrow(list, PoolCauses.GrewColumn, ascending: true);
+        Assert.Equal(1, ListSort.ArrowOf(list, PoolCauses.GrewColumn)); // up: ascending
+        Assert.Equal(0, ListSort.ArrowOf(list, 0));
+        ListSort.SetArrow(list, PoolCauses.GrewColumn, ascending: false);
+        Assert.Equal(-1, ListSort.ArrowOf(list, PoolCauses.GrewColumn)); // down: the other way
+        ListSort.SetArrow(list, 7, ascending: true);
+        Assert.Equal(0, ListSort.ArrowOf(list, PoolCauses.GrewColumn));
+        Assert.Equal(1, ListSort.ArrowOf(list, 7));
+        ListSort.SetArrow(list, -1, ascending: true);                    // the list's own order: no arrow
+        Assert.All(Enumerable.Range(0, 8), i => Assert.Equal(0, ListSort.ArrowOf(list, i)));
         // The header's text stays as it was.
         Assert.Equal(PoolCauses.Columns, list.Columns.Cast<ColumnHeader>().Select(c => c.Text));
     }
@@ -82,5 +83,9 @@ public class ListSyncTests
         Assert.Equal((2, true), PoolCausesSort.Click((2, false), 2));          // again: the other way
         Assert.Equal((2, false), PoolCausesSort.Click((2, true), 2));          // and back
         Assert.Equal((5, false), PoolCausesSort.Click((2, true), 5));          // another column starts ascending
+        // The one rule every sortable list uses.
+        Assert.Equal((3, true), ListSort.Next((0, true), 3));
+        Assert.Equal((3, false), ListSort.Next((3, true), 3));
+        Assert.Equal((3, true), ListSort.Next((3, false), 3));
     }
 }

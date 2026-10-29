@@ -21,7 +21,7 @@ public class RefreshRepaintTests
     [Fact]
     public void TheMainWindowShowsNoTextInANativeLabel()
     {
-        // Every text a refresh writes is held in a field (the legend and the "Preset:" caption are never changed). The native
+        // Every text a refresh writes is held in a field (the legend and the "Profile:" caption are never changed). The native
         // labels are the update notice, whose text changes only when a newer release appears, days apart, never with a sample,
         // and the Active changes link, whose text never changes (its count is a control that draws itself).
         var labels = typeof(MainForm).GetFields(BindingFlags.Instance | BindingFlags.NonPublic)
@@ -110,9 +110,9 @@ public class RefreshRepaintTests
     {
         // Its Cost cells change on every refresh; a list view that is not double-buffered erases a changed cell on screen
         // before it draws it again.
-        Assert.Equal(typeof(BufferedListView), typeof(MainForm).GetField("_services", BindingFlags.Instance | BindingFlags.NonPublic)?.FieldType);
+        Assert.Equal(typeof(ServiceListView), typeof(ServicesTabView).GetProperty("Services")?.PropertyType);
         using var host = new Form();
-        var list = new BufferedListView();
+        var list = new ServiceListView();
         host.Controls.Add(list);
         Assert.NotEqual(0, (long)SendMessage(list.Handle, LVM_GETEXTENDEDLISTVIEWSTYLE, IntPtr.Zero, IntPtr.Zero) & LVS_EX_DOUBLEBUFFER);
     }

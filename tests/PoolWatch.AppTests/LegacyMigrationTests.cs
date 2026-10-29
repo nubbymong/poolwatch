@@ -215,15 +215,16 @@ public sealed class LegacyMigrationTests : IDisposable
 
         Assert.Null(r.Refused);
         Assert.Empty(r.Failed);
-        Assert.Equal(4, r.Copied);
-        Assert.Equal(4, r.Deleted);
-        foreach (var (rel, text) in new[] { ("settings.json", "{ \"sampleIntervalSeconds\": 10 }"), ("poolwatch.log", "log line"),
+        Assert.Equal(3, r.Copied);
+        Assert.Equal(3, r.Deleted);
+        foreach (var (rel, text) in new[] { ("poolwatch.log", "log line"),
                      (@"data\20261020\tags.csv", "time,tag"), (@"incidents\20261020-111111-Reff\report.md", "# report") })
         {
             Assert.Equal(text, File.ReadAllText(Path.Combine(Data, rel)));
             Assert.False(File.Exists(Path.Combine(Legacy, rel)), rel + " is still in the old folder");
         }
-        foreach (var rel in new[] { "service-changes.json", @"cache\tagscan.json", @"symbols\ntkrnlmp.pdb", @"requests\mark.txt", "tool.exe" })
+        // settings.json only through the checked settings migration at start (never as it is: it could carry service profiles).
+        foreach (var rel in new[] { "settings.json", "service-changes.json", @"cache\tagscan.json", @"symbols\ntkrnlmp.pdb", @"requests\mark.txt", "tool.exe" })
         {
             Assert.True(File.Exists(Path.Combine(Legacy, rel)), rel + " should stay");
             Assert.False(File.Exists(Path.Combine(Data, rel)), rel + " should not be copied");
@@ -243,20 +244,22 @@ public sealed class LegacyMigrationTests : IDisposable
     [Fact]
     public void AnExistingFileInTheNewFolderIsNeverOverwritten()
     {
-        Write("settings.json", "old");
-        File.WriteAllText(Path.Combine(Data, "settings.json"), "new");
+        Write("poolwatch.log", "old");
+        File.WriteAllText(Path.Combine(Data, "poolwatch.log"), "new");
 
         var r = Run();
 
         Assert.Null(r.Refused);
         Assert.Equal(0, r.Copied);
-        Assert.Equal("new", File.ReadAllText(Path.Combine(Data, "settings.json")));
-        Assert.Equal("old", File.ReadAllText(Path.Combine(Legacy, "settings.json"))); // not deleted: it was not copied
+        Assert.Equal("new", File.ReadAllText(Path.Combine(Data, "poolwatch.log")));
+        Assert.Equal("old", File.ReadAllText(Path.Combine(Legacy, "poolwatch.log"))); // not deleted: it was not copied
         Assert.Contains(r.Left, l => l.Contains("different file"));
     }
 
     [Theory]
-    [InlineData("settings.json", 10, null)]
+    // Taken only by the checked settings migration at start, never copied as it is (it could carry service profiles).
+    [InlineData("settings.json", 10, "settings are taken over only by the checked settings migration at start")]
+    [InlineData("poolwatch.log", 10, null)]
     [InlineData(@"data\20261020\processes.csv", 10, null)]
     [InlineData(@"data\20261020\findings.jsonl", 10, null)]
     [InlineData(@"incidents\x\timeline.png", 10, null)]

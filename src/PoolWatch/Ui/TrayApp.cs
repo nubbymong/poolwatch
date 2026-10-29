@@ -42,8 +42,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
     private GuardNotices? _guardNotices;
     private SetupGuideForm? _guide;
     private ActiveChangesForm? _activeChanges;
-    /// <summary>The balloon showing now offers the setup guide (a click on it opens the guide).</summary>
-    private bool _balloonOpensGuide;
+    /// <summary>What a click on the balloon showing now opens (the setup guide, Active changes), if anything.</summary>
+    private readonly BalloonClick _balloonClick = new();
 
     /// <summary>The state the tray icon currently shows.</summary>
     public TrayState IconState => _state;
@@ -68,7 +68,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         var menu = _menu;
         menu.Items.Add("Open PoolWatch", null, (_, _) => ShowWindow());
         menu.Items.Add("Set up PoolWatch...", null, (_, _) => OpenGuide());
-        menu.Items.Add("Active changes...", null, (_, _) => _actions.Guarded(null, "Active changes", ShowActiveChanges));
+        menu.Items.Add("Active changes...", null, (_, _) => OpenActiveChanges());
         // "PoolWatch 1.2.0 is available": shown only while a newer release is out; it opens that release's page.
         var update = new ToolStripMenuItem("", null, (_, _) => _actions.Guarded(null, "Open the release page", () =>
         {
@@ -118,8 +118,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         _icon = new NotifyIcon { ContextMenuStrip = menu, Visible = true, Text = "PoolWatch: starting", Icon = TrayIcons.Starting };
         _icon.DoubleClick += (_, _) => ShowWindow();
-        _icon.BalloonTipClicked += (_, _) => { if (_balloonOpensGuide) OpenGuide(); };
-        _icon.BalloonTipClosed += (_, _) => _balloonOpensGuide = false;
+        _icon.BalloonTipClicked += (_, _) => _balloonClick.Clicked();
+        _icon.BalloonTipClosed += (_, _) => _balloonClick.Closed();
         // Raised on the sampler's thread under the history lock: the notice is worded here, from the incident as it is now,
         // and only the text goes to the UI thread.
         _onOpened = (inc, _) =>
@@ -146,7 +146,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         else if (!smoke)
         {
             if (showWindow) OpenGuide();
-            else Balloon("PoolWatch is running. Click here to set it up.", 10_000, opensGuide: true);
+            else Balloon("PoolWatch is running. Click here to set it up.", 10_000, OpenGuide);
         }
     }
 
@@ -211,7 +211,6 @@ internal sealed class TrayApp : ApplicationContext, IShell
     /// <summary>The setup guide, one at a time. It marks itself completed when it closes; the update check then starts (once).</summary>
     private void ShowGuide()
     {
-        _balloonOpensGuide = false;
         if (_guide is { IsDisposed: false } open) { Bring(open); return; }
         _guide = new SetupGuideForm(Setup);
         _guide.FormClosed += (_, _) =>
@@ -307,13 +306,23 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _icon.Text = text.Length > 127 ? text[..127] : text;
     }
 
-    private void Balloon(string text, int ms = 5000, bool opensGuide = false)
+    /// <summary>
+    /// A notice in the tray from any thread about changes PoolWatch made by itself (a service profile applied at start): a
+    /// click on it opens Active changes, which lists them, each with a way to put it back.
+    /// </summary>
+    public void NotifyChanges(string text) => _ui.Post(_ => Balloon(text, 10_000, OpenActiveChanges), null);
+
+    /// <param name="onClick">What a click on this balloon opens; null: nothing (a click on it never runs an older balloon's).</param>
+    private void Balloon(string text, int ms = 5000, Action? onClick = null)
     {
-        _balloonOpensGuide = opensGuide;
+        _balloonClick.Shown(onClick);
         _icon.BalloonTipTitle = "PoolWatch";
-        _icon.BalloonTipText = text.Length > 250 ? text[..250] : text;
+        _icon.BalloonTipText = text.Length > ProfileAtStart.MaxNotice ? text[..ProfileAtStart.MaxNotice] : text;
         _icon.ShowBalloonTip(ms);
     }
+
+    /// <summary>Opens Active changes from the tray (its menu, or a notice about changes): a failure is shown, never thrown.</summary>
+    private void OpenActiveChanges() => _actions.Guarded(null, "Active changes", ShowActiveChanges);
 
     protected override void ExitThreadCore()
     {
@@ -331,4 +340,25 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _form?.Dispose();
         base.ExitThreadCore();
     }
+}
+
+/// <summary>
+/// What a click on the tray's balloon does: each balloon sets its own action, or none, so a click never runs an older
+/// balloon's; it runs once, and not after the balloon closed.
+/// </summary>
+internal sealed class BalloonClick
+{
+    private Action? _action;
+
+    /// <summary>A balloon is shown, with what a click on it opens (null: nothing).</summary>
+    public void Shown(Action? onClick) => _action = onClick;
+
+    public void Clicked()
+    {
+        var action = _action;
+        _action = null;
+        action?.Invoke();
+    }
+
+    public void Closed() => _action = null;
 }

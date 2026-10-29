@@ -45,6 +45,8 @@ public sealed class AgentsGuideTests : IDisposable
         // Written for people and their assistants: no internal setting names.
         foreach (var setting in new[] { "AutoClearEnabled", "TokenGuardEnabled", "AutoClearEveryHours", "AutoClearPoolGb" })
             Assert.DoesNotContain(setting, text);
+        // The file map says where the service profiles are (one may be applied, unasked, each time PoolWatch starts).
+        Assert.Contains("| `settings.json` | PoolWatch's settings, and the service profiles: the services each keeps off, and the one applied when PoolWatch starts |", text);
     }
 
     [Fact]

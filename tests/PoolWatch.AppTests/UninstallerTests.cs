@@ -111,14 +111,18 @@ public sealed class UninstallerTests
         var service = Row("service:a", ChangeKind.Service, "Turned off Gerätedienst \"Beispiel\" (Example\\Svc)") with { Detail = "service · was Manual" };
         var tabbed = Row("task:a", ChangeKind.ScheduledTask, "Turned off the scheduled task \\Vendor\\Up\tdater");
         var logon = Row(ChangeIds.LogonTask, ChangeKind.LogonTask, ChangeWords.LogonTask);
+        var held = Row("service:mapsbroker", ChangeKind.Service, "Turned off MapsBroker (profile Build box, at start)") with
+        {
+            Warning = ChangeWords.KeptOffAtStart("Build box", "MapsBroker"), AtStart = new AtStartHold("Build box", "MapsBroker"),
+        };
         var warned = Row("clear-task:a", ChangeKind.RemovedClearTask, "Replaced your own clear task \"Clear standby\" (it ran RAMMap)") with { Warning = "This task runs RAMMap from C:\\Tools." };
         var cannot = Row("unread:applied-changes", ChangeKind.Shortcut, "PoolWatch could not read the shortcuts it changed", canUndo: false, note: ChangeWords.UnreadNote("Access is denied."));
-        ActiveChange[] rows = [service, tabbed, logon, warned, cannot];
+        ActiveChange[] rows = [service, tabbed, logon, held, warned, cannot];
 
         string json = ChangeLedger.ToJson(rows);
         var shown = ReadAsTheUninstallerDoes(json);
 
-        Assert.Equal([service.What, "Turned off the scheduled task \\Vendor\\Up dater", logon.What], shown.PutsBack);
+        Assert.Equal([service.What, "Turned off the scheduled task \\Vendor\\Up dater", logon.What, held.What], shown.PutsBack);
         Assert.Equal([warned.What + ". " + ChangeWords.UninstallNeedsYourYes, cannot.What + ". " + cannot.Note], shown.Leaves);
         Assert.Empty(shown.Caveats);
         // What it lists is what PoolWatch itself says the uninstaller does with each row.

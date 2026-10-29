@@ -349,7 +349,7 @@ public sealed class ClearTaskReplacerTests : IDisposable
         Assert.Equal(written, File.GetLastWriteTimeUtc(file));
         Assert.False(File.Exists(file + ".tmp"));
 
-        _f.Records.Remove(record.Id);
+        _f.Records.Remove(record);
         Assert.False(File.Exists(file));
     }
 

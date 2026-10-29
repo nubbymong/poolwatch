@@ -42,7 +42,7 @@ In the data folder:
 | Path | What it holds |
 |---|---|
 | `AGENTS.md` | this guide |
-| `settings.json` | PoolWatch's settings |
+| `settings.json` | PoolWatch's settings, and the service profiles: the services each keeps off, and the one applied when PoolWatch starts |
 | `poolwatch.log` | what PoolWatch did, one line each (moved to `poolwatch.log.1` at 2 MB) |
 | `since-boot.md`, `since-boot.json`, `boots.md` | written when PoolWatch exits: what grew since boot, and the last boots side by side |
 | `data\<yyyyMMdd>\` | one folder per day, kept 7 days by default: the CSV files below and `findings.jsonl` |
@@ -54,7 +54,7 @@ In the data folder:
 | `cache\environment.json` | the last look at the PC: Windows version and build, memory, drives and their file systems, the AI tools found and what is set up. No user names, and no paths except drive roots |
 | `cache\profile.json` | PoolWatch's own cost, written every hour: its processor time, memory and heap, what it holds in memory, and what it wrote to each file |
 | `cache\update-check.json` | the last check for a new version: when it ran, its result, and the newest release seen |
-| `service-changes.json` | every background service PoolWatch changed, with its original start type (Restore needs it) |
+| `service-changes.json` | every background service PoolWatch changed, with its original start type (Put back needs it, on the Services tab and in Active changes) |
 | `applied-changes.json` | the other changes PoolWatch made that can be put back (Active changes needs it) |
 | `removed-tasks\<name>.xml` | only when a clear task of the owner's that PoolWatch removed could not be put back by itself: its definition, to import in Task Scheduler |
 | `setup.json` | when the setup guide was completed, and the suggestions the owner hid (each shows again after 30 days) |
@@ -65,6 +65,11 @@ In the data folder:
 | `reports\` | the Since boot reports |
 | `exports\` | export zips, vendor bundles, and Report an issue's saved text (`issue-<yyyyMMdd-HHmmss>.txt`) |
 | `requests\` | notes waiting for the running PoolWatch to put on its timeline (`--mark`) |
+
+Not in the data folder, but wherever the person saved or picked them, when they used **Decide with your AI agent** on
+the Services tab: `poolwatch-services.md`, the prompt PoolWatch made for their AI agent (the services, scheduled tasks
+and startup apps on the PC, with its own instructions), and `poolwatch-services-answer.json`, the agent's answer,
+which PoolWatch reads only when the person imports it, and then shows every change before making any.
 
 The daily CSV files have a header row. `totals.csv` has a row every 10 seconds; the others as noted.
 
@@ -191,4 +196,5 @@ the kernel); PoolWatch's own GitHub for a problem with PoolWatch.
 - Turning Microsoft Defender off. For a Dev Drive, Defender's performance mode keeps protection on and costs far less.
 - Running a RAMMap clear task as well as PoolWatch's automatic cache clear: two clears fight over the same cache.
   PoolWatch pauses its own while such a task exists, and can replace it.
-- Deleting `service-changes.json` or `applied-changes.json`: Active changes and Restore need them to put things back.
+- Deleting `service-changes.json` or `applied-changes.json`: Active changes and the Services tab need them to put
+  things back.

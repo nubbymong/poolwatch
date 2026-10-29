@@ -23,7 +23,7 @@ public class ServiceCatalogueTests
         Assert.Equal("Intel System Usage Report", intel!.Name);
         Assert.Contains("USER_ESRV_SVC_QUEENCREEK", intel.Services); // the family is turned off together
         Assert.Equal(ServiceRisk.Safe, intel.Risk);
-        Assert.True(intel.DevPreset);
+        Assert.False(intel.AgenticPreset); // a vendor's service has no official source: the AI-agent route, not the preset
         Assert.Equal(ServiceRisk.CheckFirst, Cat.Find("DiagTrack")!.Risk); // Insider note
     }
 
@@ -77,7 +77,7 @@ public class ServiceCatalogueTests
         Assert.DoesNotContain("WinDefend", telemetry);  // protected
         Assert.DoesNotContain("SomeVendorSvc", telemetry); // unknown
 
-        var dev = ServicePlan.Tick(Preset.DevWorkstation, opts);
+        var dev = ServicePlan.Tick(Preset.AgenticCodingPc, opts);
         Assert.Contains("SysMain", dev);                // preset: true
         Assert.DoesNotContain("WerSvc", dev);           // preset: false
         Assert.Empty(ServicePlan.Tick(Preset.Custom, opts));
@@ -86,16 +86,17 @@ public class ServiceCatalogueTests
     [Fact]
     public void ApplyBuildsOperationsAndRecordsTheOriginal()
     {
-        var services = new[] { V("SysMain", ServiceStartType.Automatic), V("XblAuthManager", ServiceStartType.Manual) };
+        var services = new[] { V("SysMain", ServiceStartType.Automatic), V("edgeupdate", ServiceStartType.Automatic) };
         var opts = ServicePlan.Options(services, Cat, insiderEnrolled: false, NoDefaults);
-        var ops = ServicePlan.BuildApply(["SysMain", "XblAuthManager"], opts, insiderEnrolled: false, "Dev workstation", T0);
+        var ops = ServicePlan.BuildApply(["SysMain", "edgeupdate"], opts, insiderEnrolled: false, "Agentic coding PC", T0);
         Assert.Equal(2, ops.Count);
         var sysmain = ops.Single(o => o.Option.Service.Name == "SysMain");
         Assert.Equal(ServiceStartType.Disabled, sysmain.NewStart);           // off: disabled
         Assert.Equal(ServiceStartType.Automatic, sysmain.Record.OriginalStart);
         Assert.True(sysmain.Record.OriginalRunning);
-        var xbl = ops.Single(o => o.Option.Service.Name == "XblAuthManager");
-        Assert.Equal(ServiceStartType.Manual, xbl.NewStart);                 // off: manual
+        var edge = ops.Single(o => o.Option.Service.Name == "edgeupdate");
+        Assert.Equal(ServiceStartType.Manual, edge.NewStart);                // off: manual
+        Assert.Equal(ServiceStartType.Automatic, edge.Record.OriginalStart);
     }
 
     [Fact]
@@ -107,6 +108,16 @@ public class ServiceCatalogueTests
         Assert.Throws<InvalidOperationException>(() => ServicePlan.BuildApply(["WinDefend"], opts, false, "manual", T0));
         Assert.Throws<InvalidOperationException>(() => ServicePlan.BuildApply(["somedrv"], opts, false, "manual", T0));
         Assert.Throws<InvalidOperationException>(() => ServicePlan.BuildApply(["NotInstalled"], opts, false, "manual", T0));
+    }
+
+    [Fact]
+    public void AServiceWhoseStartTypeCouldNotBeReadIsNeverChangedSinceItCouldNotBePutBack()
+    {
+        // The service control manager could not tell the start type (Unknown): recorded as the original, Restore would refuse it.
+        var opts = ServicePlan.Options([V("SysMain", ServiceStartType.Unknown), V("MapsBroker", ServiceStartType.Automatic)], Cat, insiderEnrolled: false, NoDefaults);
+        var refused = Assert.Throws<InvalidOperationException>(() => ServicePlan.BuildApply(["MapsBroker", "SysMain"], opts, false, "manual", T0));
+        Assert.Equal("'SysMain': its current start type cannot be read, so it could not be put back later", refused.Message);
+        Assert.Equal(ServiceStartType.Automatic, Assert.Single(ServicePlan.BuildApply(["MapsBroker"], opts, false, "manual", T0)).Record.OriginalStart);
     }
 
     [Theory]
@@ -175,11 +186,25 @@ public class ServiceCatalogueTests
         list = ServiceChangeLog.Upsert(list, c1b); // one record per service
         Assert.Single(list);
         Assert.Equal(ServiceStartType.Manual, list[0].NewStart);
-        var back = ServiceChangeLog.Parse(ServiceChangeLog.ToJson(list));
+        var back = ServiceChangeLog.Parse(ServiceChangeLog.ToJson(list))!;
         Assert.Single(back);
         Assert.Equal(ServiceStartType.Automatic, ServicePlan.RestoreTarget(back[0])); // restores to the original
-        Assert.Empty(ServiceChangeLog.Parse("not json"));
+        Assert.Empty(ServiceChangeLog.Parse(ServiceChangeLog.ToJson([]))!);
     }
+
+    /// <summary>A change log that is not one PoolWatch wrote is not read as "no changes", so it is never written over.</summary>
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("")]
+    [InlineData(" \r\n")]
+    [InlineData("\0\0\0\0")]
+    [InlineData("null")]
+    [InlineData("{}")]
+    [InlineData("[null]")]
+    [InlineData("[{\"service\": \"SysMain\"}]")] // a record without its original
+    [InlineData("[{\"service\": null, \"originalStart\": \"Manual\", \"originalRunning\": false, \"newStart\": \"Disabled\"}]")]
+    [InlineData("[{\"service\": \"\", \"originalStart\": \"Manual\", \"originalRunning\": false, \"newStart\": \"Disabled\"}]")]
+    public void AChangeLogThatCannotBeReadIsNotRead(string json) => Assert.Null(ServiceChangeLog.Parse(json));
 }
 
 /// <summary>Addendum 4 A: per-process CPU / page-fault rates and the whole-machine CPU fraction.</summary>

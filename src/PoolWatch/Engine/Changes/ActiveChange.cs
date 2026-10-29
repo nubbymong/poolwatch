@@ -27,6 +27,12 @@ internal sealed record ActiveChange(string Id, ChangeKind Kind, DateTime? Change
     /// </summary>
     public string? Warning { get; init; }
 
+    /// <summary>
+    /// When <see cref="Warning"/> is that the profile applied at start would turn this service off again (and putting it
+    /// back takes it out of that profile): the profile and the service. Put all back says that once for all such rows.
+    /// </summary>
+    public AtStartHold? AtStart { get; init; }
+
     /// <summary>The window's bold line: what it is ("Empty the standby cache", a service's name). <see cref="What"/> when not set.</summary>
     public string Title { get; init; } = What;
 
@@ -65,6 +71,9 @@ internal sealed record ActiveChange(string Id, ChangeKind Kind, DateTime? Change
         c.Group != ChangeGroup.Feature ? ChangeWords.PutBack : c.Kind == ChangeKind.Shortcut ? ChangeWords.Remove : ChangeWords.TurnOff;
 }
 
+/// <summary>A service the profile applied at start lists: <see cref="ActiveChange.AtStart"/>.</summary>
+internal sealed record AtStartHold(string Profile, string Service);
+
 /// <param name="Done">The change is no longer in effect: put back now, or nothing was left to put back. False: it still is.</param>
 /// <param name="Message">What happened, in plain words.</param>
 internal sealed record UndoResult(bool Done, string Message);
@@ -82,4 +91,10 @@ internal interface IChangeSource
     /// so Put all back reports it as not done (and the uninstaller says not everything was put back) instead of leaving it out.
     /// </summary>
     ActiveChange Unread(string error);
+
+    /// <summary>
+    /// The order Put all back runs <paramref name="rows"/> in, this source's rows of one kind: as given (newest first),
+    /// unless the source needs another (services: one that another depends on first).
+    /// </summary>
+    IReadOnlyList<ActiveChange> PutBackOrder(IReadOnlyList<ActiveChange> rows) => rows;
 }

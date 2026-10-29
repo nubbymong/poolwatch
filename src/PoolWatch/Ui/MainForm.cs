@@ -21,9 +21,9 @@ namespace PoolWatch.Ui;
 /// tiles over the graph's 6 hours (growth per hour without the clears, what they cleared, the net change, and the memory
 /// in use), the graph, and "Get more from PoolWatch" cards. The Advanced view: the graph with its 1 h / 6 h / 24 h choice
 /// (the graph's axis always spans the whole window, the time before PoolWatch started a labelled band) and the growth
-/// and clear stats beside it, then the tabs (Pool causes with the Impact column, Services). Both have Active changes
-/// with the count of changes in effect, the update notice when a newer release is out, and the Advanced view switch at
-/// the bottom; everything else is in the tray menu. Refreshes on a 10 s timer that runs only while the window is visible
+/// and clear stats beside it, then the tabs (Pool causes with the Impact column, Services, Tasks and startup apps). Both
+/// have Active changes with the count of changes in effect, the update notice when a newer release is out, and the
+/// Advanced view switch at the bottom; everything else is in the tray menu. Refreshes on a 10 s timer that runs only while the window is visible
 /// and not minimised, the Simple view's tiles and cards at most once a minute; nothing is rendered or recomputed while it
 /// is hidden, and hiding it drops what only it shows.
 /// </summary>
@@ -100,14 +100,10 @@ internal sealed class MainForm : Form
     private int _sortColumn = -1;
     private bool _sortDescending, _sortChanged;
 
-    // Services (the former Background services page; same behaviour). Its list is drawn off screen: its Cost cells change
-    // on every refresh.
-    private readonly BufferedListView _services = new() { View = View.Details, FullRowSelect = true, CheckBoxes = true, Dock = DockStyle.Fill, MultiSelect = true, HideSelection = false };
-    private readonly WrapLabel _servicesStatus = new() { Dock = DockStyle.Top };
-    private readonly ListView _tasks = new() { View = View.Details, FullRowSelect = true, Dock = DockStyle.Fill, MultiSelect = false, HideSelection = false };
-    private readonly ComboBox _preset = new() { DropDownStyle = ComboBoxStyle.DropDownList };
-    private readonly SplitContainer _servicesSplit = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
-    private readonly Engine.TasksAndStartup _tasksEngine;
+    // Services, and Tasks and startup apps: each tab builds itself and does its own work (ServicesTab, TasksTab); the
+    // window only adds their pages and refreshes the one that shows.
+    private readonly ServicesTab _servicesTab;
+    private readonly TasksTab _tasksTab;
 
     private bool _repopulating;
 
@@ -121,7 +117,9 @@ internal sealed class MainForm : Form
         _actions = context.Actions;
         _view = view;
         _update = update;
-        _tasksEngine = new Engine.TasksAndStartup(_engine.Log);
+        _tasksTab = new TasksTab(this, _tips, context);
+        // An AI agent's answer applied from Services may have switched startup apps and tasks: that tab reads them again.
+        _servicesTab = new ServicesTab(this, _tips, context, agentApplied: _tasksTab.ReadAgain);
         Text = "PoolWatch";
         Icon = TrayIcons.App;
         Font = new Font("Segoe UI", 9f);
@@ -165,6 +163,7 @@ internal sealed class MainForm : Form
         });
         _tabs.TabPages.Add(CausesPage());
         _tabs.TabPages.Add(ServicesPage());
+        _tabs.TabPages.Add(TasksPage());
         _advanced.Padding = Px(16, 12, 16, 4);
         _advanced.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         var (graphRow, tabsRow) = AdvancedRows(servicesTab: false);
@@ -237,7 +236,7 @@ internal sealed class MainForm : Form
         _causes.DoubleClick += (_, _) => { if (SelectedRow()?.Folder is { } d && Directory.Exists(d)) _actions.OpenIncidentFolder(d); };
         _causes.Resize += (_, _) => FitCauseColumns();
         _causes.ColumnClick += (_, e) => SafeRefresh(() => SortCausesBy(e.Column));
-        _causes.HandleCreated += (_, _) => PoolCausesHeader.Show(_causes, _sortColumn, _sortDescending);
+        _causes.HandleCreated += (_, _) => ListSort.SetArrow(_causes, _sortColumn, !_sortDescending);
         _openFolder.Click += (_, _) => { if (SelectedRow()?.Folder is { } d) _actions.OpenIncidentFolder(d); };
         _copySummary.Click += (_, _) => _actions.Guarded(this, "Copy summary", () => { if (SummaryOf(SelectedRow()) is { } text) _actions.Copy(text); });
         _exportReport.Click += (_, _) => _actions.Guarded(this, "Export report", () => _actions.ExportReport(this, SelectedRow()?.Folder));
@@ -261,7 +260,6 @@ internal sealed class MainForm : Form
         Activated += (_, _) => _countSchedule.Activated(DateTime.UtcNow);
         Load += (_, _) => { LayoutHeader(); FitCauseColumns(); };
         SplitAt(_causesSplit, 0.58);
-        SplitAt(_servicesSplit, 0.6);
         SetView(_view?.Advanced == true);
     }
 
@@ -338,10 +336,10 @@ internal sealed class MainForm : Form
         ? (new RowStyle(SizeType.Absolute, 0), new RowStyle(SizeType.Percent, 100))
         : (new RowStyle(SizeType.Percent, 36), new RowStyle(SizeType.Percent, 64));
 
-    /// <summary>The rows as the tab picked now wants them (<see cref="AdvancedRows"/>).</summary>
+    /// <summary>The rows as the tab picked now wants them (<see cref="AdvancedRows"/>; Tasks and startup apps as Services).</summary>
     private void LayoutAdvancedRows()
     {
-        bool services = _tabs.SelectedIndex == 1;
+        bool services = _tabs.SelectedIndex >= 1;
         if (services == _servicesRows) return;
         _servicesRows = services;
         var (graph, tabs) = AdvancedRows(services);
@@ -352,7 +350,7 @@ internal sealed class MainForm : Form
         _advanced.ResumeLayout(true);
     }
 
-    /// <summary>Switches to the Advanced view on a tab (0 Pool causes, 1 Services), as the owner asked from a suggestion; kept like the switch.</summary>
+    /// <summary>Switches to the Advanced view on a tab (0 Pool causes, 1 Services, 2 Tasks and startup apps), as the owner asked from a suggestion; kept like the switch.</summary>
     public void ShowAdvanced(int tab)
     {
         _view?.Remember(true);
@@ -755,7 +753,7 @@ internal sealed class MainForm : Form
         (_sortColumn, _sortDescending) = PoolCausesSort.Click((_sortColumn, _sortDescending), column);
         _sortChanged = true;
         RefreshCauses(force: true);
-        PoolCausesHeader.Show(_causes, _sortColumn, _sortDescending);
+        ListSort.SetArrow(_causes, _sortColumn, !_sortDescending);
     }
 
     /// <summary>The column Pool causes is sorted by (-1 for none) and whether it is descending (tests, CI).</summary>
@@ -1061,306 +1059,11 @@ internal sealed class MainForm : Form
 
     // ---------------------------------------------------------------- Services
 
-    private TabPage ServicesPage()
-    {
-        foreach (var (h, w) in new[] { ("Service", 200), ("Group", 80), ("Category", 140), ("State", 230), ("Cost", 190), ("You lose / publisher", 360) })
-            _services.Columns.Add(h, S(w));
-        _preset.Items.AddRange(["Custom", "Telemetry only", "Dev workstation"]);
-        _preset.SelectedIndex = 0;
-        _preset.Width = S(150);
-        _preset.SelectedIndexChanged += (_, _) => _actions.Guarded(this, "Preset", ApplyPresetTicks);
-        Button Btn(string text, string what, Action a) { var b = new Button { Text = text, AutoSize = true, UseVisualStyleBackColor = true }; b.Click += (_, _) => _actions.Guarded(this, what, a); return b; }
-        var apply = Btn("Apply (turn off ticked)", "Apply services", ApplyServices);
-        var restoreOne = Btn("Restore selected", "Restore service", RestoreSelected);
-        var restoreDefault = Btn("Restore to Windows default", "Restore to Windows default", RestoreSelectedToDefault);
-        var restore = Btn("Restore all", "Restore services", () => DoRestore(null));
-        var refresh = Btn("Refresh", "Refresh services", () => { _servicesLoaded = false; RefreshServices(); });
-        _tips.SetToolTip(restoreDefault, "For a selected service that is off outside PoolWatch: set it back to its Windows default start type (reversible with Restore).");
-        var bar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = Px(0, 2, 0, 4) };
-        bar.Controls.AddRange([new Label { Text = "Preset:", AutoSize = true, Margin = Px(3, 8, 0, 0) }, _preset, apply, restoreOne, restoreDefault, restore, refresh]);
-        _servicesStatus.Padding = Px(2, 4, 2, 2);
-        _servicesStatus.Text = "PoolWatch recommends; you choose; every change is reversible (Restore). Protected services (security, Windows Update, input/audio, core) are greyed out.";
+    /// <summary>The Services tab (ServicesTab): the window adds its page and refreshes it while it shows.</summary>
+    private TabPage ServicesPage() => _servicesTab.Page;
 
-        foreach (var (h, w) in new[] { ("Type", 70), ("Name", 230), ("State", 140), ("Cost", 210), ("Runs / command", 480) }) _tasks.Columns.Add(h, S(w));
-        var taskDisable = Btn("Disable", "Disable", () => ToggleTaskOrStartup(false));
-        var taskEnable = Btn("Enable", "Enable", () => ToggleTaskOrStartup(true));
-        var appEnd = Btn("End process", "End process", EndSelectedApp);
-        var appOpen = Btn("Open file location", "Open location", OpenSelectedAppLocation);
-        var cBar = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = Px(0, 4, 0, 0) };
-        cBar.Controls.AddRange([taskDisable, taskEnable, appEnd, appOpen]);
-        var cBox = new GroupBox { Text = "Scheduled tasks, startup apps and heavy background apps (non-Microsoft; you choose, reversible)", Dock = DockStyle.Fill, Padding = Px(6, 4, 6, 6) };
-        cBox.Controls.Add(_tasks);
-        cBox.Controls.Add(cBar);
-
-        _servicesSplit.Panel1.Controls.Add(_services); // fill first, then the docked edges (the last added is the topmost)
-        _servicesSplit.Panel1.Controls.Add(bar);
-        _servicesSplit.Panel1.Controls.Add(_servicesStatus);
-        _servicesSplit.Panel2.Controls.Add(cBox);
-        _servicesSplit.SplitterWidth = S(6);
-        var page = new TabPage("Services") { UseVisualStyleBackColor = true, Padding = Px(4, 4, 4, 4) };
-        page.Controls.Add(_servicesSplit);
-        _services.ItemChecked += (_, e) => { if (!_repopulating && e.Item.Tag is Core.Services.ServiceOption o && !o.CanTurnOff && e.Item.Checked) e.Item.Checked = false; };
-        return page;
-    }
-
-    private bool _servicesLoaded;
-    private List<Core.Services.ServiceOption> _serviceOptions = new();
-
-    private void RefreshServices()
-    {
-        if (_servicesLoaded) { UpdateServiceCosts(); return; }
-        _servicesLoaded = true;
-        _servicesStatus.Text = "Reading services…";
-        Task.Run(() => _analysis.Diagnostics.Services.Options()).ContinueWith(t =>
-        {
-            if (!IsHandleCreated || IsDisposed || t.IsFaulted) return;
-            BeginInvoke(() => ShowServices(t.Result));
-        });
-        Task.Run(LoadTasksAndApps).ContinueWith(t =>
-        {
-            if (!IsHandleCreated || IsDisposed || t.IsFaulted) return;
-            BeginInvoke(() => ShowTasks(t.Result));
-        });
-    }
-
-    private List<(string type, string name, string state, string cost, string runs, object tag)> LoadTasksAndApps()
-    {
-        var rows = new List<(string, string, string, string, string, object)>();
-        var d = _analysis.Diagnostics;
-        // Cost per task / startup entry: the live processes running its program, matched by image.
-        var live = _engine.Registry.LiveRecords().Select(r => new Core.Services.LiveImage(r.Key, r.Image, r.ImagePath)).ToList();
-        string Cost(string command)
-        {
-            string? exe = Core.Services.EntryCost.ExeOf(command, Environment.ExpandEnvironmentVariables);
-            var r = Core.Services.EntryCost.ViaLauncher(exe) ? null : Core.Services.EntryCost.Match(exe, live, d.CostOfProcess);
-            return Core.Services.EntryCost.Text(exe, r);
-        }
-        foreach (var t in _tasksEngine.Tasks())
-            rows.Add(("task", t.Name, t.Enabled ? "enabled" : "disabled", Cost(t.Runs), t.Runs, t));
-        foreach (var su in _tasksEngine.Startup().Where(s => !s.Microsoft))
-            rows.Add(("startup", su.Name, su.Enabled ? "enabled" : "disabled", Cost(su.Command), $"{su.Location}: {su.Command}", su));
-        // Heavy background apps: over 0.5 core averaged over the last 30 minutes, never with a window in front (judged on
-        // minute points, not one 10 s window).
-        foreach (var h in d.HeavyBackground().Take(10))
-        {
-            var rec = _engine.Registry.Get(h.Key);
-            string identity = rec is not null ? Core.Identity.ProcessIdentities.Of(_engine.Registry.Ancestry(rec.Key)).Display : h.Image;
-            var app = new HeavyApp(h.Key, h.Image, identity, rec?.CommandLine, h.Cores);
-            rows.Add(("app", identity, "running, no window in front", $"{Core.Services.ServicePlan.Cost(h.Cores, h.PageFaultsPerSec)} (average over {(int)h.Covered.TotalMinutes} min)",
-                $"PID {h.Key.Pid}{(h.Key.CreateTime > 0 ? $", started {Fmt.Clock(DateTime.FromFileTimeUtc(h.Key.CreateTime))}" : "")}{(rec?.CommandLine is { } cl ? ": " + cl : "")}", app));
-        }
-        return rows;
-    }
-
-    /// <summary>A heavy background app, keyed by PID AND create time so End process never kills a reused PID.</summary>
-    private sealed record HeavyApp(ProcessKey Key, string Image, string Identity, string? CommandLine, double Cores);
-
-    private void ShowTasks(List<(string type, string name, string state, string cost, string runs, object tag)> rows) =>
-        KeepPlace(_tasks, it => it.SubItems.Count > 1 ? it.SubItems[0].Text + "\u001f" + it.SubItems[1].Text : null, () =>
-        {
-            _tasks.BeginUpdate();
-            try
-            {
-                _tasks.Items.Clear();
-                foreach (var (type, name, state, cost, runs, tag) in rows)
-                    _tasks.Items.Add(new ListViewItem([type, name, state, cost, runs]) { Tag = tag });
-            }
-            finally { _tasks.EndUpdate(); }
-        });
-
-    private void ToggleTaskOrStartup(bool enable)
-    {
-        if (_tasks.SelectedItems.Count == 0) return;
-        var tag = _tasks.SelectedItems[0].Tag;
-        string? err = tag switch
-        {
-            Engine.ScheduledTaskView t => _tasksEngine.SetTaskEnabled(t.Path, enable),
-            Engine.StartupView su => _tasksEngine.SetStartupEnabled(su.Location, su.Name, enable),
-            _ => "select a scheduled task or startup entry",
-        };
-        if (err is not null) MessageBox.Show(this, err, "PoolWatch");
-        else
-        {
-            // Every change is on the timeline, like the service changes, and under Active changes.
-            string what = tag switch
-            {
-                Engine.ScheduledTaskView t => $"Scheduled task {(enable ? "enabled" : "disabled")} by you: {t.Path}",
-                Engine.StartupView su => $"Startup entry {(enable ? "enabled" : "disabled")} by you: {su.Location}\\{su.Name} (Task Manager shows the same switch)",
-                _ => "",
-            };
-            if (what.Length > 0) _analysis.Diagnostics.RecordOwnerChange(what, tag is Engine.StartupView s ? s.Name : (tag as Engine.ScheduledTaskView)?.Name);
-            if (tag is Engine.ScheduledTaskView task) _context.Ledger.Records.RecordToggle(ChangeKind.ScheduledTask, task.Path, task.Name, enable, "the Services tab");
-            else if (tag is Engine.StartupView entry) _context.Ledger.Records.RecordToggle(ChangeKind.StartupEntry, entry.Location, entry.Name, enable, "the Services tab");
-        }
-        _servicesLoaded = false; RefreshServices();
-    }
-
-    private void EndSelectedApp()
-    {
-        if (_tasks.SelectedItems.Count == 0 || _tasks.SelectedItems[0].Tag is not HeavyApp app) { MessageBox.Show(this, "Select a background app.", "PoolWatch"); return; }
-        // Never a core / security process, a service host or a VM's memory process.
-        var hosted = _engine.Services.Where(s => s.ProcessId == app.Key.Pid).Select(s => s.Name).ToList();
-        if (Core.Services.EndProcessPolicy.WhyNot(app.Key.Pid, app.Image, hosted) is { } why)
-        {
-            MessageBox.Show(this, $"PoolWatch will not end {app.Identity}: {why}.", "PoolWatch");
-            return;
-        }
-        // The handle is opened first, the create time read from it and compared exactly, the owner asked,
-        // and the process ended through that same handle (Engine.ProcessEnder). An unknown create time ends nothing.
-        string detail = $"{app.Identity}\nPID {app.Key.Pid}" +
-            (app.Key.CreateTime > 0 ? $", started {Fmt.Clock(DateTime.FromFileTimeUtc(app.Key.CreateTime))}" : "") +
-            $"\n{app.Image}" + (app.CommandLine is { } cl ? $"\n{cl}" : "");
-        var r = Engine.ProcessEnder.End(new Engine.WindowsProcessOpener(), app.Key, app.Identity, () =>
-            MessageBox.Show(this, $"End this process?\n\n{detail}\n\nUnsaved work in it is lost. PoolWatch never uninstalls anything.",
-                "PoolWatch: end process", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) == DialogResult.OK);
-        if (r.Outcome == Engine.ProcessEnder.Outcome.Cancelled) return;
-        if (r.Outcome == Engine.ProcessEnder.Outcome.Ended) _analysis.Diagnostics.RecordOwnerChange($"Process ended by you: {app.Identity} (PID {app.Key.Pid})", app.Image);
-        else MessageBox.Show(this, r.Message, "PoolWatch");
-        _servicesLoaded = false; RefreshServices();
-    }
-
-    private void OpenSelectedAppLocation()
-    {
-        if (_tasks.SelectedItems.Count == 0 || _tasks.SelectedItems[0].Tag is not HeavyApp app) { MessageBox.Show(this, "Select a background app.", "PoolWatch"); return; }
-        try
-        {
-            string? path = System.Diagnostics.Process.GetProcessById(app.Key.Pid).MainModule?.FileName;
-            if (path is not null) UiActions.ShowFile(path);
-        }
-        catch (Exception ex) { MessageBox.Show(this, ex.Message, "PoolWatch"); }
-    }
-
-    private void ShowServices(List<Core.Services.ServiceOption> options)
-    {
-        _serviceOptions = options.OrderBy(o => o.Group).ThenByDescending(o => o.Service.Cores).ThenBy(o => o.Service.Name).ToList();
-        _repopulating = true;
-        try { KeepPlace(_services, it => (it.Tag as Core.Services.ServiceOption)?.Service.Name, FillServices); }
-        finally { _repopulating = false; }
-        int off = _analysis.Diagnostics.Services.Changes.Count;
-        _servicesStatus.Text = $"{_serviceOptions.Count} services; {_serviceOptions.Count(o => o.CanTurnOff)} you may turn off, {_serviceOptions.Count(o => o.Group == Core.Services.ServiceGroup.Protected)} protected." +
-            (off > 0 ? $" {off} changed by PoolWatch (Restore all to undo)." : "") + " Tick, pick a preset or tick by hand, then Apply.";
-    }
-
-    /// <summary>
-    /// The Cost cell: the live CPU and page faults of the service's process (a shared host says so), or, for a service
-    /// PoolWatch turned off, what that saved over the hour after the change.
-    /// </summary>
-    private string CostCell(Core.Services.ServiceOption o)
-    {
-        if (o.PoolWatchChange is not null && _analysis.Diagnostics.Services.SavingsText(o.Service.Name) is { } saved) return saved;
-        var live = o.Service.Running && o.Service.ProcessId > 0 && _analysis.Diagnostics.CostOfPid(o.Service.ProcessId) is { } c
-            ? o.Service with { Cores = c.cores, PageFaultsPerSec = c.faultsPerSec } : o.Service;
-        return Core.Services.ServicePlan.CostText(live);
-    }
-
-    /// <summary>Every refresh while the page shows: the Cost cells only (the list itself is re-read on Refresh / Apply).</summary>
-    private void UpdateServiceCosts()
-    {
-        foreach (ListViewItem it in _services.Items)
-            if (it.Tag is Core.Services.ServiceOption o && it.SubItems.Count > 4 && CostCell(o) is var cost && it.SubItems[4].Text != cost)
-                it.SubItems[4].Text = cost;
-    }
-
-    private void FillServices()
-    {
-        _services.BeginUpdate();
-        try
-        {
-            _services.Items.Clear();
-            foreach (var o in _serviceOptions)
-            {
-                string group = o.Group switch { Core.Services.ServiceGroup.Optional => "optional", Core.Services.ServiceGroup.Unknown => "unknown", _ => "protected" };
-                string state = Core.Services.ServicePlan.StateText(o);
-                if (o.CanRestoreDefault) state += $"; Windows default: {o.WindowsDefault}";
-                string cost = CostCell(o);
-                string detail = o.Catalogue is { } c ? $"lose: {c.Lose}" + (c.Note is { } n ? $" — {n}" : "") : o.Service.Publisher ?? o.ProtectedReason ?? o.Service.Description ?? "";
-                var it = new ListViewItem([o.Service.Name, group, o.Catalogue?.Category ?? "", state, cost, detail]) { Tag = o };
-                if (o.Group == Core.Services.ServiceGroup.Protected) it.ForeColor = Color.Gray;
-                else if (o.Catalogue is { Risk: Core.Services.ServiceRisk.CheckFirst }) it.ForeColor = Color.DarkGoldenrod;
-                _services.Items.Add(it);
-            }
-        }
-        finally { _services.EndUpdate(); }
-    }
-
-    private void ApplyPresetTicks()
-    {
-        var preset = _preset.SelectedIndex switch { 1 => Core.Services.Preset.TelemetryOnly, 2 => Core.Services.Preset.DevWorkstation, _ => Core.Services.Preset.Custom };
-        if (preset == Core.Services.Preset.Custom) return;
-        var ticked = Core.Services.ServicePlan.Tick(preset, _serviceOptions);
-        _repopulating = true;
-        foreach (ListViewItem it in _services.Items) it.Checked = it.Tag is Core.Services.ServiceOption o && ticked.Contains(o.Service.Name);
-        _repopulating = false;
-    }
-
-    private void ApplyServices()
-    {
-        var ticked = _services.Items.Cast<ListViewItem>().Where(i => i.Checked && i.Tag is Core.Services.ServiceOption o && o.CanTurnOff)
-            .Select(i => ((Core.Services.ServiceOption)i.Tag!).Service.Name).ToList();
-        if (ticked.Count == 0) { MessageBox.Show(this, "Tick the services to turn off first.", "PoolWatch"); return; }
-        bool anyUnknown = ticked.Any(n => _serviceOptions.First(o => o.Service.Name == n).Group == Core.Services.ServiceGroup.Unknown);
-        string summary = $"{ticked.Count} service(s) will be stopped and set to not start:\n\n  {string.Join("\n  ", ticked)}\n\nThe original is saved first; Restore puts it back. Continue?";
-        if (MessageBox.Show(this, summary, "PoolWatch: turn off services", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
-        if (anyUnknown && MessageBox.Show(this, "Some are third-party services PoolWatch does not recognise (\"you decide\"). Turn them off too?", "PoolWatch", MessageBoxButtons.YesNo) != DialogResult.Yes)
-            ticked = ticked.Where(n => _serviceOptions.First(o => o.Service.Name == n).Group != Core.Services.ServiceGroup.Unknown).ToList();
-        var preset = _preset.SelectedIndex switch { 1 => "Telemetry only", 2 => "Dev workstation", _ => "manual" };
-        RunServiceOp(() => _analysis.Diagnostics.Services.Apply(ticked, preset));
-    }
-
-    private void DoRestore(string? service)
-    {
-        if (_analysis.Diagnostics.Services.Changes.Count == 0) { MessageBox.Show(this, "Nothing to restore: PoolWatch has not changed any service.", "PoolWatch"); return; }
-        RunServiceOp(() => _analysis.Diagnostics.Services.Restore(service));
-    }
-
-    private Core.Services.ServiceOption? SelectedService() =>
-        _services.SelectedItems.Count > 0 ? _services.SelectedItems[0].Tag as Core.Services.ServiceOption : null;
-
-    /// <summary>Per-service Restore: puts back exactly what PoolWatch saved before changing it (and starts it if it was running).</summary>
-    private void RestoreSelected()
-    {
-        if (SelectedService() is not { } o) { MessageBox.Show(this, "Select a service first.", "PoolWatch"); return; }
-        if (o.PoolWatchChange is not { } c) { MessageBox.Show(this, $"PoolWatch has not changed {o.Service.Name}: nothing to restore.", "PoolWatch"); return; }
-        string again = Core.Services.ServicePlan.StartAfterRestore(c) ? " and start it again (it was running before)" : "";
-        if (MessageBox.Show(this, $"Restore {o.Service.Name} to {c.OriginalStart}{again}?", "PoolWatch: restore service", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
-        RunServiceOp(() => _analysis.Diagnostics.Services.Restore(o.Service.Name));
-    }
-
-    /// <summary>"Restore to Windows default" for a service that is off outside PoolWatch (through the same gate; reversible with Restore).</summary>
-    private void RestoreSelectedToDefault()
-    {
-        if (SelectedService() is not { } o) { MessageBox.Show(this, "Select a service first.", "PoolWatch"); return; }
-        if (!o.CanRestoreDefault)
-        {
-            string why = o.Group == Core.Services.ServiceGroup.Protected ? "it is a protected service"
-                : o.PoolWatchChange is not null ? "PoolWatch changed it: use Restore"
-                : o.OffOutsidePoolWatch != Core.Services.ServicePlan.OffOutside ? "it is not off outside PoolWatch"
-                : "PoolWatch does not know its Windows default start type (set it in services.msc)";
-            MessageBox.Show(this, $"{o.Service.Name}: not offered: {why}.", "PoolWatch");
-            return;
-        }
-        if (MessageBox.Show(this, $"Set {o.Service.Name} back to its Windows default ({o.WindowsDefault})?\n\nIt starts at the next boot or when something asks for it. " +
-                "Your current setting (Disabled) is saved first; Restore puts it back.", "PoolWatch: Windows default", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
-        RunServiceOp(() => _analysis.Diagnostics.Services.RestoreToDefault(o.Service.Name));
-    }
-
-    /// <summary>Runs a service change off the UI thread (it can take seconds), then re-reads the list.</summary>
-    private void RunServiceOp(Func<List<(string service, string? error)>> op)
-    {
-        _servicesStatus.Text = "Applying…";
-        Task.Run(op).ContinueWith(t =>
-        {
-            if (!IsHandleCreated || IsDisposed) return;
-            BeginInvoke(() =>
-            {
-                string msg = t.IsFaulted ? t.Exception!.GetBaseException().Message
-                    : string.Join("\n", t.Result.Select(r => r.error is null ? $"{r.service}: done" : $"{r.service}: {r.error}"));
-                MessageBox.Show(this, msg, "PoolWatch: services");
-                _servicesLoaded = false;
-                RefreshServices();
-            });
-        });
-    }
+    /// <summary>The Tasks and startup apps tab (TasksTab): the window adds its page and refreshes it while it shows.</summary>
+    private TabPage TasksPage() => _tasksTab.Page;
 
     // ---------------------------------------------------------------- refresh
 
@@ -1421,7 +1124,8 @@ internal sealed class MainForm : Form
                 switch (_tabs.SelectedIndex)
                 {
                     case 0: RefreshCauses(force); break;
-                    case 1: RefreshServices(); break;
+                    case 1: _servicesTab.Refresh(); break;
+                    case 2: _tasksTab.Refresh(); break;
                 }
         ShowUpdate(_update());
         RefreshChangeCount();
@@ -1534,36 +1238,6 @@ internal sealed class MainForm : Form
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
-
-    /// <summary>
-    /// A list rebuilt from scratch (the services and the tasks lists) keeps its top visible row and its selection, matched by
-    /// <paramref name="key"/>.
-    /// </summary>
-    private static void KeepPlace(ListView lv, Func<ListViewItem, object?> key, Action rebuild)
-    {
-        int topIndex = 0;
-        var fromTop = new List<object>();
-        var selected = new List<object>();
-        try
-        {
-            if (lv.IsHandleCreated && lv.Items.Count > 0 && lv.TopItem is { } top)
-            {
-                topIndex = top.Index;
-                for (int i = top.Index; i < lv.Items.Count && fromTop.Count < 64; i++) if (key(lv.Items[i]) is { } k) fromTop.Add(k);
-            }
-            foreach (ListViewItem it in lv.SelectedItems) if (key(it) is { } k) selected.Add(k);
-        }
-        catch (Exception) { /* best effort */ }
-        rebuild();
-        try
-        {
-            var byKey = new Dictionary<object, ListViewItem>();
-            foreach (ListViewItem it in lv.Items) if (key(it) is { } k) byKey.TryAdd(k, it);
-            foreach (var k in selected) if (byKey.TryGetValue(k, out var it)) it.Selected = true;
-            if (lv.IsHandleCreated && ScrollAnchor.Pick(topIndex, fromTop, byKey.ContainsKey) is { } a && byKey.TryGetValue(a, out var t)) lv.TopItem = t;
-        }
-        catch (Exception) { }
-    }
 
     private string? _lastRefreshError;
 
@@ -1703,7 +1377,7 @@ internal sealed class MainForm : Form
 
     /// <summary>
     /// CI soak: every minute show the next page, as a user would: the Simple view, then Pool causes with its top row
-    /// selected, then Services (profiled as ui.simple, ui.page0 and ui.page1).
+    /// selected, then Services, then Tasks and startup apps (profiled as ui.simple, ui.page0, ui.page1 and ui.page2).
     /// </summary>
     public void StartSoakCycle()
     {
@@ -1751,7 +1425,7 @@ internal sealed class MainForm : Form
         var advancedButtons = VisibleButtons();
         _tabs.SelectedIndex = 1;
         RefreshNow(force: true);
-        int serviceRows = Rows(_services);
+        int serviceRows = _servicesTab.Rows;
         _tabs.SelectedIndex = 0;
         RefreshNow(force: true);
         var kinds = _causeRows.GroupBy(r => r.Kind.ToString()).ToDictionary(g => g.Key, g => g.Count());
@@ -1770,11 +1444,14 @@ internal sealed class MainForm : Form
         bool copyMatches = lines.Length == 2 && lines[0] == string.Join('\t', _causes.Columns.Cast<ColumnHeader>().Select(c => c.Text)) &&
                            _causes.SelectedItems.Count == 1 && lines[1] == string.Join('\t', _causes.SelectedItems[0].SubItems.Cast<ListViewItem.ListViewSubItem>().Select(s => CopyText.Cell(s.Text)));
         string detailsTitle = _detailTitle.Text, details = _detailText.Text;
-        // Both tabs, each with the tab selected (a hidden page is not laid out for the user): Services once its list has
-        // loaded, as the user sees it (its status text and wrapping button bar are what clipped before).
+        // Every tab, each with the tab selected (a hidden page is not laid out for the user): Services and Tasks and startup
+        // apps once their lists have loaded, as the user sees them (their wrapping bars are what clipped before).
         _tabs.SelectedIndex = 1;
         RefreshNow(force: true);
-        for (int i = 0; i < 200 && _serviceOptions.Count == 0; i++) { Application.DoEvents(); Thread.Sleep(100); }
+        for (int i = 0; i < 200 && !_servicesTab.Loaded; i++) { Application.DoEvents(); Thread.Sleep(100); }
+        _tabs.SelectedIndex = 2;
+        RefreshNow(force: true);
+        for (int i = 0; i < 200 && !_tasksTab.Loaded; i++) { Application.DoEvents(); Thread.Sleep(100); }
         List<string> BothTabs()
         {
             _tabs.SelectedIndex = 0;
@@ -1783,6 +1460,9 @@ internal sealed class MainForm : Form
             _tabs.SelectedIndex = 1;
             Application.DoEvents();
             p.AddRange(LayoutProblems().Select(x => "Services: " + x));
+            _tabs.SelectedIndex = 2;
+            Application.DoEvents();
+            p.AddRange(LayoutProblems().Select(x => "Tasks and startup apps: " + x));
             _tabs.SelectedIndex = 0;
             return p;
         }
@@ -1818,7 +1498,10 @@ internal sealed class MainForm : Form
             advanced.Hide();
         }
         // Read before hiding: the window drops its rows when it hides.
-        var rows = new Dictionary<string, int> { ["Pool causes"] = _causeRows.Count, ["Services"] = Math.Max(serviceRows, Rows(_services)) };
+        var rows = new Dictionary<string, int>
+        {
+            ["Pool causes"] = _causeRows.Count, ["Services"] = Math.Max(serviceRows, _servicesTab.Rows), ["Tasks and startup apps"] = _tasksTab.Rows.Count,
+        };
         var likelyCauses = _causeRows.Take(20).Select(r => r.Cause).ToList();
         int unrankedTagRows = _causeRows.Count(r => r.Kind == CauseKind.Tag && r.Active && r.Cause.Length == 0);
         SetView(false); // as the window opens again
@@ -1902,7 +1585,7 @@ internal sealed class MainForm : Form
 
     /// <summary>
     /// CI/README screenshots: the Simple view as the window opens, the Advanced view with the top cause selected, Services,
-    /// and Settings with its Advanced grid.
+    /// Tasks and startup apps with its top row selected, and Settings with its Advanced grid.
     /// </summary>
     public List<string> Screenshots(string dir)
     {
@@ -1923,8 +1606,13 @@ internal sealed class MainForm : Form
         _tabs.SelectedIndex = 1;
         RefreshNow(force: true);
         // The services list loads in the background: wait for it (at most 20 s) so the shot shows it.
-        for (int i = 0; i < 200 && _serviceOptions.Count == 0; i++) { Application.DoEvents(); Thread.Sleep(100); }
+        for (int i = 0; i < 200 && !_servicesTab.Loaded; i++) { Application.DoEvents(); Thread.Sleep(100); }
         Shot(this, "3-services.png");
+        _tabs.SelectedIndex = 2;
+        RefreshNow(force: true);
+        for (int i = 0; i < 200 && !_tasksTab.Loaded; i++) { Application.DoEvents(); Thread.Sleep(100); }
+        _tasksTab.SelectFirst(); // the detail panel shows the top row
+        Shot(this, "3b-tasks-and-startup-apps.png");
         _tabs.SelectedIndex = 0;
         using (var settings = NewSettings())
         {
