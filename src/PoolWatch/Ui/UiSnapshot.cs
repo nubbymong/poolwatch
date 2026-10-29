@@ -35,11 +35,23 @@ internal sealed record ChartPoint(DateTime TimeUtc, PoolTotals Totals);
 
 /// <summary>The committed pool total now and how it moved, for the status line.</summary>
 /// <param name="Clear">
-/// PoolWatch's latest cache clear in the last hour, if any. A change over a span that holds it is measured from the level
-/// the clear left, so the drop it caused is said as its result (<see cref="ChartClear.Result"/>), never as the pool falling,
-/// and growth after it is neither hidden nor exaggerated by it.
+/// PoolWatch's latest cache clear in the last hour, if any. The changes are measured on the detector's baseline across
+/// PoolWatch's own clears (<see cref="ClearSpans"/>): each clear's drop is added back, so the drop it caused is said as its
+/// result (<see cref="ChartClear.Result"/>), never as the pool falling; growth after it counts from the level it left and
+/// growth before it still counts, as in the tag rows.
 /// </param>
-internal sealed record TotalsNow(long? Total, TimeSpan Held, long Change10Min, long? ChangeHour, ChartClear? Clear = null);
+internal sealed record TotalsNow(long? Total, TimeSpan Held, long Change10Min, long? ChangeHour, ChartClear? Clear = null)
+{
+    /// <summary>
+    /// What PoolWatch's own clears of the last hour freed of the pool, as each was measured (those that freed nothing, under
+    /// <see cref="ClearScheduleText.NothingBelow"/>, left out), with the one clear's time when one did (null for several):
+    /// what <see cref="ChangeHour"/> leaves out. Zero when none did.
+    /// </summary>
+    public (long Bytes, DateTime? OneAtUtc) ClearedHour { get; init; }
+
+    /// <summary>When the clear still being measured ran, or null: no change across it is known until it is (the changes read 0).</summary>
+    public DateTime? MeasuringUtc { get; init; }
+}
 
 internal static class UiData
 {
@@ -283,9 +295,10 @@ internal static class UiData
     }
 
     /// <summary>
-    /// The committed total now, how far back the raw samples go, and its change over 10 minutes and an hour, measured from
-    /// the level PoolWatch's own latest clear left when the span holds it (<see cref="TotalsNow.Clear"/>; 0 while that clear
-    /// is being measured).
+    /// The committed total now, how far back the raw samples go, and its change over 10 minutes and an hour, on the
+    /// detector's baseline across PoolWatch's own clears (<see cref="ClearSpans"/>: each clear's drop added back, a span
+    /// that starts inside a clear's interval starting at its measurement; 0 while a clear is being measured), so the status
+    /// line's total and its tag rows never measure from two baselines.
     /// </summary>
     public static TotalsNow Totals(AnalysisPipeline a)
     {
@@ -301,11 +314,24 @@ internal static class UiData
         long total = Sum(h.Totals[^1]);
         var now = h.Times[^1];
         var held = now - h.Times[0];
-        long Change(TimeSpan span) => ClearPolicy.ChangeFrom(now - span, now, clears, CacheClearer.MeasureAfter) is { } from
-            ? total - Sum(h.Totals[Math.Min(h.IndexAtOrAfter(from), h.Count - 1)])
-            : 0;
+        var own = new OwnClears(clears, CacheClearer.MeasureAfter);
+        var measuringClear = own.Measuring(now);
+        bool measuring = measuringClear is not null;
+        var spans = own.SpansIn(h);
+        int from = h.IndexAtOrAfter(now - TimeSpan.FromHours(1));
+        var series = new long[h.Count - from];
+        for (int i = from; i < h.Count; i++) series[i - from] = Sum(h.Totals[i]);
+        spans.Stitch(series, from);
+        long Change(TimeSpan span) => measuring ? 0 : series[^1] - series[spans.Start(h.IndexAtOrAfter(now - span)) - from];
         var clear = clears.LastOrDefault(r => r.Error is null && r.TimeUtc > now - TimeSpan.FromHours(1));
+        // A clear that failed, or is not measured yet, has no level after it, so its record frees nothing: it is left out with
+        // the clears that freed nothing.
+        var freed = clears.Where(r => r.TimeUtc > now - TimeSpan.FromHours(1) && r.TimeUtc <= now && r.Freed >= ClearScheduleText.NothingBelow).ToList();
         return new TotalsNow(total, held, Change(TimeSpan.FromMinutes(10)), held.TotalMinutes >= 55 ? Change(TimeSpan.FromHours(1)) : null,
-            clear is null ? null : ChartClear.Of(clear));
+            clear is null ? null : ChartClear.Of(clear))
+        {
+            ClearedHour = (freed.Sum(r => r.Freed), freed.Count == 1 ? freed[0].TimeUtc : null),
+            MeasuringUtc = measuringClear?.TimeUtc,
+        };
     }
 }

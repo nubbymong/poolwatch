@@ -200,21 +200,6 @@ public static class ClearPolicy
         && (history.LastOrDefault(r => r is { Mode: ClearMode.Standby, After: not null, Error: null }) is not { } full
             || !FreedLittle(full)); // last: the only part that reads back through the history
 
-    /// <summary>
-    /// Where a change of the pool up to <paramref name="nowUtc"/> is measured from, so that a drop PoolWatch's own clear
-    /// caused is that clear's result and never the pool falling, and growth after it is measured from the level it left:
-    /// <paramref name="fromUtc"/>, or, when the latest clear that ran is measured after it (the clear plus
-    /// <paramref name="settle"/>: a clear just before the span still drops the pool inside it), that measurement point;
-    /// null while that clear is still being measured (no change can be told yet).
-    /// </summary>
-    public static DateTime? ChangeFrom(DateTime fromUtc, DateTime nowUtc, IReadOnlyList<ClearRecord> clears, TimeSpan settle)
-    {
-        var clear = clears.LastOrDefault(r => r.Error is null && r.TimeUtc + settle > fromUtc && r.TimeUtc <= nowUtc);
-        if (clear is null) return fromUtc;
-        var settled = clear.TimeUtc + settle;
-        return settled <= nowUtc ? settled : null;
-    }
-
     /// <summary>A measured clear that freed less than max(512 MB, 10% of the pool before it): the pool it saw was not cache-held.</summary>
     public static bool FreedLittle(ClearRecord r) => r.Freed < Math.Max(512L << 20, r.PoolBefore / 10);
 

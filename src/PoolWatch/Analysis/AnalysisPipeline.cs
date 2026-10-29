@@ -72,6 +72,11 @@ internal sealed class AnalysisPipeline
 
     private void OnSample(Sample s)
     {
+        // PoolWatch's own cache clears are its own impact, not the pool's: the detector measures across them. Read before
+        // the history lock, as the other readers of both do. The clearer measures a clear at this same sample, after the
+        // detector, from this sample's totals. Diagnostics is null only while the constructor runs: this handler is
+        // subscribed before Diagnostics is made.
+        var clears = Diagnostics is { } d ? d.Cache.History() : null;
         lock (History.SyncRoot)
         {
             using (Profiler.Stage("analysis.history")) History.Add(s);
@@ -89,7 +94,7 @@ internal sealed class AnalysisPipeline
                 _lastReads = reads;
             }
             List<Alert> alerts;
-            using (Profiler.Stage("analysis.detector")) alerts = Detector.Evaluate(History);
+            using (Profiler.Stage("analysis.detector")) alerts = Detect(Detector, History, clears);
             AlertsRaised += alerts.Count;
             using (Profiler.Stage("analysis.incidents")) Incidents.Process(History, Detector, alerts, s.TimeUtc);
             try { RequestPoolCaptures(); }
@@ -109,6 +114,14 @@ internal sealed class AnalysisPipeline
     }
 
     private string? _lastBootError;
+
+    /// <summary>
+    /// The detector on the newest sample, with PoolWatch's own cache clears as the clearer holds them (null: none yet),
+    /// each measured <see cref="CacheClearer.MeasureAfter"/> after it ran, as the clearer measures it. The caller holds the
+    /// history lock.
+    /// </summary>
+    internal static List<Alert> Detect(Detector detector, History history, IReadOnlyList<Core.Cache.ClearRecord>? clears) =>
+        detector.Evaluate(history, clears is null ? OwnClears.None : new OwnClears(clears, CacheClearer.MeasureAfter));
 
     private void OnIncidentOpened(Incident inc, Alert a)
     {

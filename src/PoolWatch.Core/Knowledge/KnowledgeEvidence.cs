@@ -1,4 +1,5 @@
 using PoolWatch.Core.Cache;
+using PoolWatch.Core.Detection;
 using PoolWatch.Core.Recommendations;
 
 namespace PoolWatch.Core.Knowledge;
@@ -19,7 +20,7 @@ public sealed record ClearResult(DateTime TimeUtc, IReadOnlyDictionary<PoolTag, 
 /// </summary>
 public sealed record KnowledgeEvidence
 {
-    /// <summary>Growth is measured over the last hour, or since the level a cache clear left, whichever is shorter.</summary>
+    /// <summary>Growth is measured over the last hour (PoolWatch's own cache clears in it measured across, as the detector does).</summary>
     public static readonly TimeSpan GrowthWindow = TimeSpan.FromHours(1);
     /// <summary>A shorter span says nothing about how fast a tag grows (a clear's refill, a burst).</summary>
     public static readonly TimeSpan MinGrowthOver = TimeSpan.FromMinutes(10);
@@ -43,9 +44,10 @@ public sealed record KnowledgeEvidence
     /// <summary>
     /// Gathers the evidence from memory: nothing is scanned or queried for it. Call with the history's lock held
     /// (<see cref="History.History.SyncRoot"/>), as for the detector; it measures only <see cref="KnowledgeBase.GrowthTags"/>.
-    /// A cache clear's drop is the clear's doing, not a change of the tag: growth counts from the level the newest clear
-    /// left (<paramref name="clearSettles"/> after it), so the clear can neither hide growth nor make its refill look like
-    /// growth. Clears count only once measured with their per-tag results (a clear read back after a restart keeps only the
+    /// A cache clear's drop is the clear's doing, not a change of the tag: growth is measured as the detector measures it
+    /// across PoolWatch's own clears (from the level each left, <paramref name="clearSettles"/> after it, with the growth
+    /// before it kept), so a clear can neither hide growth nor make its refill look like growth. Clears count in
+    /// <see cref="Clears"/> only once measured with their per-tag results (a clear read back after a restart keeps only the
     /// tags it freed, up to 12; one from an older file has none).
     /// </summary>
     /// <param name="clears">The cache clears PoolWatch holds, oldest first.</param>
@@ -58,8 +60,7 @@ public sealed record KnowledgeEvidence
     {
         DateTime nowUtc = inputs.NowUtc;
         var facts = inputs.Facts;
-        DateTime settled = clears.Where(c => c.Error is null).Select(c => c.TimeUtc + clearSettles).DefaultIfEmpty(DateTime.MinValue).Max();
-        var (over, growth) = Measure(history, knowledge.GrowthTags, settled);
+        var (over, growth) = Measure(history, knowledge.GrowthTags, clears, clearSettles);
         return new KnowledgeEvidence
         {
             NowUtc = nowUtc, WindowsBuild = facts?.Build, FileSystems = facts?.Volumes.Select(v => v.FileSystem).Distinct(StringComparer.OrdinalIgnoreCase).ToList() ?? [],
@@ -72,21 +73,34 @@ public sealed record KnowledgeEvidence
     }
 
     /// <summary>
-    /// Each tag's rise in each pool over the raw samples since <paramref name="settledUtc"/> or the last hour, whichever is
-    /// later: the newest value minus the lowest in the span (an ongoing climb with small dips still counts whole).
+    /// Each tag's rise in each pool over the raw samples of the last hour, on the detector's baseline for PoolWatch's own
+    /// clears (<see cref="ClearSpans"/>: each clear's drop added back, the samples inside its interval skipped, a span that
+    /// starts inside one starts at its measurement; none while a clear is being measured): the newest value minus the
+    /// lowest in the span (an ongoing climb with small dips still counts whole).
     /// </summary>
-    private static (TimeSpan Over, Dictionary<PoolTag, TagGrowth> Growth) Measure(History.History h, IReadOnlySet<PoolTag> tags, DateTime settledUtc)
+    private static (TimeSpan Over, Dictionary<PoolTag, TagGrowth> Growth) Measure(History.History h, IReadOnlySet<PoolTag> tags,
+        IReadOnlyList<ClearRecord> clears, TimeSpan clearSettles)
     {
         var growth = new Dictionary<PoolTag, TagGrowth>();
         if (h.Count < 2) return (TimeSpan.Zero, growth);
         var last = h.Times[^1];
-        int from = h.IndexAtOrAfter(settledUtc > last - GrowthWindow ? settledUtc : last - GrowthWindow);
+        var own = new OwnClears(clears, clearSettles);
+        if (own.Measuring(last) is not null) return (TimeSpan.Zero, growth); // nothing can be told across it until it is measured
+        var spans = own.SpansIn(h);
+        int from = spans.Start(h.IndexAtOrAfter(last - GrowthWindow));
         if (from >= h.Count - 1 || last - h.Times[from] < MinGrowthOver) return (TimeSpan.Zero, growth);
         foreach (var tag in tags)
             growth[tag] = new TagGrowth(Rise(h.TagSeries(tag, from, nonPagedOnly: false)), Rise(h.TagSeries(tag, from, nonPagedOnly: true)));
         return (last - h.Times[from], growth);
 
-        static long Rise(long[] series) => series[^1] - series.Min();
+        long Rise(long[] series)
+        {
+            spans.Stitch(series, from);
+            long min = long.MaxValue;
+            for (int i = 0; i < series.Length; i++)
+                if (!spans.Inside(from + i)) min = Math.Min(min, series[i]);
+            return series[^1] - min;
+        }
     }
 
     /// <summary>What a measured clear freed of each tag it recorded (a tag that grew meanwhile freed nothing).</summary>

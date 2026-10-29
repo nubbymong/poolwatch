@@ -150,6 +150,8 @@ internal sealed class IncidentWriter
         startBytes = inc.StartBytes,
         peakBytes = inc.PeakBytes,
         currentBytes = inc.CurrentBytes,
+        clearedBytes = inc.ClearedBytes,
+        clearedAtUtc = inc.ClearedAtUtc,
         growthBytes = inc.Growth,
         window = inc.Window,
         alerts = inc.Alerts.Select(a => new { kind = a.Kind, timeUtc = a.TimeUtc, rule = a.Rule, bytes = a.Bytes, onsetUtc = a.OnsetUtc }),
@@ -230,7 +232,8 @@ internal sealed class IncidentWriter
                       (info.Description.Length > 0 ? $", {Md(info.Description)}" : "") + $" (source: {info.Source})");
         if (inc.Kind != IncidentKind.Release)
             sb.AppendLine($"- Growth: {Fmt.Bytes(inc.StartBytes)} -> {Fmt.Bytes(inc.PeakBytes)} (+{Fmt.Bytes(inc.Growth)}) from {Fmt.Clock(inc.OnsetUtc)}" +
-                          (inc.EndUtc is { } e ? $" to {Fmt.Clock(e)}" : " (still climbing at the last sample)") + $"; now {Fmt.Bytes(inc.CurrentBytes)}");
+                          (inc.EndUtc is { } e ? $" to {Fmt.Clock(e)}" : " (still climbing at the last sample)") + $"; now {Fmt.Bytes(inc.CurrentBytes)}" +
+                          (inc.OwnClearsFreed is { } own ? $", after {own} of it" : ""));
         if (Shape(inc) is { During: { Shape: not AllocShape.Idle } shape, Before: var before })
             sb.AppendLine($"- Allocation shape {ShapeSpan(inc)}: {shape.AllocsPerMin:N0} allocations/min, {shape.FreesPerMin:N0} frees/min" +
                           (before is { } b ? $", against {b.AllocsPerMin:N0} and {b.FreesPerMin:N0} a minute just before it" : "") + $": {shape.Text}");
@@ -240,7 +243,9 @@ internal sealed class IncidentWriter
         foreach (var a in inc.Alerts)
             sb.AppendLine($"- Alert {Fmt.Clock(a.TimeUtc)}: {a.Rule} ({Fmt.SignedBytes(a.Kind == AlertKind.Release ? -a.Bytes : a.Bytes)}, onset {Fmt.Clock(a.OnsetUtc)})");
         if (inc.Retention is { } ret) sb.AppendLine($"- **Retained**: {ret.Note}.");
-        if (inc.Release is { } rel) sb.AppendLine($"- **Released**: {Fmt.Bytes(rel.FromBytes)} -> {Fmt.Bytes(rel.ToBytes)} between {Fmt.Clock(rel.FromUtc)} and {Fmt.Clock(rel.TimeUtc)}.");
+        if (inc.Release is { } rel)
+            sb.AppendLine($"- **Released**: {Fmt.Bytes(rel.FromBytes)} -> {Fmt.Bytes(rel.ToBytes)} between {Fmt.Clock(rel.FromUtc)} and {Fmt.Clock(rel.TimeUtc)}" +
+                          (rel.ClearedBytes > 0 ? $"; {Fmt.OwnClearsFreed(rel.ClearedBytes, rel.ClearedAtUtc)} of it and {Fmt.Bytes(rel.Dropped)} fell on its own." : "."));
         sb.AppendLine("- Sizes are the tag's own usage from SystemPoolTagInformation; Task Manager's committed pool figures run higher (fragmentation, lazy release).");
         sb.AppendLine();
 
@@ -297,7 +302,11 @@ internal sealed class IncidentWriter
         if (inc.Release is { } r)
         {
             sb.AppendLine("## Release").AppendLine();
-            sb.AppendLine($"`{inc.Tag.ToDisplay()}` fell {Fmt.Bytes(r.Dropped)} ({Fmt.Bytes(r.FromBytes)} -> {Fmt.Bytes(r.ToBytes)}) between {Fmt.Clock(r.FromUtc)} and {Fmt.Clock(r.TimeUtc)}. " +
+            // PoolWatch's own clears in the span freed part of it: that part is their result, the rest fell on its own.
+            string fell = r.ClearedBytes > 0
+                ? $"fell {Fmt.Bytes(r.Dropped)} on its own ({Fmt.Bytes(r.FromBytes)} -> {Fmt.Bytes(r.ToBytes)}, of which {Fmt.OwnClearsFreed(r.ClearedBytes, r.ClearedAtUtc)})"
+                : $"fell {Fmt.Bytes(r.Dropped)} ({Fmt.Bytes(r.FromBytes)} -> {Fmt.Bytes(r.ToBytes)})";
+            sb.AppendLine($"`{inc.Tag.ToDisplay()}` {fell} between {Fmt.Clock(r.FromUtc)} and {Fmt.Clock(r.TimeUtc)}. " +
                           "Whatever stopped or was deleted at that moment was holding the memory.").AppendLine();
             if (r.Exits.Count > 0) { sb.AppendLine("Process exits around the drop:").AppendLine(); foreach (var x in r.Exits) sb.AppendLine($"- {Md(x)}"); sb.AppendLine(); }
             if (r.WorktreeNote is { } wn) sb.AppendLine($"**Git worktree sprawl:** {Md(wn)}").AppendLine();

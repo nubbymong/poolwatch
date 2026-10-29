@@ -1,6 +1,7 @@
 using System.Globalization;
 using PoolWatch.Core;
 using PoolWatch.Core.Cache;
+using PoolWatch.Core.Detection;
 using PoolWatch.Core.History;
 using PoolWatch.Core.Knowledge;
 using PoolWatch.Core.Model;
@@ -441,8 +442,8 @@ public class KnownIssueMatcherTests
     public void AClearsDropIsNotGrowthAndNeitherIsItsRefill()
     {
         // Reff held 2 GB; a clear 20 minutes ago dropped it to 100 MB, the cache refilled it to 200 MB within the 2 minutes
-        // before the clear is measured, and it has grown to 500 MB since. Growth is the 300 MB since the clear's level: not
-        // a fall (the drop is the clear's doing) and not 400 MB (the refill is the clear's too).
+        // before the clear is measured, and it has grown to 500 MB since. Over the hour, growth is the 300 MB since the
+        // clear's level: not a fall (the drop is the clear's doing) and not 400 MB (the refill is the clear's too).
         var clearAt = Now.AddMinutes(-20);
         long Reff(int minute) => T0.AddMinutes(minute) switch
         {
@@ -452,7 +453,7 @@ public class KnownIssueMatcherTests
         };
         var h = History(i => [("Reff", Reff(i), 0)]);
         var e = Gather(h, [Clear(clearAt, ("Reff", 2 * GB, 200 * MB))]);
-        Assert.Equal(TimeSpan.FromMinutes(18), e.GrowthOver);
+        Assert.Equal(TimeSpan.FromHours(1), e.GrowthOver);
         Assert.Equal(300 * MB, e.Growth[PoolTag.Parse("Reff")].PagedBytes);
 
         // A failed clear changed nothing, so the hour still counts whole.
@@ -462,13 +463,83 @@ public class KnownIssueMatcherTests
     }
 
     [Fact]
-    public void RightAfterAClearNoGrowthIsKnown()
+    public void GrowthIsMeasuredAcrossClearsAsTheDetectorMeasuresIt()
     {
+        // The detector's one baseline for PoolWatch's own clears: each clear's drop added back, its interval left out. Toke
+        // grows 1 MB a minute. Clears dated after the newest sample (the clock was set back since), or that freed none of
+        // it, leave the hour whole; a clear that freed 30 MB of it 20 minutes ago takes nothing off the growth before it
+        // or after it, only its own interval (from the sample before it to the one that measured it: 3 MB here, Toke's
+        // growth in the clear's 2 minutes being the clear's).
+        var h = History(i => [("Toke", 100 * MB + i * MB, 0)]);
+        var toke = PoolTag.Parse("Toke");
+        foreach (var clears in new ClearRecord[][] { [Clear(Now.AddMinutes(1))], [Clear(Now.AddMinutes(-40)), Clear(Now.AddMinutes(-20))] })
+        {
+            var e = Gather(h, clears);
+            Assert.Equal(TimeSpan.FromHours(1), e.GrowthOver);
+            Assert.Equal(60 * MB, e.Growth[toke].PagedBytes);
+        }
+        var clearAt = Now.AddMinutes(-20);
+        var trimmed = History(i => [("Toke", 100 * MB + i * MB - (T0.AddMinutes(i) >= clearAt ? 30 * MB : 0), 0)]);
+        var cleared = Gather(trimmed, [Clear(clearAt)]);
+        Assert.Equal(TimeSpan.FromHours(1), cleared.GrowthOver);
+        Assert.Equal(57 * MB, cleared.Growth[toke].PagedBytes);
+        // An hour that starts inside a clear's interval starts at its measurement, and its rate is judged over what is left.
+        var early = Gather(h, [Clear(Now.AddMinutes(-61))]);
+        Assert.Equal(TimeSpan.FromMinutes(59), early.GrowthOver);
+        Assert.Equal(59 * MB, early.Growth[toke].PagedBytes);
+        // A clear that finds Toke flat (it stopped growing 25 minutes ago) and leaves it a page lower: the page is the clear's,
+        // added back, and the hour holds 35 MB of growth.
+        const long KB = 1 << 10;
+        var wobble = History(i => [("Toke", 100 * MB + Math.Min(i, 45) * MB - (T0.AddMinutes(i) >= clearAt ? 4 * KB : 0), 0)]);
+        Assert.Equal(35 * MB, Gather(wobble, [Clear(clearAt)]).Growth[toke].PagedBytes);
+    }
+
+    [Fact]
+    public void ATagGrowingJustOverAPacksRateThatAClearTrimsReadsUnderItAndTheRateIsNeverLowered()
+    {
+        // Tokens grow 350 KB a minute (20.5 MB an hour, over the token leak's 20 MB). With no clear the leak is named. A clear
+        // 20 minutes ago trims 30 MB of them: their growth in the clear's 3 minutes is the clear's, and the pack keeps its own
+        // 20 MB an hour, so the hour holds 57 minutes of growth (19.5 MB) and the leak is not named while the hour holds the
+        // clear (the limit: here 3 of the hour's 60 samples at a sample a minute; about 4% over a rate with hourly clears at
+        // the default 10-second sampling).
+        const long KB = 1 << 10;
+        var clearAt = Now.AddMinutes(-20);
+        var inputs = new RecommendationInputs { NowUtc = Now, Facts = Facts() };
+        var plain = Gather(History(i => [("Toke", 100 * MB + i * 350 * KB, 0)]), inputs: inputs);
+        Assert.Equal((TimeSpan.FromHours(1), new TagGrowth(60 * 350 * KB, 0)), (plain.GrowthOver, plain.Growth[PoolTag.Parse("Toke")]));
+        Assert.Equal(["windows-token-leak"], Ids(plain));
+        Assert.Contains($"Security tokens grew {Fmt.Bytes(60 * 350 * KB)} in the last hour.", Single(plain, "windows-token-leak").Seen);
+        var h = History(i => [("Toke", 100 * MB + i * 350 * KB - (T0.AddMinutes(i) >= clearAt ? 30 * MB : 0), 0)]);
+        var e = Gather(h, [Clear(clearAt)], inputs: inputs);
+        Assert.Equal((TimeSpan.FromHours(1), new TagGrowth(57 * 350 * KB, 0)), (e.GrowthOver, e.Growth[PoolTag.Parse("Toke")]));
+        Assert.Empty(Ids(e));
+        // ReFS file records name no pool, so both count. Reff's paged part grows 160 MB an hour and the clear trims it (152 MB
+        // in the hour, its 3 minutes being the clear's); its non-paged part grows 110 MB an hour and the clear frees none of
+        // it: 262 MB together, over the 256 MB the ReFS pack asks. Either part alone is under it.
+        var refs = Gather(History(i => [("Reff", 100 * MB + i * 8 * MB / 3 - (T0.AddMinutes(i) >= clearAt ? 30 * MB : 0), 50 * MB + i * 110 * MB / 60)]),
+            [Clear(clearAt)], inputs: inputs);
+        var reff = refs.Growth[PoolTag.Parse("Reff")];
+        Assert.Equal((152 * MB, 110 * MB), (reff.PagedBytes, reff.NonPagedBytes));
+        Assert.Contains("refs-standby-metadata", Ids(refs));
+        Assert.DoesNotContain("refs-standby-metadata", Ids(refs with { Growth = new Dictionary<PoolTag, TagGrowth> { [PoolTag.Parse("Reff")] = reff with { NonPagedBytes = 0 } } }));
+        Assert.DoesNotContain("refs-standby-metadata", Ids(refs with { Growth = new Dictionary<PoolTag, TagGrowth> { [PoolTag.Parse("Reff")] = reff with { PagedBytes = 0 } } }));
+    }
+
+    [Fact]
+    public void WhileAClearIsMeasuredNoGrowthIsKnown()
+    {
+        // Until the clear is measured nothing can be told across it (the detector holds then too); right after, the hour is
+        // known again.
         var h = History(i => [("Toke", i * 10 * MB, 0)]);
-        var e = Gather(h, [Clear(Now.AddMinutes(-9))]); // measured from 7 minutes ago: too short to say how fast
+        var measuring = Clear(Now.AddMinutes(-1));
+        measuring.After = null;
+        var e = Gather(h, [measuring]);
         Assert.Equal(TimeSpan.Zero, e.GrowthOver);
         Assert.Empty(e.Growth);
         Assert.Empty(KnownIssueMatcher.Match(KnowledgeBase.Embedded(), e with { WindowsBuild = "26200.9106" }));
+        var after = Gather(h, [Clear(Now.AddMinutes(-9))]);
+        Assert.Equal(TimeSpan.FromHours(1), after.GrowthOver);
+        Assert.Equal(600 * MB, after.Growth[PoolTag.Parse("Toke")].PagedBytes); // the clear freed none of it
         Assert.Equal(TimeSpan.Zero, Gather(new History()).GrowthOver); // nothing sampled yet
     }
 

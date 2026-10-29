@@ -82,6 +82,8 @@ public sealed class IncidentManager
         if (h.Count == 0) return;
         int cut = _events.FindIndex(e => e.TimeUtc >= nowUtc - EventKeep);
         if (cut > 0) _events.RemoveRange(0, cut);
+        _clears = detector.Clears;
+        LowerHighsByClearsJustMeasured(h);
 
         foreach (var a in alerts)
         {
@@ -91,7 +93,8 @@ public sealed class IncidentManager
 
         foreach (var inc in _open.Values.ToList())
         {
-            if (nowUtc - inc.LastRiseUtc >= TimeSpan.FromMinutes(_settings.IncidentQuietMinutes))
+            // While PoolWatch's own clear is being measured the detector holds: its silence is not the growth stopping.
+            if (!detector.Holding && nowUtc - inc.QuietSinceUtc >= TimeSpan.FromMinutes(_settings.IncidentQuietMinutes))
                 Close(h, inc, nowUtc, $"no new rise for {_settings.IncidentQuietMinutes:0.#} min");
             else if (nowUtc - (inc.EpisodeStartUtc ?? inc.OpenedUtc) >= TimeSpan.FromMinutes(_settings.IncidentMaxMinutes))
                 Close(h, inc, nowUtc, $"open for the maximum {_settings.IncidentMaxMinutes:0} min");
@@ -106,7 +109,8 @@ public sealed class IncidentManager
             }
         }
 
-        CheckRetention(h, detector, nowUtc);
+        if (!detector.Holding) CheckRetention(h, detector, nowUtc);
+        foreach (var freed in detector.ClearedRetentions) NoteRetentionCleared(freed, nowUtc);
         // A closed incident is rewritten on a change, and (2f, review round 2) at most every few minutes for alerts counted
         // on its timeline after it closed.
         foreach (var inc in _closed.Where(i => i.Dirty || (i.CountPending && nowUtc - i.LastWriteUtc >= MaxRewriteInterval)).ToList()) Write(h, inc);
@@ -120,6 +124,49 @@ public sealed class IncidentManager
         int old = _closed.FindIndex(i => nowUtc - i.ClosedUtc!.Value < ReleaseAttachWindow);
         if (old > 0) _closed.RemoveRange(0, old); // their folders stay on disk
         else if (old < 0) _closed.Clear();
+    }
+
+    /// <summary>PoolWatch's own cache clears as the detector read them last: <see cref="Rank"/> and the release record measure across them as it does.</summary>
+    private OwnClears _clears = OwnClears.None;
+    /// <summary>The sample at which the high-water marks were last lowered for a clear, so one clear lowers them once.</summary>
+    private DateTime _loweredAtUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// A clear measured at this sample (the newest) that dropped an incident's series: that growth incident's high-water
+    /// mark comes down by the drop (<see cref="ClearSpan.Drop"/>). The drop is the clear's result, not the growth ending,
+    /// so a rise after it counts from the level the clear left, as the detector measures it, and not only once it passes
+    /// the level before the clear. An open incident that was still rising when the clear ran counts its quiet minutes from
+    /// the measurement (<see cref="Incident.QuietFromUtc"/>; its last rise stays the last one seen): the interval hid its
+    /// rise (the rules skip it), it did not stop. A clear measured while a later one
+    /// still is shares that one's interval (<see cref="OwnClears.SpansIn"/>), so both lower the marks once, when it is.
+    /// </summary>
+    private void LowerHighsByClearsJustMeasured(History.History h)
+    {
+        int n = h.Count;
+        if (h.Times[n - 1] == _loweredAtUtc) return;
+        var spans = _clears.SpansIn(h);
+        for (int k = 0; k < spans.Count; k++)
+        {
+            var c = spans.Spans[k];
+            if (c.Measured != n - 1 || c.Before < 0) continue;
+            _loweredAtUtc = h.Times[n - 1];
+            foreach (var inc in _open.Values.Concat(_closed))
+            {
+                if (inc.Kind is not (IncidentKind.Growth or IncidentKind.NonPagedTotal)) continue;
+                long drop = ClearSpan.Drop(Level(h, inc, c.Before), Level(h, inc, c.Measured));
+                if (drop == 0) continue;
+                inc.HighestSeenBytes -= drop;
+                if (inc.IsOpen && inc.LastRiseUtc >= h.Times[c.Before] - AlertRunGap) inc.QuietFromUtc = h.Times[n - 1];
+            }
+        }
+    }
+
+    /// <summary>The series an incident's high-water mark follows: the committed non-paged total for the system incident, else its tag.</summary>
+    private static long Level(History.History h, Incident inc, int i)
+    {
+        if (inc.Kind == IncidentKind.NonPagedTotal) return (long)h.Totals[i].CommittedNonPaged;
+        var (p, np) = h.TagAt(inc.Tag, i);
+        return p + np;
     }
 
     /// <summary>
@@ -241,6 +288,7 @@ public sealed class IncidentManager
             last.EndUtc = null;
             last.EpisodeStartUtc = a.TimeUtc; // the maximum duration counts from the re-open, not from the first episode
             last.LastAlertUtc = last.LastRiseUtc = a.TimeUtc;
+            last.QuietFromUtc = null; // a clear's quiet start belongs to the episode it ran in
             last.HighestSeenBytes = Math.Max(last.HighestSeenBytes, cur);
             last.Reopened++;
             var same = last.Alerts.FindIndex(x => x.Kind == a.Kind && x.Window == a.Window);
@@ -422,12 +470,24 @@ public sealed class IncidentManager
         var series = h.TagSeries(inc.Tag, iFrom);
         if (series.Length == 0) return;
         if (iTo - iFrom + 1 < series.Length) series = series[..(iTo - iFrom + 1)];
+        // PoolWatch's own clears, on the detector's stitch: their interval is neither the growth's start nor its end (it
+        // takes the level just before it), and their drop is not the growth ending (`grown` adds it back). The levels said
+        // (start, now) are the tag's own.
+        var spans = _clears.SpansIn(h);
+        var grown = series;
+        var dropped = new List<ClearSpan>();
+        if (spans.Count > 0)
+        {
+            grown = (long[])series.Clone();
+            spans.Stitch(series, iFrom, addBack: false, fill: true);
+            spans.Stitch(grown, iFrom, fill: true, dropped: dropped);
+        }
 
         DateTime? end = null;
         if (inc.Kind != IncidentKind.Release)
         {
             // Refine the onset with change-point detection on the series after the baseline start.
-            var cp = Detector.FindChangePoints(series);
+            var cp = Detector.FindChangePoints(grown);
             if (cp.Rise > 0)
             {
                 var cpOnset = h.Times[iFrom + cp.OnsetIndex];
@@ -438,7 +498,11 @@ public sealed class IncidentManager
             inc.EndUtc = end;
             int o = Math.Clamp(h.IndexAtOrAfter(onset) - iFrom, 0, series.Length - 1);
             inc.StartBytes = series[o];
-            inc.PeakBytes = series[o..].Max();
+            inc.PeakBytes = series[o] + (grown[o..].Max() - grown[o]);
+            inc.ClearedBytes = grown[^1] - series[^1] - (grown[o] - series[o]);
+            // The clears whose drop that is (measured after the onset), said with its time when there was one.
+            var freed = dropped.FindAll(s => s.Measured > iFrom + o);
+            inc.ClearedAtUtc = freed.Count == 1 ? spans.TimeOf(freed[0]) : null;
         }
         else
         {
@@ -525,13 +589,29 @@ public sealed class IncidentManager
             long cur = p + np;
             if (cur < inc.StartBytes + inc.Growth / 2) continue;
             inc.CurrentBytes = cur;
+            // Its rise counts back what PoolWatch's own clears freed of it: said as theirs, not as given back.
             string note = $"{inc.Tag.ToDisplay()} still holds {Fmt.Bytes(cur - inc.StartBytes)} of its {Fmt.Bytes(inc.Growth)} rise " +
-                          $"{Fmt.Duration(nowUtc - st)} after {top.Image} (PID {top.Key.Pid}) {(top.ExitUtc is not null ? "exited" : "went quiet")}";
+                          $"{Fmt.Duration(nowUtc - st)} after {top.Image} (PID {top.Key.Pid}) {(top.ExitUtc is not null ? "exited" : "went quiet")}" +
+                          (inc.OwnClearsFreed is { } freed ? $"; {freed} of it" : "");
             inc.Retention = new RetentionRecord(nowUtc, st, cur - inc.StartBytes, note);
             detector.MarkRetained(inc.Tag, st, inc.StartBytes + inc.Growth / 2);
             inc.Dirty = true;
             _host.Log($"incident {inc.Id}: retained: {note}");
         }
+    }
+
+    /// <summary>
+    /// A retained tag that PoolWatch's own clear took under its floor (<see cref="Detector.ClearedRetentions"/>): it no longer
+    /// counts as retained, and its incident says why, as the clear's result. What the clear freed was the cache's.
+    /// </summary>
+    private void NoteRetentionCleared(ClearedRetention freed, DateTime nowUtc)
+    {
+        var inc = _closed.LastOrDefault(i => i.Tag == freed.Tag && i.Retention is not null);
+        if (inc is null) return;
+        string text = $"no longer retained: {Fmt.OwnClearsFreed(freed.FreedBytes, freed.ClearAtUtc)} of it, so that memory was the cache's";
+        AddTimeline(inc, nowUtc, text);
+        inc.Dirty = true;
+        _host.Log($"incident {inc.Id}: {text}");
     }
 
     /// <summary>Time of the last sample in which the process did any I/O (null if it never did in the raw history).</summary>
@@ -583,7 +663,26 @@ public sealed class IncidentManager
             active.Add((text, ops));
         }
         var activeText = active.OrderByDescending(x => x.ops).Take(5).Select(x => x.text).ToList();
-        return new ReleaseRecord(a.TimeUtc, a.OnsetUtc, fp + fnp, tp + tnp, exits, activeText, WorktreeNote(h, iFrom, a));
+        // The real levels it fell from and to, and what PoolWatch's own clears took from it meanwhile: their drop is their
+        // result, not the release, so what fell on its own is the rest, as the detector measured the drop.
+        long cleared = 0;
+        int clears = 0;
+        DateTime? clearedAt = null;
+        var spans = _clears.SpansIn(h);
+        foreach (var s in spans.Spans)
+            if (s.Before >= iFrom && s.Measured <= iTo)
+            {
+                var (bp, bnp) = h.TagAt(a.Tag, s.Before);
+                var (mp, mnp) = h.TagAt(a.Tag, s.Measured);
+                long drop = ClearSpan.Drop(bp + bnp, mp + mnp);
+                if (drop == 0) continue; // it freed none of this tag: not one of the clears said
+                cleared += drop;
+                clearedAt = clears++ == 0 ? spans.TimeOf(s) : null;
+            }
+        return new ReleaseRecord(a.TimeUtc, a.OnsetUtc, fp + fnp, tp + tnp, exits, activeText, WorktreeNote(h, iFrom, a))
+        {
+            ClearedBytes = cleared, ClearedAtUtc = clearedAt,
+        };
     }
 
     /// <summary>

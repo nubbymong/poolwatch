@@ -189,9 +189,7 @@ internal sealed class ReportIssueDialog : Form
     private static IssueFacts Facts(MonitorEngine engine, AnalysisPipeline analysis)
     {
         var system = analysis.Host.GetSystemInfo();
-        var totals = UiData.Totals(analysis);
-        string kernel = totals.Total is not { } total ? "not measured yet"
-            : Fmt.Bytes(total) + " (paged and non-paged pool), " + (totals.ChangeHour is { } h ? Change(h) + " in the last hour" : "watched for less than an hour");
+        string kernel = KernelLine(UiData.Totals(analysis));
         var tags = UiData.Tags(analysis, growingOnly: false, max: int.MaxValue).OrderByDescending(t => t.Bytes).Take(8)
             .Select(t => $"{PlainWords.Tag(t.Tag, analysis.Knowledge.Lookup(t.Tag))}: {Fmt.Bytes(t.Bytes)}").ToList();
         // OSArchitecture is the machine's own (ARM64 on Windows on Arm, also for this x64 build under emulation, since .NET 7).
@@ -206,6 +204,17 @@ internal sealed class ReportIssueDialog : Form
     private static string Arch(Architecture a) => a switch { Architecture.X64 => "x64", Architecture.Arm64 => "ARM64", _ => a.ToString() };
 
     private static string Change(long bytes) => bytes > 0 ? "up " + Fmt.Bytes(bytes) : bytes < 0 ? "down " + Fmt.Bytes(-bytes) : "unchanged";
+
+    /// <summary>
+    /// The kernel pool now and its change over the last hour, as the status line measures it (a clear's drop added back, so
+    /// growth before it still counts), with what PoolWatch's own cache clears of that hour freed said apart, as their result:
+    /// "12.0 GB (paged and non-paged pool), up 150 MB in the last hour; PoolWatch's own cache clear at 03:56 freed 1.3 GB, not
+    /// counted in that change". While a clear is still being measured no change is told.
+    /// </summary>
+    internal static string KernelLine(TotalsNow totals) => totals.Total is not { } total ? "not measured yet"
+        : Fmt.Bytes(total) + " (paged and non-paged pool), " + (totals.ChangeHour is not { } h ? "watched for less than an hour"
+            : totals.MeasuringUtc is { } m ? $"change in the last hour not known yet: PoolWatch's own cache clear at {m.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture)} is being measured"
+            : Change(h) + " in the last hour" + (totals.ClearedHour is { Bytes: > 0 } c ? $"; {Fmt.OwnClearsFreed(c.Bytes, c.OneAtUtc, seconds: false)}, not counted in that change" : ""));
 
     /// <summary>
     /// How this copy was installed, in the issue form's own words: the installer leaves unins000.exe next to the exe; a
