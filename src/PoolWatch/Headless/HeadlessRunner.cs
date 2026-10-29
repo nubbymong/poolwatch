@@ -21,6 +21,8 @@ internal static class HeadlessRunner
 
         using var stopRequested = new ManualResetEventSlim();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; stopRequested.Set(); };
+        // The installer and the uninstaller ask through the exit signal: the same clean stop as Ctrl+C.
+        using var exitSignal = ExitSignal.Listen(stopRequested.Set, log.Info);
         // A "stop" file in the output folder ends the run cleanly (CI and scripts without a console).
         string stopFile = Path.Combine(paths.OutDir ?? paths.DataRoot, "stop");
         if (File.Exists(stopFile)) File.Delete(paths.Guard.CheckReal(stopFile));

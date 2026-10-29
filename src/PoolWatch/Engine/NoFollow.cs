@@ -8,7 +8,8 @@ namespace PoolWatch.Engine;
 /// <summary>
 /// File-system operations that never follow a link (review rounds 2 and 3): every open uses FILE_FLAG_OPEN_REPARSE_POINT
 /// (and FILE_FLAG_BACKUP_SEMANTICS for folders), and everything after it (facts, security, rename, delete) goes through
-/// that handle, so what is checked is what is acted on. Used by the one-time migration and the data root guard.
+/// that handle, so what is checked is what is acted on. Used by the one-time migration, the data root guard and the
+/// desktop shortcut.
 /// </summary>
 internal static class NoFollow
 {
@@ -21,7 +22,7 @@ internal static class NoFollow
     public const uint CREATE_NEW = 1, OPEN_EXISTING = 3;
     public const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000, FILE_FLAG_BACKUP_SEMANTICS = 0x02000000, FILE_ATTRIBUTE_NORMAL = 0x80,
         FILE_FLAG_OVERLAPPED = 0x40000000;
-    public const int ERROR_FILE_NOT_FOUND = 2, ERROR_PATH_NOT_FOUND = 3, ERROR_ACCESS_DENIED = 5, ERROR_ALREADY_EXISTS = 183;
+    public const int ERROR_FILE_NOT_FOUND = 2, ERROR_PATH_NOT_FOUND = 3, ERROR_ACCESS_DENIED = 5, ERROR_FILE_EXISTS = 80, ERROR_ALREADY_EXISTS = 183;
 
     /// <summary>Opens the entry itself (never what a link points at). Check IsInvalid; the error is Marshal.GetLastWin32Error().</summary>
     public static SafeFileHandle Open(string path, bool dir, uint access, uint share) =>
@@ -138,9 +139,12 @@ internal static class NoFollow
         }
     }
 
-    /// <summary>Creates a new file (fails if the name exists, a link included), never through a link.</summary>
-    public static SafeFileHandle CreateNew(string path) =>
-        CreateFileW(path, GENERIC_WRITE, 0, IntPtr.Zero, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT | FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+    /// <summary>
+    /// Creates a new file (fails if the name exists, a link included; the error is then ERROR_FILE_EXISTS), never through
+    /// a link. Add DELETE to <paramref name="access"/> to be able to remove it again through the handle.
+    /// </summary>
+    public static SafeFileHandle CreateNew(string path, uint access = GENERIC_WRITE) =>
+        CreateFileW(path, access, 0, IntPtr.Zero, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT | FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
 
     public static Facts Query(SafeFileHandle h)
     {
@@ -151,6 +155,20 @@ internal static class NoFollow
         return new Facts((FileAttributes)basic.FileAttributes, standard.NumberOfLinks, standard.EndOfFile,
             new FileId(id.VolumeSerialNumber, id.IdLow, id.IdHigh), DateTime.FromFileTimeUtc(basic.LastWriteTime));
     }
+
+    /// <summary>The reparse tag of the handle's entry (a link's kind), or 0 when it is not a reparse point.</summary>
+    public static uint ReparseTag(SafeFileHandle h)
+    {
+        if (!GetFileInformationByHandleEx(h, FileAttributeTagInfo, out FILE_ATTRIBUTE_TAG_INFO info, Marshal.SizeOf<FILE_ATTRIBUTE_TAG_INFO>()))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        return ((FileAttributes)info.FileAttributes & FileAttributes.ReparsePoint) != 0 ? info.ReparseTag : 0;
+    }
+
+    /// <summary>
+    /// Whether a reparse tag is one of the cloud-files tags (IO_REPARSE_TAG_CLOUD to IO_REPARSE_TAG_CLOUD_F in winnt.h):
+    /// what OneDrive puts on its folders, which hold their own files rather than point anywhere else.
+    /// </summary>
+    public static bool IsCloudFilesTag(uint tag) => (tag & ~IO_REPARSE_TAG_CLOUD_MASK) == IO_REPARSE_TAG_CLOUD;
 
     /// <summary>The handle's path now (normalized, DOS form, "\\?\" prefix removed); null when it cannot be read.</summary>
     public static string? FinalPath(SafeFileHandle h)
@@ -175,7 +193,7 @@ internal static class NoFollow
     /// <summary>Renames the handle's entry (the handle needs DELETE): a link is renamed itself, never its target. Fails if the new name exists.</summary>
     public static bool Rename(SafeFileHandle h, string newFullPath)
     {
-        // FILE_RENAME_INFO (x64): ReplaceIfExists (4 with padding) | pad 4 | RootDirectory (8) | FileNameLength (4) | FileName.
+        // FILE_RENAME_INFO (64-bit): ReplaceIfExists (4 with padding) | pad 4 | RootDirectory (8) | FileNameLength (4) | FileName.
         byte[] name = System.Text.Encoding.Unicode.GetBytes(newFullPath);
         int size = 20 + name.Length + 2;
         IntPtr buf = Marshal.AllocHGlobal(size);
@@ -235,7 +253,8 @@ internal static class NoFollow
         }
     }
 
-    private const int FileBasicInfo = 0, FileStandardInfo = 1, FileRenameInfo = 3, FileDispositionInfo = 4, FileIdInfo = 18;
+    private const int FileBasicInfo = 0, FileStandardInfo = 1, FileRenameInfo = 3, FileDispositionInfo = 4, FileAttributeTagInfo = 9, FileIdInfo = 18;
+    private const uint IO_REPARSE_TAG_CLOUD = 0x9000001A, IO_REPARSE_TAG_CLOUD_MASK = 0x0000F000;
     private const int SE_FILE_OBJECT = 1;
     private const uint OWNER_SECURITY_INFORMATION = 1, DACL_SECURITY_INFORMATION = 4, PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000;
     private const uint TOKEN_ADJUST_PRIVILEGES = 0x20, TOKEN_QUERY = 0x8, SE_PRIVILEGE_ENABLED = 0x2;
@@ -243,6 +262,7 @@ internal static class NoFollow
     [StructLayout(LayoutKind.Sequential)] private struct FILE_BASIC_INFO { public long CreationTime, LastAccessTime, LastWriteTime, ChangeTime; public uint FileAttributes; }
     [StructLayout(LayoutKind.Sequential)] private struct FILE_STANDARD_INFO { public long AllocationSize, EndOfFile; public uint NumberOfLinks; public byte DeletePending, Directory; }
     [StructLayout(LayoutKind.Sequential)] private struct FILE_ID_INFO { public ulong VolumeSerialNumber, IdLow, IdHigh; }
+    [StructLayout(LayoutKind.Sequential)] private struct FILE_ATTRIBUTE_TAG_INFO { public uint FileAttributes, ReparseTag; }
     [StructLayout(LayoutKind.Sequential)] private struct FILE_DISPOSITION_INFO { public byte DeleteFile; }
     [StructLayout(LayoutKind.Sequential)] private struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr lpSecurityDescriptor; public int bInheritHandle; }
     [StructLayout(LayoutKind.Sequential)] private struct LUID { public uint LowPart; public int HighPart; }
@@ -258,6 +278,8 @@ internal static class NoFollow
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle h, int cls, out FILE_STANDARD_INFO info, int size);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle h, int cls, out FILE_ID_INFO info, int size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle h, int cls, out FILE_ATTRIBUTE_TAG_INFO info, int size);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetFileInformationByHandle(SafeFileHandle h, int cls, ref FILE_DISPOSITION_INFO info, int size);
     [DllImport("kernel32.dll", SetLastError = true)]

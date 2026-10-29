@@ -129,7 +129,7 @@ public class ActiveChangesWordsTests
             ChangeWords.ServiceDetail(ServiceStartType.Manual, false, false), ChangeWords.UnreadNote(""),
             ChangeWords.TitleOf(ChangeRecordTests.ClearTask()), ChangeWords.DetailOf(ChangeRecordTests.ClearTask()),
             ChangeWords.TitleOf(ChangeRecordTests.Shortcut()), ChangeWords.DetailOf(ChangeRecordTests.Task()), ChangeWords.DetailOf(ChangeRecordTests.Startup()),
-            ChangeWords.TokenGuardTurnOffTip, ChangeWords.TokenGuardSettingStays, ChangeWords.ShortcutTitle, ChangeWords.TitleOf(ChangeRecordTests.Startup()),
+            ChangeWords.TokenGuardTurnOffTip, ChangeWords.TokenGuardSettingStays, ChangeWords.TitleOf(ChangeRecordTests.Startup()),
             ChangeWords.TurnOff, ChangeWords.Remove, ChangeWords.PutBack, ChangeWords.CannotPutBackLine("It ran with a saved password."),
             ChangeWords.Timeline(ChangeWords.TurnOff, false, ChangeWords.TokenGuardTitle, ChangeWords.TokenGuardOff),
             ChangeWords.Timeline(ChangeWords.Remove, true, ChangeWords.ShortcutTitle, "Deleted the shortcut."),
