@@ -137,6 +137,20 @@ public class ScreenFitTests
         Assert.True(d.AutoSize && !d.AutoScroll, $"AutoSize is {d.AutoSize} and AutoScroll {d.AutoScroll}");
     }
 
+    [Fact]
+    public void AWindowThatAlreadyScrollsIsLeftAsItIsOnAShorterScreen()
+    {
+        // As when the setup guide fills in again after it was moved to a shorter screen: it no longer sizes itself, so
+        // it is not widened by a second scroll bar.
+        using var d = Open(AboutLike);
+        Assert.True(ScreenFit.ToArea(d, new Rectangle(0, 0, 1920, 400)), $"the window is {d.Size} on an area 400 px tall");
+        var size = d.Size;
+
+        Assert.False(ScreenFit.ToArea(d, new Rectangle(0, 0, 1920, 300)), $"the window, {size}, was fitted again to an area 300 px tall");
+
+        Assert.Equal(size, d.Size);
+    }
+
     [Theory]
     [InlineData(17, 26)] // a monitor at 100% beside a main display at 150%: WinForms reckons with the main display's bar
     [InlineData(26, 17)] // a monitor at 150% beside a main display at 100%: Windows draws the wider bar
@@ -148,6 +162,61 @@ public class ScreenFitTests
         Assert.True(ScreenFit.ToArea(d, new Rectangle(0, 0, 1920, 400), windowBar, systemBar), $"the window is {d.Size} on an area 400 px tall");
 
         Assert.Equal(width + 26, d.Width);
+    }
+
+    [Fact]
+    public void TheSetupGuideOnAScreenTooShortForItKeepsItsWidthAndSitsAtTheTopOfTheArea()
+    {
+        // The guide's fit (ScreenFit.IntoArea), on a working area below a taskbar at the top of the screen.
+        var content = AboutLike;
+        using var d = Open(content);
+        d.Location = new Point(100, 300);
+        var area = new Rectangle(0, 40, 1920, 400);
+
+        Assert.True(ScreenFit.IntoArea(d, area), $"the window is {d.Size} on an area of {area.Size}");
+
+        Assert.Equal(area.Height, d.Height);
+        Assert.Equal(area.Top, d.Top);
+        Assert.Equal(100, d.Left);
+        // The guide had the same code as About: turning AutoSize off first left it 300 px wide.
+        Assert.True(d.ClientSize.Width >= content.Width, $"the window shows {d.ClientSize.Width} px of its content's {content.Width}");
+        Assert.True(d.VerticalScroll.Visible, "it scrolls vertically");
+        Assert.False(d.HorizontalScroll.Visible, "it does not scroll sideways");
+    }
+
+    [Fact]
+    public void ASetupGuideThatGrewPastTheBottomOfTheAreaMovesUpInsideIt()
+    {
+        // It still fits, so it keeps sizing itself; only its place changes.
+        using var d = Open(new Size(652, 400));
+        d.Location = new Point(100, 500);
+        var size = d.Size;
+        var area = new Rectangle(0, 40, 1920, 600);
+        Assert.True(d.Bottom > area.Bottom, $"the window ends at {d.Bottom}, below the area's {area.Bottom}");
+
+        Assert.False(ScreenFit.IntoArea(d, area), $"the window, {size}, was fitted to an area of {area.Size}");
+
+        Assert.Equal(size, d.Size);
+        Assert.True(d.AutoSize && !d.AutoScroll, $"AutoSize is {d.AutoSize} and AutoScroll {d.AutoScroll}");
+        Assert.Equal(area.Bottom, d.Bottom);
+        Assert.Equal(100, d.Left);
+    }
+
+    [Fact]
+    public void AScrollingSetupGuideStillTooTallForTheAreaStaysAtTheAreasTop()
+    {
+        // A guide that already scrolls fills in again on a shorter screen: it keeps its size, and moving it up must not take
+        // its title bar above the working area, where the window could no longer be dragged.
+        using var d = Open(AboutLike);
+        Assert.True(ScreenFit.ToArea(d, new Rectangle(0, 0, 1920, 400)), $"the window is {d.Size} on an area 400 px tall");
+        var size = d.Size;
+        d.Location = new Point(100, 300);
+
+        Assert.False(ScreenFit.IntoArea(d, new Rectangle(0, 40, 1920, 300)), $"the window, {size}, was fitted again to an area 300 px tall");
+
+        Assert.Equal(40, d.Top);
+        Assert.Equal(100, d.Left);
+        Assert.Equal(size, d.Size);
     }
 
     [Fact]

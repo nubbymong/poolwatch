@@ -48,10 +48,12 @@ In the data folder:
 | `cache\clears.json` | the last 100 finished cache clears: when, how and why, the pool (and its paged part) and the standby list before and after, and any error; for a measured clear, the tags it freed (up to 12, each at least 1 MB, with the bytes before and after). Every tag that dropped is in the `CacheClear` findings |
 | `cache\token-guard.json` | the last token-leak test: the Windows build, the result and when it ran |
 | `cache\tagscan.json` | which driver each pool tag belongs to, from PoolWatch's scan of the drivers |
+| `cache\environment.json` | the last look at the PC: Windows version and build, memory, drives and their file systems, the AI tools found and what is set up. No user names, and no paths except drive roots |
 | `cache\profile.json` | PoolWatch's own cost, written every hour: its processor time, memory and heap, what it holds in memory, and what it wrote to each file |
 | `service-changes.json` | every background service PoolWatch changed, with its original start type (Restore needs it) |
 | `applied-changes.json` | the other changes PoolWatch made that can be put back (Active changes needs it) |
 | `removed-tasks\<name>.xml` | only when a clear task of the owner's that PoolWatch removed could not be put back by itself: its definition, to import in Task Scheduler |
+| `setup.json` | when the setup guide was completed, and the suggestions the owner hid (each shows again after 30 days) |
 | `uninstall-summary.txt` | written by the uninstaller: each change it put back, and any it could not put back (and why) or kept |
 | `uninstall-list.json` | only while the uninstaller runs: the list of changes it asked PoolWatch for, deleted again once read |
 | `boots\` | one folder per boot: `baseline.json` (the first full tag snapshot) and `summary.json` (the peaks) |
@@ -123,7 +125,8 @@ reproduction confirms it.
   stay in the standby cache. They drop sharply after a cache clear: compare the `CacheClear` findings ("By tag: Reff
   722 MB -> 72 MB") and `cache\clears.json`. Common drivers: a crawl of a whole drive, many git worktrees, and an app
   that opens files in a loop, such as a desktop app's GPU shader cache (for the ChatGPT desktop app, starting it with
-  `--disable-gpu-shader-disk-cache` stops that, as traced by Faarfarin in openai/codex issue 31212).
+  `--disable-gpu-shader-disk-cache` stops that, as traced by Faarfarin in openai/codex issue 31212; PoolWatch can make
+  a shortcut that does).
 - **The token leak.** `Toke` can rise with every process start on some Windows 11 24H2 and 25H2 builds (26100 and
   26200); other builds are untested, and only a test tells. PoolWatch's result for this build is in
   `cache\token-guard.json`. Look for `TokenSpawn` findings; the token-leak guard works around it.
