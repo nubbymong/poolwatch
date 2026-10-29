@@ -24,7 +24,7 @@ public enum PoolStatusKind
 /// <param name="What">The tag in plain words (<see cref="PlainWords.Tag"/>: "File system metadata (Reff, refs.sys)").</param>
 /// <param name="Growth">How much it grew, in bytes (only a positive growth is named, and its amount only when it rounds to at least 1 MB).</param>
 /// <param name="Over">Over how long it grew.</param>
-/// <param name="Cause">The top suspect (process, service, driver or session), if any.</param>
+/// <param name="Cause">The top suspect by the name people know it by ("Stream Deck", "Example Device Service"), if any.</param>
 /// <param name="Confidence">How strongly the evidence ties <paramref name="Cause"/> to the growth.</param>
 public sealed record PoolStatusLead(string What, long Growth, TimeSpan Over, string? Cause, Confidence Confidence);
 
@@ -63,12 +63,21 @@ public static class PoolStatusLine
     /// Null while the PC is not saturated; while it is (all cores busy for a minute, the saturation detector), the busiest
     /// process, or "" when none stands out. Said in one short clause at the end.
     /// </param>
-    public static PoolStatus Describe(long? totalBytes, TimeSpan held, long change10Min, long? changeHour, PoolStatusLead? lead, string? saturatedBusiest = null)
+    /// <param name="ownClear">
+    /// PoolWatch's own cache clear of the last 10 minutes, as its result ("The cache clear at 03:56 freed 1.3 GB."), or
+    /// null. The changes are measured from the level it left, so its drop is said only this way, never as the pool shrinking.
+    /// </param>
+    /// <param name="nextClear">When the automatic clear runs next ("The next cache clear is in 12 min."), said after a growth; null when none is scheduled.</param>
+    public static PoolStatus Describe(long? totalBytes, TimeSpan held, long change10Min, long? changeHour, PoolStatusLead? lead, string? saturatedBusiest = null,
+        string? ownClear = null, string? nextClear = null)
     {
         var s = Pool(totalBytes, held, change10Min, changeHour, lead);
-        if (saturatedBusiest is null) return s;
+        string text = s.Text;
+        if (ownClear is not null) text += " " + ownClear;
+        if (nextClear is not null && s.Kind is PoolStatusKind.Growing or PoolStatusKind.TagGrowing) text += " " + nextClear;
+        if (saturatedBusiest is null) return s with { Text = text };
         string clause = saturatedBusiest.Length > 0 ? $" Your PC is saturated; busiest: {saturatedBusiest}." : " Your PC is saturated: every core is busy.";
-        return s with { Text = s.Text + clause, Saturated = true };
+        return s with { Text = text + clause, Saturated = true };
     }
 
     private static PoolStatus Pool(long? totalBytes, TimeSpan held, long change10Min, long? changeHour, PoolStatusLead? lead)
@@ -76,7 +85,7 @@ public static class PoolStatusLine
         if (totalBytes is not { } total) return new PoolStatus(PoolStatusKind.Collecting, "Kernel pool: collecting the first sample…");
         if (lead is { Growth: <= 0 }) lead = null; // only a real growth is ever named
         // A tag's growth is said with its amount only when the amount shows (never "grew 0 MB"); while the total grows,
-        // only its name is said, so there any growth counts.
+        // only its cause is said, so there any growth counts.
         var shown = lead is { Growth: >= LeastShownGrowth } ? lead : null;
         if (held < MinHistory)
         {
@@ -84,34 +93,36 @@ public static class PoolStatusLine
             if (shown is null)
                 return new PoolStatus(PoolStatusKind.Collecting, $"Kernel pool is {PlainWords.Amount(total)}. It takes a few minutes to tell whether it is growing.");
             return new PoolStatus(PoolStatusKind.TagGrowing,
-                $"Kernel pool is {PlainWords.Amount(total)}, and {shown.What} grew {PlainWords.Amount(shown.Growth)} in {PlainWords.Span(shown.Over)}." + CauseSentence(shown, growingMost: false));
+                $"Kernel pool is {PlainWords.Amount(total)}, and {shown.What} grew {PlainWords.Amount(shown.Growth)} in {PlainWords.Span(shown.Over)}." + CauseSentence(shown));
         }
         string shortSpan = held >= TimeSpan.FromMinutes(9.5) ? "the last 10 minutes" : $"the last {PlainWords.Span(held)}";
 
-        // The last 10 minutes first: a fall just now (a cache clear, an app closed) is the current news even after an hour of growth.
+        // The last 10 minutes first: a fall just now (an app closed) is the current news even after an hour of growth.
         if (change10Min <= -DropBytes10Min)
             return new PoolStatus(PoolStatusKind.Dropping, $"Kernel pool shrank {PlainWords.Amount(-change10Min)} in {shortSpan}.");
         bool hourGrew = changeHour is { } h && h >= GrowBytesHour;
         if (hourGrew || change10Min >= GrowBytes10Min)
         {
             var (amount, span) = hourGrew ? (changeHour!.Value, "the last hour") : (change10Min, shortSpan);
-            return new PoolStatus(PoolStatusKind.Growing, $"Kernel pool grew {PlainWords.Amount(amount)} in {span}." + CauseSentence(lead, growingMost: true));
+            return new PoolStatus(PoolStatusKind.Growing, $"Kernel pool grew {PlainWords.Amount(amount)} in {span}." + CauseSentence(lead));
         }
         if (changeHour is { } fell && fell <= -DropBytesHour)
             return new PoolStatus(PoolStatusKind.Dropping, $"Kernel pool shrank {PlainWords.Amount(-fell)} in the last hour.");
         if (shown is not null)
             return new PoolStatus(PoolStatusKind.TagGrowing,
-                $"Kernel pool is steady at {PlainWords.Amount(total)}, but {shown.What} grew {PlainWords.Amount(shown.Growth)} in {PlainWords.Span(shown.Over)}." + CauseSentence(shown, growingMost: false));
+                $"Kernel pool is steady at {PlainWords.Amount(total)}, but {shown.What} grew {PlainWords.Amount(shown.Growth)} in {PlainWords.Span(shown.Over)}." + CauseSentence(shown));
         return new PoolStatus(PoolStatusKind.Steady, $"Kernel pool is steady at {PlainWords.Amount(total)}.");
     }
 
-    /// <summary>" Most likely cause: X, with strong evidence." when the evidence is at least "some"; otherwise " No clear cause yet."</summary>
-    private static string CauseSentence(PoolStatusLead? lead, bool growingMost)
-    {
-        if (lead is { Cause: { Length: > 0 } cause } && lead.Confidence >= Confidence.Correlated)
-            return $" Most likely cause: {cause}, {PlainWords.ConfidencePhrase(lead.Confidence)}.";
-        return growingMost && lead is not null ? $" No clear cause yet; growing most: {lead.What}." : " No clear cause yet.";
-    }
+    /// <summary>
+    /// " PoolWatch is keeping an eye on X." when the evidence is strong or a trace confirmed it; otherwise nothing. Growth
+    /// often goes away by itself, so a weaker suspect is not named here (Pool causes lists every suspect with its evidence).
+    /// </summary>
+    private static string CauseSentence(PoolStatusLead? lead) => lead is null ? "" : CauseSentence(lead.Cause, lead.Confidence);
+
+    /// <summary>The same for a cause on its own (the tray's notice when an incident opens uses this rule too).</summary>
+    public static string CauseSentence(string? cause, Confidence confidence) =>
+        cause is { Length: > 0 } && confidence >= Confidence.StronglyCorrelated ? $" PoolWatch is keeping an eye on {cause}." : "";
 }
 
 /// <summary>Small plain-English formatters shared by the window (pure, unit-tested).</summary>

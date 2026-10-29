@@ -18,6 +18,7 @@ internal static class HeadlessRunner
         log.EchoToConsole = true;
         var settings = LoadSettings(opt, paths, log);
         log.Info($"PoolWatch {typeof(HeadlessRunner).Assembly.GetName().Version} headless; out={paths.OutDir ?? paths.DataRoot}; interval={settings.SampleIntervalSeconds}s; duration={opt.DurationSeconds?.ToString() ?? "unbounded"}");
+        LogKnowledgeProblems(log);
 
         using var stopRequested = new ManualResetEventSlim();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; stopRequested.Set(); };
@@ -49,9 +50,9 @@ internal static class HeadlessRunner
             });
         }
         Task? guard = opt.TokenGuard ? analysis.Diagnostics.StartTokenGuard(null) : null;
-        // S3 (review round 2): a headless run on the real data root moves the old per-user data too (in the background).
+        // A headless run on the real data root moves the old per-user data too (in the background).
         if (paths.OutDir is null) paths.StartLegacyMigration(log);
-        // S4 (review round 3): an unsafe logon task is reported (no one to ask headless: nothing is changed).
+        // An unsafe logon task is reported (no one to ask headless: nothing is changed).
         Task.Run(() =>
         {
             try
@@ -187,12 +188,18 @@ internal static class HeadlessRunner
         return 0;
     }
 
+    /// <summary>At start-up (headless and the tray app): each knowledge pack left out, and why, once in the log.</summary>
+    internal static void LogKnowledgeProblems(Log log)
+    {
+        foreach (var problem in Core.Knowledge.KnowledgeBase.Embedded().Problems) log.Info("knowledge pack left out: " + problem);
+    }
+
     internal static Settings LoadSettings(CommandLineOptions opt, AppPaths paths, Log? log = null)
     {
-        // Review round 3: the old per-user settings.json is moved (checked and clamped) before the first read, so the first
+        // The old per-user settings.json is moved (checked and clamped) before the first read, so the first
         // session after the move is on the owner's settings, not the defaults.
         if (opt.ConfigFile is null && paths.MigrateLegacySettings() is { } moved) log?.Info(moved);
-        // C1 e (review round 2): an explicit --config is read as written; only the default settings.json is migrated.
+        // An explicit --config is read as written; only the default settings.json is migrated.
         var settings = opt.ConfigFile is not null ? Settings.Load(opt.ConfigFile, explicitConfig: true) : Settings.Load(paths.SettingsFile);
         if (opt.IntervalSeconds is { } i) settings.SampleIntervalSeconds = i;
         settings.Normalize();

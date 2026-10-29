@@ -1,20 +1,26 @@
 using PoolWatch.Analysis;
 using PoolWatch.Core.Detection;
 using PoolWatch.Engine;
+using PoolWatch.Engine.Changes;
+using PoolWatch.Native;
 
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// The tray app: an icon coloured by state (green / amber / red) with the paged + non-paged totals in its tooltip,
-/// a balloon when an incident opens, and the main window on demand. Its menu also holds the tools that are not on the
-/// simplified main window (DESIGN.md section 11): Capture now, Since boot report, Open incident folder, Export vendor
-/// bundle, Copy latest incident summary, the clear-task removals (shown only while there is something to remove) and About.
+/// The tray app: an icon coloured by state (grey while starting, then green / amber / red) with the paged + non-paged
+/// totals in its tooltip, a balloon when an incident opens, and the main window on demand. Its menu opens the setup guide
+/// and Active changes, and holds the tools that are not on the main window (DESIGN.md section 11): Capture now, Since boot
+/// report, Open incident folder, Export vendor bundle, Copy latest incident summary, the clear-task removals (shown only
+/// while there is something to remove), Report an issue and About. It is the shell the setup guide and the suggestions
+/// call (<see cref="IShell"/>): one of each window at a time, and the token-leak guard's sign-in check with its notices.
+/// The installer's exit signal ends it cleanly.
 /// </summary>
-internal sealed class TrayApp : ApplicationContext
+internal sealed class TrayApp : ApplicationContext, IShell
 {
     private readonly MonitorEngine _engine;
     private readonly AnalysisPipeline _analysis;
     private readonly UiActions _actions;
+    private readonly ViewState? _view;
     private readonly NotifyIcon _icon;
     private readonly ContextMenuStrip _menu = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 10_000 };
@@ -26,19 +32,31 @@ internal sealed class TrayApp : ApplicationContext
     private readonly Action<Core.Experiments.ExperimentStep> _onExperiment;
     private readonly HotkeyWindow _hotkey;
     private readonly ToolStripMenuItem _experimentItem;
+    private readonly IDisposable? _exitSignal;
     private bool _markOpen;
+    private GuardNotices? _guardNotices;
+    private SetupGuideForm? _guide;
+    private ActiveChangesForm? _activeChanges;
+    /// <summary>The balloon showing now offers the setup guide (a click on it opens the guide).</summary>
+    private bool _balloonOpensGuide;
 
     /// <summary>The state the tray icon currently shows.</summary>
     public TrayState IconState => _state;
 
-    public TrayApp(MonitorEngine engine, AnalysisPipeline analysis, bool showWindow)
+    /// <param name="showWindow">Open the main window now (not when started at sign-in with --tray).</param>
+    /// <param name="smoke">The CI UI test: the window opens in the Simple view and keeps no view choice, the guide does not open by itself.</param>
+    public TrayApp(MonitorEngine engine, AnalysisPipeline analysis, LiveSettings live, ChangeLedger ledger, bool showWindow, bool smoke)
     {
         _engine = engine;
         _analysis = analysis;
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _actions = new UiActions(engine, analysis, _ui);
+        _view = smoke ? null : new ViewState(engine.Paths, engine.Log);
+        Setup = new SetupContext(engine, analysis, _actions, live, ledger, this, smoke);
         var menu = _menu;
         menu.Items.Add("Open PoolWatch", null, (_, _) => ShowWindow());
+        menu.Items.Add("Set up PoolWatch...", null, (_, _) => OpenGuide());
+        menu.Items.Add("Active changes...", null, (_, _) => _actions.Guarded(null, "Active changes", ShowActiveChanges));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Capture now", null, (_, _) => _actions.Guarded(null, "Capture now", () =>
         {
@@ -65,6 +83,7 @@ internal sealed class TrayApp : ApplicationContext
             { ToolTipText = @"An older PoolWatch installed two SYSTEM tasks (\PoolWatch\Clear cache ...) for Clear cache; they are no longer used. Removes them after you say yes." };
         menu.Items.Add(removeLegacy);
         menu.Items.Add(removeOld);
+        menu.Items.Add("Report an issue...", null, (_, _) => _actions.Guarded(null, "Report an issue", () => _actions.ReportIssue(null)));
         menu.Items.Add("About PoolWatch", null, (_, _) => _actions.About(null));
         menu.Opening += (_, _) =>
         {
@@ -78,23 +97,43 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         _icon = new NotifyIcon { ContextMenuStrip = menu, Visible = true, Text = "PoolWatch: starting", Icon = TrayIcons.Starting };
         _icon.DoubleClick += (_, _) => ShowWindow();
-        _onOpened = (inc, a) => _ui.Post(_ => Balloon($"{inc.Tag.ToDisplay()}: {a.Rule}. {inc.Suspects.FirstOrDefault()?.DisplayName ?? ""}"), null);
+        _icon.BalloonTipClicked += (_, _) => { if (_balloonOpensGuide) OpenGuide(); };
+        _icon.BalloonTipClosed += (_, _) => _balloonOpensGuide = false;
+        // Raised on the sampler's thread under the history lock: the notice is worded here, from the incident as it is now,
+        // and only the text goes to the UI thread.
+        _onOpened = (inc, _) =>
+        {
+            if (PoolCauses.TrayNotice(inc, _analysis.Knowledge.Lookup, _engine.Services, _engine.Log.Info) is { } text) _ui.Post(_ => Balloon(text), null);
+        };
         _analysis.Incidents.Opened += _onOpened;
         _onExperiment = step => _ui.Post(_ => Balloon(step.Prompt, step.Phase == Core.Experiments.ExperimentPhase.Done ? 20_000 : 10_000), null);
         _analysis.Diagnostics.ExperimentStep += _onExperiment;
         if (Core.Experiments.Hotkey.Parse(engine.Settings.MarkHotkey) is not null && !_hotkey.Registered)
             engine.Log.Info($"mark hotkey {engine.Settings.MarkHotkey} is held by another app; use the tray Mark item");
-        // Shutdown / logoff: exit cleanly so open incidents are closed and written.
+        // Shutdown / logoff, and the installer's exit signal: exit cleanly so open incidents are closed and written.
         _onSessionEnding = (_, _) => ExitThread();
         Microsoft.Win32.SystemEvents.SessionEnding += _onSessionEnding;
+        _exitSignal = ExitSignal.Listen(() => _ui.Post(_ => ExitThread(), null), engine.Log.Info);
         // Tray refresh: one cheap state read every 10 s (no painting, no animation).
         _timer.Tick += (_, _) => UpdateIcon();
         _timer.Start();
         UpdateIcon();
         if (showWindow) ShowWindow();
+        // The first start (the guide was never completed): the guide over the main window, or, started at sign-in, a balloon.
+        if (!smoke && !Setup.Store.GuideCompleted)
+        {
+            if (showWindow) OpenGuide();
+            else Balloon("PoolWatch is running. Click here to set it up.", 10_000, opensGuide: true);
+        }
     }
 
-    public MainForm Form => _form ??= new MainForm(_engine, _analysis, _actions);
+    /// <summary>What the setup guide and the suggestions use (made once).</summary>
+    public SetupContext Setup { get; }
+
+    public MainForm Form => _form ??= new MainForm(Setup, _view);
+
+    /// <summary>What the main window's Pool causes rankings hold, for PoolWatch's own cost report (any thread; none before the window was made).</summary>
+    public (int rankings, int owners, int ownerMembers, int events) RankingsHeld() => _form?.Rankings.Held() ?? default;
 
     /// <summary>Every item of the tray menu, by text (CI: what the main window gave up must still be reachable).</summary>
     public List<string> MenuItemTexts() => _menu.Items.OfType<ToolStripMenuItem>().Select(i => i.Text ?? "").ToList();
@@ -105,6 +144,72 @@ internal sealed class TrayApp : ApplicationContext
         if (Form.WindowState == FormWindowState.Minimized) Form.WindowState = FormWindowState.Normal;
         Form.Activate();
     }
+
+    /// <summary>The main window when it shows (a window opened from it sits on it), else null (the window gets a taskbar button).</summary>
+    private Form? MainWindowIfShown => _form is { Visible: true } f ? f : null;
+
+    /// <summary>Opens a window made for this opening (closing disposes it) over the main window when that shows.</summary>
+    private void Open(Form form)
+    {
+        var owner = MainWindowIfShown;
+        form.ShowInTaskbar = owner is null;
+        if (owner is null) form.Show();
+        else form.Show(owner);
+    }
+
+    /// <summary>Brings a window that is open already to the front, shown again if it was hidden with the main window.</summary>
+    private static void Bring(Form form)
+    {
+        if (!form.Visible) form.Show();
+        if (form.WindowState == FormWindowState.Minimized) form.WindowState = FormWindowState.Normal;
+        form.Activate();
+    }
+
+    /// <summary>The setup guide from the menu, the balloon or a first start: a failure to open it is shown, never thrown (PoolWatch keeps running).</summary>
+    private void OpenGuide() => _actions.Guarded(null, "Set up PoolWatch", ShowGuide);
+
+    /// <summary>The setup guide, one at a time. It marks itself completed when it closes.</summary>
+    private void ShowGuide()
+    {
+        _balloonOpensGuide = false;
+        if (_guide is { IsDisposed: false } open) { Bring(open); return; }
+        _guide = new SetupGuideForm(Setup);
+        _guide.FormClosed += (_, _) => _guide = null;
+        Open(_guide);
+    }
+
+    // ---------------------------------------------------------------- IShell
+
+    public void ShowAdvanced(int tab)
+    {
+        ShowWindow();
+        Form.ShowAdvanced(tab);
+    }
+
+    /// <summary>Active changes, one at a time (modeless: it reads its list off the UI thread).</summary>
+    public void ShowActiveChanges()
+    {
+        if (_activeChanges is { IsDisposed: false } open) { Bring(open); return; }
+        _activeChanges = new ActiveChangesForm(Setup.Ledger, _actions);
+        _activeChanges.FormClosed += (_, _) => _activeChanges = null;
+        Open(_activeChanges);
+    }
+
+    public void ShowReport(string? incidentDir) => _actions.ReportIssue(MainWindowIfShown, incidentDir);
+
+    /// <summary>
+    /// The token-leak guard's sign-in check now, with its notices (one set for the app): true when this sign-in is protected
+    /// (Windows' setting is on) or needs no protection, false when it could not be protected yet (its notice says what to do).
+    /// </summary>
+    public async Task<bool> StartTokenGuard()
+    {
+        var d = _analysis.Diagnostics;
+        _guardNotices ??= new GuardNotices(_ui, () => d.Guard.TurnOnByOwner(_guardNotices!));
+        await d.StartTokenGuard(_guardNotices);
+        return !d.Guard.WorkaroundWanted || TokenGuardNative.GetForegroundLockTimeout() == 0;
+    }
+
+    // ---------------------------------------------------------------- tools
 
     /// <summary>Tray Mark item and hotkey: a note on the timeline ("lag", "closed ChatGPT").</summary>
     public void Mark()
@@ -129,7 +234,7 @@ internal sealed class TrayApp : ApplicationContext
             ? $"Experiment with {x.app}: the baseline starts now. Leave {x.app} closed; PoolWatch tells you when to start it." : "An experiment is already running.");
     }
 
-    /// <summary>The A/B preset of addendum 2 C: lag as it is, then a clear, then lag again (phases of ExperimentPhaseMinutes).</summary>
+    /// <summary>The lag experiment's preset: lag as it is, then a clear, then lag again (phases of ExperimentPhaseMinutes).</summary>
     private void StartClearExperiment()
     {
         double m = _engine.Settings.ExperimentPhaseMinutes;
@@ -137,7 +242,8 @@ internal sealed class TrayApp : ApplicationContext
             ? $"Experiment: {m:0.#} min of lag measurements, then PoolWatch clears the standby cache and measures {m:0.#} min more." : "An experiment is already running.");
     }
 
-    private void UpdateIcon()
+    /// <summary>The icon's colour once there is a reading (grey until the first sample), and the totals in its tooltip.</summary>
+    internal void UpdateIcon()
     {
         var t = _engine.Latest?.Totals;
         var state = UiData.State(_analysis);
@@ -147,8 +253,9 @@ internal sealed class TrayApp : ApplicationContext
         _icon.Text = text.Length > 127 ? text[..127] : text;
     }
 
-    private void Balloon(string text, int ms = 5000)
+    private void Balloon(string text, int ms = 5000, bool opensGuide = false)
     {
+        _balloonOpensGuide = opensGuide;
         _icon.BalloonTipTitle = "PoolWatch";
         _icon.BalloonTipText = text.Length > 250 ? text[..250] : text;
         _icon.ShowBalloonTip(ms);
@@ -156,6 +263,7 @@ internal sealed class TrayApp : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        _exitSignal?.Dispose(); // first: a second request finds nothing to signal
         _analysis.Incidents.Opened -= _onOpened; // the sampler may still raise it until the engine stops
         _analysis.Diagnostics.ExperimentStep -= _onExperiment;
         _hotkey.Dispose();

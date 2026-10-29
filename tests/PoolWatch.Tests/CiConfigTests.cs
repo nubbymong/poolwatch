@@ -25,6 +25,19 @@ public sealed class CiConfigTests
     }
 
     [Fact]
+    public void TheUiTestRunsWithTheM2ThresholdsAndTheHourlyClear()
+    {
+        // ci/m4-ui.ps1: the Simple view's line shows a schedule and Active changes lists a setting; the rest is as in M2.
+        var ui = Config("ui-config.json");
+        Assert.True(ui.AutoClearEnabled);
+        Assert.Equal(1, ui.AutoClearEveryHours);
+        var m2 = Config("m2-config.json");
+        m2.AutoClearEnabled = true;
+        m2.AutoClearEveryHours = 1;
+        Assert.Equal(m2.ToJson(), ui.ToJson());
+    }
+
+    [Fact]
     public void TheCaptureScenarioTracesPoolEventsAndKernelFileOnAnAlert()
     {
         // ci/m2-e2e.ps1 (capture) asserts both the pool events and Leaker.exe's file opens from the on-alert trace.

@@ -1,20 +1,25 @@
 using PoolWatch.Analysis;
+using PoolWatch.Core;
 using PoolWatch.Engine;
 
 namespace PoolWatch.Ui;
 
 /// <summary>
 /// Settings, opened from the main window's Settings button: a short form in plain words with what most people change
-/// (Start at logon, automatic cache clearing, deeper capture, the token-leak guard) and an Advanced button for every
-/// setting (the old grid).
-/// Start at logon is a scheduled task and changes at once; the rest is written to settings.json by Save and taken at
-/// PoolWatch's next start, as before. The form sizes itself to its content, so nothing is cut off at any scaling.
-/// Created once and reused (the edited settings last as long as the window).
+/// (Start at logon, automatic cache clearing, deeper capture, the token-leak guard, update notices) and an Advanced
+/// button for every setting (the old grid).
+/// Start at logon is a scheduled task and changes at once. Save writes the rest to settings.json and puts automatic
+/// clearing, the token-leak guard and update notices into effect at once; the other settings apply at PoolWatch's next
+/// start. A change made elsewhere while the form is open shows here at once. The form sizes itself to its content, so
+/// nothing is cut off at any scaling. Created for each opening and disposed when it closes, so it always starts from what
+/// is saved, with the settings in effect now.
 /// </summary>
 internal sealed class SettingsDialog : Form
 {
     private readonly MonitorEngine _engine;
+    private readonly LiveSettings _live;
     private readonly SettingsEditor _editor;
+    private readonly Action<Action<Settings>> _onApplied;
     private readonly CheckBox _logon = new() { Text = "Start PoolWatch when I sign in", AutoSize = true };
     private readonly SimpleSettingsFields _fields = new();
     private readonly Label _clearHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
@@ -24,10 +29,11 @@ internal sealed class SettingsDialog : Form
     private readonly List<Control> _clearFields = [];
     private AdvancedSettingsDialog? _advanced;
 
-    public SettingsDialog(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions)
+    public SettingsDialog(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions, LiveSettings live, IShell shell)
     {
         _engine = engine;
-        _editor = new SettingsEditor(engine, analysis, actions);
+        _live = live;
+        _editor = new SettingsEditor(engine, analysis, actions, live, shell);
         Text = "PoolWatch settings";
         Icon = TrayIcons.For(TrayState.Green);
         Font = new Font("Segoe UI", 9f);
@@ -82,14 +88,17 @@ internal sealed class SettingsDialog : Form
         Row(_fields.Deeper, indent);
         Row(_deeperHint, indent, bottom: 10);
 
-        // The guard starts with the tray app (UiRunner), so like the others it takes effect from PoolWatch's next start.
         Row(Heading("Token-leak guard"));
         Row(_fields.TokenGuard, indent);
         Row(Hint(SimpleSettings.TokenGuardHint), indent, bottom: 10);
         _tips.SetToolTip(_fields.TokenGuard, SimpleSettings.TokenGuardTip);
 
+        Row(Heading("Update notices"));
+        Row(_fields.Updates, indent);
+        Row(Hint(SimpleSettings.UpdatesHint), indent, bottom: 10);
+
         Row(_problems, 0, bottom: 6);
-        Row(Hint("Start at logon changes at once. Save writes the other settings now; PoolWatch uses them from its next start."), 0, bottom: 8);
+        Row(Hint(SimpleSettings.WhenChangesApply), 0, bottom: 8);
 
         var advanced = new Button { Text = "Advanced...", AutoSize = true, Margin = Padding.Empty };
         advanced.Click += (_, _) => actions.Guarded(this, "Advanced settings", OpenAdvanced);
@@ -116,6 +125,15 @@ internal sealed class SettingsDialog : Form
         _logon.Enabled = false;
         var ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         Task.Run(SafeExists).ContinueWith(t => ui.Post(_ => { if (!IsDisposed) WireLogon(t.Result, actions); }, null), TaskScheduler.Default);
+        // A suggestion, the setup guide or Undo may change a setting while the form is open (Undo on a worker thread):
+        // the form follows on this thread, so Save never puts an older value back.
+        _onApplied = change => ui.Post(_ =>
+        {
+            if (IsDisposed) return;
+            _editor.Follow(change);
+            LoadFrom();
+        }, null);
+        _live.Applied += _onApplied;
     }
 
     private int S(int logical) => LogicalToDeviceUnits(logical);
@@ -127,7 +145,7 @@ internal sealed class SettingsDialog : Form
     /// <summary>The form's fields from the edited settings (also after Advanced, which edits the same settings).</summary>
     private void LoadFrom()
     {
-        _fields.Show(SimpleSettings.From(_editor.Edit));
+        _fields.Fill(SimpleSettings.From(_editor.Edit));
         _clearHint.Text = SimpleSettings.AutoClearHint(_editor.Edit);
         _deeperHint.Text = SimpleSettings.DeeperCaptureHint(_editor.Edit);
         EnableClearFields();
@@ -177,22 +195,20 @@ internal sealed class SettingsDialog : Form
         try { return LogonTask.Exists(); } catch { return false; }
     }
 
-    /// <summary>Closing hides the dialog (it is reused); the window disposes it.</summary>
-    protected override void OnFormClosing(FormClosingEventArgs e)
-    {
-        if (e.CloseReason == CloseReason.UserClosing && !Modal) { e.Cancel = true; Hide(); }
-        base.OnFormClosing(e);
-    }
-
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _advanced?.Dispose(); _tips.Dispose(); }
+        if (disposing)
+        {
+            _live.Applied -= _onApplied;
+            _advanced?.Dispose();
+            _tips.Dispose();
+        }
         base.Dispose(disposing);
     }
 }
 
 /// <summary>
-/// The plain form's five value fields and how they show and read <see cref="SimpleSettings"/>. The dialog lays them out;
+/// The plain form's six value fields and how they show and read <see cref="SimpleSettings"/>. The dialog lays them out;
 /// they are kept apart from it so a test can bind them without an engine or a window.
 /// </summary>
 internal sealed class SimpleSettingsFields
@@ -202,15 +218,18 @@ internal sealed class SimpleSettingsFields
     public NumericUpDown PoolGb { get; } = new() { DecimalPlaces = 1, Increment = 1, Minimum = 0, Maximum = SimpleSettings.MaxPoolGb, TextAlign = HorizontalAlignment.Right };
     public CheckBox Deeper { get; } = new() { Text = "Deeper automatic captures", AutoSize = true };
     public CheckBox TokenGuard { get; } = new() { Text = SimpleSettings.TokenGuardLabel, AutoSize = true };
+    public CheckBox Updates { get; } = new() { Text = SimpleSettings.UpdatesLabel, AutoSize = true };
 
-    public void Show(SimpleSettings v)
+    /// <summary>Sets the fields to <paramref name="v"/>.</summary>
+    public void Fill(SimpleSettings v)
     {
         AutoClear.Checked = v.AutoClear;
         Hours.Value = v.EveryHours;
         PoolGb.Value = v.PoolGb;
         Deeper.Checked = v.DeeperCapture;
         TokenGuard.Checked = v.TokenGuard;
+        Updates.Checked = v.CheckForUpdates;
     }
 
-    public SimpleSettings Values() => new(AutoClear.Checked, Hours.Value, PoolGb.Value, Deeper.Checked, TokenGuard.Checked);
+    public SimpleSettings Values() => new(AutoClear.Checked, Hours.Value, PoolGb.Value, Deeper.Checked, TokenGuard.Checked, Updates.Checked);
 }

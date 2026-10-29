@@ -3,6 +3,7 @@ using PoolWatch.Core;
 using PoolWatch.Core.Correlation;
 using PoolWatch.Core.Detection;
 using PoolWatch.Core.Findings;
+using PoolWatch.Core.Identity;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
@@ -71,6 +72,14 @@ public class PoolCausesTests
     }
 
     [Fact]
+    public void AnIncidentRowKnowsItsTagSoTheKnownIssuesAboutItCanBeShown()
+    {
+        Assert.Equal(PoolTag.Parse("File"), PoolCauses.ForIncident(Incident(IncidentKind.Growth, GB, open: true), "a", Now).Tag);
+        // A tag read back from an older report that does not parse names no known issue.
+        Assert.Null(PoolCauses.ForIncident(Incident(IncidentKind.Growth, GB, open: true) with { Tag = "not a tag" }, "a", Now).Tag);
+    }
+
+    [Fact]
     public void AReleaseSaysFreedNeverANegativeGrowth()
     {
         var r = PoolCauses.ForIncident(Incident(IncidentKind.Release, -400 * MB, open: false, dropped: 400 * MB), "File objects (File)", Now);
@@ -122,6 +131,136 @@ public class PoolCausesTests
         foreach (var view in new[] { null, View(null), View(Confidence.Weak) })
             foreach (var state in new[] { TagState.Growing, TagState.Retained, TagState.Released })
                 Assert.DoesNotContain(PoolCauses.ForTag(Tag(state, GB, 1, 1, Now), "x", view, Now).Cells, c => c.Contains("select", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>The services Windows runs now, with the names it shows for them.</summary>
+    private static readonly ServiceEntry[] Running = [new("ExampleDeviceService", "Example Device Service", 5120), new("Schedule", "Task Scheduler", 1400)];
+
+    private static ProcessRecord P(string image, params string[] services)
+    {
+        var r = new ProcessRecord { Key = new ProcessKey(5120, 1), Image = image };
+        r.Services.AddRange(services);
+        return r;
+    }
+
+    private static Suspect Process(string image, params string[] services) => new()
+    {
+        Key = new ProcessKey(7716, 1), Image = image, DisplayName = image, Services = [.. services],
+        Direct = new DirectSignal(null, 0, 0, 0, 0, 0, false), Activity = new ActivitySignal("ops", 0, 0, 0, 0, 0, false),
+        Lifecycle = new LifecycleSignal(false, false, false, []),
+    };
+
+    private static OwnerSuspect Ranked(Owner owner, Confidence level, bool meaningful = true) =>
+        new() { Owner = owner, Members = [], Identities = [], Confidence = level, Meaningful = meaningful };
+
+    /// <summary>An open growth incident of the File tag with what its ranking found so far.</summary>
+    private static Incident Open(IncidentKind kind = IncidentKind.Growth, List<Suspect>? suspects = null, List<OwnerSuspect>? owners = null, List<TraceOwner>? traced = null) =>
+        new() { Id = "20261027-140000-File-656c6946", Dir = @"C:\data\incidents\x", Tag = PoolTag.Parse("File"), Kind = kind, Suspects = suspects ?? [], Owners = owners, TraceOwners = traced };
+
+    /// <summary>A process known by its exe and PID only: its name in the ranking is never what the status line or the tray says.</summary>
+    private static readonly Owner LeakerByPid = new(OwnerKind.Unknown, "proc:7716", "Leaker.exe (PID 7716)");
+
+    [Fact]
+    public void ACauseIsNamedAsPeopleKnowItNeverByItsExeOrPid()
+    {
+        var running = Running;
+        // A service by the name Windows shows ("ExampleDeviceService.exe (ExampleDeviceService)" before), else its own.
+        var device = ProcessIdentities.OwnerOf([P("services.exe"), P("ExampleDeviceService.exe", "ExampleDeviceService")]);
+        Assert.Equal(OwnerKind.Service, device.Kind);
+        Assert.Equal("Example Device Service", PoolCauses.FriendlyName(device, running));
+        Assert.Equal("ExampleDeviceService", PoolCauses.FriendlyName(device, []));
+        Assert.Equal("Task Scheduler and 2 other services", PoolCauses.FriendlyName(ProcessIdentities.OwnerOf([P("svchost.exe", "Schedule", "BITS", "Winmgmt")]), running));
+        Assert.Equal("Task Scheduler and 1 other service", PoolCauses.FriendlyName(ProcessIdentities.OwnerOf([P("svchost.exe", "Schedule", "BITS")]), running));
+        // An app by its own name, a Claude Code session by its folder, any other program without ".exe" or its PID.
+        Assert.Equal("Stream Deck", PoolCauses.FriendlyName(new Owner(OwnerKind.App, "app:stream deck", "Stream Deck"), running));
+        Assert.Equal("Claude Code session sample-app", PoolCauses.FriendlyName(new Owner(OwnerKind.ClaudeSession, "claude:1", "Claude Code session sample-app (PID 7716)"), running));
+        Assert.Equal("node", PoolCauses.FriendlyName(new Owner(OwnerKind.Unknown, "proc:1", "node.exe (PID 7716)"), running));
+        Assert.Equal("Leaker", PoolCauses.FriendlyName(Process("Leaker.exe"), running));
+        Assert.Equal("Example Device Service", PoolCauses.FriendlyName(Process("ExampleDeviceService.exe", "ExampleDeviceService"), running));
+        // Nothing anyone would know by a name: none is said (Pool causes says what they are).
+        Assert.Null(PoolCauses.FriendlyName(new Owner(OwnerKind.System, "system", "the kernel (System worker threads)"), running));
+        Assert.Null(PoolCauses.FriendlyName(new Owner(OwnerKind.ViaWmi, "wmi:1", "a WMI-launched foo.exe"), running));
+        Assert.Null(PoolCauses.FriendlyName(new Owner(OwnerKind.Unknown, "pid:12", "PID 12"), running));
+        Assert.Null(PoolCauses.FriendlyName(Process("unknown process"), running));
+    }
+
+    [Fact]
+    public void TheStatusLineNamesAnIncidentsCauseAsPeopleKnowIt()
+    {
+        // In the order Pool causes picks it: the trace's top owner, else the top owner that stands out, else the top process.
+        var device = ProcessIdentities.OwnerOf([P("services.exe"), P("ExampleDeviceService.exe", "ExampleDeviceService")]);
+        var traced = Open(traced: [new TraceOwner { Owner = device }], owners: [Ranked(LeakerByPid, Confidence.StronglyCorrelated)]);
+        Assert.Equal(("Example Device Service", Confidence.ConfirmedByTrace), PoolCauses.FriendlyCause(traced, Running));
+
+        var app = Open(owners: [Ranked(LeakerByPid, Confidence.Correlated, meaningful: false), Ranked(new Owner(OwnerKind.App, "app:stream deck", "Stream Deck"), Confidence.StronglyCorrelated)],
+            suspects: [Process("Leaker.exe")]);
+        Assert.Equal(("Stream Deck", Confidence.StronglyCorrelated), PoolCauses.FriendlyCause(app, Running));
+
+        var byPid = Open(owners: [Ranked(LeakerByPid, Confidence.StronglyCorrelated)]);
+        Assert.Equal(("Leaker", Confidence.StronglyCorrelated), PoolCauses.FriendlyCause(byPid, Running)); // never "Leaker.exe (PID 7716)"
+
+        var suspect = Process("Leaker.exe");
+        suspect.Confidence = Confidence.Correlated;
+        Assert.Equal(("Leaker", Confidence.Correlated), PoolCauses.FriendlyCause(Open(suspects: [suspect]), Running)); // never "Leaker.exe (PID 7716)"
+        Assert.Null(PoolCauses.FriendlyCause(Open(), Running));
+    }
+
+    [Fact]
+    public void TheStatusLineNamesAGrowingTagsCauseAsPeopleKnowIt()
+    {
+        var owners = new List<OwnerSuspect> { Ranked(LeakerByPid, Confidence.StronglyCorrelated) };
+        var view = new TagViewData(PoolTag.Parse("Reff"), "Reff", new TagAnswer("Reff grew.", owners, 300 * MB, 0), owners, [], Now.AddHours(-1), Now, Now.AddMinutes(-30));
+        Assert.Equal(("Leaker", Confidence.StronglyCorrelated), PoolCauses.TagCause(view, Running)); // the ranking's own name has the exe and PID
+        Assert.Equal(("Leaker", Confidence.ConfirmedByTrace), PoolCauses.TagCause(view with { TraceBacked = true }, Running));
+        Assert.Null(PoolCauses.TagCause(null, Running)); // not ranked yet
+        Assert.Null(PoolCauses.TagCause(view with { Answer = view.Answer with { Growth = 0 } }, Running));
+    }
+
+    [Fact]
+    public void TheTraysIncidentNoticeSaysKernelPoolAndNamesACauseOnlyAtStrongEvidence()
+    {
+        var info = new TagInfo("<unknown>", "File objects", "pooltag.txt");
+        var strong = Open(owners: [Ranked(LeakerByPid, Confidence.StronglyCorrelated)], suspects: [Process("Leaker.exe")]);
+        Assert.Equal("Kernel pool: Open files (File) is growing. PoolWatch is keeping an eye on Leaker.", PoolCauses.IncidentNotice(strong, info, Running));
+
+        // A weaker suspect is not named, as on the status line: growth often goes away by itself.
+        var weak = Process("Leaker.exe");
+        weak.Confidence = Confidence.Correlated;
+        Assert.Equal("Kernel pool: Open files (File) is growing. Open PoolWatch for details.", PoolCauses.IncidentNotice(Open(suspects: [weak]), info, Running));
+        Assert.Equal("Kernel pool: Open files (File) is growing. Open PoolWatch for details.", PoolCauses.IncidentNotice(Open(), info, Running));
+        // A cause nobody knows by a name is not named either.
+        var system = Open(owners: [Ranked(new Owner(OwnerKind.System, "system", "the kernel (System worker threads)"), Confidence.StronglyCorrelated)]);
+        Assert.EndsWith("is growing. Open PoolWatch for details.", PoolCauses.IncidentNotice(system, info, Running));
+
+        string? total = PoolCauses.IncidentNotice(Open(IncidentKind.NonPagedTotal, traced: [new TraceOwner { Owner = new Owner(OwnerKind.App, "app:codex", "Codex") }]), info, Running);
+        Assert.Equal("Kernel pool: Open files (File) is growing, with non-paged pool over the limit. PoolWatch is keeping an eye on Codex.", total);
+        foreach (var text in new[] { PoolCauses.IncidentNotice(strong, info, Running)!, total! })
+        {
+            Assert.DoesNotMatch(new Regex(@"\.exe\b|\(PID \d+\)|>"), text); // no exe, no PID, no detector rule
+            Assert.True(text.Length <= 250, text); // what a notification shows
+        }
+
+        // A pool released (a tag that dropped with no growth incident, often after PoolWatch's own clear) is no alarm:
+        // no notice at all, however strong its ranking, and so never "is growing" or a cause.
+        Assert.Null(PoolCauses.IncidentNotice(Open(IncidentKind.Release, owners: [Ranked(LeakerByPid, Confidence.StronglyCorrelated)]), info, Running));
+        Assert.Null(PoolCauses.IncidentNotice(Open(IncidentKind.Release, traced: [new TraceOwner { Owner = new Owner(OwnerKind.App, "app:codex", "Codex") }]), info, Running));
+        Assert.Null(PoolCauses.IncidentNotice(Open(IncidentKind.Capture), info, Running));
+    }
+
+    [Fact]
+    public void TheTrayWordsAnOpenedIncidentWithTheTagsDescriptionAndLogsAFailure()
+    {
+        var info = new TagInfo("<unknown>", "File objects", "pooltag.txt");
+        var log = new List<string>();
+        var asked = new List<PoolTag>();
+        var strong = Open(owners: [Ranked(LeakerByPid, Confidence.StronglyCorrelated)]);
+        Assert.Equal("Kernel pool: Open files (File) is growing. PoolWatch is keeping an eye on Leaker.",
+            PoolCauses.TrayNotice(strong, t => { asked.Add(t); return info; }, Running, log.Add)); // never the bare tag code
+        Assert.Equal([PoolTag.Parse("File")], asked);
+        Assert.Null(PoolCauses.TrayNotice(Open(IncidentKind.Release, owners: [Ranked(LeakerByPid, Confidence.StronglyCorrelated)]), _ => info, Running, log.Add));
+        Assert.Empty(log);
+        Assert.Null(PoolCauses.TrayNotice(strong, _ => throw new InvalidOperationException("no knowledge"), Running, log.Add));
+        Assert.Equal(["incident notice: no knowledge"], log);
     }
 
     [Fact]

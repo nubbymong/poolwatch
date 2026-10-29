@@ -1,8 +1,10 @@
+using System.Text.RegularExpressions;
 using PoolWatch.Analysis;
 using PoolWatch.Core;
 using PoolWatch.Core.Correlation;
 using PoolWatch.Core.Detection;
 using PoolWatch.Core.Findings;
+using PoolWatch.Core.Identity;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
@@ -96,6 +98,7 @@ internal static class PoolCauses
             r.Open ? $"since {PlainWords.When(start, nowUtc)}" : PlainWords.When(start, nowUtc))
         {
             Active = r.Open, TimeUtc = r.OpenedUtc, Tone = r.Open ? RowTone.Alert : RowTone.Normal, Folder = r.Dir,
+            Tag = PoolTag.TryParse(r.Tag, out var tag) ? tag : null, // for the known issues about it
         };
     }
 
@@ -139,10 +142,13 @@ internal static class PoolCauses
     }
 
     /// <summary>The top owner of a tag's ranking (the trace's first, when the trace backs it); null when nobody stood out.</summary>
-    public static (string name, Confidence level)? CauseOf(TagViewData v)
+    public static (string name, Confidence level)? CauseOf(TagViewData v) => TopOwner(v) is { } top ? (top.owner.Name, top.level) : null;
+
+    /// <summary>The owner <see cref="CauseOf(TagViewData)"/> names, with its confidence.</summary>
+    private static (Owner owner, Confidence level)? TopOwner(TagViewData v)
     {
         var top = v.TraceBacked ? v.Owners.FirstOrDefault() : v.Owners.FirstOrDefault(o => o.Meaningful);
-        return top is null || v.Answer.Growth <= 0 ? null : (top.Name, v.TraceBacked ? Confidence.ConfirmedByTrace : top.Confidence);
+        return top is null || v.Answer.Growth <= 0 ? null : (top.Owner, v.TraceBacked ? Confidence.ConfirmedByTrace : top.Confidence);
     }
 
     public static bool Stands(ProcessCandidate p) =>
@@ -255,17 +261,19 @@ internal static class PoolCauses
     /// <summary>
     /// The status line's lead: the open growth incident that grew most, else the fastest-growing tag (with its ranking
     /// when there is one; <paramref name="rankTag"/> is then that tag, for the background ranking). Null when nothing grows.
+    /// Its cause is named as people know it (<see cref="FriendlyName(Owner, IReadOnlyList{ServiceEntry})"/>), from
+    /// <paramref name="services"/>, the services Windows runs now.
     /// </summary>
-    public static PoolStatusLead? Lead(AnalysisPipeline a, TagRankings ranked, TimeSpan held, out PoolTag? rankTag)
+    public static PoolStatusLead? Lead(AnalysisPipeline a, TagRankings ranked, IReadOnlyList<ServiceEntry> services, TimeSpan held, out PoolTag? rankTag)
     {
         rankTag = null;
         var now = DateTime.UtcNow;
         Incident? inc;
-        (string name, Confidence level)? cause;
+        (string? name, Confidence level)? cause;
         lock (a.History.SyncRoot)
         {
             inc = a.Incidents.Open.Where(i => i.Kind is IncidentKind.Growth or IncidentKind.NonPagedTotal && i.Growth > 0).MaxBy(i => i.Growth);
-            cause = inc is null ? null : UiData.CauseOf(inc);
+            cause = inc is null ? null : FriendlyCause(inc, services);
         }
         if (inc is not null)
             return new PoolStatusLead(TagWords(inc.Tag, a.Knowledge.Lookup(inc.Tag)), inc.Growth, now - inc.OnsetUtc, cause?.name, cause?.level ?? Confidence.Weak);
@@ -275,10 +283,90 @@ internal static class PoolCauses
         if (growth <= 0) return null;
         var over = s.Delta60m > 0 ? (held < TimeSpan.FromHours(1) ? held : TimeSpan.FromHours(1)) : TimeSpan.FromMinutes(Math.Min(10, Math.Max(1, held.TotalMinutes)));
         rankTag = s.Tag;
-        var view = ranked.Get(s.Tag);
-        var c = view is null ? null : CauseOf(view);
-        return new PoolStatusLead(TagWords(s.Tag, a.Knowledge.Lookup(s.Tag)), growth, over, c?.name, c?.level ?? Confidence.Weak);
+        var tagCause = TagCause(ranked.Get(s.Tag), services);
+        return new PoolStatusLead(TagWords(s.Tag, a.Knowledge.Lookup(s.Tag)), growth, over, tagCause?.name, tagCause?.level ?? Confidence.Weak);
     }
+
+    /// <summary>
+    /// A growing tag's likely cause as <see cref="CauseOf(TagViewData)"/> picks it from its ranking (none before the
+    /// ranking), by its friendly name.
+    /// </summary>
+    internal static (string? name, Confidence level)? TagCause(TagViewData? view, IReadOnlyList<ServiceEntry> services) =>
+        view is not null && TopOwner(view) is { } top ? (FriendlyName(top.owner, services), top.level) : null;
+
+    /// <summary>
+    /// The incident's likely cause as <see cref="UiData.CauseOf(Incident)"/> picks it (the trace's top owner, else the top
+    /// suspect owner, else the top process), by its friendly name. The caller holds the history lock.
+    /// </summary>
+    internal static (string? name, Confidence level)? FriendlyCause(Incident i, IReadOnlyList<ServiceEntry> services)
+    {
+        if (i.TraceOwners is { Count: > 0 } traced) return (FriendlyName(traced[0].Owner, services), Confidence.ConfirmedByTrace);
+        if (i.Owners?.FirstOrDefault(o => o.Meaningful) is { } owner) return (FriendlyName(owner.Owner, services), owner.Confidence);
+        if (i.Suspects.FirstOrDefault() is { } top) return (FriendlyName(top, services), top.Confidence);
+        return null;
+    }
+
+    /// <summary>
+    /// The tray's notice when a growth incident opens, in the status line's words: "Kernel pool: Open files (File) is
+    /// growing.", then the likely cause by its friendly name only when the evidence is strong or a trace confirmed it
+    /// (<see cref="PoolStatusLine.CauseSentence"/>), else where to look. Never an exe, a PID or the detector's rule.
+    /// Null for any other incident: a pool released (often by PoolWatch's own cache clear) needs nothing from you, and
+    /// Pool causes lists it. The caller holds the history lock (the incident manager raises its event under it).
+    /// </summary>
+    internal static string? IncidentNotice(Incident i, TagInfo? info, IReadOnlyList<ServiceEntry> services)
+    {
+        if (i.Kind is not (IncidentKind.Growth or IncidentKind.NonPagedTotal)) return null;
+        string over = i.Kind == IncidentKind.NonPagedTotal ? ", with non-paged pool over the limit" : "";
+        string cause = FriendlyCause(i, services) is { } c ? PoolStatusLine.CauseSentence(c.name, c.level) : "";
+        return $"Kernel pool: {TagWords(i.Tag, info)} is growing{over}." + (cause.Length > 0 ? cause : " Open PoolWatch for details.");
+    }
+
+    /// <summary>
+    /// The tray's handler for an incident that opened: <see cref="IncidentNotice"/> with the tag's description from
+    /// <paramref name="lookup"/>, or null for no notice. A failure to word it is logged, never thrown into the sampler.
+    /// </summary>
+    internal static string? TrayNotice(Incident i, Func<PoolTag, TagInfo?> lookup, IReadOnlyList<ServiceEntry> services, Action<string> log)
+    {
+        try { return IncidentNotice(i, lookup(i.Tag), services); }
+        catch (Exception ex) { log("incident notice: " + ex.Message); return null; }
+    }
+
+    private static readonly Regex PidSuffix = new(@" \(PID \d+\)$", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// A cause by the name people know it by, for the status line: an app's own name ("Codex", "Stream Deck"), a service's
+    /// display name ("Example Device Service"), a Claude Code session with its folder, else its program without
+    /// ".exe" ("Leaker"), never a PID (Pool causes keeps every detail). Null for an owner nobody would know by a name:
+    /// the kernel's own threads, a program started through WMI, a process known only by its PID.
+    /// </summary>
+    /// <param name="services">The services Windows runs now, for their display names.</param>
+    public static string? FriendlyName(Owner owner, IReadOnlyList<ServiceEntry> services) => owner.Kind switch
+    {
+        OwnerKind.App or OwnerKind.Aicc => owner.Name,
+        OwnerKind.Service => ServiceNames(ProcessIdentities.ServicesOf(owner), services),
+        OwnerKind.ClaudeSession => PidSuffix.Replace(owner.Name, ""),
+        OwnerKind.Unknown when PidSuffix.IsMatch(owner.Name) => ProgramName(PidSuffix.Replace(owner.Name, "")),
+        _ => null,
+    };
+
+    /// <summary>The same for a process (an incident's top suspect before its owners are ranked): its services, else its program.</summary>
+    public static string? FriendlyName(Suspect process, IReadOnlyList<ServiceEntry> services) =>
+        process.Services.Count > 0 ? ServiceNames(process.Services, services) : ProgramName(process.Image);
+
+    /// <summary>
+    /// The first service by the name Windows shows for it (its own name once Windows no longer lists it), and how many
+    /// more the same process runs: "Example Device Service", "Task Scheduler and 2 other services".
+    /// </summary>
+    private static string? ServiceNames(IReadOnlyList<string> names, IReadOnlyList<ServiceEntry> services)
+    {
+        if (names.Count == 0) return null;
+        string first = services.FirstOrDefault(e => e.Name.Equals(names[0], StringComparison.OrdinalIgnoreCase))?.DisplayName is { Length: > 0 } shown ? shown : names[0];
+        return names.Count switch { 1 => first, 2 => $"{first} and 1 other service", _ => $"{first} and {names.Count - 1} other services" };
+    }
+
+    /// <summary>A program by its file name without ".exe" ("Leaker"); null for anything else ("System", "unknown process").</summary>
+    private static string? ProgramName(string image) =>
+        image.Length > 4 && image.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? image[..^4] : null;
 
     /// <summary>Live processes that stand out (<see cref="Stands"/>), the largest rise first.</summary>
     private static List<ProcessCandidate> ProcessCandidates(AnalysisPipeline a, MonitorEngine engine)
@@ -355,8 +443,8 @@ internal static class RankPlan
 /// The rankings of growing tags (the old tag page's suspects). <see cref="Pump"/> builds the next one <see cref="RankPlan"/>
 /// picks on a pool thread, one at a time, so the window never waits on the correlator; the rows show what is cached
 /// (a blank cause until the first ranking). A tag that stops growing keeps its last ranking, so its released row still
-/// has a cause and a summary to copy, until the oldest are dropped past <see cref="MaxCached"/> or the window hides and
-/// drops them all (<see cref="Clear"/>). Thread-safe.
+/// has a summary to copy (a released row names no cause), until the oldest are dropped past <see cref="MaxCached"/> or the
+/// window hides and drops them all (<see cref="Clear"/>). Thread-safe.
 /// </summary>
 internal sealed class TagRankings
 {

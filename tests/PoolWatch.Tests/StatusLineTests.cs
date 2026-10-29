@@ -18,8 +18,9 @@ public class StatusLineTests
     private const string Metadata = "File system metadata (Reff, refs.sys)";
     private const string OpenFiles = "Open files (File, Windows kernel)";
 
-    private static PoolStatus Describe(long? total, TimeSpan held, long change10, long? changeHour, PoolStatusLead? lead = null, string? saturated = null) =>
-        PoolStatusLine.Describe(total, held, change10, changeHour, lead, saturated);
+    private static PoolStatus Describe(long? total, TimeSpan held, long change10, long? changeHour, PoolStatusLead? lead = null, string? saturated = null,
+        string? ownClear = null, string? nextClear = null) =>
+        PoolStatusLine.Describe(total, held, change10, changeHour, lead, saturated, ownClear, nextClear);
 
     /// <summary>Brackets inside brackets ("(growing most: X (Reff))"): the wording must never do that.</summary>
     private static readonly Regex Nested = new(@"\([^()]*\(");
@@ -39,36 +40,58 @@ public class StatusLineTests
         // "Kernel pool is growing: +708.5 MB in the last hour."
         var s = Describe(10 * GB, TwoHours, 20 * MB, (long)(708.5 * MB));
         Assert.Equal(PoolStatusKind.Growing, s.Kind);
-        Assert.Equal("Kernel pool grew 709 MB in the last hour. No clear cause yet.", s.Text);
+        Assert.Equal("Kernel pool grew 709 MB in the last hour.", s.Text);
         Assert.StartsWith("Kernel pool grew 1.4 GB in the last hour.", Describe(10 * GB, TwoHours, 20 * MB, (long)(1.37 * GB)).Text);
     }
 
     [Fact]
-    public void AGrowingPoolNamesTheMostLikelyCauseWithItsConfidenceInWords()
+    public void AGrowingPoolNamesACauseInSoftWordsOnlyWithStrongEvidence()
     {
         var lead = new PoolStatusLead(OpenFiles, (long)(1.1 * GB), TimeSpan.FromMinutes(50), "Stream Deck", Confidence.StronglyCorrelated);
         var s = Describe(10 * GB, TwoHours, 150 * MB, (long)(1.2 * GB), lead);
         Assert.Equal(PoolStatusKind.Growing, s.Kind);
-        Assert.Equal("Kernel pool grew 1.2 GB in the last hour. Most likely cause: Stream Deck, with strong evidence.", s.Text);
+        Assert.Equal("Kernel pool grew 1.2 GB in the last hour. PoolWatch is keeping an eye on Stream Deck.", s.Text);
 
-        var traced = Describe(10 * GB, TwoHours, 150 * MB, (long)(1.2 * GB), lead with { Confidence = Confidence.ConfirmedByTrace, Cause = "Leaker.exe (PID 7716)" });
-        Assert.EndsWith("Most likely cause: Leaker.exe (PID 7716), confirmed by a trace.", traced.Text);
+        var traced = Describe(10 * GB, TwoHours, 150 * MB, (long)(1.2 * GB), lead with { Confidence = Confidence.ConfirmedByTrace, Cause = "Example Device Service" });
+        Assert.EndsWith("PoolWatch is keeping an eye on Example Device Service.", traced.Text);
     }
 
     [Fact]
-    public void AGrowingPoolWithoutAConvincingSuspectSaysNoClearCauseYet()
+    public void AGrowingPoolWithoutAStrongSuspectNamesNoCause()
     {
         // No lead at all.
         var none = Describe(10 * GB, TwoHours, 20 * MB, 300 * MB);
         Assert.Equal(PoolStatusKind.Growing, none.Kind);
-        Assert.Equal("Kernel pool grew 300 MB in the last hour. No clear cause yet.", none.Text);
+        Assert.Equal("Kernel pool grew 300 MB in the last hour.", none.Text);
 
-        // A lead whose suspect has only weak evidence is not named as the cause; what grows most is still said.
-        var weak = new PoolStatusLead(Metadata, 280 * MB, TimeSpan.FromHours(1), "Explorer", Confidence.Weak);
-        var s = Describe(10 * GB, TwoHours, 20 * MB, 300 * MB, weak);
-        Assert.Equal("Kernel pool grew 300 MB in the last hour. No clear cause yet; growing most: File system metadata (Reff, refs.sys).", s.Text);
-        Assert.DoesNotContain("Explorer", s.Text);
-        Assert.DoesNotMatch(Nested, s.Text);
+        // A suspect with weak or only some evidence is not named (growth often goes away by itself; Pool causes has the details).
+        foreach (var confidence in new[] { Confidence.Weak, Confidence.Correlated })
+        {
+            var s = Describe(10 * GB, TwoHours, 20 * MB, 300 * MB, new PoolStatusLead(Metadata, 280 * MB, TimeSpan.FromHours(1), "Explorer", confidence));
+            Assert.Equal("Kernel pool grew 300 MB in the last hour.", s.Text);
+        }
+    }
+
+    [Fact]
+    public void PoolWatchsOwnClearIsSaidAsItsResultAndAGrowthSaysWhenTheNextOneRuns()
+    {
+        const string clear = "The cache clear at 03:56 freed 1.3 GB.", next = "The next cache clear is in 12 min.";
+        // The changes are measured from the level the clear left, so the pool is steady and the drop is the clear's result.
+        var after = Describe((long)(6.2 * GB), TwoHours, 10 * MB, 20 * MB, ownClear: clear, nextClear: next);
+        Assert.Equal(PoolStatusKind.Steady, after.Kind);
+        Assert.Equal("Kernel pool is steady at 6.2 GB. The cache clear at 03:56 freed 1.3 GB.", after.Text);
+
+        // A growth says when the next clear runs, after a cause and after the last clear's result.
+        Assert.Equal("Kernel pool grew 484 MB in the last hour. The next cache clear is in 12 min.", Describe(10 * GB, TwoHours, 20 * MB, 484 * MB, nextClear: next).Text);
+        var lead = new PoolStatusLead(Metadata, 400 * MB, TimeSpan.FromHours(1), "Explorer", Confidence.StronglyCorrelated);
+        Assert.Equal("Kernel pool is steady at 9.6 GB, but File system metadata (Reff, refs.sys) grew 400 MB in the last hour. PoolWatch is keeping an eye on " +
+                     "Explorer. The cache clear at 03:56 freed 1.3 GB. The next cache clear is in 12 min.",
+            Describe((long)(9.6 * GB), TwoHours, 0, 0, lead, ownClear: clear, nextClear: next).Text);
+
+        // Steady or shrinking: nothing to wait for. The saturation clause stays last.
+        Assert.Equal("Kernel pool is steady at 9.6 GB.", Describe((long)(9.6 * GB), TwoHours, 0, 0, nextClear: next).Text);
+        Assert.Equal("Kernel pool shrank 600 MB in the last hour.", Describe(9 * GB, TwoHours, -10 * MB, -600 * MB, nextClear: next).Text);
+        Assert.EndsWith(clear + " Your PC is saturated: every core is busy.", Describe((long)(6.2 * GB), TwoHours, 0, 0, saturated: "", ownClear: clear).Text);
     }
 
     [Fact]
@@ -113,19 +136,19 @@ public class StatusLineTests
 
         // ... but a growth the detector already caught (an open incident) is said, with its cause.
         var caught = Describe((long)(9.6 * GB), TimeSpan.FromMinutes(1), 500 * MB, null,
-            new PoolStatusLead(OpenFiles, 12 * MB, TimeSpan.FromSeconds(40), "Leaker.exe (PID 7716)", Confidence.StronglyCorrelated));
+            new PoolStatusLead(OpenFiles, 12 * MB, TimeSpan.FromSeconds(40), "Leaker", Confidence.StronglyCorrelated));
         Assert.Equal(PoolStatusKind.TagGrowing, caught.Kind);
-        Assert.Equal("Kernel pool is 9.6 GB, and Open files (File, Windows kernel) grew 12 MB in 40 seconds. Most likely cause: Leaker.exe (PID 7716), with strong evidence.", caught.Text);
+        Assert.Equal("Kernel pool is 9.6 GB, and Open files (File, Windows kernel) grew 12 MB in 40 seconds. PoolWatch is keeping an eye on Leaker.", caught.Text);
     }
 
     [Fact]
     public void ATagGrowingWhileTheTotalHoldsIsNamedInPlainWords()
     {
         // An open incident on one tag while other tags shrink: the total is steady, the line still says what grows and why.
-        var lead = new PoolStatusLead(Metadata, 400 * MB, TimeSpan.FromHours(1), "Explorer", Confidence.Correlated);
+        var lead = new PoolStatusLead(Metadata, 400 * MB, TimeSpan.FromHours(1), "Explorer", Confidence.StronglyCorrelated);
         var s = Describe((long)(9.6 * GB), TwoHours, -50 * MB, -150 * MB, lead);
         Assert.Equal(PoolStatusKind.TagGrowing, s.Kind);
-        Assert.Equal("Kernel pool is steady at 9.6 GB, but File system metadata (Reff, refs.sys) grew 400 MB in the last hour. Most likely cause: Explorer, with some evidence.", s.Text);
+        Assert.Equal("Kernel pool is steady at 9.6 GB, but File system metadata (Reff, refs.sys) grew 400 MB in the last hour. PoolWatch is keeping an eye on Explorer.", s.Text);
 
         Assert.Contains("grew 400 MB in 25 minutes.", Describe((long)(9.6 * GB), TwoHours, 0, 0, lead with { Over = TimeSpan.FromMinutes(25) }).Text);
 
@@ -139,8 +162,8 @@ public class StatusLineTests
         Assert.Equal("Kernel pool is steady at 9.6 GB.", Describe((long)(9.6 * GB), TwoHours, 0, 0, tiny).Text);
         Assert.Equal("Kernel pool is 9.6 GB. It takes a few minutes to tell whether it is growing.", Describe((long)(9.6 * GB), TimeSpan.FromMinutes(1), 0, null, tiny).Text);
         Assert.Contains("grew 1 MB in the last hour.", Describe((long)(9.6 * GB), TwoHours, 0, 0, lead with { Growth = 512 * KB }).Text);
-        // While the total grows, its amount is not said, so the same lead is still named as what grows most.
-        Assert.Equal("Kernel pool grew 300 MB in the last hour. Most likely cause: Explorer, with some evidence.", Describe(10 * GB, TwoHours, 20 * MB, 300 * MB, tiny).Text);
+        // While the total grows, the tag's amount is not said, so the same lead's cause is still named.
+        Assert.Equal("Kernel pool grew 300 MB in the last hour. PoolWatch is keeping an eye on Explorer.", Describe(10 * GB, TwoHours, 20 * MB, 300 * MB, tiny).Text);
     }
 
     [Fact]

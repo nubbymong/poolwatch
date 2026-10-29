@@ -1,14 +1,32 @@
+using System.ComponentModel;
 using System.Drawing.Drawing2D;
 using System.Globalization;
+using PoolWatch.Core.Cache;
 using PoolWatch.Core.Detection;
 using PoolWatch.Core.Util;
 
 namespace PoolWatch.Ui;
 
-/// <summary>Where the chart drew its text last time (for the CI layout check: nothing may overlap or fall outside).</summary>
-internal sealed record ChartLayout(Size Client, Rectangle Title, Rectangle Legend, Rectangle Plot, IReadOnlyList<Rectangle> YLabels, IReadOnlyList<Rectangle> XLabels)
+/// <summary>
+/// A cache clear the graph marks: when, what it freed (measured 2 minutes after it), whether PoolWatch started it, whether
+/// it was a light (low-priority) one, and whether it has been measured yet.
+/// </summary>
+internal sealed record ChartClear(DateTime TimeUtc, long FreedBytes, bool Automatic, bool Light, bool Done)
 {
-    /// <summary>Overlapping or clipped text, in words; empty when the layout is clean.</summary>
+    public static ChartClear Of(ClearRecord r) => new(r.TimeUtc, r.Freed, r.Automatic, r.Mode == ClearMode.LowPriority, r.Done);
+
+    /// <summary>Its mark's hover text: "Cache clear at 09:12 (automatic): freed 4.7 GB".</summary>
+    public string Text => ClearScheduleText.Mark(TimeUtc, FreedBytes, Automatic, Light, Done);
+
+    /// <summary>What the status line says in place of the drop it caused: "The cache clear at 03:56 freed 1.3 GB."</summary>
+    public string Result => ClearScheduleText.Result(TimeUtc, FreedBytes, Done);
+}
+
+/// <summary>Where the chart drew its text and clear marks last time (for the CI layout check: nothing may overlap or fall outside).</summary>
+internal sealed record ChartLayout(Size Client, Rectangle Title, Rectangle Legend, Rectangle Plot, IReadOnlyList<Rectangle> YLabels, IReadOnlyList<Rectangle> XLabels,
+    IReadOnlyList<Rectangle> Markers)
+{
+    /// <summary>Overlapping or clipped text, and clear marks outside the plot, in words; empty when the layout is clean.</summary>
     public List<string> Problems()
     {
         var p = new List<string>();
@@ -18,6 +36,8 @@ internal sealed record ChartLayout(Size Client, Rectangle Title, Rectangle Legen
         Inside("legend", Legend);
         foreach (var r in YLabels) Inside("axis label", r);
         foreach (var r in XLabels) Inside("time label", r);
+        foreach (var r in Markers)
+            if (!Plot.Contains(r)) p.Add($"clear mark {r} is outside the plot {Plot}");
         if (!Legend.IsEmpty && Title.IntersectsWith(Legend)) p.Add("the legend overlaps the title");
         foreach (var r in YLabels)
             if (r.IntersectsWith(Title) || (!Legend.IsEmpty && r.IntersectsWith(Legend))) p.Add($"axis label {r} overlaps the title or legend");
@@ -33,24 +53,75 @@ internal sealed record ChartLayout(Size Client, Rectangle Title, Rectangle Legen
 
 /// <summary>
 /// The main window's one graph: the committed paged and non-paged pool (the figures Task Manager shows) over the last
-/// 6 hours, solid lines with a plain legend. Every position comes from the font's measured size, so the axis labels never
-/// reach the title at any display scaling. Paints only when invalidated; the window feeds it only while visible.
+/// 6 hours, solid lines with a plain legend, and a mark at each cache clear that shows on hover what it freed, so a drop a
+/// clear caused reads as the clear. Every position comes from the font's measured size, so the axis labels never reach the
+/// title at any display scaling. Paints only when invalidated; the window feeds it only while visible.
 /// </summary>
 internal sealed class PoolChart : Control
 {
     public static readonly TimeSpan Span = TimeSpan.FromHours(6);
     private static readonly Color PagedColor = Color.SteelBlue, NonPagedColor = Color.DarkOrange;
     private static readonly Color GridColor = Color.FromArgb(232, 232, 232), TextColor = Color.FromArgb(90, 90, 90);
+    private static readonly Color MarkColor = Color.FromArgb(46, 125, 50), MarkLineColor = Color.FromArgb(190, 212, 192);
     private const TextFormatFlags Flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
     private IReadOnlyList<ChartPoint> _points = [];
+    private IReadOnlyList<ChartClear> _clears = [];
     private readonly Font _font = new("Segoe UI", 9f);
     private readonly Font _titleFont = new("Segoe UI Semibold", 10f);
+
+    // One tooltip: over a clear mark (or its line) what the clear freed, elsewhere HelpText.
+    private readonly ToolTip _tip = new() { AutoPopDelay = 30_000, InitialDelay = 400 };
+    private List<(Rectangle Hit, string Text)> _markHits = [];
+    private string _helpText = "";
+    private string? _tipText;
 
     public PoolChart()
     {
         DoubleBuffered = true;
         SetStyle(ControlStyles.ResizeRedraw | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
         BackColor = Color.White;
+    }
+
+    /// <summary>The tooltip shown anywhere but over a clear mark.</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)] // set in code, never by a designer
+    public string HelpText
+    {
+        get => _helpText;
+        set { _helpText = value; ShowTip(value); }
+    }
+
+    /// <summary>The clears to mark (any span: those outside the graph's are left out). Repaints only when they changed.</summary>
+    public void SetClears(IReadOnlyList<ChartClear> clears)
+    {
+        if (clears.SequenceEqual(_clears)) return;
+        _clears = clears;
+        Invalidate();
+    }
+
+    /// <summary>The tooltip at a point of the last paint: every clear marked there (marks close in time overlap), else <see cref="HelpText"/>.</summary>
+    internal string TipAt(Point p)
+    {
+        var over = _markHits.Where(m => m.Hit.Contains(p)).Select(m => m.Text).ToList();
+        return over.Count > 0 ? string.Join(Environment.NewLine, over) : _helpText;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        ShowTip(TipAt(e.Location));
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        ShowTip(_helpText);
+    }
+
+    private void ShowTip(string text)
+    {
+        if (text == _tipText) return;
+        _tipText = text;
+        _tip.SetToolTip(this, text);
     }
 
     /// <summary>The text positions of the last paint (null before the first).</summary>
@@ -81,8 +152,8 @@ internal sealed class PoolChart : Control
         DateTime from = t1 - Span;
         if (pts.Count > 0 && pts[0].TimeUtc < from) pts = pts.Where(p => p.TimeUtc >= from).ToList();
         DateTime t0 = pts.Count > 0 ? pts[0].TimeUtc : from;
-        string title = pts.Count < 2 ? "Kernel pool" : t0 <= from + TimeSpan.FromMinutes(2) ? "Kernel pool, last 6 hours"
-            : $"Kernel pool since {t0.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture)}";
+        string title = pts.Count < 2 ? PoolName.Title : t0 <= from + TimeSpan.FromMinutes(2) ? $"{PoolName.Title}, last 6 hours"
+            : $"{PoolName.Title} since {t0.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture)}";
 
         // Row 1: the title on the left, the legend on the right (on a row of its own when the chart is too narrow for both).
         var titleSize = TextRenderer.MeasureText(g, title, _titleFont, Size.Empty, Flags);
@@ -116,7 +187,8 @@ internal sealed class PoolChart : Control
         if (pts.Count < 2)
         {
             TextRenderer.DrawText(g, "Collecting the first samples…", _font, new Point(pad, headerBottom + fh), Color.Gray, Flags);
-            LastLayout = new ChartLayout(ClientSize, titleRect, legendRect, Rectangle.Empty, [], []);
+            LastLayout = new ChartLayout(ClientSize, titleRect, legendRect, Rectangle.Empty, [], [], []);
+            _markHits = [];
             return;
         }
 
@@ -131,7 +203,8 @@ internal sealed class PoolChart : Control
         var plot = Rectangle.FromLTRB(pad + labelW + pad, headerBottom + fh, Width - 2 * pad, Height - pad - fh - pad / 2);
         if (plot.Width < 40 || plot.Height < fh * 2)
         {
-            LastLayout = new ChartLayout(ClientSize, titleRect, legendRect, Rectangle.Empty, [], []);
+            LastLayout = new ChartLayout(ClientSize, titleRect, legendRect, Rectangle.Empty, [], [], []);
+            _markHits = [];
             return;
         }
         double span = Math.Max(60, (t1 - t0).TotalSeconds);
@@ -171,18 +244,46 @@ internal sealed class PoolChart : Control
                 xRects.Add(r);
             }
 
+        // Each cache clear: a faint line behind the data, and a small mark at the top of the plot, kept inside it.
+        var clears = _clears.Where(c => c.TimeUtc >= t0 && c.TimeUtc <= t1).ToList();
+        var marks = new List<Rectangle>();
+        var hits = new List<(Rectangle, string)>();
+        int markSize = Math.Max(7, fh * 2 / 3);
+        using (var line = new Pen(MarkLineColor) { DashStyle = DashStyle.Dash })
+            foreach (var c in clears)
+            {
+                float x = X(c.TimeUtc);
+                g.DrawLine(line, x, plot.Top, x, plot.Bottom);
+                var mark = new Rectangle(Math.Clamp((int)Math.Round(x - markSize / 2f), plot.Left, plot.Right - markSize), plot.Top, markSize, markSize);
+                marks.Add(mark);
+                // The mark and its line answer to the pointer; a few pixels either side, so a thin line is easy to find.
+                hits.Add((Rectangle.FromLTRB(Math.Min(mark.Left, (int)x - pad / 2), plot.Top, Math.Max(mark.Right, (int)x + pad / 2), plot.Bottom), c.Text));
+            }
+
         using (var pen = new Pen(PagedColor, LineWidth()) { LineJoin = LineJoin.Round })
             g.DrawLines(pen, pts.Select(p => new PointF(X(p.TimeUtc), Y(p.Totals.CommittedPaged))).ToArray());
         using (var pen = new Pen(NonPagedColor, LineWidth()) { LineJoin = LineJoin.Round })
             g.DrawLines(pen, pts.Select(p => new PointF(X(p.TimeUtc), Y(p.Totals.CommittedNonPaged))).ToArray());
-        LastLayout = new ChartLayout(ClientSize, titleRect, legendRect, plot, yRects, xRects);
+
+        // The marks on top: filled once the clear is measured, an outline while it is being measured.
+        using (var fill = new SolidBrush(MarkColor))
+        using (var outline = new Pen(MarkColor))
+            for (int i = 0; i < clears.Count; i++)
+            {
+                var r = marks[i];
+                PointF[] down = [new(r.Left, r.Top), new(r.Right, r.Top), new(r.Left + r.Width / 2f, r.Bottom)];
+                if (clears[i].Done) g.FillPolygon(fill, down);
+                else g.DrawPolygon(outline, down);
+            }
+        _markHits = hits;
+        LastLayout = new ChartLayout(ClientSize, titleRect, legendRect, plot, yRects, xRects, marks);
     }
 
     private float LineWidth() => Math.Max(1.5f, 2f * DeviceDpi / 96f);
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _font.Dispose(); _titleFont.Dispose(); }
+        if (disposing) { _font.Dispose(); _titleFont.Dispose(); _tip.Dispose(); }
         base.Dispose(disposing);
     }
 }

@@ -3,8 +3,9 @@ using PoolWatch.Core;
 namespace PoolWatch.Engine;
 
 /// <summary>
-/// Settings that take effect at once: the setup guide, a suggestion, Settings and Undo turn the automatic clear and the
-/// token-leak guard on or off while PoolWatch runs, or the "Next cache clear" line would be wrong until the next start.
+/// Settings that take effect at once: the setup guide, a suggestion, Settings and Undo turn the automatic clear, the
+/// token-leak guard and update notices on or off while PoolWatch runs, or the "Next cache clear" line would be wrong until
+/// the next start.
 /// <see cref="Apply"/> changes settings.json and the running engine's settings object (the sampler reads the automatic
 /// clear's values once per sample; a bool or double write is atomic on x64), then raises <see cref="Applied"/> so an
 /// open Settings form's copy follows. Every other setting still applies at the next start.
@@ -30,6 +31,21 @@ internal sealed class LiveSettings
 
     /// <summary>Raised on the caller's thread after each <see cref="Apply"/>, with the change that was applied.</summary>
     public event Action<Action<Settings>>? Applied;
+
+    /// <summary>
+    /// What the next start reads: settings.json as saved, with any change saved there for the next start. Null with
+    /// <c>--config</c> (that file is never written, so the running settings are what the next start reads) or when the
+    /// file cannot be read.
+    /// </summary>
+    public Settings? Saved()
+    {
+        if (!_persist) return null;
+        lock (_lock)
+        {
+            try { return Settings.Load(_paths.SettingsFile); }
+            catch (Exception ex) { _log.Info("settings.json not read: " + ex.Message); return null; }
+        }
+    }
 
     /// <summary>
     /// Any thread. The file is changed first (loaded, changed, normalized, written to a temporary file and moved over the

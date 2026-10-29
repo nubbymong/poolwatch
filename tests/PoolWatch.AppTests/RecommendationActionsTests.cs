@@ -397,6 +397,28 @@ public sealed class RecommendationActionsTests : IDisposable
     }
 
     [Fact]
+    public void TheStepThatTurnsClearingOnSaysOnceThatAClearCanStutter()
+    {
+        int Said(EnvironmentFacts facts, bool autoClear = false)
+        {
+            var rows = SetupGuideForm.Rows(Inputs(facts, autoClear), Evidence(null), leakNotChecked: null);
+            using var host = new Form();
+            using var font = new Font("Segoe UI", 9f);
+            var page = new GuidePage(font);
+            host.Controls.Add(page);
+            page.Fill(new GuideState(facts.PlainLines(), rows, null, new HashSet<string>(), new Dictionary<string, string>()));
+            Assert.Empty(page.LayoutProblems());
+            return All<Label>(page).Count(l => l.Text == SimpleSettings.ClearStutter);
+        }
+        Assert.Equal(1, Said(Facts(DevDrive)));                                         // "Clear the cache every hour", Turn on
+        Assert.Equal(1, Said(Facts(Ntfs) with { OwnClearTasks = [@"\RAMMap clear"] })); // replacing your own task turns it on too
+        Assert.Equal(1, Said(Facts(Ntfs)));                                             // the one-time check runs a clear too
+        Assert.Equal(0, Said(Facts(DevDrive), autoClear: true));                        // done already
+        Assert.True(SimpleSettings.RunsAClear(Hourly()));
+        Assert.False(SimpleSettings.RunsAClear(Hourly() with { State = RecommendationState.Done }));
+    }
+
+    [Fact]
     public void TheUpdateSwitchShowsWhatIsInEffectAfterAChangeThatDidNotWork()
     {
         using var host = new Form();

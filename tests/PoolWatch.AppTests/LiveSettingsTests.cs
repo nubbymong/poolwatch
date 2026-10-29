@@ -44,6 +44,17 @@ public sealed class LiveSettingsTests : IDisposable
     }
 
     [Fact]
+    public void WhatTheNextStartReadsIsTheSavedFile()
+    {
+        new Settings { DeeperCapture = true }.Save(_f.Paths.SettingsFile);
+        Assert.True(_f.Live(new Settings()).Saved()!.DeeperCapture); // saved for the next start, not running yet
+        // With --config the running settings are what the next start reads; a file that cannot be read gives none either.
+        Assert.Null(_f.Live(new Settings(), persist: false).Saved());
+        File.WriteAllText(_f.Paths.SettingsFile, "{ not json");
+        Assert.Null(_f.Live().Saved());
+    }
+
+    [Fact]
     public void WithAReadOnlyConfigNothingIsWritten()
     {
         var live = _f.Live(new Settings(), persist: false);

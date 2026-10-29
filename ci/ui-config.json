@@ -1,0 +1,17 @@
+{
+  // The CI UI test (m4-ui.ps1): the M2 CI thresholds, so the small leak the test runs opens an incident, plus the hourly
+  // automatic clear, so the Simple view's line shows a schedule and Active changes lists a setting.
+  "sampleIntervalSeconds": 2,
+  "handleIntervalSeconds": 10,
+  "tagCsvIntervalSeconds": 10,
+  "processCsvIntervalSeconds": 10,
+  "growthRules": [ { "windowMinutes": 1, "bytes": 3145728 } ],
+  "releaseBytes": 2097152,
+  "releaseWindowMinutes": 1,
+  "retentionMinutes": 0.5,
+  "incidentQuietMinutes": 0.5,
+  "incidentMaxMinutes": 10,
+  "growingDisplayBytesPer10Min": 1048576,
+  "autoClearEnabled": true,
+  "autoClearEveryHours": 1
+}

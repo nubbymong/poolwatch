@@ -1,7 +1,9 @@
 using PoolWatch.Analysis;
 using PoolWatch.Core;
+using PoolWatch.Core.Cache;
 using PoolWatch.Core.Correlation;
 using PoolWatch.Core.Detection;
+using PoolWatch.Core.History;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
@@ -32,17 +34,65 @@ internal sealed record IncidentRow(string Id, string Dir, DateTime OpenedUtc, st
 internal sealed record ChartPoint(DateTime TimeUtc, PoolTotals Totals);
 
 /// <summary>The committed pool total now and how it moved, for the status line.</summary>
-internal sealed record TotalsNow(long? Total, TimeSpan Held, long Change10Min, long? ChangeHour);
+/// <param name="Clear">
+/// PoolWatch's latest cache clear in the last hour, if any. A change over a span that holds it is measured from the level
+/// the clear left, so the drop it caused is said as its result (<see cref="ChartClear.Result"/>), never as the pool falling,
+/// and growth after it is neither hidden nor exaggerated by it.
+/// </param>
+internal sealed record TotalsNow(long? Total, TimeSpan Held, long Change10Min, long? ChangeHour, ChartClear? Clear = null);
 
 internal static class UiData
 {
+    /// <summary>The tray icon's colour now, from the open incidents and the tags' states (the rule is below).</summary>
     public static TrayState State(AnalysisPipeline a)
     {
         lock (a.History.SyncRoot)
+            return State(a.Incidents.Open.Select(i => (i.Kind, CauseOf(i)?.level)), a.Detector.Status.Values.Any(s => s.State == TagState.Retained));
+    }
+
+    /// <summary>
+    /// The tray icon's colour, calm on purpose: red only for a real risk (an open incident of the non-paged pool over its
+    /// limit and still rising, or an open growth whose cause a trace confirmed); amber while another incident is open or a
+    /// tag keeps memory after its activity stopped; green otherwise, also while a tag grows for a while (watched, not alarming).
+    /// </summary>
+    /// <param name="open">Each open incident's kind and its likely cause's confidence (null while none is known).</param>
+    /// <param name="retained">A tag keeps its memory after the activity that grew it stopped.</param>
+    internal static TrayState State(IEnumerable<(IncidentKind Kind, Confidence? Cause)> open, bool retained)
+    {
+        bool anyOpen = false;
+        foreach (var (kind, cause) in open)
         {
-            if (a.Incidents.Open.Count > 0) return TrayState.Red;
-            return a.Detector.Status.Values.Any(s => s.State is TagState.Growing or TagState.Retained) ? TrayState.Amber : TrayState.Green;
+            if (kind == IncidentKind.NonPagedTotal || cause == Confidence.ConfirmedByTrace) return TrayState.Red;
+            anyOpen = true;
         }
+        return anyOpen || retained ? TrayState.Amber : TrayState.Green;
+    }
+
+    /// <summary>The Simple view's line about clearing: when the automatic clear runs next, and what the last clear freed.</summary>
+    public static string NextClearLine(AnalysisPipeline a)
+    {
+        var cache = a.Diagnostics.Cache;
+        var nowUtc = DateTime.UtcNow;
+        return ClearScheduleText.Line(cache.Next(nowUtc), cache.History(), LatestTotals(a), nowUtc);
+    }
+
+    /// <summary>What the status line adds to a growth: "The next cache clear is in 12 min."; null when no clear is scheduled.</summary>
+    public static string? NextClearContext(AnalysisPipeline a)
+    {
+        var nowUtc = DateTime.UtcNow;
+        return ClearScheduleText.Context(a.Diagnostics.Cache.Next(nowUtc), nowUtc);
+    }
+
+    /// <summary>The cache clears of the last <paramref name="span"/> that ran, for the graph's marks.</summary>
+    public static List<ChartClear> Clears(AnalysisPipeline a, TimeSpan span)
+    {
+        var from = DateTime.UtcNow - span;
+        return a.Diagnostics.Cache.History().Where(r => r.Error is null && r.TimeUtc >= from).Select(ChartClear.Of).ToList();
+    }
+
+    private static PoolTotals LatestTotals(AnalysisPipeline a)
+    {
+        lock (a.History.SyncRoot) return a.History.Count > 0 ? a.History.Totals[^1] : default;
     }
 
     public static List<TagRow> Tags(AnalysisPipeline a, bool growingOnly, int max = 200)
@@ -109,11 +159,20 @@ internal static class UiData
         return null;
     }
 
-    /// <summary>In-memory incidents plus older ones still on disk (the manager forgets them after 6 h or a restart).</summary>
+    /// <summary>
+    /// The incidents\ folder's rows as last listed, and what they were listed at: the folder is listed again only when an
+    /// incident or finding report was added, an incident left memory, the folder changed, or 5 minutes passed.
+    /// </summary>
+    private static (string Dir, int Created, int InMemory, int Findings, DateTime Utc, List<IncidentRow> Rows)? _listed;
+    private static readonly TimeSpan ListAgainAfter = TimeSpan.FromMinutes(5);
+
+    /// <summary>In-memory incidents plus older ones still on disk (the manager forgets them after 6 h or a restart). UI thread.</summary>
     public static List<IncidentRow> Incidents(AnalysisPipeline a, string incidentsDir)
     {
         List<IncidentRow> live;
+        int created;
         lock (a.History.SyncRoot)
+        {
             live = a.Incidents.All.Select(i =>
             {
                 var cause = CauseOf(i);
@@ -123,22 +182,40 @@ internal static class UiData
                     Level = cause?.level, OnsetUtc = i.OnsetUtc, EndUtc = i.EndUtc ?? i.ClosedUtc, Dropped = i.Release?.Dropped ?? 0,
                 };
             }).ToList();
+            created = a.Incidents.CreatedCount;
+        }
         var known = new HashSet<string>(live.Select(r => r.Dir), StringComparer.OrdinalIgnoreCase);
+        int inMemory = live.Count, findings = a.Diagnostics.Findings.Count;
+        var nowUtc = DateTime.UtcNow;
+        if (_listed is not { } listed || listed.Dir != incidentsDir || listed.Created != created || listed.InMemory != inMemory
+            || listed.Findings != findings || nowUtc - listed.Utc >= ListAgainAfter)
+            _listed = listed = (incidentsDir, created, inMemory, findings, nowUtc, ListDisk(incidentsDir, known));
+        live.AddRange(listed.Rows.Where(r => !known.Contains(r.Dir)));
+        return live.OrderByDescending(r => r.OpenedUtc).ToList();
+    }
+
+    /// <summary>The incident folders on disk that are not in memory; rows of folders no longer there are dropped from the cache.</summary>
+    private static List<IncidentRow> ListDisk(string incidentsDir, HashSet<string> known)
+    {
+        var rows = new List<IncidentRow>();
+        var listed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             if (Directory.Exists(incidentsDir))
                 foreach (var dir in Directory.EnumerateDirectories(incidentsDir).OrderByDescending(d => d, StringComparer.Ordinal).Take(500))
                 {
+                    listed.Add(dir);
                     if (known.Contains(dir)) continue;
                     var written = File.GetLastWriteTimeUtc(Path.Combine(dir, "report.json"));
-                    if (DiskRows.TryGetValue(dir, out var cached) && cached.written == written) { if (cached.row is { } c) live.Add(c); continue; }
+                    if (DiskRows.TryGetValue(dir, out var cached) && cached.written == written) { if (cached.row is { } c) rows.Add(c); continue; }
                     var (ok, row) = ReadRow(dir);
                     if (ok) DiskRows[dir] = (written, row); // a failed read is retried next time
-                    if (row is not null) live.Add(row);
+                    if (row is not null) rows.Add(row);
                 }
         }
         catch (IOException) { }
-        return live.OrderByDescending(r => r.OpenedUtc).ToList();
+        foreach (var gone in DiskRows.Keys.Where(d => !listed.Contains(d)).ToList()) DiskRows.Remove(gone);
+        return rows;
     }
 
     private static (bool ok, IncidentRow? row) ReadRow(string dir)
@@ -205,19 +282,30 @@ internal static class UiData
         }
     }
 
-    /// <summary>The committed total now, how far back the raw samples go, and its change over 10 minutes and an hour.</summary>
+    /// <summary>
+    /// The committed total now, how far back the raw samples go, and its change over 10 minutes and an hour, measured from
+    /// the level PoolWatch's own latest clear left when the span holds it (<see cref="TotalsNow.Clear"/>; 0 while that clear
+    /// is being measured).
+    /// </summary>
     public static TotalsNow Totals(AnalysisPipeline a)
     {
-        lock (a.History.SyncRoot)
-        {
-            var h = a.History;
-            if (h.Count == 0) return new TotalsNow(null, TimeSpan.Zero, 0, null);
-            static long Sum(PoolTotals t) => (long)(t.CommittedPaged + t.CommittedNonPaged);
-            long total = Sum(h.Totals[^1]);
-            var now = h.Times[^1];
-            var held = now - h.Times[0];
-            long Change(TimeSpan span) => total - Sum(h.Totals[Math.Min(h.IndexAtOrAfter(now - span), h.Count - 1)]);
-            return new TotalsNow(total, held, Change(TimeSpan.FromMinutes(10)), held.TotalMinutes >= 55 ? Change(TimeSpan.FromHours(1)) : null);
-        }
+        var clears = a.Diagnostics.Cache.History();
+        lock (a.History.SyncRoot) return Totals(a.History, clears);
+    }
+
+    /// <summary><see cref="Totals(AnalysisPipeline)"/> from a history (the caller holds its lock) and PoolWatch's clears.</summary>
+    internal static TotalsNow Totals(History h, IReadOnlyList<ClearRecord> clears)
+    {
+        if (h.Count == 0) return new TotalsNow(null, TimeSpan.Zero, 0, null);
+        static long Sum(PoolTotals t) => (long)(t.CommittedPaged + t.CommittedNonPaged);
+        long total = Sum(h.Totals[^1]);
+        var now = h.Times[^1];
+        var held = now - h.Times[0];
+        long Change(TimeSpan span) => ClearPolicy.ChangeFrom(now - span, now, clears, CacheClearer.MeasureAfter) is { } from
+            ? total - Sum(h.Totals[Math.Min(h.IndexAtOrAfter(from), h.Count - 1)])
+            : 0;
+        var clear = clears.LastOrDefault(r => r.Error is null && r.TimeUtc > now - TimeSpan.FromHours(1));
+        return new TotalsNow(total, held, Change(TimeSpan.FromMinutes(10)), held.TotalMinutes >= 55 ? Change(TimeSpan.FromHours(1)) : null,
+            clear is null ? null : ChartClear.Of(clear));
     }
 }

@@ -5,38 +5,59 @@ using PoolWatch.Core.Detection;
 using PoolWatch.Core.Findings;
 using PoolWatch.Core.Util;
 using PoolWatch.Core.Incidents;
+using PoolWatch.Core.Knowledge;
 using PoolWatch.Core.Model;
+using PoolWatch.Core.Recommendations;
 using PoolWatch.Engine;
+using PoolWatch.Engine.Changes;
 
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// The main window (DESIGN.md section 11): one plain-English status line, one pool graph, three buttons (Clear cache
-/// now, Export report, Settings) and two tabs (Pool causes, Services). Everything else is in the tray menu. Refreshes on
-/// a 10 s timer that runs only while the window is visible and not minimised; nothing is rendered or recomputed while
-/// it is hidden.
+/// The main window (DESIGN.md section 11), in one of two views. The Simple view, the default: the status line, the
+/// Clear cache now button, the line about the next cache clear, the pool graph and up to three suggestions. The Advanced
+/// view: the status line, three buttons (Clear cache now, Export report, Settings), the graph and two tabs (Pool causes,
+/// Services). Both have Active changes and the Advanced view switch at the bottom; everything else is in the tray menu.
+/// The one graph moves between the two layouts. Refreshes on a 10 s timer that runs only while the window is visible and
+/// not minimised, the Simple view's line and suggestions at most once a minute; nothing is rendered or recomputed while
+/// it is hidden, and hiding it drops what only it shows.
 /// </summary>
 internal sealed class MainForm : Form
 {
     private readonly MonitorEngine _engine;
     private readonly AnalysisPipeline _analysis;
     private readonly UiActions _actions;
+    private readonly SetupContext _context;
+    private readonly ViewState? _view;
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 10_000 };
     private readonly ToolTip _tips = new() { AutoPopDelay = 30_000, InitialDelay = 400 };
 
-    // The header: the status line on the left, the three buttons on the right. The line draws itself (a Label flashed
-    // blank each time a refresh changed its text).
+    // The header: the status line on the left, the buttons on the right (only Clear cache now in the Simple view). The line
+    // draws itself (a Label flashed blank each time a refresh changed its text).
     private readonly Panel _header = new() { Dock = DockStyle.Top };
     private readonly PaintedLabel _status = new(centerVertically: true) { Dock = DockStyle.Fill };
     private readonly FlowLayoutPanel _buttons = new() { Dock = DockStyle.Right, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false };
     private readonly List<Button> _headerButtons = [];
+    private readonly List<Button> _advancedButtons = [];
     private PoolStatusKind _statusKind = PoolStatusKind.Collecting;
+
+    // The two views and the footer they share.
+    private readonly SimpleView _simple = new() { Dock = DockStyle.Fill };
+    private readonly TableLayoutPanel _advanced = new() { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = SystemColors.Window };
+    private readonly TableLayoutPanel _footer = new() { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 3, RowCount = 1 };
+    private readonly Button _appliedChanges = new() { Text = "Active changes", AutoSize = true, UseVisualStyleBackColor = true };
+    private readonly CheckBox _advancedBox = new() { Text = "Advanced view", AutoSize = true };
+    private bool _isAdvanced;
+    /// <summary>When the Simple view's line and suggestions were last read (they are read at most once a minute).</summary>
+    private DateTime _simpleReadUtc = DateTime.MinValue;
+    private static readonly TimeSpan SimpleEvery = TimeSpan.FromMinutes(1);
 
     private readonly PoolChart _chart = new() { Dock = DockStyle.Fill };
     private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
 
-    // Pool causes: the merged list and the selected row's details.
-    private readonly ListView _causes = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false };
+    // Pool causes: the merged list and the selected row's details. The list is drawn off screen and kept in step in place
+    // (ListSync): its cells change while it shows.
+    private readonly BufferedListView _causes = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false };
     private readonly SplitContainer _causesSplit = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
     private readonly WrapLabel _detailTitle = new() { Dock = DockStyle.Top };
     private readonly TextBox _detailText = new() { Dock = DockStyle.Fill, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical, WordWrap = true, BackColor = SystemColors.Window, BorderStyle = BorderStyle.None };
@@ -56,15 +77,17 @@ internal sealed class MainForm : Form
     private readonly SplitContainer _servicesSplit = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
     private readonly Engine.TasksAndStartup _tasksEngine;
 
-    private SettingsDialog? _settings;
     private bool _repopulating;
 
-    public MainForm(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions)
+    /// <param name="view">The view to open in, and where the owner's switch is kept; null (the CI UI test): the Simple view, and a switch is not kept.</param>
+    public MainForm(SetupContext context, ViewState? view)
     {
-        _engine = engine;
-        _analysis = analysis;
-        _actions = actions;
-        _tasksEngine = new Engine.TasksAndStartup(engine.Log);
+        _context = context;
+        _engine = context.Engine;
+        _analysis = context.Analysis;
+        _actions = context.Actions;
+        _view = view;
+        _tasksEngine = new Engine.TasksAndStartup(_engine.Log);
         Text = "PoolWatch";
         Icon = TrayIcons.For(TrayState.Green);
         Font = new Font("Segoe UI", 9f);
@@ -81,27 +104,54 @@ internal sealed class MainForm : Form
         _status.Text = "Kernel pool: collecting the first sample…";
         var clear = HeaderButton("Clear cache now", () => _actions.Guarded(this, "Clear cache", () => _actions.ClearCacheNow(this)));
         clear.MouseEnter += (_, _) => _tips.SetToolTip(clear, _actions.ClearCacheTip());
-        var export = HeaderButton("Export report", () => _actions.Guarded(this, "Export report", () => _actions.ExportReport(this, SelectedRow()?.Folder)));
+        var export = HeaderButton("Export report", () => _actions.Guarded(this, "Export report", () => _actions.ExportReport(this, SelectedRow()?.Folder)), advancedOnly: true);
         _tips.SetToolTip(export, "Zip the selected row's report (or the newest incident's) to share it. Redacted by default.");
-        var settings = HeaderButton("Settings", () => _actions.Guarded(this, "Settings", OpenSettings));
+        var settings = HeaderButton("Settings", () => _actions.Guarded(this, "Settings", OpenSettings), advancedOnly: true);
         _tips.SetToolTip(settings, "Detection thresholds, the automatic cache clear, redaction, and Start at logon.");
         _header.Controls.Add(_status);  // fill first, then the docked edge
         _header.Controls.Add(_buttons);
 
-        // Body: the graph above the two tabs.
-        _tips.SetToolTip(_chart, "Committed paged and non-paged pool: the figures Task Manager shows (Performance, Memory).");
+        // The Advanced view's body: the graph above the two tabs. The Simple view lays itself out (SimpleView).
+        _chart.HelpText = "Committed paged and non-paged pool: the figures Task Manager shows (Performance, Memory).";
         _tabs.TabPages.Add(CausesPage());
         _tabs.TabPages.Add(ServicesPage());
-        var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = Px(12, 0, 12, 12), BackColor = SystemColors.Window };
-        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        body.RowStyles.Add(new RowStyle(SizeType.Percent, 36));
-        body.RowStyles.Add(new RowStyle(SizeType.Percent, 64));
-        _chart.Margin = Px(0, 0, 0, 8);
+        _advanced.Padding = Px(12, 0, 12, 4);
+        _advanced.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _advanced.RowStyles.Add(new RowStyle(SizeType.Percent, 36));
+        _advanced.RowStyles.Add(new RowStyle(SizeType.Percent, 64));
         _tabs.Margin = Padding.Empty;
-        body.Controls.Add(_chart, 0, 0);
-        body.Controls.Add(_tabs, 0, 1);
-        Controls.Add(body);
+        _advanced.Controls.Add(_tabs, 0, 1);
+
+        // The footer, the same in both views.
+        _footer.Padding = Px(12, 6, 12, 10);
+        _footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _appliedChanges.Padding = Px(6, 2, 6, 2);
+        _appliedChanges.Margin = Padding.Empty;
+        _appliedChanges.Click += (_, _) => _actions.Guarded(this, "Active changes", _context.Shell.ShowActiveChanges);
+        _tips.SetToolTip(_appliedChanges, "Every change PoolWatch made on this PC, each with Undo.");
+        _advancedBox.Margin = new Padding(0, S(4), 0, 0);
+        _advancedBox.CheckedChanged += (_, _) =>
+        {
+            if (_advancedBox.Checked == _isAdvanced) return; // set by the window itself
+            _view?.Remember(_advancedBox.Checked);
+            SafeRefresh(() => SetView(_advancedBox.Checked));
+        };
+        _tips.SetToolTip(_advancedBox, "Pool causes, background services, exports and every setting.");
+        _footer.Controls.Add(_appliedChanges, 0, 0);
+        _footer.Controls.Add(_advancedBox, 2, 0);
+
+        Controls.Add(_simple); // fill first, then the docked edges
+        Controls.Add(_advanced);
+        Controls.Add(_footer);
         Controls.Add(_header);
+        _simple.ActionClicked += RunSuggestion;
+        _simple.HideClicked += r =>
+        {
+            _context.Store.Dismiss(r.Key, DateTime.UtcNow);
+            ReadSimpleNow();
+        };
 
         EnableCopy(_causes, CauseCopy);
         EnableTextCopy(_detailText);
@@ -118,24 +168,66 @@ internal sealed class MainForm : Form
         _openFolder.Click += (_, _) => { if (SelectedRow()?.Folder is { } d) _actions.OpenIncidentFolder(d); };
         _tabs.SelectedIndexChanged += (_, _) => RefreshNow();
         _timer.Tick += (_, _) => RefreshNow();
-        VisibleChanged += (_, _) => UpdateTimer();
+        VisibleChanged += (_, _) =>
+        {
+            if (Disposing) return; // the app is exiting: nothing to read or release
+            if (Visible) ReadFactsIfStale();
+            else ReleaseWhileHidden();
+            UpdateTimer();
+        };
         Resize += (_, _) => { UpdateTimer(); LayoutHeader(); };
         Load += (_, _) => { LayoutHeader(); FitCauseColumns(); };
         SplitAt(_causesSplit, 0.58);
         SplitAt(_servicesSplit, 0.6);
-        LayoutHeader();
+        SetView(_view?.Advanced == true);
     }
 
     private int S(int logical) => LogicalToDeviceUnits(logical);
     private Padding Px(int l, int t, int r, int b) => new(S(l), S(t), S(r), S(b));
 
-    private Button HeaderButton(string text, Action click)
+    private Button HeaderButton(string text, Action click, bool advancedOnly = false)
     {
         var b = new Button { Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = Px(10, 4, 10, 4), Margin = Px(8, 0, 0, 0), UseVisualStyleBackColor = true };
         b.Click += (_, _) => click();
         _buttons.Controls.Add(b);
         _headerButtons.Add(b);
+        if (advancedOnly) _advancedButtons.Add(b);
         return b;
+    }
+
+    /// <summary>The header buttons of the view shown now.</summary>
+    private IEnumerable<Button> ShownButtons => _isAdvanced ? _headerButtons : _headerButtons.Except(_advancedButtons);
+
+    /// <summary>
+    /// Shows the Advanced view (the graph above the tabs, all three header buttons) or the Simple view (its line, the graph
+    /// and the suggestions, Clear cache now only), moving the one graph between them. The view's contents are read at once.
+    /// </summary>
+    private void SetView(bool advanced)
+    {
+        SuspendLayout();
+        _isAdvanced = advanced;
+        if (advanced)
+        {
+            _chart.Margin = Px(0, 0, 0, 8);
+            _advanced.Controls.Add(_chart, 0, 0);
+        }
+        else _simple.SetChart(_chart);
+        _advanced.Visible = advanced;
+        _simple.Visible = !advanced;
+        foreach (var b in _advancedButtons) b.Visible = advanced;
+        _advancedBox.Checked = advanced;
+        ResumeLayout(true);
+        LayoutHeader();
+        _simpleReadUtc = DateTime.MinValue;
+        RefreshNow(force: true);
+    }
+
+    /// <summary>Switches to the Advanced view on a tab (0 Pool causes, 1 Services), as the owner asked from a suggestion; kept like the switch.</summary>
+    public void ShowAdvanced(int tab)
+    {
+        _view?.Remember(true);
+        if (!_isAdvanced) SetView(true);
+        _tabs.SelectedIndex = Math.Clamp(tab, 0, _tabs.TabCount - 1);
     }
 
     /// <summary>The header's height follows the status text (wrapped to the room left of the buttons) and the buttons.</summary>
@@ -143,8 +235,9 @@ internal sealed class MainForm : Form
     {
         if (_buttons.Controls.Count == 0) return;
         _header.Padding = Px(14, 10, 12, 8);
-        int btnH = _headerButtons.Max(b => b.GetPreferredSize(Size.Empty).Height + b.Margin.Vertical);
-        int btnW = _headerButtons.Sum(b => b.GetPreferredSize(Size.Empty).Width + b.Margin.Horizontal) + S(12);
+        var shown = ShownButtons.ToList();
+        int btnH = shown.Max(b => b.GetPreferredSize(Size.Empty).Height + b.Margin.Vertical);
+        int btnW = shown.Sum(b => b.GetPreferredSize(Size.Empty).Width + b.Margin.Horizontal) + S(12);
         int textW = Math.Max(S(200), ClientSize.Width - _header.Padding.Horizontal - btnW);
         // Measured a little narrower than the label: wrapping earlier can only add a line, never cut one off.
         int textH = PaintedLabel.Measure(_status.Text, _status.Font, textW - S(4));
@@ -154,31 +247,99 @@ internal sealed class MainForm : Form
         if (_header.Height != h) _header.Height = h;
     }
 
-    private static readonly Color Growing = Color.FromArgb(178, 34, 34), TagGrowing = Color.FromArgb(150, 90, 0), Dropping = Color.FromArgb(0, 110, 50);
+    // The tray icon's red and amber (UiData.State: red only for a real risk), and green for a fall.
+    private static readonly Color Risk = Color.FromArgb(178, 34, 34), Watched = Color.FromArgb(150, 90, 0), Fell = Color.FromArgb(0, 110, 50);
+    private static readonly TimeSpan OwnClearSaidFor = TimeSpan.FromMinutes(10);
 
-    private void UpdateStatus()
+    /// <summary>
+    /// The status line, calm on purpose: a growth alone is plain text with when the next clear runs, its colour is the tray
+    /// icon's, and PoolWatch's own clear of the last 10 minutes is said as its result, not as the pool shrinking.
+    /// </summary>
+    private void UpdateStatus(TrayState state)
     {
         var t = UiData.Totals(_analysis);
-        var lead = PoolCauses.Lead(_analysis, _rankings, t.Held, out _leadTag);
-        var s = PoolStatusLine.Describe(t.Total, t.Held, t.Change10Min, t.ChangeHour, lead, UiData.SaturatedBusiest(_analysis));
+        var lead = PoolCauses.Lead(_analysis, _rankings, _engine.Services, t.Held, out _leadTag);
+        string? ownClear = t.Clear is { } c && DateTime.UtcNow - c.TimeUtc <= OwnClearSaidFor ? c.Result : null;
+        var s = PoolStatusLine.Describe(t.Total, t.Held, t.Change10Min, t.ChangeHour, lead, UiData.SaturatedBusiest(_analysis), ownClear, UiData.NextClearContext(_analysis));
         _statusKind = s.Kind;
-        var color = s.Kind switch
+        var color = state switch
         {
-            PoolStatusKind.Growing => Growing,
-            PoolStatusKind.TagGrowing => TagGrowing,
-            PoolStatusKind.Dropping when !s.Saturated => Dropping,
-            PoolStatusKind.Collecting when !s.Saturated => SystemColors.GrayText,
-            _ => s.Saturated ? TagGrowing : SystemColors.ControlText,
+            TrayState.Red => Risk,
+            TrayState.Amber => Watched,
+            _ when s.Saturated => Watched,
+            _ => s.Kind switch { PoolStatusKind.Dropping => Fell, PoolStatusKind.Collecting => SystemColors.GrayText, _ => SystemColors.ControlText },
         };
         if (_status.ForeColor != color) _status.ForeColor = color;
         if (_status.Text != s.Text) { _status.Text = s.Text; LayoutHeader(); }
     }
 
+    /// <summary>Settings, created for this opening and disposed when it closes, so it always starts from what is saved, with the settings in effect now.</summary>
     private void OpenSettings()
     {
-        _settings ??= new SettingsDialog(_engine, _analysis, _actions);
-        if (!_settings.Visible) _settings.ShowDialog(this);
+        using var settings = NewSettings();
+        settings.ShowDialog(this);
     }
+
+    /// <summary>Settings for one opening (the caller disposes it).</summary>
+    private SettingsDialog NewSettings() => new(_engine, _analysis, _actions, _context.Live, _context.Shell);
+
+    // ---------------------------------------------------------------- Simple view
+
+    /// <summary>
+    /// The Simple view's line about clearing and its suggestions, read at most once a minute while it shows (from memory
+    /// and the cached facts: nothing is scanned), and at once after a suggestion's button or Hide.
+    /// </summary>
+    private void ReadSimple(bool force)
+    {
+        var now = DateTime.UtcNow;
+        if (!force && now - _simpleReadUtc < SimpleEvery) return;
+        _simpleReadUtc = now;
+        _simple.ShowNextClear(UiData.NextClearLine(_analysis));
+        _simple.ShowRecommendations(_context.Suggestions());
+    }
+
+    private void ReadSimpleNow() => RefreshNow(force: true);
+
+    /// <summary>A suggestion's button: its change runs off the UI thread (RecommendationActions), then its answer shows on the card.</summary>
+    private async void RunSuggestion(Recommendation r)
+    {
+        var (ok, message) = await _context.Recommendations.Run(r, this);
+        if (IsDisposed) return;
+        _simple.ShowOutcome(r, ok, message);
+        ReadSimpleNow();
+    }
+
+    /// <summary>The window became visible: the PC's facts are read again when they are old or Windows was updated, in the background.</summary>
+    private async void ReadFactsIfStale()
+    {
+        if (!_context.Probe.Stale(DateTime.UtcNow)) return;
+        try { await _context.Probe.ScanAsync(); }
+        catch (Exception ex) { _engine.Log.Info("the PC's facts were not read: " + ex.Message); return; }
+        if (!IsDisposed && !_isAdvanced) ReadSimpleNow();
+    }
+
+    /// <summary>
+    /// The window hid: what only it shows is dropped (the tag rankings, the Pool causes rows and their report texts) and
+    /// PoolWatch's own memory is given back at the next sample. A released tag's row then has no summary to copy.
+    /// </summary>
+    private void ReleaseWhileHidden()
+    {
+        _rankings.Clear();
+        _causeRows = [];
+        _causeByKey = new();
+        _rankTags = [];
+        _knownIssues = null;
+        _reportText.Clear();
+        _detailText.Clear();
+        _textItems.Clear();
+        if (_syncs.TryGetValue(_causes, out var sync)) sync.Clear();
+        _listSignature.Remove(_causes);
+        _causesSamples = -1;
+        _engine.ReleaseMemory();
+    }
+
+    /// <summary>What the Pool causes rankings hold now, for PoolWatch's own cost report (any thread).</summary>
+    internal TagRankings Rankings => _rankings;
 
     // ---------------------------------------------------------------- Pool causes
 
@@ -301,12 +462,29 @@ internal sealed class MainForm : Form
             CauseKind.Process => ProcessDetails(row),
             _ => FindingDetails(row),
         };
+        if (row.Kind is CauseKind.Incident or CauseKind.Tag && row.Tag is { } tag && KnownIssueNotes(tag) is { Length: > 0 } notes)
+            text += "\r\n\r\n" + notes;
         SetText(_detailText, text, row.Key);
         bool folder = row.Folder is { } f && Directory.Exists(f);
         if (_openFolder.Visible != folder) _openFolder.Visible = folder;
     }
 
     private void SetTitle(string text) { if (_detailTitle.Text != text) _detailTitle.Text = text; }
+
+    /// <summary>The known issues matched with the Simple view's cards (SetupContext), and when: read at most once a minute, only for a selected row.</summary>
+    private (DateTime Utc, IReadOnlyList<Recommendation> Cards, IReadOnlyList<KnownIssueMatch> Matches)? _knownIssues;
+
+    /// <summary>The notes of the known issues about <paramref name="tag"/> (what PoolWatch saw, what helps, who found it), or "".</summary>
+    private string KnownIssueNotes(PoolTag tag)
+    {
+        var now = DateTime.UtcNow;
+        if (_knownIssues is not { } known || now - known.Utc >= SimpleEvery)
+        {
+            var (cards, matches) = _context.SuggestionsAndKnownIssues();
+            _knownIssues = known = (now, cards, matches);
+        }
+        return string.Join("\r\n\r\n", known.Matches.Where(m => m.Tags.Contains(tag)).Select(m => m.Note(known.Cards)));
+    }
 
     private readonly Dictionary<string, (DateTime written, string text)> _reportText = new(StringComparer.OrdinalIgnoreCase);
 
@@ -410,8 +588,8 @@ internal sealed class MainForm : Form
         {
             case CauseKind.Incident when row.Folder is { } dir:
                 return new CopyInfo(null, null, dir, null, () => UiActions.IncidentSummary(dir));
-            case CauseKind.Tag when row.Tag is { } tag:
-                return new CopyInfo(null, null, null, null, () => _rankings.Get(tag) is { } v ? TagSummary(v) : "");
+            case CauseKind.Tag when row.Tag is { } tag && _rankings.Get(tag) is { } ranked: // none after the window hid: nothing to copy
+                return new CopyInfo(null, null, null, null, () => TagSummary(ranked));
             case CauseKind.Process when row.Process is { } pk && _engine.Registry.Get(pk) is { } r:
                 return new CopyInfo(r.Pid.ToString(), r.CommandLine, r.ImagePath, null, null);
             case CauseKind.Finding when row.Finding is { } f:
@@ -428,7 +606,7 @@ internal sealed class MainForm : Form
         sb.AppendLine($"{o.Name}: {OwnerRanking.Strength(o.Confidence)}{(o.CorrelationOnly ? " (correlation only: the confirmation trace did not see it allocate this tag)" : "")} ({o.Owner.Kind})");
         foreach (var p in o.Plain) sb.AppendLine("• " + p);
         sb.AppendLine();
-        // 2a / 2b: what the trace saw this owner's processes do, each with its identity, chain and command line.
+        // What the trace saw this owner's processes do, each with its identity, chain and command line.
         if (o.Trace is { } t)
         {
             sb.AppendLine($"Traced processes ({t.Processes.Count}, net {Fmt.Bytes(t.Net)}, {t.Allocs:N0} allocations, {t.Frees:N0} frees):");
@@ -535,7 +713,7 @@ internal sealed class MainForm : Form
     {
         var rows = new List<(string, string, string, string, string, object)>();
         var d = _analysis.Diagnostics;
-        // Cost per task / startup entry (addendum 4 C): the live processes running its program, matched by image.
+        // Cost per task / startup entry: the live processes running its program, matched by image.
         var live = _engine.Registry.LiveRecords().Select(r => new Core.Services.LiveImage(r.Key, r.Image, r.ImagePath)).ToList();
         string Cost(string command)
         {
@@ -560,7 +738,7 @@ internal sealed class MainForm : Form
         return rows;
     }
 
-    /// <summary>A heavy background app, keyed by PID AND create time so End process never kills a reused PID (S6).</summary>
+    /// <summary>A heavy background app, keyed by PID AND create time so End process never kills a reused PID.</summary>
     private sealed record HeavyApp(ProcessKey Key, string Image, string Identity, string? CommandLine, double Cores);
 
     private void ShowTasks(List<(string type, string name, string state, string cost, string runs, object tag)> rows) =>
@@ -589,7 +767,7 @@ internal sealed class MainForm : Form
         if (err is not null) MessageBox.Show(this, err, "PoolWatch");
         else
         {
-            // Every change is on the timeline (addendum 4 B / C), like the service changes.
+            // Every change is on the timeline, like the service changes, and under Active changes.
             string what = tag switch
             {
                 Engine.ScheduledTaskView t => $"Scheduled task {(enable ? "enabled" : "disabled")} by you: {t.Path}",
@@ -597,6 +775,8 @@ internal sealed class MainForm : Form
                 _ => "",
             };
             if (what.Length > 0) _analysis.Diagnostics.RecordOwnerChange(what, tag is Engine.StartupView s ? s.Name : (tag as Engine.ScheduledTaskView)?.Name);
+            if (tag is Engine.ScheduledTaskView task) _context.Ledger.Records.RecordToggle(ChangeKind.ScheduledTask, task.Path, task.Name, enable, "the Services tab");
+            else if (tag is Engine.StartupView entry) _context.Ledger.Records.RecordToggle(ChangeKind.StartupEntry, entry.Location, entry.Name, enable, "the Services tab");
         }
         _servicesLoaded = false; RefreshServices();
     }
@@ -604,14 +784,14 @@ internal sealed class MainForm : Form
     private void EndSelectedApp()
     {
         if (_tasks.SelectedItems.Count == 0 || _tasks.SelectedItems[0].Tag is not HeavyApp app) { MessageBox.Show(this, "Select a background app.", "PoolWatch"); return; }
-        // Part 3 review: never a core / security process, a service host or a VM's memory process.
+        // Never a core / security process, a service host or a VM's memory process.
         var hosted = _engine.Services.Where(s => s.ProcessId == app.Key.Pid).Select(s => s.Name).ToList();
         if (Core.Services.EndProcessPolicy.WhyNot(app.Key.Pid, app.Image, hosted) is { } why)
         {
             MessageBox.Show(this, $"PoolWatch will not end {app.Identity}: {why}.", "PoolWatch");
             return;
         }
-        // S6 (review round 2): the handle is opened first, the create time read from it and compared exactly, the owner asked,
+        // The handle is opened first, the create time read from it and compared exactly, the owner asked,
         // and the process ended through that same handle (Engine.ProcessEnder). An unknown create time ends nothing.
         string detail = $"{app.Identity}\nPID {app.Key.Pid}" +
             (app.Key.CreateTime > 0 ? $", started {Fmt.Clock(DateTime.FromFileTimeUtc(app.Key.CreateTime))}" : "") +
@@ -649,7 +829,7 @@ internal sealed class MainForm : Form
 
     /// <summary>
     /// The Cost cell: the live CPU and page faults of the service's process (a shared host says so), or, for a service
-    /// PoolWatch turned off, what that saved over the hour after the change (addendum 4 B).
+    /// PoolWatch turned off, what that saved over the hour after the change.
     /// </summary>
     private string CostCell(Core.Services.ServiceOption o)
     {
@@ -790,19 +970,24 @@ internal sealed class MainForm : Form
     private void RefreshVisible(bool force)
     {
         using var _ui = Core.Util.Profiler.Stage("ui.refresh");
+        var state = UiData.State(_analysis);
         if (_engine.SampleCount != _statusSamples || force) // the chart and the status line change only with a new sample
         {
             _statusSamples = _engine.SampleCount;
             _chart.SetData(UiData.Chart(_analysis, PoolChart.Span));
-            UpdateStatus();
+            _chart.SetClears(UiData.Clears(_analysis, PoolChart.Span));
+            UpdateStatus(state);
         }
-        using (Core.Util.Profiler.Stage("ui.page" + _tabs.SelectedIndex))
-            switch (_tabs.SelectedIndex)
-            {
-                case 0: RefreshCauses(force); break;
-                case 1: RefreshServices(); break;
-            }
-        Icon = TrayIcons.For(UiData.State(_analysis));
+        if (!_isAdvanced)
+            using (Core.Util.Profiler.Stage("ui.simple")) ReadSimple(force);
+        else
+            using (Core.Util.Profiler.Stage("ui.page" + _tabs.SelectedIndex))
+                switch (_tabs.SelectedIndex)
+                {
+                    case 0: RefreshCauses(force); break;
+                    case 1: RefreshServices(); break;
+                }
+        Icon = TrayIcons.For(state);
         PumpRankings();
     }
 
@@ -810,15 +995,16 @@ internal sealed class MainForm : Form
     private List<PoolTag> _rankTags = [];
 
     /// <summary>
-    /// Starts the next tag ranking in the background (TagRankings / RankPlan): the status line's lead tag first, then the
-    /// list's tag rows, the selected row's tag at once. When it is done the rows and the status line are refreshed.
+    /// Starts the next tag ranking in the background (TagRankings / RankPlan): the status line's lead tag first, then, in the
+    /// Advanced view, the list's tag rows and the selected row's tag at once. When it is done the rows and the status line
+    /// are refreshed.
     /// </summary>
     private void PumpRankings()
     {
         var wanted = new List<PoolTag>();
         if (_leadTag is { } lead) wanted.Add(lead);
-        wanted.AddRange(_rankTags.Where(t => t != _leadTag));
-        PoolTag? selected = SelectedRow() is { Kind: CauseKind.Tag, Active: true, Tag: { } sel } ? sel : null;
+        if (_isAdvanced) wanted.AddRange(_rankTags.Where(t => t != _leadTag));
+        PoolTag? selected = _isAdvanced && SelectedRow() is { Kind: CauseKind.Tag, Active: true, Tag: { } sel } ? sel : null;
         _rankings.Pump(tag => TagViewBuilder.Build(_analysis, _engine.Registry, tag), wanted, selected, () =>
         {
             try { if (!IsDisposed && IsHandleCreated) BeginInvoke(OnRanked); }
@@ -837,7 +1023,7 @@ internal sealed class MainForm : Form
     private readonly Dictionary<TextBox, object?> _textItems = new();
 
     /// <summary>
-    /// Updates a read-only text box without making it jump (C5). A different <paramref name="item"/> always replaces the
+    /// Updates a read-only text box without making it jump. A different <paramref name="item"/> always replaces the
     /// text, even while text is selected. For the same item the first visible line and the caret are kept, and a selection
     /// is kept when the selected text is unchanged; an update that would destroy the selection waits only while the box
     /// has focus (Core.Util.TextRefresh).
@@ -871,7 +1057,7 @@ internal sealed class MainForm : Form
 
     /// <summary>
     /// A list rebuilt from scratch (the services and the tasks lists) keeps its top visible row and its selection, matched by
-    /// <paramref name="key"/> (C5 item 3).
+    /// <paramref name="key"/>.
     /// </summary>
     private static void KeepPlace(ListView lv, Func<ListViewItem, object?> key, Action rebuild)
     {
@@ -902,7 +1088,7 @@ internal sealed class MainForm : Form
     private string? _lastRefreshError;
 
     /// <summary>
-    /// C5: a refresh runs from the timer and from selection events, outside <see cref="UiActions.Guarded"/>; an exception
+    /// A refresh runs from the timer and from selection events, outside <see cref="UiActions.Guarded"/>; an exception
     /// there went to WinForms' unhandled-exception path. It is logged (once per distinct error) and the window keeps running.
     /// </summary>
     private void SafeRefresh(Action refresh)
@@ -998,7 +1184,7 @@ internal sealed class MainForm : Form
     /// <summary>
     /// The elevated app's redaction for exports and copies: the home folder in its long and 8.3 forms (TEMP is often
     /// C:\Users\JOHNDO~1\AppData\Local\Temp) and the TEMP folders, so a short path in a command line cannot carry part of
-    /// the user name out of a redacted export. C6: TEMP is redacted as &lt;TEMP&gt;.
+    /// the user name out of a redacted export. TEMP is redacted as &lt;TEMP&gt;.
     /// </summary>
     internal static RedactionInfo CurrentRedaction()
     {
@@ -1034,29 +1220,53 @@ internal sealed class MainForm : Form
 
     // ---------------------------------------------------------------- CI
 
-    /// <summary>CI soak: every minute show the next page (Pool causes with its top row selected, then Services).</summary>
+    /// <summary>
+    /// CI soak: every minute show the next page, as a user would: the Simple view, then Pool causes with its top row
+    /// selected, then Services (profiled as ui.simple, ui.page0 and ui.page1).
+    /// </summary>
     public void StartSoakCycle()
     {
         var t = new System.Windows.Forms.Timer { Interval = 60_000 };
-        int page = 0;
-        t.Tick += (_, _) =>
+        int step = 0;
+        t.Tick += (_, _) => SafeRefresh(() =>
         {
-            _tabs.SelectedIndex = page++ % _tabs.TabCount; // ui.page0 = Pool causes, ui.page1 = Services
-            if (_tabs.SelectedIndex == 0 && _causes.Items.Count > 0 && _causes.SelectedItems.Count == 0) _causes.Items[0].Selected = true;
+            int page = step++ % (_tabs.TabCount + 1) - 1; // -1: the Simple view
+            if (page < 0) { SetView(false); return; }
+            if (!_isAdvanced) SetView(true);
+            _tabs.SelectedIndex = page;
+            if (page == 0 && _causes.Items.Count > 0 && _causes.SelectedItems.Count == 0) _causes.Items[0].Selected = true;
             RefreshNow();
-        };
+        });
         t.Start();
     }
 
     /// <summary>The selected tab's row count (CI).</summary>
     private static int Rows(ListView lv) => lv.Items.Count;
 
+    /// <summary>The header buttons the window shows now (CI: what is on screen, not what the view should show).</summary>
+    private List<string> VisibleButtons() => _headerButtons.Where(b => b.Visible).Select(b => b.Text).ToList();
+
     /// <summary>
-    /// CI: what the window shows (status, rows, the selected row's details), whether a refresh keeps rows and the selection,
-    /// whether anything is clipped or overlaps, and whether hiding the window stops the refresh timer.
+    /// CI: the Simple view as the window opens (its buttons, footer, line, cards and anything clipped), then the Advanced
+    /// view (status, rows, the selected row's details, whether a refresh keeps rows and the selection, whether anything is
+    /// clipped or overlaps), Settings with its Advanced grid, whether hiding the window stops the refresh timer, and
+    /// whether Pool causes lists its rows again once the window shows after a hide.
     /// </summary>
     public object SmokeStats()
     {
+        SetView(false);
+        Application.DoEvents();
+        var simple = new
+        {
+            buttons = VisibleButtons(),
+            footer = new[] { _appliedChanges.Text, _advancedBox.Text },
+            tabsShown = _tabs.Visible,
+            view = _simple.SmokeStats(),
+            layoutProblems = LayoutProblems(),
+        };
+        SetView(true);
+        Application.DoEvents();
+        var advancedButtons = VisibleButtons();
         _tabs.SelectedIndex = 1;
         RefreshNow(force: true);
         int serviceRows = Rows(_services);
@@ -1104,40 +1314,54 @@ internal sealed class MainForm : Form
         Application.DoEvents();
         // The Settings form and its Advanced grid, each shown as it opens.
         var settingsLayout = new List<string>();
-        _settings ??= new SettingsDialog(_engine, _analysis, _actions);
-        _settings.Show(this);
-        Application.DoEvents();
-        ClippedControls(_settings, settingsLayout);
-        // The form sizes itself to its content: it must still fit the screen it opens on.
-        if (Screen.FromControl(_settings).WorkingArea is var area && (_settings.Height > area.Height || _settings.Width > area.Width))
-            settingsLayout.Add($"the Settings form ({_settings.Size}) is larger than the screen's working area ({area.Size})");
         var settingsForm = new List<string>();
-        void Texts(Control parent) { foreach (Control c in parent.Controls) { if (c is CheckBox or Button || c is Label { Font.Bold: true }) settingsForm.Add(c.Text); Texts(c); } }
-        Texts(_settings);
-        _settings.Hide();
-        var advanced = _settings.Advanced;
-        advanced.Show(this);
-        Application.DoEvents();
-        var advancedLayout = new List<string>();
-        ClippedControls(advanced, advancedLayout);
-        settingsLayout.AddRange(advancedLayout.Select(x => "Advanced: " + x));
-        advanced.Hide();
+        using (var settings = NewSettings())
+        {
+            settings.Show(this);
+            Application.DoEvents();
+            ClippedControls(settings, settingsLayout);
+            // The form sizes itself to its content: it must still fit the screen it opens on.
+            if (Screen.FromControl(settings).WorkingArea is var area && (settings.Height > area.Height || settings.Width > area.Width))
+                settingsLayout.Add($"the Settings form ({settings.Size}) is larger than the screen's working area ({area.Size})");
+            // Every text on the form, its grey hints too (CI checks the token-leak guard's line is there).
+            void Texts(Control parent) { foreach (Control c in parent.Controls) { if (c is CheckBox or Button or Label) settingsForm.Add(c.Text); Texts(c); } }
+            Texts(settings);
+            settings.Hide();
+            var advanced = settings.Advanced;
+            advanced.Show(this);
+            Application.DoEvents();
+            var advancedLayout = new List<string>();
+            ClippedControls(advanced, advancedLayout);
+            settingsLayout.AddRange(advancedLayout.Select(x => "Advanced: " + x));
+            advanced.Hide();
+        }
+        // Read before hiding: the window drops its rows when it hides.
+        var rows = new Dictionary<string, int> { ["Pool causes"] = _causeRows.Count, ["Services"] = Math.Max(serviceRows, Rows(_services)) };
+        var likelyCauses = _causeRows.Take(20).Select(r => r.Cause).ToList();
+        int unrankedTagRows = _causeRows.Count(r => r.Kind == CauseKind.Tag && r.Active && r.Cause.Length == 0);
         bool timerWhileVisible = _timer.Enabled;
         Hide();
         bool timerWhileHidden = _timer.Enabled;
+        // The hide dropped the rows: shown again, Pool causes must list them again (the leak's incident at least).
+        Show();
+        SetView(true);
+        _tabs.SelectedIndex = 0;
+        RefreshNow(force: true);
+        int rowsAfterHide = Rows(_causes);
+        SetView(false);
+        Hide();
         return new
         {
+            simple,
             status = _status.Text, statusKind = _statusKind.ToString(), chartPoints = _chart.PointCount,
             tabs = _tabs.TabPages.Cast<TabPage>().Select(p => p.Text).ToList(),
-            buttons = _headerButtons.Select(b => b.Text).ToList(),
-            rows = new Dictionary<string, int> { ["Pool causes"] = _causeRows.Count, ["Services"] = Math.Max(serviceRows, Rows(_services)) },
-            causeKinds = kinds, detailsTitle, details = details.Length > 600 ? details[..600] : details,
-            likelyCauses = _causeRows.Take(20).Select(r => r.Cause).ToList(),
-            unrankedTagRows = _causeRows.Count(r => r.Kind == CauseKind.Tag && r.Active && r.Cause.Length == 0),
+            buttons = advancedButtons,
+            rows, causeKinds = kinds, detailsTitle, details = details.Length > 600 ? details[..600] : details,
+            likelyCauses, unrankedTagRows,
             identityKept, selectionKept, copyMatches, copiedSample = copied,
             layoutProblems = layout, layoutProblemsAtMinimumSize = layoutAtMinimum, settingsLayoutProblems = settingsLayout, settingsForm,
             size = new { width = size.Width, height = size.Height, dpi = DeviceDpi },
-            timerWhileVisible, timerWhileHidden,
+            timerWhileVisible, timerWhileHidden, rowsAfterHide,
         };
     }
 
@@ -1185,44 +1409,43 @@ internal sealed class MainForm : Form
         static string Describe(Control c) => $"{c.GetType().Name} \"{(c.Text.Length > 40 ? c.Text[..40] + "…" : c.Text)}\"";
     }
 
-    /// <summary>CI/README screenshots: the window as opened, the top cause selected, Services, and Settings.</summary>
+    /// <summary>
+    /// CI/README screenshots: the Simple view as the window opens, the Advanced view with the top cause selected, Services,
+    /// and Settings with its Advanced grid.
+    /// </summary>
     public List<string> Screenshots(string dir)
     {
         var files = new List<string>();
-        void Shot(Control c, string name)
-        {
-            Application.DoEvents();
-            using var bmp = new Bitmap(c.Width, c.Height);
-            c.DrawToBitmap(bmp, new Rectangle(0, 0, c.Width, c.Height));
-            string path = Path.Combine(dir, name);
-            bmp.Save(_engine.Paths.Guard.CheckReal(path), System.Drawing.Imaging.ImageFormat.Png);
-            files.Add(path);
-        }
+        void Shot(Control c, string name) => files.Add(SmokeShots.Save(c, dir, name, _engine.Paths.Guard));
+        SetView(true);
         _tabs.SelectedIndex = 0;
         _causes.SelectedItems.Clear();
         RefreshNow(force: true);
         // The background ranking spaces its work out (RankPlan); for the screenshots, rank every listed tag now.
         _rankings.RankNow(tag => TagViewBuilder.Build(_analysis, _engine.Registry, tag), _leadTag is { } lead ? _rankTags.Prepend(lead) : _rankTags);
         _statusSamples = -1;
-        RefreshNow(force: true);
-        Shot(this, "1-main-window.png");
+        SetView(false);
+        Shot(this, "1-simple-view.png");
+        SetView(true);
         if (_causes.Items.Count > 0) { _causes.Items[0].Selected = true; ShowCauseDetails(); }
-        Shot(this, "2-pool-causes.png");
+        Shot(this, "2-advanced-view.png");
         _tabs.SelectedIndex = 1;
         RefreshNow(force: true);
         // The services list loads in the background: wait for it (at most 20 s) so the shot shows it.
         for (int i = 0; i < 200 && _serviceOptions.Count == 0; i++) { Application.DoEvents(); Thread.Sleep(100); }
         Shot(this, "3-services.png");
         _tabs.SelectedIndex = 0;
-        _settings ??= new SettingsDialog(_engine, _analysis, _actions);
-        _settings.StartPosition = FormStartPosition.CenterParent;
-        _settings.Show(this);
-        Shot(_settings, "4-settings.png");
-        _settings.Hide();
-        var advanced = _settings.Advanced;
-        advanced.Show(this);
-        Shot(advanced, "5-settings-advanced.png");
-        advanced.Hide();
+        using (var settings = NewSettings())
+        {
+            settings.StartPosition = FormStartPosition.CenterParent;
+            settings.Show(this);
+            Shot(settings, "4-settings.png");
+            settings.Hide();
+            var advanced = settings.Advanced;
+            advanced.Show(this);
+            Shot(advanced, "5-settings-advanced.png");
+            advanced.Hide();
+        }
         return files;
     }
 
@@ -1232,7 +1455,6 @@ internal sealed class MainForm : Form
         {
             _timer.Dispose();
             _tips.Dispose();
-            _settings?.Dispose();
         }
         base.Dispose(disposing);
     }

@@ -82,10 +82,17 @@ internal sealed class SetupContext
     /// The Simple view's cards (<see cref="Suggest"/>), with the known issues matched against what PoolWatch holds now
     /// (memory and the cached facts: nothing is scanned), cheap enough for the once-a-minute refresh.
     /// </summary>
-    public IReadOnlyList<Recommendation> Suggestions()
+    public IReadOnlyList<Recommendation> Suggestions() => SuggestionsAndKnownIssues().Suggestions;
+
+    /// <summary>
+    /// The Simple view's cards and the known issues they were matched with: Pool causes shows each match's note, which
+    /// points at the card for its action while that card is offered.
+    /// </summary>
+    public (IReadOnlyList<Recommendation> Suggestions, IReadOnlyList<KnownIssueMatch> KnownIssues) SuggestionsAndKnownIssues()
     {
         var inputs = Inputs();
-        return Suggest(inputs, KnownIssueMatcher.Match(KnowledgeBase.Embedded(), KnownIssueEvidence(inputs)), Probe.Last, ClearEvidence());
+        var matches = KnownIssueMatcher.Match(KnowledgeBase.Embedded(), KnownIssueEvidence(inputs));
+        return (Suggest(inputs, matches, Probe.Last, ClearEvidence()), matches);
     }
 
     /// <summary>
