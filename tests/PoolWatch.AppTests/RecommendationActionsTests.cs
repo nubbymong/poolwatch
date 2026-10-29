@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using PoolWatch.Analysis;
 using PoolWatch.Core;
 using PoolWatch.Core.Cache;
+using PoolWatch.Core.Knowledge;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Recommendations;
 using PoolWatch.Core.Setup;
@@ -305,6 +306,27 @@ public sealed class RecommendationActionsTests : IDisposable
         var helped = ClearAdvice.ForSimpleView(current, Facts(Ntfs), Evidence(true, 2));
         Assert.Equal(3, helped.Count);
         Assert.StartsWith("On this PC, clearing the cache freed 2.0 GB", helped[0].Why);
+    }
+
+    [Fact]
+    public void AKnownIssueOnThisPcGivesTheCardItExplainsItsReason()
+    {
+        var facts = Facts(Ntfs, DevDrive);
+        var inputs = new RecommendationInputs { NowUtc = DateTime.UtcNow, Facts = facts, TokenSpawnLast24h = true };
+        var seen = new KnowledgeEvidence
+        {
+            NowUtc = inputs.NowUtc, WindowsBuild = facts.Build, FileSystems = ["NTFS", "ReFS"], GrowthOver = TimeSpan.FromHours(1),
+            Growth = new Dictionary<PoolTag, TagGrowth> { [PoolTag.Parse("Toke")] = new(300L << 20, 0), [PoolTag.Parse("Reff")] = new(400L << 20, 0) },
+        };
+        var matches = KnownIssueMatcher.Match(KnowledgeBase.Embedded(), seen);
+        Recommendation Card(ClearEvidence evidence, RecommendationId id) => SetupContext.Suggest(inputs, matches, facts, evidence).Single(r => r.Id == id);
+
+        var guard = Card(Evidence(null), RecommendationId.TokenLeakGuard);
+        Assert.StartsWith("Security tokens grew 300 MB in the last hour. This is the known Windows token leak.", guard.Why);
+        Assert.DoesNotContain("to the front", TokenGuardWords.CardWhy(guard.Why)); // the card's details say the trade-off instead
+        Assert.StartsWith("ReFS file records grew 400 MB in the last hour.", Card(Evidence(null), RecommendationId.HourlyCacheClear).Why);
+        // Once a clear here helped, what it freed is the hourly card's reason.
+        Assert.StartsWith("On this PC, clearing the cache freed 2.0 GB", Card(Evidence(true, 2, "Reff"), RecommendationId.HourlyCacheClear).Why);
     }
 
     // ------------------------------------------------------------------ the setup guide's rows
