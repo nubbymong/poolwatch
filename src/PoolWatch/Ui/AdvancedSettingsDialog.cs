@@ -13,7 +13,7 @@ internal sealed class AdvancedSettingsDialog : Form
     {
         _editor = editor;
         Text = "PoolWatch settings: Advanced";
-        Icon = TrayIcons.For(TrayState.Green);
+        Icon = TrayIcons.App;
         Font = new Font("Segoe UI", 9f);
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;

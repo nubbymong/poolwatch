@@ -48,6 +48,11 @@ WizardStyle=modern
 ; control" panel in place of Inno Setup's list of settings, which would hold nothing here.
 DisableWelcomePage=no
 DisableReadyMemo=yes
+; PoolWatch's own artwork (docs/brand), in the sizes of the wizard's image areas: Setup picks the closest for the display
+; scale. The title-bar icon is the program's icon: the binoculars at every size.
+SetupIconFile=..\src\PoolWatch\Assets\poolwatch.ico
+WizardImageFile=poolwatch-sidebar-202x386.png,poolwatch-sidebar-269x515.png,poolwatch-sidebar-328x628.png
+WizardSmallImageFile=poolwatch-small-58x58.png,poolwatch-small-77x77.png,poolwatch-small-97x97.png,poolwatch-small-124x124.png
 OutputBaseFilename=PoolWatch-v{#AppVersion}-setup-win-x64
 Compression=lzma2/max
 SolidCompression=yes

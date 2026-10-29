@@ -50,7 +50,7 @@ internal sealed class ReportIssueDialog : Form
         _incident = Digest(incidentDir);
         _facts = Facts(engine, analysis);
         Text = "Report an issue";
-        Icon = TrayIcons.For(TrayState.Green);
+        Icon = TrayIcons.App;
         Font = new Font("Segoe UI", 9f);
         StartPosition = FormStartPosition.CenterScreen;
         MinimizeBox = false;

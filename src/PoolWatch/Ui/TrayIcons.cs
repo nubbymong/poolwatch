@@ -1,37 +1,66 @@
 using System.Diagnostics;
-using System.Drawing.Drawing2D;
-using System.Runtime.InteropServices;
 
 namespace PoolWatch.Ui;
 
-/// <summary>Tray icons drawn at runtime (no image assets): a coloured disc per state.</summary>
+/// <summary>
+/// The tray and window icons: PoolWatch's binoculars, in the tray with a dot in the state's colour (green, amber, red;
+/// grey binoculars while PoolWatch has no reading yet), on its windows and the taskbar as they are. They are the .ico
+/// files in Assets, embedded in PoolWatch.exe, loaded once on first use and kept for the life of the app.
+/// </summary>
 internal static class TrayIcons
 {
-    [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr handle);
+    private static readonly Lazy<TrayIconSet> Embedded = new(() => TrayIconSet.Load(typeof(TrayIcons).Assembly.GetManifestResourceStream));
 
-    private static readonly Dictionary<TrayState, Icon> Cache = new();
+    public static Icon For(TrayState state) => Embedded.Value.For(state);
 
-    public static Icon For(TrayState state)
+    /// <summary>The grey binoculars, for while PoolWatch has no reading yet ("PoolWatch: starting").</summary>
+    public static Icon Starting => Embedded.Value.Starting;
+
+    /// <summary>The binoculars without a state: every window's title bar and taskbar button (the app's own icon, poolwatch.ico).</summary>
+    public static Icon App => Embedded.Value.App;
+}
+
+/// <summary>
+/// One icon per tray state and the app's own, read from .ico files: each state's holds sizes from 16 to 64 px (the tray
+/// and its menu ask for no larger), the app's from 16 to 256 px (Explorer and the installer show it large).
+/// </summary>
+internal sealed class TrayIconSet : IDisposable
+{
+    private readonly Icon _green, _amber, _red, _starting, _app;
+
+    private TrayIconSet(Icon green, Icon amber, Icon red, Icon starting, Icon app) =>
+        (_green, _amber, _red, _starting, _app) = (green, amber, red, starting, app);
+
+    public Icon For(TrayState state) => state switch
     {
-        if (Cache.TryGetValue(state, out var icon)) return icon;
-        var color = state switch { TrayState.Red => Color.Crimson, TrayState.Amber => Color.Orange, _ => Color.SeaGreen };
-        using var bmp = new Bitmap(32, 32);
-        using (var g = Graphics.FromImage(bmp))
+        TrayState.Green => _green,
+        TrayState.Amber => _amber,
+        TrayState.Red => _red,
+        _ => throw new ArgumentOutOfRangeException(nameof(state), state, "No tray icon for this state."),
+    };
+
+    public Icon Starting => _starting;
+
+    public Icon App => _app;
+
+    /// <param name="open">Opens a file by name (its embedded resource name); null when there is no such file.</param>
+    public static TrayIconSet Load(Func<string, Stream?> open)
+    {
+        Icon Read(string name)
         {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.Clear(Color.Transparent);
-            using var b = new SolidBrush(color);
-            g.FillEllipse(b, 2, 2, 28, 28);
-            using var pen = new Pen(Color.White, 3);
-            g.DrawLine(pen, 9, 20, 14, 14); // a small rising line: "pool"
-            g.DrawLine(pen, 14, 14, 18, 18);
-            g.DrawLine(pen, 18, 18, 24, 10);
+            using var stream = open(name) ?? throw new InvalidOperationException($"The icon {name} is missing from PoolWatch.exe.");
+            return new Icon(stream); // the system's large size: sharp as a window's taskbar icon, scaled down in the tray
         }
-        IntPtr h = bmp.GetHicon();
-        icon = (Icon)Icon.FromHandle(h).Clone();
-        DestroyIcon(h);
-        Cache[state] = icon;
-        return icon;
+        return new TrayIconSet(Read("tray-healthy.ico"), Read("tray-warning.ico"), Read("tray-critical.ico"), Read("tray-inactive.ico"), Read("poolwatch.ico"));
+    }
+
+    public void Dispose()
+    {
+        _green.Dispose();
+        _amber.Dispose();
+        _red.Dispose();
+        _starting.Dispose();
+        _app.Dispose();
     }
 }
 
