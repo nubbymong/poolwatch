@@ -454,9 +454,9 @@ internal static class ActiveChangesView
 
     /// <summary>
     /// The window's size on a working area of <paramref name="area"/>: as designed, never taller or wider than the area.
-    /// The list inside scrolls, not the window, so no room is added for a scroll bar.
+    /// The list inside scrolls, not the window, so no room is added for a scroll bar (ScreenFit's rule, with none).
     /// </summary>
-    internal static Size Fit(Size window, Size area) => new(Math.Min(window.Width, area.Width), Math.Min(window.Height, area.Height));
+    internal static Size Fit(Size window, Size area) => ScreenFit.Capped(window, area, scrollBar: 0);
 
     /// <summary>At most this many changes are listed in Put all back's question and in its results, so each box fits on the screen.</summary>
     private const int MaxListed = 10;

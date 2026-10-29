@@ -56,7 +56,7 @@ In the data folder:
 | `uninstall-list.json` | only while the uninstaller runs: the list of changes it asked PoolWatch for, deleted again once read |
 | `boots\` | one folder per boot: `baseline.json` (the first full tag snapshot) and `summary.json` (the peaks) |
 | `reports\` | the Since boot reports |
-| `exports\` | export zips, vendor bundles |
+| `exports\` | export zips, vendor bundles, and Report an issue's saved text (`issue-<yyyyMMdd-HHmmss>.txt`) |
 | `requests\` | notes waiting for the running PoolWatch to put on its timeline (`--mark`) |
 
 The daily CSV files have a header row. `totals.csv` has a row every 10 seconds; the others as noted.
