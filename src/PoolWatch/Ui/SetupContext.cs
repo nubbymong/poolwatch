@@ -1,6 +1,7 @@
 using PoolWatch.Analysis;
 using PoolWatch.Core.Cache;
 using PoolWatch.Core.Changes;
+using PoolWatch.Core.Knowledge;
 using PoolWatch.Core.Recommendations;
 using PoolWatch.Core.Setup;
 using PoolWatch.Core.TokenGuard;
@@ -78,18 +79,36 @@ internal sealed class SetupContext
     public ClearEvidence ClearEvidence() => Analysis.Diagnostics.Cache.Evidence();
 
     /// <summary>
-    /// The Simple view's cards (<see cref="Suggest"/>), from what PoolWatch holds now (memory and the cached facts: nothing
-    /// is scanned), cheap enough for the once-a-minute refresh.
+    /// The Simple view's cards (<see cref="Suggest"/>), with the known issues matched against what PoolWatch holds now
+    /// (memory and the cached facts: nothing is scanned), cheap enough for the once-a-minute refresh.
     /// </summary>
-    public IReadOnlyList<Recommendation> Suggestions() => Suggest(Inputs(), Probe.Last, ClearEvidence());
+    public IReadOnlyList<Recommendation> Suggestions()
+    {
+        var inputs = Inputs();
+        return Suggest(inputs, KnownIssueMatcher.Match(KnowledgeBase.Embedded(), KnownIssueEvidence(inputs)), Probe.Last, ClearEvidence());
+    }
 
     /// <summary>
-    /// Up to 3 offers. The hourly clear shows only where it applies, and once a clear helped here, what it freed is its
-    /// reason (<see cref="ClearAdvice"/>).
+    /// Up to 3 offers. An offer that a known issue on this PC explains gives that issue's reason
+    /// (<see cref="KnownIssueMatcher.Explain"/>); the hourly clear shows only where it applies, and once a clear helped here,
+    /// what it freed is its reason (<see cref="ClearAdvice"/>).
     /// </summary>
-    internal static IReadOnlyList<Recommendation> Suggest(RecommendationInputs inputs, EnvironmentFacts? facts, ClearEvidence evidence) =>
-        ClearAdvice.ForSimpleView(RecommendationRules.Current(inputs, max: 4), facts, evidence);
+    internal static IReadOnlyList<Recommendation> Suggest(RecommendationInputs inputs, IReadOnlyList<KnownIssueMatch> matches, EnvironmentFacts? facts,
+        ClearEvidence evidence) =>
+        ClearAdvice.ForSimpleView(KnownIssueMatcher.Explain(RecommendationRules.Current(inputs, max: 4), matches), facts, evidence);
 
+    /// <summary>
+    /// What the known issues are matched against: the clears, the running programs and the Windows setting that stops the
+    /// token leak are read first, then the history under its lock.
+    /// </summary>
+    private KnowledgeEvidence KnownIssueEvidence(RecommendationInputs inputs)
+    {
+        var clears = Analysis.Diagnostics.Cache.History();
+        var running = Engine.Registry.LiveRecords();
+        uint? foregroundLockTimeout = TokenGuardNative.GetForegroundLockTimeout();
+        lock (Analysis.History.SyncRoot)
+            return KnowledgeEvidence.Gather(KnowledgeBase.Embedded(), Analysis.History, clears, CacheClearer.MeasureAfter, inputs, foregroundLockTimeout, running);
+    }
 }
 
 /// <summary>The real PC behind <see cref="RecommendationActions"/>.</summary>

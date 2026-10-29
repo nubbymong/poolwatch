@@ -1,0 +1,32 @@
+{
+  "$schema": "./schema.json",
+  "format": 1,
+  "id": "ntfc-ai-desktop-apps",
+  "title": "NTFS file records pile up while an AI desktop app runs",
+  "explanation": "Several people report the non-paged kernel pool growing by gigabytes an hour, most of it NTFS file records (pool tag NtFC), while the Codex desktop app runs, or the Claude desktop app with its Cowork feature on. Both install as Windows app packages, and the file redirection Windows uses for those appears to leave a record behind for many files the app opens, for example when its data folder is a junction to another drive. The memory comes back only after a restart.",
+  "workaround": "PoolWatch has no sure fix for this, and its cache clear is not known to free these records. What helped others: making the app's data folders under AppData ordinary folders instead of junctions to another drive, using the Codex command-line tool instead of the desktop app, or closing the desktop app when it is not in use. A restart frees the memory.",
+  "evidence": [
+    {
+      "tagGrowth": { "tags": ["NtFC"], "name": "NTFS file records", "pool": "nonPaged", "minMBPerHour": 100 },
+      "running": [
+        { "name": "Codex desktop", "storePackage": "OpenAI.Codex" },
+        { "name": "Claude desktop", "storePackage": "Claude" },
+        { "name": "Claude desktop", "storePackage": "Anthropic" }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "title": "Codex desktop leaks non-paged kernel memory (NtFC), openai/codex issue 56160",
+      "url": "https://github.com/openai/codex/issues/56160"
+    },
+    {
+      "title": "Claude desktop: non-paged kernel memory leak on the NtFC tag, anthropics/claude-code issue 55361",
+      "url": "https://github.com/anthropics/claude-code/issues/55361"
+    },
+    {
+      "title": "Codex desktop and sustained kernel memory growth, openai/codex issue 31212",
+      "url": "https://github.com/openai/codex/issues/31212"
+    }
+  ]
+}

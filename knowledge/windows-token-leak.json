@@ -1,0 +1,38 @@
+{
+  "$schema": "./schema.json",
+  "format": 1,
+  "id": "windows-token-leak",
+  "title": "The Windows 11 token leak",
+  "explanation": "On Windows 11 25H2, and probably 24H2, which shares its code, Windows keeps a security token in the kernel pool for almost every program that starts another program, and never gives it back. Coding assistants, Git and build tools start thousands of programs an hour, so it adds up to gigabytes, and starting programs gets slower until the next restart.",
+  "workaround": "A Windows setting stops the leak, but Windows resets it at each sign-in, so the token-leak guard sets it again each time PoolWatch starts. While it is on, other programs can bring their windows to the front and take your keystrokes, even while you type; most people find that rare and easy to live with. To stop it, turn it off in Active changes. A restart frees what has already leaked.",
+  "actions": ["token-guard"],
+  "suggestion": "This is the known Windows token leak. The guard turns on the Windows setting that stops it, each time PoolWatch starts.",
+  "evidence": [
+    {
+      "tagGrowth": { "tags": ["Toke"], "name": "security tokens", "pool": "paged", "minMBPerHour": 20 },
+      "windowsBuild": { "min": 26100 }
+    }
+  ],
+  "links": [
+    {
+      "title": "Windows 11 leaks a kernel token for every process that creates a process",
+      "url": "https://github.com/bentoner/windows-token-leak"
+    },
+    {
+      "title": "Why the token-leak fix is undone at every sign-in, and a fix that survives restarts",
+      "url": "https://github.com/gunrgbcr/windows-token-leak-logon-fix"
+    }
+  ],
+  "credits": [
+    {
+      "name": "bentoner",
+      "what": "documented the leak, its cause and the setting that stops it",
+      "url": "https://github.com/bentoner/windows-token-leak"
+    },
+    {
+      "name": "gunrgbcr",
+      "what": "found why Windows undoes the setting at each sign-in and how to keep it on; the guard follows that idea, no code was copied",
+      "url": "https://github.com/gunrgbcr/windows-token-leak-logon-fix"
+    }
+  ]
+}
