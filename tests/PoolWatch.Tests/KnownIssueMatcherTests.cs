@@ -189,7 +189,7 @@ public class KnownIssueMatcherTests
         Assert.Equal("What PoolWatch sees: Security tokens grew 60 MB in the last hour. This PC runs Windows build 26200.9106.", lines[1]);
         Assert.StartsWith("What is going on: On Windows 11 25H2", lines[2]);
         Assert.StartsWith("What helps: A Windows setting stops the leak", lines[3]);
-        Assert.Equal($"PoolWatch can turn on its token-leak guard: see the suggestion \"{Title(RecommendationId.TokenLeakGuard)}\" in Simple view.", lines[4]);
+        Assert.Equal($"PoolWatch can turn on its token-leak guard: untick Advanced view to see the suggestion \"{Title(RecommendationId.TokenLeakGuard)}\".", lines[4]);
         Assert.Equal("Read more: Windows 11 leaks a kernel token for every process that creates a process: https://github.com/bentoner/windows-token-leak", lines[5]);
         Assert.Equal("Credit: bentoner documented the leak, its cause and the setting that stops it (https://github.com/bentoner/windows-token-leak).", lines[7]);
         Assert.Equal("Pool tags: Toke", lines[^1]);
@@ -214,7 +214,7 @@ public class KnownIssueMatcherTests
         var refs = Cleared(Quiet() with { FileSystems = ["ReFS"] }, Now.AddHours(-1), ("Reff", 2048));
         Assert.Equal("PoolWatch already clears the cache every hour and shows what each clear freed.",
             ActionLine(refs, ThreeOffers() with { AutoClearOn = true }, "refs-standby-metadata"));
-        Assert.Equal($"PoolWatch can clear the cache every hour and show what each clear freed: see the suggestion \"{Title(RecommendationId.HourlyCacheClear)}\" in Simple view.",
+        Assert.Equal($"PoolWatch can clear the cache every hour and show what each clear freed: untick Advanced view to see the suggestion \"{Title(RecommendationId.HourlyCacheClear)}\".",
             ActionLine(refs, ThreeOffers(), "refs-standby-metadata"));
         // Hidden in the last 30 days, so not offered: the note promises nothing.
         var hidden = new Dictionary<string, DateTime> { [Recommendation.KeyOf(RecommendationId.HourlyCacheClear, null)] = Now };
@@ -222,7 +222,7 @@ public class KnownIssueMatcherTests
 
         // The shortcut's words name no app: the line above them in the note has just said which one is running.
         var codex = Grew(Quiet() with { Running = [CodexDesktop] }, ("NtFC", 0, 2048));
-        Assert.Equal($"PoolWatch can create a desktop shortcut that starts the app without its GPU shader disk cache: see the suggestion \"{Title(RecommendationId.ChatGptShortcut)}\" in Simple view.",
+        Assert.Equal($"PoolWatch can create a desktop shortcut that starts the app without its GPU shader disk cache: untick Advanced view to see the suggestion \"{Title(RecommendationId.ChatGptShortcut)}\".",
             ActionLine(codex, ThreeOffers(), "codex-gpu-shader-cache"));
         Assert.Equal("PoolWatch already made a desktop shortcut that starts the app without its GPU shader disk cache; use it instead of the usual one.",
             ActionLine(codex, ThreeOffers() with { ChatGptShortcutMade = true }, "codex-gpu-shader-cache"));

@@ -54,6 +54,7 @@ In the data folder:
 | `applied-changes.json` | the other changes PoolWatch made that can be put back (Active changes needs it) |
 | `removed-tasks\<name>.xml` | only when a clear task of the owner's that PoolWatch removed could not be put back by itself: its definition, to import in Task Scheduler |
 | `setup.json` | when the setup guide was completed, and the suggestions the owner hid (each shows again after 30 days) |
+| `ui-state.json` | which view the main window opens in: Simple or Advanced |
 | `uninstall-summary.txt` | written by the uninstaller: each change it put back, and any it could not put back (and why) or kept |
 | `uninstall-list.json` | only while the uninstaller runs: the list of changes it asked PoolWatch for, deleted again once read |
 | `boots\` | one folder per boot: `baseline.json` (the first full tag snapshot) and `summary.json` (the peaks) |

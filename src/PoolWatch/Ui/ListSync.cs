@@ -18,11 +18,18 @@ internal sealed class ListSync
         list.MouseEnter += (_, _) => _mouseOver = true;
         list.MouseLeave += (_, _) => _mouseOver = false;
         list.VisibleChanged += (_, _) => { if (!list.Visible) _mouseOver = false; }; // a tab switched by keyboard leaves no MouseLeave
-        typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.SetValue(list, true);
     }
 
     /// <summary>True when the last update kept the old order although the data's order changed.</summary>
     public bool OrderHeld { get; private set; }
+
+    /// <summary>Removes every row and forgets it (the window hid); the next update adds the rows again.</summary>
+    public void Clear()
+    {
+        _items.Clear();
+        _list.Items.Clear();
+        OrderHeld = false;
+    }
 
     public bool Updating { get; private set; }
 
@@ -32,7 +39,7 @@ internal sealed class ListSync
     public void Update(IReadOnlyList<Row> rows, bool forceOrder = false)
     {
         Updating = true;
-        // C5 item 3: remember where the user is (the top visible row and the rows below it, the selection and the focused
+        // Remember where the user is (the top visible row and the rows below it, the selection and the focused
         // row) so that removals, insertions above and moves cannot scroll the list or drop the selection.
         var (topIndex, fromTop) = VisibleKeys();
         List<object> selected;

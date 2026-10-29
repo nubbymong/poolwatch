@@ -30,7 +30,7 @@ public sealed record KnownIssueMatch(KnownIssue Issue, IReadOnlyList<string> See
         foreach (var action in Issue.Actions.Select(a => KnownActions.Find(a)!))
             if (ActionsOn.Contains(action.Id)) lines.Add($"PoolWatch already {action.Done}.");
             else if (suggestions.FirstOrDefault(s => s.Id == action.Suggestion && s.State == RecommendationState.Offer) is { } offer)
-                lines.Add($"PoolWatch can {action.Does}: see the suggestion \"{offer.Title}\" in Simple view.");
+                lines.Add($"PoolWatch can {action.Does}: untick Advanced view to see the suggestion \"{offer.Title}\".");
         lines.AddRange(Issue.Links.Select(l => $"Read more: {l.Title}: {l.Url}"));
         lines.AddRange(Issue.Credits.Select(c => $"Credit: {c.Name} {c.What}" + (c.Url is { } url ? $" ({url})." : ".")));
         lines.Add("Pool tags: " + string.Join(", ", Tags.Select(t => t.ToDisplay())));

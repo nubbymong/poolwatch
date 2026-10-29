@@ -94,7 +94,7 @@ public class TagViewKeepTests
         Rank([A, B]);
         Assert.Equal(2, rankings.Held().rankings);
         now += RankPlan.Fresh;
-        Rank([B]); // A stopped growing: its row says "released", and its cause and Copy summary still read the ranking
+        Rank([B]); // A stopped growing: its row says "released" with no cause, and its Copy summary still reads the ranking
         Assert.NotNull(rankings.Get(A));
         Assert.Equal((2, 2, 6, 0), rankings.Held());
         rankings.Clear();

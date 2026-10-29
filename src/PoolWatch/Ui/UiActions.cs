@@ -45,7 +45,7 @@ internal sealed class UiActions
     public void ClearCacheNow(IWin32Window? owner)
     {
         var c = _analysis.Diagnostics.Cache;
-        // S5 (review round 2): the purge is in-process; PoolWatch runs as administrator, so there is nothing to set up.
+        // The purge is in-process; PoolWatch runs as administrator, so there is nothing to set up.
         if (!CacheHelper.IsElevated)
         {
             MessageBox.Show(owner, NotElevated, "PoolWatch");
@@ -76,32 +76,34 @@ internal sealed class UiActions
     public void RemoveLegacyTask(IWin32Window? owner)
     {
         if (!CacheHelper.IsElevated) { MessageBox.Show(owner, NotElevated, "PoolWatch"); return; }
-        int code = LegacyInProcess(owner, "the tray menu", out string? note);
+        var outcome = LegacyInProcess(owner, "the tray menu", out string? note);
         _analysis.Diagnostics.Cache.RefreshStatus();
-        if (code == 0) MessageBox.Show(owner, "Removed (RAMMap itself is left in place).", "PoolWatch");
-        else if (note is not null) MessageBox.Show(owner, note, "PoolWatch");
+        string? said = outcome switch
+        {
+            CacheHelper.LegacyOutcome.Removed => "Removed (RAMMap itself is left in place).",
+            CacheHelper.LegacyOutcome.None => "No clear task of your own was found, so nothing was removed.",
+            _ => note, // your No needs no answer
+        };
+        if (said is not null) MessageBox.Show(owner, said, "PoolWatch");
     }
 
     /// <summary>
-    /// The same step as <c>--remove-legacy-clear-task</c>, with its exit codes. 0: removed, or no clear task of your own is
-    /// there; 4: one is still there (you kept it, or the note says why). Only 0 lets the automatic clear go on. Every task
-    /// is recorded, with its definition, before it is removed, so Active changes can put it back.
+    /// The same step as <c>--remove-legacy-clear-task</c>. Removed, or None (no clear task of your own is there), lets the
+    /// automatic clear go on; Kept: one is still there (you kept it, or the note says why). Every task is recorded, with its
+    /// definition, before it is removed, so Active changes can put it back.
     /// </summary>
     /// <param name="via">Where the removal was asked for, in plain words ("the tray menu", "Settings").</param>
     /// <param name="note">Why your tasks were left in place when it was not your No, for the caller to show; null otherwise.</param>
-    public int LegacyInProcess(IWin32Window? owner, string via, out string? note)
+    public CacheHelper.LegacyOutcome LegacyInProcess(IWin32Window? owner, string via, out string? note)
     {
         (var outcome, _, note) = CacheHelper.ResolveLegacy(t =>
             MessageBox.Show(owner, CacheHelper.LegacyQuestion(t), "PoolWatch: your own clear task", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes,
             ChangeRecords.Open(_engine.Paths, _engine.Log), via);
-        return outcome == CacheHelper.LegacyOutcome.Kept ? 4 : 0;
+        return outcome;
     }
 
-    /// <summary><see cref="LegacyInProcess(IWin32Window?, string, out string?)"/> from Settings, for a caller that shows its own words.</summary>
-    public int LegacyInProcess(IWin32Window? owner) => LegacyInProcess(owner, "Settings", out _);
-
     /// <summary>
-    /// S5 (review round 2): removes the two \PoolWatch\ SYSTEM tasks and the helper files an older PoolWatch's Clear cache
+    /// Removes the two \PoolWatch\ SYSTEM tasks and the helper files an older PoolWatch's Clear cache
     /// setup installed (offered only while they are there), after a yes. Recorded on the timeline.
     /// </summary>
     public void RemoveOldClearTasks(IWin32Window? owner)
@@ -136,7 +138,7 @@ internal sealed class UiActions
         dir ??= LatestIncidentDir();
         if (dir is null || !Directory.Exists(dir)) { MessageBox.Show(owner, "No incident to export yet.", "PoolWatch"); return; }
         if (_analysis.Captures.Busy) { MessageBox.Show(owner, "A confirmation trace is being recorded. Export when it has finished.", "PoolWatch"); return; }
-        // M1: redaction is the default (Yes, or Enter); the incident folder itself is never redacted.
+        // Redaction is the default (Yes, or Enter); the incident folder itself is never redacted.
         var answer = MessageBox.Show(owner, $"Export {Path.GetFileName(dir)}.\n\nRedact the user name, home and TEMP paths, machine name, SID and values that look like secrets " +
             "(passwords, tokens, API keys on a command line)? Recommended before you share it.\n(The .etl trace is left out of a redacted export. " +
             "Redaction is best-effort: read the export before you post it.)",
@@ -226,7 +228,7 @@ internal sealed class UiActions
     private static readonly string ExplorerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
 
     /// <summary>
-    /// Opens a folder in Explorer. S1/S3: the elevated app never shell-executes a path (that would consult the user's
+    /// Opens a folder in Explorer. The elevated app never shell-executes a path (that would consult the user's
     /// shell associations and App Paths, both user-writable): it starts explorer.exe by full path with the folder as an
     /// argument and UseShellExecute = false.
     /// </summary>

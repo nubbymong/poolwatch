@@ -301,6 +301,7 @@ internal sealed class GuidePage : TableLayoutPanel
         bool leakOffer = r is { Id: RecommendationId.TokenLeakGuard, State: RecommendationState.Offer };
         Line(leakOffer ? TokenGuardWords.Why : r.Why);
         if (leakOffer) Line(TokenGuardWords.Details, color: SystemColors.GrayText);
+        if (SimpleSettings.RunsAClear(r)) Line(SimpleSettings.ClearStutter, color: SystemColors.GrayText);
         if (busy) Line(testClear ? "Clearing the cache once and measuring what it frees (about 2 minutes)..." : "Working...", color: SystemColors.GrayText);
         if (state.Errors.TryGetValue(r.Key, out var error)) Line(error, color: ErrorColor);
 
@@ -327,7 +328,7 @@ internal sealed class GuidePage : TableLayoutPanel
     /// <summary>The update notice's switch: on by default, applied at once (it is a setting, not a change to the PC).</summary>
     private Control UpdateSwitch(IUpdateCheck updates)
     {
-        var box = new CheckBox { Text = "Tell me when a new version is out.", AutoSize = true, Checked = updates.Enabled, Margin = Padding.Empty };
+        var box = new CheckBox { Text = SimpleSettings.UpdatesLabel, AutoSize = true, Checked = updates.Enabled, Margin = Padding.Empty };
         box.CheckedChanged += (_, _) =>
         {
             if (box.Checked == updates.Enabled) return; // put back below
@@ -336,7 +337,7 @@ internal sealed class GuidePage : TableLayoutPanel
         };
         var panel = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
         panel.Controls.Add(box);
-        var note = Para("Checks GitHub once a day; information only, nothing is downloaded or installed.", color: SystemColors.GrayText, width: _width - S(18));
+        var note = Para(SimpleSettings.UpdatesHint, color: SystemColors.GrayText, width: _width - S(18));
         note.Margin = new Padding(S(18), 0, 0, 0);
         panel.Controls.Add(note);
         return panel;
