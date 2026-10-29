@@ -123,7 +123,8 @@ internal static class BundleBuilder
         files["crashes.md"] = crashes.ToString();
         files["findings.jsonl"] = string.Concat(findings.Select(f => FindingLog.ToJsonLine(f) + "\n"));
 
-        return VendorBundle.Write(engine.Paths.ExportsDir, now, files, redaction, engine.Paths.Guard.CheckReal);
+        return VendorBundle.Write(engine.Paths.ExportsDir, now, files, redaction, engine.Paths.Guard.CheckReal,
+            new Dictionary<string, string> { [AgentsGuide.FileName] = AgentsGuide.Text });
     }
 
     private static string Iso(DateTime utc) => utc.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);

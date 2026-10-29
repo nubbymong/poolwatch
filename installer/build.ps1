@@ -25,11 +25,11 @@ if (-not (Test-Path "$inno\ISCC.exe")) {
     if ($p.ExitCode -ne 0 -or -not (Test-Path "$inno\ISCC.exe")) { throw "Inno Setup did not install (exit $($p.ExitCode))" }
 }
 
-# What is installed: the build, the ChatGPT launcher and the licences.
+# What is installed: the build, the ChatGPT launcher, the guide for AI assistants and the licences.
 $stage = Join-Path $Out 'stage'
 New-Item -ItemType Directory -Path $stage | Out-Null
 Copy-Item -Path (Join-Path $Publish '*') -Destination $stage -Recurse
-Copy-Item -Destination $stage -Path "$PSScriptRoot\chatgpt-no-shader-cache.ps1", "$repo\LICENSE", "$repo\THIRD-PARTY-NOTICES.md"
+Copy-Item -Destination $stage -Path "$PSScriptRoot\chatgpt-no-shader-cache.ps1", "$repo\src\PoolWatch\Assets\AGENTS.md", "$repo\LICENSE", "$repo\THIRD-PARTY-NOTICES.md"
 if ($SignTool) {
     & $SignTool sign /fd sha256 /tr http://ts.ssl.com /td sha256 /sha1 $Thumbprint "$stage\chatgpt-no-shader-cache.ps1"
     if ($LASTEXITCODE -ne 0) { throw "signtool failed on the launcher (exit $LASTEXITCODE)" }

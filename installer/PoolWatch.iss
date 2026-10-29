@@ -95,10 +95,11 @@ Source: "ready\*.png"; Flags: dontcopy
 Source: "{#PublishDir}\PoolWatch-selfcontained.exe"; DestDir: "{app}"; DestName: "PoolWatch.exe"; Flags: ignoreversion
 ; Named one by one, so a build without one of them fails here instead of shipping without it.
 Source: "{#PublishDir}\chatgpt-no-shader-cache.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PublishDir}\AGENTS.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PublishDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PublishDir}\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 ; The rest of the build: the native DLLs PoolWatch loads from its own folder, and the .NET runtime's licences (licenses\).
-Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "\PoolWatch-selfcontained.exe,\chatgpt-no-shader-cache.ps1,\LICENSE,\THIRD-PARTY-NOTICES.md"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "\PoolWatch-selfcontained.exe,\chatgpt-no-shader-cache.ps1,\AGENTS.md,\LICENSE,\THIRD-PARTY-NOTICES.md"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\PoolWatch"; Filename: "{app}\PoolWatch.exe"

@@ -182,7 +182,10 @@ public static class Exporter
     public static bool IsStructured(string fileName) => StructuredExtensions.Contains(Path.GetExtension(fileName));
 
     /// <param name="checkWrite">The write policy (returns the path or throws).</param>
-    public static string Export(string incidentDir, string exportsDir, RedactionInfo? redaction, Func<string, string> checkWrite)
+    /// <param name="extraFiles">Text files added at the root of the zip as they are, never redacted (the guide for AI
+    /// assistants, which holds nothing about this PC), by file name. A file of the same name in the folder is left out.</param>
+    public static string Export(string incidentDir, string exportsDir, RedactionInfo? redaction, Func<string, string> checkWrite,
+        IReadOnlyDictionary<string, string>? extraFiles = null)
     {
         Directory.CreateDirectory(checkWrite(exportsDir));
         string name = Path.GetFileName(incidentDir.TrimEnd('\\', '/')) + (redaction is not null ? "-redacted" : "") + ".zip";
@@ -192,10 +195,16 @@ public static class Exporter
         {
         using (var zip = ZipFile.Open(tmp, ZipArchiveMode.Create))
         {
+            foreach (var (extra, content) in extraFiles ?? new Dictionary<string, string>())
+            {
+                using var s = zip.CreateEntry(extra, CompressionLevel.Optimal).Open();
+                s.Write(new UTF8Encoding(false).GetBytes(content));
+            }
             foreach (var file in Directory.EnumerateFiles(incidentDir, "*", SearchOption.AllDirectories))
             {
                 string rel = Path.GetRelativePath(incidentDir, file).Replace('\\', '/');
                 if (rel.StartsWith("wpr-temp/", StringComparison.OrdinalIgnoreCase)) continue; // a running capture's buffers
+                if (extraFiles?.ContainsKey(rel) == true) continue;
                 string ext = Path.GetExtension(file);
                 if (ext.Equals(".tmp", StringComparison.OrdinalIgnoreCase) || ext.Equals(".etlx", StringComparison.OrdinalIgnoreCase)) continue;
                 if (redaction is not null && TextExtensions.Contains(ext))

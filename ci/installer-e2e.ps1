@@ -100,7 +100,7 @@ $fits = $ready.Success -and [int]$ready.Groups[3].Value -lt [int]$ready.Groups[4
     [int]$ready.Groups[5].Value -le [int]$ready.Groups[6].Value -and [int]$ready.Groups[7].Value -le [int]$ready.Groups[2].Value
 Assert-True $fits "the Ready page's steps, panel and last line are in order and fit on the page ($($ready.Value))"
 Assert-True ($installLog -notmatch "The Ready page's icon \S+ could not be shown") 'the setup showed every icon on its Ready page'
-foreach ($f in 'PoolWatch.exe', 'unins000.exe', 'chatgpt-no-shader-cache.ps1', 'LICENSE', 'THIRD-PARTY-NOTICES.md',
+foreach ($f in 'PoolWatch.exe', 'unins000.exe', 'chatgpt-no-shader-cache.ps1', 'AGENTS.md', 'LICENSE', 'THIRD-PARTY-NOTICES.md',
                'amd64\KernelTraceControl.dll', 'licenses\Microsoft.NETCore.App\LICENSE.TXT') {
     Assert-True (Test-Path (Join-Path $app $f)) "installed $f"
 }
