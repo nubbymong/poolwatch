@@ -24,9 +24,10 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 10_000 };
     private readonly ToolTip _tips = new() { AutoPopDelay = 30_000, InitialDelay = 400 };
 
-    // The header: the status line on the left, the three buttons on the right.
+    // The header: the status line on the left, the three buttons on the right. The line draws itself (a Label flashed
+    // blank each time a refresh changed its text).
     private readonly Panel _header = new() { Dock = DockStyle.Top };
-    private readonly Label _status = new() { Dock = DockStyle.Fill, AutoSize = false, TextAlign = ContentAlignment.MiddleLeft, UseMnemonic = false, AutoEllipsis = false };
+    private readonly PaintedLabel _status = new(centerVertically: true) { Dock = DockStyle.Fill };
     private readonly FlowLayoutPanel _buttons = new() { Dock = DockStyle.Right, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false };
     private readonly List<Button> _headerButtons = [];
     private PoolStatusKind _statusKind = PoolStatusKind.Collecting;
@@ -46,8 +47,9 @@ internal sealed class MainForm : Form
     private bool _causeSelectPending;
     private long _causesSamples = -1;
 
-    // Services (the former Background services page; same behaviour).
-    private readonly ListView _services = new() { View = View.Details, FullRowSelect = true, CheckBoxes = true, Dock = DockStyle.Fill, MultiSelect = true, HideSelection = false };
+    // Services (the former Background services page; same behaviour). Its list is drawn off screen: its Cost cells change
+    // on every refresh.
+    private readonly BufferedListView _services = new() { View = View.Details, FullRowSelect = true, CheckBoxes = true, Dock = DockStyle.Fill, MultiSelect = true, HideSelection = false };
     private readonly WrapLabel _servicesStatus = new() { Dock = DockStyle.Top };
     private readonly ListView _tasks = new() { View = View.Details, FullRowSelect = true, Dock = DockStyle.Fill, MultiSelect = false, HideSelection = false };
     private readonly ComboBox _preset = new() { DropDownStyle = ComboBoxStyle.DropDownList };
@@ -145,7 +147,7 @@ internal sealed class MainForm : Form
         int btnW = _headerButtons.Sum(b => b.GetPreferredSize(Size.Empty).Width + b.Margin.Horizontal) + S(12);
         int textW = Math.Max(S(200), ClientSize.Width - _header.Padding.Horizontal - btnW);
         // Measured a little narrower than the label: wrapping earlier can only add a line, never cut one off.
-        int textH = WrapLabel.Measure(_status.Text, _status.Font, textW - S(4));
+        int textH = PaintedLabel.Measure(_status.Text, _status.Font, textW - S(4));
         int inner = Math.Max(textH + S(2), btnH);
         _buttons.Padding = new Padding(S(12), Math.Max(0, (inner - btnH) / 2), 0, 0);
         int h = inner + _header.Padding.Vertical;
@@ -349,9 +351,7 @@ internal sealed class MainForm : Form
         {
             sb.Append($"\r\n{++n}. {o.Name}: {PlainWords.Confidence(o.Confidence)}{(o.CorrelationOnly ? " (correlation only)" : "")}\r\n");
             foreach (var p in o.Plain) sb.Append("   - ").Append(p).Append("\r\n");
-            if (o.Members.Count > 0)
-                sb.Append("   Processes: ").Append(string.Join("; ", o.Members.Take(5).Select(m => PlainWords.WithPid(m.DisplayName, m.Key.Pid))))
-                  .Append(o.Members.Count > 5 ? $" and {o.Members.Count - 5} more" : "").Append("\r\n");
+            if (o.Members.Count > 0) sb.Append("   ").Append(ProcessesLine(o)).Append("\r\n");
             if (o.Members.FirstOrDefault(m => m.CommandLine is not null)?.CommandLine is { } cl) sb.Append("   Command line: ").Append(cl).Append("\r\n");
         }
         if (n == 0) sb.Append("\r\nNo suspect stood out.\r\n");
@@ -363,6 +363,11 @@ internal sealed class MainForm : Form
         }
         return sb.ToString().TrimEnd();
     }
+
+    /// <summary>An owner's first five processes, then how many more it has: all of them, not only the ones the row kept.</summary>
+    internal static string ProcessesLine(OwnerSuspect o) =>
+        "Processes: " + string.Join("; ", o.Members.Take(5).Select(m => PlainWords.WithPid(m.DisplayName, m.Key.Pid)))
+        + (o.MemberCount > 5 ? $" and {o.MemberCount - 5} more" : "");
 
     private string ProcessDetails(CauseRow row)
     {
@@ -446,7 +451,7 @@ internal sealed class MainForm : Form
             if (m.ImagePath is { } path) sb.AppendLine("   path: " + path);
             foreach (var e in m.Evidence) sb.AppendLine("   raw: " + e);
         }
-        if (o.Members.Count > 20) sb.AppendLine($"… and {o.Members.Count - 20} more processes");
+        if (o.MemberCount > 20) sb.AppendLine($"… and {o.MemberCount - 20} more processes");
         return sb.ToString().TrimEnd(); // AppendLine is \r\n on Windows: a TextBox needs that
     }
 
@@ -1142,7 +1147,7 @@ internal sealed class MainForm : Form
         PerformLayout();
         _chart.Refresh(); // paint now, so the chart's layout is the current one
         var p = new List<string>();
-        int need = WrapLabel.Measure(_status.Text, _status.Font, Math.Max(1, _status.ClientSize.Width));
+        int need = PaintedLabel.Measure(_status.Text, _status.Font, Math.Max(1, _status.ClientSize.Width));
         if (need > _status.ClientSize.Height) p.Add($"the status line needs {need} px, has {_status.ClientSize.Height}");
         if (_header.Bottom > ClientSize.Height || _status.Width < S(150)) p.Add($"the header does not fit ({_header.Bounds}, status {_status.Bounds})");
         ClippedControls(this, p);

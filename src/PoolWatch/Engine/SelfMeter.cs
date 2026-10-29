@@ -68,10 +68,14 @@ internal sealed class SelfMeter
     private static (long workingSet, long privateBytes) Memory() =>
         NativeMethods.GetOwnMemory(out long ws, out long priv) ? (ws, priv) : (Environment.WorkingSet, 0);
 
+    /// <summary>The working set the last <see cref="Tick"/> read (sampler thread; the memory trim looks at it).</summary>
+    public long WorkingSetNow { get; private set; }
+
     public void Tick()
     {
         var cpu = Cpu();
         var (ws, priv) = Memory();
+        WorkingSetNow = ws;
         double now = _wall.Elapsed.TotalSeconds;
         if (_wallAtWarmup >= 0 && now - _lastRecent >= 60)
         {

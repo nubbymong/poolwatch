@@ -4,7 +4,7 @@ using PoolWatch.Core.Model;
 namespace PoolWatch.Core.Parsing;
 
 /// <summary>
-/// Parses SYSTEM_POOLTAG_INFORMATION (x64): ULONG Count, then 40-byte SYSTEM_POOLTAG entries from offset 8:
+/// Parses SYSTEM_POOLTAG_INFORMATION (64-bit): ULONG Count, then 40-byte SYSTEM_POOLTAG entries from offset 8:
 /// Tag[4]@0, PagedAllocs@4, PagedFrees@8, PagedUsed(SIZE_T)@16, NonPagedAllocs@24, NonPagedFrees@28, NonPagedUsed(SIZE_T)@32.
 /// </summary>
 public static class PoolTagInfoParser

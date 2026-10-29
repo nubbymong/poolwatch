@@ -106,14 +106,16 @@ public static class Correlator
         var scanAfter = h.HandlesAtOrBefore(h.Times[end]) is { } sa && scanBefore is not null && sa.TimeUtc > scanBefore.TimeUtc ? sa : h.LatestHandles;
         bool haveScans = handleType is not null && scanBefore is not null && scanAfter is not null && scanAfter.TimeUtc > scanBefore.TimeUtc;
 
+        // Every process of the window is read in place: on a busy PC most are short commands seen once, which the filter
+        // below drops before anything is copied or correlated for them.
         var keys = h.ProcessesSince(from);
-        var rows = new List<(ProcessKey key, ProcPoint?[] pts, long ops, long quota, int hBefore, int hAfter)>();
+        var rows = new List<(ProcessKey key, ProcessPoints pts, long ops, long quota, int hBefore, int hAfter)>();
         long totalOps = 0, totalQuotaUp = 0, totalHandleUp = 0;
         foreach (var key in keys)
         {
-            var pts = h.ProcessSeries(key, from);
-            long ops = OpsDelta(pts, onset - from, end - from);
-            long quota = QuotaDelta(pts, onset - from, end - from);
+            var pts = h.Points(key);
+            long ops = OpsDelta(pts, onset, end);
+            long quota = QuotaDelta(pts, onset, end);
             int hb = 0, ha = 0;
             if (haveScans)
             {
@@ -127,10 +129,12 @@ public static class Correlator
         }
 
         var suspects = new List<Suspect>();
+        var tagRanks = new TagRanks(tagDeltas);
+        var deltas = new double[tagDeltas.Length]; // one counter's deltas, reused for every process and counter
         foreach (var (key, pts, ops, quota, hb, ha) in rows)
         {
-            var rec = registry.Get(key);
             if (key.Pid == 0) continue; // Idle
+            var rec = registry.Get(key);
             double ioShare = totalOps > 0 ? Math.Max(0, ops) / (double)totalOps : 0;
             double hShare = totalHandleUp > 0 ? Math.Max(0, ha - hb) / (double)totalHandleUp : 0;
             double qShare = totalQuotaUp > 0 ? Math.Max(0, quota) / (double)totalQuotaUp : 0;
@@ -139,12 +143,12 @@ public static class Correlator
             bool directQuota = growth > 0 && quota >= Math.Max(1L << 20, growth / 10) && qShare >= 0.5;
             var direct = new DirectSignal(haveScans ? handleType : null, hb, ha, hShare, quota, qShare, directHandles || directQuota);
 
-            var activity = Activity(tagDeltas, pts, ops, ioShare);
             // Start / exit timing only means something for a process that did something in the episode.
             bool active = ioShare >= 0.01 || ha - hb >= MinHandleDelta || quota >= 64 * 1024;
             var lifecycle = Lifecycle(rec, h, from, onset, end, to, ioShare, active);
 
             if (!direct.Present && !lifecycle.Present && ops <= 0 && ha - hb <= 0) continue;
+            var activity = Activity(tagRanks, pts, from, ops, ioShare, deltas);
 
             var chain = registry.Ancestry(key);
             bool viaWmi = chain.Take(chain.Count - 1).Any(a => a.Image.Equals("WmiPrvSE.exe", StringComparison.OrdinalIgnoreCase));
@@ -153,7 +157,7 @@ public static class Correlator
                 Key = key,
                 Image = rec?.Image ?? "unknown process",
                 // 2d: never "?": a process PoolWatch no longer holds is named by when it ran (from its history points).
-                DisplayName = rec?.DisplayName ?? Incidents.TracedProcess.UnknownName(key.CreateTime > 0 ? key.CreateTimeUtc : null, LastSeen(h, pts, from)),
+                DisplayName = rec?.DisplayName ?? Incidents.TracedProcess.UnknownName(key.CreateTime > 0 ? key.CreateTimeUtc : null, LastSeen(h, pts)),
                 CommandLine = rec?.CommandLine,
                 ImagePath = rec?.ImagePath,
                 User = rec?.User,
@@ -189,12 +193,8 @@ public static class Correlator
     public const int IdentityTop = 50;
 
     /// <summary>The last sample a process was seen in (its exit, roughly), or null while it is still in the latest sample.</summary>
-    private static DateTime? LastSeen(History.History h, ProcPoint?[] pts, int from)
-    {
-        for (int i = pts.Length - 1; i >= 0; i--)
-            if (pts[i] is not null) return from + i >= h.Count - 1 ? null : h.Times[from + i];
-        return null;
-    }
+    private static DateTime? LastSeen(History.History h, ProcessPoints pts) =>
+        pts.Last < pts.First || pts.Last >= h.Count - 1 ? null : h.Times[pts.Last];
 
     public static double Score(Suspect s)
     {
@@ -217,23 +217,28 @@ public static class Correlator
         return corroborating == 1 ? Confidence.Correlated : Confidence.Weak;
     }
 
-    private static ActivitySignal Activity(double[] tagDeltas, ProcPoint?[] pts, long ops, double ioShare)
+    private static readonly string[] Counters = ["total", "other", "read"];
+
+    /// <param name="from">The raw sample index of the window's first sample (the tag deltas start there).</param>
+    /// <param name="d">A buffer as long as the tag deltas, overwritten.</param>
+    private static ActivitySignal Activity(TagRanks tag, ProcessPoints pts, int from, long ops, double ioShare, double[] d)
     {
         ActivitySignal? best = null;
-        foreach (var counter in new[] { "total", "other", "read" })
+        foreach (var counter in Counters)
         {
-            var d = new double[tagDeltas.Length];
             for (int i = 0; i < d.Length; i++)
             {
-                if (pts[i] is not { } a || pts[i + 1] is not { } b) continue;
+                int at = from + i;
+                if (!pts.Has(at) || !pts.Has(at + 1)) { d[i] = 0; continue; }
+                ProcPoint a = pts[at], b = pts[at + 1];
                 long v = counter switch { "other" => b.OtherOps - a.OtherOps, "read" => b.ReadOps - a.ReadOps, _ => b.TotalOps - a.TotalOps };
                 d[i] = Math.Max(0, v);
             }
-            double r = Stats.Spearman(tagDeltas, d);
+            double r = tag.Spearman(d, 0);
             double bestLagged = double.NaN; int bestLag = 0;
             for (int lag = 1; lag <= MaxLag; lag++)
             {
-                double rl = Stats.SpearmanLagged(tagDeltas, d, lag);
+                double rl = tag.Spearman(d, lag);
                 if (!double.IsNaN(rl) && (double.IsNaN(bestLagged) || rl > bestLagged)) { bestLagged = rl; bestLag = lag; }
             }
             var cand = new ActivitySignal(counter, r, bestLag, bestLagged, ioShare, ops, false);
@@ -246,6 +251,60 @@ public static class Correlator
     }
 
     private static bool Better(double a, double b) => !double.IsNaN(a) && (double.IsNaN(b) || a > b);
+
+    /// <summary>
+    /// Spearman of the tag's growth deltas against one process counter at each lag, as Stats.Spearman (lag 0) and
+    /// Stats.SpearmanLagged compute it, without their allocations: the tag's series is ranked once per ranking, and each
+    /// counter is ranked into reused buffers. A rank depends only on the values (ties share their mean rank), so sorting
+    /// in place gives the same ranks, and Stats.Pearson the same result.
+    /// </summary>
+    internal sealed class TagRanks
+    {
+        private readonly double[]?[] _tag = new double[]?[MaxLag + 1];
+        private readonly double[]?[] _counter = new double[]?[MaxLag + 1];
+        private readonly double[] _keys;
+        private readonly int[] _order;
+
+        public TagRanks(double[] tagDeltas)
+        {
+            int n = tagDeltas.Length;
+            _keys = new double[n];
+            _order = new int[n];
+            for (int lag = 0; lag <= MaxLag && n - lag >= 4; lag++)
+            {
+                Rank(tagDeltas.AsSpan(lag), _tag[lag] = new double[n - lag]);
+                _counter[lag] = new double[n - lag];
+            }
+        }
+
+        /// <summary>The tag's deltas against <paramref name="d"/> lagged by <paramref name="lag"/> samples; NaN when too short.</summary>
+        public double Spearman(double[] d, int lag)
+        {
+            if (_tag[lag] is not { } rx) return double.NaN;
+            var ry = _counter[lag]!;
+            Rank(d.AsSpan(0, ry.Length), ry);
+            return Stats.Pearson(rx, ry);
+        }
+
+        /// <summary>Stats.Ranks into <paramref name="ranks"/>: 1-based, ties sharing their mean rank.</summary>
+        private void Rank(ReadOnlySpan<double> values, double[] ranks)
+        {
+            int n = values.Length;
+            var keys = _keys.AsSpan(0, n);
+            var order = _order.AsSpan(0, n);
+            values.CopyTo(keys);
+            for (int i = 0; i < n; i++) order[i] = i;
+            keys.Sort(order);
+            for (int k = 0; k < n;)
+            {
+                int j = k;
+                while (j + 1 < n && keys[j + 1] == keys[k]) j++;
+                double r = (k + j) / 2.0 + 1;
+                for (int m = k; m <= j; m++) ranks[order[m]] = r;
+                k = j + 1;
+            }
+        }
+    }
 
     private static LifecycleSignal Lifecycle(ProcessRecord? rec, History.History h, int from, int onset, int end, int to, double ioShare, bool active)
     {
@@ -297,29 +356,17 @@ public static class Correlator
         if (s.ViaWmi) s.Evidence.Add($"launched via WMI (WmiPrvSE.exe in its parent chain: the real requester is hidden); command line: {s.CommandLine ?? "unknown"}");
     }
 
-    private static long OpsDelta(ProcPoint?[] pts, int a, int b)
-    {
-        var first = FirstAtOrAfter(pts, a, b);
-        var last = LastAtOrBefore(pts, b, a);
-        return first is { } f && last is { } l ? l.TotalOps - f.TotalOps : 0;
-    }
+    /// <summary>I/O operations between the process's first and last points within raw samples [a, b].</summary>
+    private static long OpsDelta(ProcessPoints pts, int a, int b) =>
+        Within(pts, a, b) is (int f, int l) ? pts[l].TotalOps - pts[f].TotalOps : 0;
 
-    private static long QuotaDelta(ProcPoint?[] pts, int a, int b)
-    {
-        var first = FirstAtOrAfter(pts, a, b);
-        var last = LastAtOrBefore(pts, b, a);
-        return first is { } f && last is { } l ? (l.QuotaPaged + l.QuotaNonPaged) - (f.QuotaPaged + f.QuotaNonPaged) : 0;
-    }
+    private static long QuotaDelta(ProcessPoints pts, int a, int b) =>
+        Within(pts, a, b) is (int f, int l) ? (pts[l].QuotaPaged + pts[l].QuotaNonPaged) - (pts[f].QuotaPaged + pts[f].QuotaNonPaged) : 0;
 
-    private static ProcPoint? FirstAtOrAfter(ProcPoint?[] pts, int a, int limit)
+    /// <summary>The indexes of the process's first and last points within [a, b] (its points are contiguous), or null.</summary>
+    private static (int first, int last)? Within(ProcessPoints pts, int a, int b)
     {
-        for (int i = Math.Max(0, a); i <= limit && i < pts.Length; i++) if (pts[i] is { } p) return p;
-        return null;
-    }
-
-    private static ProcPoint? LastAtOrBefore(ProcPoint?[] pts, int b, int limit)
-    {
-        for (int i = Math.Min(b, pts.Length - 1); i >= limit && i >= 0; i--) if (pts[i] is { } p) return p;
-        return null;
+        int first = Math.Max(a, pts.First), last = Math.Min(b, pts.Last);
+        return first <= last ? (first, last) : null;
     }
 }

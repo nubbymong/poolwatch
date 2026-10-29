@@ -40,8 +40,8 @@ public sealed record CpuFunction(string Name, double Ms, double Share, bool Symb
 /// <summary>
 /// The CPU part of a trace (addendum 2 C): where the processors spent the time (sampled, by module and by kernel function),
 /// DPC / ISR time by module, and where threads waited (context switches with stacks, by module and function). Function names
-/// need symbols from a local folder (<see cref="Settings.SymbolPath"/> or the local part of _NT_SYMBOL_PATH; a symbol server
-/// is never contacted); without them functions are module + offset and <see cref="FunctionsNote"/> says so.
+/// need symbols from a local, admin-only folder (<see cref="Settings.SymbolPath"/>, judged by <see cref="Util.SymbolPaths"/>;
+/// a symbol server is never contacted); without them functions are module + offset and <see cref="FunctionsNote"/> says so.
 /// </summary>
 public sealed class CpuProfile
 {

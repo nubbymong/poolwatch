@@ -31,7 +31,21 @@ public sealed class ProcessRecord
     public List<string> Services { get; set; } = [];
     /// <summary>Optional friendly label (Electron role, AICC role).</summary>
     public string? Label { get; set; }
-    public Dictionary<string, string> Context { get; } = new();
+
+    private Dictionary<string, string>? _context;
+
+    /// <summary>
+    /// Values read from the process (its working directory, its session's environment); lock it to use it. Created on
+    /// first use: most records, the short commands of a busy PC among them, never need one.
+    /// </summary>
+    public Dictionary<string, string> Context => LazyInitializer.EnsureInitialized(ref _context);
+
+    /// <summary>A <see cref="Context"/> value, without creating the context to look.</summary>
+    public string? ContextValue(string key)
+    {
+        if (Volatile.Read(ref _context) is not { } context) return null;
+        lock (context) return context.GetValueOrDefault(key);
+    }
 
     /// <summary>When the parent exited (the child is an orphan only if it is still running <see cref="ProcessRegistry.OrphanGrace"/> later).</summary>
     public DateTime? ParentExitedUtc { get; set; }
@@ -586,9 +600,10 @@ public sealed class ProcessRegistry
         PruneCompact();
         if (_all.Count > _maxRecords)
         {
-            // Over the cap: evict to 90% (so the next sample is not over again), short-lived ones first (those outside an
-            // incident window before those inside it), oldest exit first.
-            int excess = _all.Count - _maxRecords * 9 / 10;
+            // Over the cap: evict to 80%, so a busy PC (hundreds of starts per sample) is not over again for several samples
+            // (each time over is a full pass), short-lived ones first (those outside an incident window before those inside
+            // it), oldest exit first.
+            int excess = _all.Count - _maxRecords * 4 / 5;
             var victims = shortLivedKept.OrderBy(r => Protected(r.ExitUtc!.Value)).ThenBy(r => r.ExitUtc)
                 .Concat(_all.Values.Where(r => !r.IsAlive && !keep.Contains(r.Key) && !(r.Key.CreateTime > 0 && r.ExitUtc - r.StartUtc < EventSummarizer.LongLived)).OrderBy(r => r.ExitUtc))
                 .Take(excess).ToList();

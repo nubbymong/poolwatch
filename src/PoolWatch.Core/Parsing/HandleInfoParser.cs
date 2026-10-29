@@ -4,7 +4,7 @@ using PoolWatch.Core.Model;
 namespace PoolWatch.Core.Parsing;
 
 /// <summary>
-/// Parses SYSTEM_HANDLE_INFORMATION_EX (x64): NumberOfHandles(ULONG_PTR)@0, Reserved@8, then 40-byte
+/// Parses SYSTEM_HANDLE_INFORMATION_EX (64-bit): NumberOfHandles(ULONG_PTR)@0, Reserved@8, then 40-byte
 /// SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX entries from offset 16: Object@0, UniqueProcessId@8, HandleValue@16,
 /// GrantedAccess@24, CreatorBackTraceIndex@28, ObjectTypeIndex(USHORT)@30, HandleAttributes@32, Reserved@36.
 /// Only counts are kept: (pid, type index) -> handles.

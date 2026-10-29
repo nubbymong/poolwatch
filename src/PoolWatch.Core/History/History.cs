@@ -10,6 +10,29 @@ public readonly record struct ProcPoint(int Handles, long ReadOps, long WriteOps
 }
 
 /// <summary>
+/// One process's raw points, read in place by raw sample index (<see cref="History.Points"/>): no copy, valid under the
+/// history lock until the next sample. A process's points are contiguous, from <see cref="First"/> to <see cref="Last"/>.
+/// </summary>
+public readonly struct ProcessPoints
+{
+    private readonly List<ProcPoint>? _points;
+    private readonly int _first;
+
+    internal ProcessPoints(List<ProcPoint> points, int first)
+    {
+        _points = points;
+        _first = first;
+    }
+
+    /// <summary>The raw sample index of the first point.</summary>
+    public int First => _first;
+    /// <summary>The raw sample index of the last point (below <see cref="First"/> when the process has none).</summary>
+    public int Last => _points is null ? _first - 1 : _first + _points.Count - 1;
+    public bool Has(int index) => index >= First && index <= Last;
+    public ProcPoint this[int index] => _points![index - _first];
+}
+
+/// <summary>
 /// Handles by type name per process instance at one handle scan. Keyed by (PID, create time) so a reused PID
 /// is never compared with the process that owned it earlier.
 /// </summary>
@@ -25,7 +48,10 @@ public sealed record TypedHandles(DateTime TimeUtc, IReadOnlyDictionary<ProcessK
     public bool Has(ProcessKey key) => ByProcess.ContainsKey(key);
 }
 
-/// <summary>One minute of downsampled history: average tag usage for significant tags and per-process I/O.</summary>
+/// <summary>
+/// One minute of downsampled history: average tag usage for significant tags, and the I/O of each process that did any
+/// in the minute (what the since-boot report splits each hour's growth by).
+/// </summary>
 public sealed class MinutePoint
 {
     public DateTime TimeUtc { get; init; }
@@ -35,8 +61,6 @@ public sealed class MinutePoint
     public required long[] TagBytes { get; init; }
     public required ProcessKey[] Processes { get; init; }
     public required long[] ProcessOps { get; init; }
-    public required int[] ProcessHandles { get; init; }
-    public required long[] ProcessQuota { get; init; }
 }
 
 /// <summary>
@@ -240,6 +264,10 @@ public sealed class History
         return r;
     }
 
+    /// <summary>The process's points in place (what <see cref="ProcessSeries"/> copies), for reading many processes cheaply.</summary>
+    public ProcessPoints Points(ProcessKey key) =>
+        _procs.TryGetValue(key, out var track) ? new ProcessPoints(track.Points, (int)(track.FirstSeq - _firstSeq)) : default;
+
     /// <summary>Processes with at least one point in raw samples [from, Count).</summary>
     public List<ProcessKey> ProcessesSince(int from)
     {
@@ -281,20 +309,21 @@ public sealed class History
                 if (avg >= MinuteMinBytes) { tags.Add(_tags[k]); bytes.Add(avg); }
             }
             long seqFrom = _firstSeq + from, seqTo = _firstSeq + to - 1;
-            var keys = new List<ProcessKey>(); var ops = new List<long>(); var handles = new List<int>(); var quota = new List<long>();
+            var keys = new List<ProcessKey>(); var ops = new List<long>();
             foreach (var (key, track) in _procs)
             {
                 if (track.LastSeq < seqFrom || track.FirstSeq > seqTo) continue; // gone before, or new in the boundary sample
                 var first = track.Points[(int)Math.Max(0, seqFrom - track.FirstSeq)];
                 var last = track.Points[(int)Math.Min(track.Points.Count - 1, seqTo - track.FirstSeq)];
                 long dOps = last.TotalOps - first.TotalOps;
-                if (dOps <= 0 && track.FirstSeq < seqFrom) continue; // idle and old: not needed for attribution
-                keys.Add(key); ops.Add(Math.Max(0, dOps)); handles.Add(last.Handles); quota.Add(last.QuotaPaged + last.QuotaNonPaged);
+                // No I/O in the minute: nothing to attribute. On a busy PC that is most short commands, seen in one sample.
+                if (dOps <= 0) continue;
+                keys.Add(key); ops.Add(dOps);
             }
             _minutes.Add(new MinutePoint
             {
                 TimeUtc = _minuteStart, Totals = _totals[to - 1], System = _system[to - 1], Tags = tags.ToArray(), TagBytes = bytes.ToArray(),
-                Processes = keys.ToArray(), ProcessOps = ops.ToArray(), ProcessHandles = handles.ToArray(), ProcessQuota = quota.ToArray(),
+                Processes = keys.ToArray(), ProcessOps = ops.ToArray(),
             });
             var cutoff = now - MinuteSpan;
             int drop = 0;

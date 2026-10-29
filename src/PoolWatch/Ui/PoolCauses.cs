@@ -354,17 +354,47 @@ internal static class RankPlan
 /// <summary>
 /// The rankings of growing tags (the old tag page's suspects). <see cref="Pump"/> builds the next one <see cref="RankPlan"/>
 /// picks on a pool thread, one at a time, so the window never waits on the correlator; the rows show what is cached
-/// (a blank cause until the first ranking). Thread-safe.
+/// (a blank cause until the first ranking). A tag that stops growing keeps its last ranking, so its released row still
+/// has a cause and a summary to copy, until the oldest are dropped past <see cref="MaxCached"/> or the window hides and
+/// drops them all (<see cref="Clear"/>). Thread-safe.
 /// </summary>
 internal sealed class TagRankings
 {
+    /// <summary>The most rankings kept, the oldest dropped first. Each holds only what its row shows (a few owners and events).</summary>
+    public const int MaxCached = 64;
     private readonly object _lock = new();
     private readonly Dictionary<PoolTag, (TagViewData? view, DateTime builtUtc)> _views = new();
     private PoolTag? _building;
     private DateTime _lastBuildUtc = DateTime.MinValue;
+    /// <summary>Bumped by <see cref="Clear"/>: a ranking started before it is not stored.</summary>
+    private int _generation;
     private readonly Func<DateTime> _now;
 
     public TagRankings(Func<DateTime>? now = null) => _now = now ?? (() => DateTime.UtcNow);
+
+    /// <summary>What the rankings hold, for PoolWatch's own cost report: the rankings, their owners, the owners' kept processes and the events.</summary>
+    public (int rankings, int owners, int ownerMembers, int events) Held()
+    {
+        lock (_lock)
+        {
+            var views = _views.Values.Select(v => v.view).OfType<TagViewData>().ToList();
+            return (_views.Count, views.Sum(v => v.Owners.Count), views.Sum(v => v.Owners.Sum(o => o.Members.Count)), views.Sum(v => v.Events.Count));
+        }
+    }
+
+    /// <summary>
+    /// Drops every ranking, for when the window hides (nothing shows them, and the next show ranks afresh); a ranking
+    /// running now is discarded when it finishes.
+    /// </summary>
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _views.Clear();
+            _lastBuildUtc = DateTime.MinValue;
+            _generation++;
+        }
+    }
 
     /// <summary>The cached ranking, or null when the tag has none yet.</summary>
     public TagViewData? Get(PoolTag tag)
@@ -403,6 +433,7 @@ internal sealed class TagRankings
     public PoolTag? Pump(Func<PoolTag, TagViewData?> build, IReadOnlyList<PoolTag> wanted, PoolTag? selected, Action done)
     {
         PoolTag tag;
+        int generation;
         lock (_lock)
         {
             if (_building is not null) return null;
@@ -410,6 +441,7 @@ internal sealed class TagRankings
             if (RankPlan.Next(wanted, selected, built, _lastBuildUtc, _now()) is not { } next) return null;
             tag = next;
             _building = tag;
+            generation = _generation;
         }
         Task.Run(() =>
         {
@@ -423,12 +455,15 @@ internal sealed class TagRankings
             {
                 lock (_lock)
                 {
-                    var now = _now();
-                    _views[tag] = (view, now);
-                    _lastBuildUtc = now;
                     _building = null;
-                    if (_views.Count > 64)
-                        foreach (var old in _views.OrderBy(kv => kv.Value.builtUtc).Take(_views.Count - 64).Select(kv => kv.Key).ToList()) _views.Remove(old);
+                    if (generation == _generation)
+                    {
+                        var now = _now();
+                        _views[tag] = (view, now);
+                        _lastBuildUtc = now;
+                        if (_views.Count > MaxCached)
+                            foreach (var old in _views.OrderBy(kv => kv.Value.builtUtc).Take(_views.Count - MaxCached).Select(kv => kv.Key).ToList()) _views.Remove(old);
+                    }
                 }
                 done();
             }
