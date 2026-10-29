@@ -6,8 +6,11 @@ using PoolWatch.Engine.Changes;
 
 namespace PoolWatch.Engine;
 
-/// <summary>A non-Microsoft scheduled task the owner may disable (addendum 4 C).</summary>
-internal sealed record ScheduledTaskView(string Path, string Name, string Author, bool Enabled, string Runs, string NextRun);
+/// <summary>
+/// A non-Microsoft scheduled task the owner may disable (addendum 4 C). <paramref name="Starts"/>: when it starts, in
+/// plain words from the kinds of its triggers (<see cref="TaskTriggers.Words"/>), "" when none can be named.
+/// </summary>
+internal sealed record ScheduledTaskView(string Path, string Name, string Author, bool Enabled, string Runs, string NextRun, string Starts = "");
 
 /// <summary>A startup entry (Run key or Startup folder), with Task Manager's enabled state.</summary>
 internal sealed record StartupView(string Name, string Command, string Location, bool Enabled, bool Microsoft);
@@ -64,7 +67,19 @@ internal sealed class TasksAndStartup : ITaskToggles
                         if ((int)a.Type == 0) { runs = ((string)a.Path + " " + (string)a.Arguments).Trim(); break; }
                 }
                 catch { }
-                list.Add(new ScheduledTaskView((string)t.Path, (string)t.Name, author, (bool)t.Enabled, runs, SafeTime(() => (DateTime)t.NextRunTime)));
+                // When it starts: the kinds of its first few triggers (read only, each released with the call).
+                var triggers = new List<int>();
+                try
+                {
+                    foreach (dynamic tr in com.Each(def!.Triggers))
+                    {
+                        try { triggers.Add((int)tr.Type); } catch { }
+                        if (triggers.Count >= MaxTriggers) break;
+                    }
+                }
+                catch { }
+                list.Add(new ScheduledTaskView((string)t.Path, (string)t.Name, author, (bool)t.Enabled, runs, SafeTime(() => (DateTime)t.NextRunTime),
+                    TaskTriggers.Words(triggers)));
             }
         }
         catch { }
@@ -75,6 +90,9 @@ internal sealed class TasksAndStartup : ITaskToggles
             }
             catch { }
     }
+
+    /// <summary>The most triggers of one task read for its "starts" words.</summary>
+    private const int MaxTriggers = 8;
 
     private static string SafeTime(Func<DateTime> f) { try { var t = f(); return t.Year > 1900 ? t.ToString("g") : ""; } catch { return ""; } }
 

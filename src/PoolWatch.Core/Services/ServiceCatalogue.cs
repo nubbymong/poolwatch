@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -10,7 +11,7 @@ public enum ServiceGroup
     Optional,
     /// <summary>Not on the catalogue and not signed by Microsoft: "unknown: you decide" (a second confirmation).</summary>
     Unknown,
-    /// <summary>Never offered: security, Windows Update, input/audio, Insider while enrolled, core/boot, drivers.</summary>
+    /// <summary>Never offered: security, Windows Update, input/audio, Hyper-V and WSL, Insider while enrolled, core/boot, drivers.</summary>
     Protected,
 }
 
@@ -30,8 +31,10 @@ public sealed record CatalogueEntry
     /// <summary>What the owner loses with it off.</summary>
     [JsonPropertyName("lose")] public string Lose { get; init; } = "";
     [JsonPropertyName("risk")] public ServiceRisk Risk { get; init; } = ServiceRisk.CheckFirst;
-    /// <summary>In the "Dev workstation" preset.</summary>
-    [JsonPropertyName("preset")] public bool DevPreset { get; init; }
+    /// <summary>
+    /// In the "Agentic coding PC" preset: ticked only when the entry has an official source too (<see cref="ServicePlan.InAgenticPreset"/>).
+    /// </summary>
+    [JsonPropertyName("preset")] public bool AgenticPreset { get; init; }
     [JsonPropertyName("off")] public OffStartType Off { get; init; } = OffStartType.Disabled;
     /// <summary>An extra note (e.g. "may affect Insider flights", "turn the family off together").</summary>
     [JsonPropertyName("note")] public string? Note { get; init; }
@@ -40,6 +43,168 @@ public sealed record CatalogueEntry
     /// is known; a vendor service has no Windows default and is left out.
     /// </summary>
     [JsonPropertyName("windowsDefault")] public Dictionary<string, string>? WindowsDefaults { get; init; }
+
+    /// <summary>
+    /// Where the advice to turn it off comes from (its "source" object); <see cref="ServiceSource.None"/> when the entry
+    /// has none, or "source" is null.
+    /// </summary>
+    [JsonPropertyName("source")] public ServiceSource Source { get => _source; init => _source = value ?? ServiceSource.None; }
+    private readonly ServiceSource _source = ServiceSource.None;
+}
+
+/// <summary>Which official source turns a catalogue entry's services off: the "kind" of its "source" object.</summary>
+public enum ServiceSourceKind
+{
+    /// <summary>"none": no official source. Also an entry with no "source" at all.</summary>
+    None,
+    /// <summary>"wdot": Microsoft's Windows Desktop Optimization Tool turns it off. The tool is written for virtual desktops.</summary>
+    Wdot,
+    /// <summary>"cis": the CIS Microsoft Windows 11 Benchmark turns it off. It is a security checklist for company PCs.</summary>
+    Cis,
+    /// <summary>"both": both of them turn it off.</summary>
+    Both,
+}
+
+/// <summary>
+/// Where the advice to turn a catalogue entry off comes from, as services-catalogue.json gives it:
+/// <c>"source": { "kind": "wdot" | "cis" | "both" | "none", "wdotRef": "...", "cisRef": "...", "checked": "YYYY-MM-DD" }</c>.
+/// "kind" is required inside the object and must be one of those four words, written in lower case; the other three are
+/// optional. A missing kind, any other kind, or a value of the wrong type fails the catalogue's load
+/// (<see cref="ServiceSourceConverter"/>), so a typo in the data is caught by the tests rather than read as some other
+/// source. Other properties in the object are skipped.
+/// </summary>
+/// <param name="Kind">Which source turns it off.</param>
+/// <param name="WdotRef">Where in Microsoft's tool it is turned off, for whoever checks the row again.</param>
+/// <param name="CisRef">Which CIS Benchmark recommendation turns it off.</param>
+/// <param name="Checked">When the row was last checked against its sources.</param>
+[JsonConverter(typeof(ServiceSourceConverter))]
+public sealed record ServiceSource(ServiceSourceKind Kind, string? WdotRef = null, string? CisRef = null, DateOnly? Checked = null)
+{
+    /// <summary>No official source: what an entry without a "source" has.</summary>
+    public static readonly ServiceSource None = new(ServiceSourceKind.None);
+}
+
+/// <summary>
+/// Reads and writes a "source" object strictly. The load fails (a <see cref="JsonException"/>) when the source is not an
+/// object, its "kind" is missing, null or not exactly "wdot", "cis", "both" or "none", a reference is not text, or
+/// "checked" is not a date written YYYY-MM-DD; the error says what was read instead. Property names are matched in any
+/// case, as in the rest of the catalogue, and other properties are skipped. An empty reference is no reference. Writing
+/// a kind that is not one of the four fails the same way, so nothing is written that would not read back.
+/// </summary>
+internal sealed class ServiceSourceConverter : JsonConverter<ServiceSource>
+{
+    private const string DateFormat = "yyyy-MM-dd";
+
+    private static readonly (string Word, ServiceSourceKind Kind)[] Kinds =
+        [("none", ServiceSourceKind.None), ("wdot", ServiceSourceKind.Wdot), ("cis", ServiceSourceKind.Cis), ("both", ServiceSourceKind.Both)];
+
+    public override ServiceSource Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType != JsonTokenType.StartObject)
+            throw new JsonException($"A service's \"source\" must be an object, not {Shown(ref reader)}.");
+        ServiceSourceKind? kind = null;
+        string? wdotRef = null, cisRef = null;
+        DateOnly? checkedOn = null;
+        while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
+        {
+            string name = reader.GetString() ?? "";
+            reader.Read();
+            if (Is(name, "kind")) kind = ReadKind(ref reader);
+            else if (Is(name, "wdotRef")) wdotRef = ReadText(ref reader, "wdotRef");
+            else if (Is(name, "cisRef")) cisRef = ReadText(ref reader, "cisRef");
+            else if (Is(name, "checked")) checkedOn = ReadDate(ref reader);
+            else reader.Skip();
+        }
+        return kind is { } k ? new ServiceSource(k, wdotRef, cisRef, checkedOn) : throw new JsonException("A service's \"source\" has no \"kind\".");
+    }
+
+    public override void Write(Utf8JsonWriter writer, ServiceSource value, JsonSerializerOptions options)
+    {
+        string word = WordOf(value.Kind);
+        writer.WriteStartObject();
+        writer.WriteString("kind", word);
+        if (value.WdotRef is { } wdot) writer.WriteString("wdotRef", wdot);
+        if (value.CisRef is { } cis) writer.WriteString("cisRef", cis);
+        if (value.Checked is { } date) writer.WriteString("checked", date.ToString(DateFormat, CultureInfo.InvariantCulture));
+        writer.WriteEndObject();
+    }
+
+    private const string KindWords = "\"wdot\", \"cis\", \"both\" or \"none\"";
+
+    private static bool Is(string name, string property) => name.Equals(property, StringComparison.OrdinalIgnoreCase);
+
+    private static string WordOf(ServiceSourceKind kind)
+    {
+        foreach (var (w, k) in Kinds)
+            if (k == kind) return w;
+        throw new JsonException($"A service's source kind must be {KindWords}, not the value {(int)kind}.");
+    }
+
+    private static ServiceSourceKind ReadKind(ref Utf8JsonReader reader)
+    {
+        string? word = reader.TokenType == JsonTokenType.String ? reader.GetString() : null;
+        foreach (var (w, kind) in Kinds)
+            if (string.Equals(word, w, StringComparison.Ordinal)) return kind;
+        throw new JsonException($"A service's source \"kind\" must be {KindWords}, not {Shown(ref reader)}.");
+    }
+
+    private static string? ReadText(ref Utf8JsonReader reader, string property) => reader.TokenType switch
+    {
+        JsonTokenType.Null => null,
+        JsonTokenType.String => reader.GetString() is { } s && !string.IsNullOrWhiteSpace(s) ? s.Trim() : null,
+        _ => throw new JsonException($"A service's source \"{property}\" must be text, not {Shown(ref reader)}."),
+    };
+
+    private static DateOnly? ReadDate(ref Utf8JsonReader reader)
+    {
+        if (reader.TokenType == JsonTokenType.Null) return null;
+        if (reader.TokenType == JsonTokenType.String
+            && DateOnly.TryParseExact(reader.GetString(), DateFormat, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+            return date;
+        throw new JsonException($"A service's source \"checked\" must be a date written YYYY-MM-DD, not {Shown(ref reader)}.");
+    }
+
+    /// <summary>
+    /// What was read where a value was refused, for the load error: text in quotes as written, else the kind of value.
+    /// System.Text.Json does not add the JSON path to an error with its own message, so this is what lets a typo be found.
+    /// </summary>
+    private static string Shown(ref Utf8JsonReader reader) => reader.TokenType switch
+    {
+        JsonTokenType.String => $"\"{reader.GetString()}\"",
+        JsonTokenType.Number => "a number",
+        JsonTokenType.True => "true",
+        JsonTokenType.False => "false",
+        JsonTokenType.Null => "null",
+        JsonTokenType.StartObject => "an object",
+        JsonTokenType.StartArray => "a list",
+        _ => reader.TokenType.ToString(),
+    };
+}
+
+/// <summary>
+/// What the Services tab says about a catalogue entry's source. Each line says what the source is written for, and never
+/// that a service is safe to turn off: Microsoft's tool is written for virtual desktops, which are copies of Windows run
+/// on a server, and the CIS Benchmark is a security checklist for company PCs, so something they turn off may still
+/// matter on your own PC.
+/// </summary>
+public static class ServiceSourceText
+{
+    public const string WdotLabel = "Microsoft's virtual-desktop optimisation tool turns this off";
+    public const string CisLabel = "The CIS security checklist for company PCs turns this off";
+    public const string BothLabel = "Microsoft's virtual-desktop tool and the CIS security checklist turn this off";
+    public const string NoneLabel = "No official source";
+
+    /// <summary>The one caveat line for a group of services that carries these sources (the Windows services group).</summary>
+    public const string GroupCaveat = "These sources were written for virtual desktops and company PCs. Check what you lose first.";
+
+    /// <summary>The line for a source; <see cref="NoneLabel"/> for none, and for a value that is not one of the four.</summary>
+    public static string Label(ServiceSourceKind kind) => kind switch
+    {
+        ServiceSourceKind.Wdot => WdotLabel,
+        ServiceSourceKind.Cis => CisLabel,
+        ServiceSourceKind.Both => BothLabel,
+        _ => NoneLabel,
+    };
 }
 
 /// <summary>
@@ -161,6 +326,10 @@ public sealed class ServiceCatalogue
 /// <summary>Loads the shipped catalogue (embedded services-catalogue.json) or an external data file.</summary>
 public static class DefaultCatalogue
 {
+    /// <summary>The shipped catalogue, read once (settings use it to check the services a profile lists).</summary>
+    public static ServiceCatalogue Shared => _shared.Value;
+    private static readonly Lazy<ServiceCatalogue> _shared = new(() => Load());
+
     public static ServiceCatalogue Load(string? externalFile = null)
     {
         if (externalFile is not null && System.IO.File.Exists(externalFile))

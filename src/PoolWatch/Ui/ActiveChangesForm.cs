@@ -9,8 +9,9 @@ namespace PoolWatch.Ui;
 /// Active changes: every lasting change PoolWatch made on this PC that is still in effect, in three groups: the features
 /// you turned on (each with Turn off, or Remove for a shortcut), what PoolWatch turned off (each with Put back), and any
 /// other change (Put back). A row says what it is and how it was before; one PoolWatch cannot put back says so and why, and
-/// one the uninstaller leaves says so too. Put all back first lists the changes and their caveats and then asks each
-/// warning on its own. Both put back only what the window showed, as it showed it. The list is read off the UI thread when the window opens and again after each action. Opened
+/// one the uninstaller leaves says so too. Put all back first lists the changes and their caveats (the profile applied at
+/// start's once, for all its services) and then asks each other warning on its own. Both put back only what the window
+/// showed, as it showed it. The list is read off the UI thread when the window opens and again after each action. Opened
 /// from the main window's footer, the setup guide and the tray menu; created when opened and disposed when closed, so it
 /// costs nothing while it is not shown. The logic is in <see cref="ActiveChangesView"/>, which the tests drive with no window.
 /// </summary>
@@ -463,7 +464,8 @@ internal static class ActiveChangesView
 
     /// <summary>
     /// Put all back's question: what it does, then each change with its caveat (a warning to accept, or why it cannot be
-    /// put back), the first <see cref="MaxListed"/> of them.
+    /// put back), the first <see cref="MaxListed"/> of them; then, once for all the services the profile applied at start
+    /// lists (listed or not), that it would turn them off again and that Put all back takes them out of it.
     /// </summary>
     internal static string PutAllBackQuestion(IReadOnlyList<ActiveChange> changes)
     {
@@ -471,10 +473,12 @@ internal static class ActiveChangesView
         foreach (var c in changes.Take(MaxListed))
         {
             text.Append("\n- ").Append(c.What);
-            string? caveat = !c.CanUndo ? ChangeWords.CannotPutBackLine(c.Note) : c.Warning ?? c.Note;
+            string? caveat = !c.CanUndo ? ChangeWords.CannotPutBackLine(c.Note) : c.AtStart is not null ? c.Note : c.Warning ?? c.Note;
             if (caveat is not null) text.Append("\n   ").Append(caveat);
         }
         if (changes.Count > MaxListed) text.Append($"\n\nAnd {changes.Count - MaxListed} more, listed in the window.");
+        foreach (var held in changes.Where(c => c.CanUndo && c.AtStart is not null).GroupBy(c => c.AtStart!.Profile))
+            text.Append("\n\n").Append(ProfileText.KeepsOn(held.Key, held.Select(c => c.AtStart!.Service).ToList(), all: true, ChangeWords.PutAllBack));
         return text.ToString();
     }
 
@@ -483,13 +487,14 @@ internal static class ActiveChangesView
 
     /// <summary>
     /// Put all back after your yes: each warning is asked on its own (<paramref name="putBackAnyway"/>), as a single Put
-    /// back asks it, and a change you say No to stays as it is, reported as not done (Declined).
+    /// back asks it, and a change you say No to stays as it is, reported as not done (Declined); the profile applied at
+    /// start's is not asked again, as Put all back's question said it once for all its services and your yes accepted it.
     /// Which: the other changes, only as the window showed them (<see cref="AsShown"/>); every warning among them was
     /// accepted, so the run confirms.
     /// </summary>
     internal static Plan PutAllBackPlan(IReadOnlyList<ActiveChange> shown, Func<string, bool> putBackAnyway)
     {
-        var declined = shown.Where(c => c.CanUndo && c.Warning is { } warning && !putBackAnyway(warning)).ToList();
+        var declined = shown.Where(c => c.CanUndo && c.AtStart is null && c.Warning is { } warning && !putBackAnyway(warning)).ToList();
         return new(AsShown(shown.Except(declined)), declined.Select(c => (c, new UndoResult(false, "You chose not to put it back."))).ToList());
     }
 

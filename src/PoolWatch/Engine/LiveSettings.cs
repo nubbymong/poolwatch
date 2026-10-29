@@ -71,4 +71,27 @@ internal sealed class LiveSettings
         _log.Info("settings applied now: " + what);
         Applied?.Invoke(change);
     }
+
+    /// <summary>
+    /// Settings' Save: <paramref name="edited"/> becomes what the next start reads, written as <see cref="Apply"/> writes
+    /// it, with the service profiles as settings.json holds them now (the Services tab owns them and writes every change
+    /// of them through <see cref="Apply"/>, so an older copy never puts back a profile list or a profile at start that was
+    /// changed since). With <c>--config</c>, which is read-only, nothing is written: that file's settings, its service
+    /// profiles and the one it would apply at start included, never become PoolWatch's own. False when nothing was
+    /// written. Throws when settings.json cannot be read or written (nothing changes then).
+    /// </summary>
+    public bool SaveForNextStart(Settings edited)
+    {
+        if (!_persist) return false;
+        lock (_lock)
+        {
+            string file = _paths.SettingsFile;
+            edited.ServiceProfiles = Settings.Load(file).ServiceProfiles;
+            edited.Normalize();
+            edited.Save(_paths.Guard.CheckReal(file + ".tmp"));
+            File.Move(_paths.Guard.CheckReal(file + ".tmp"), _paths.Guard.CheckReal(file), overwrite: true);
+        }
+        _log.Info("settings saved for the next start (Settings)");
+        return true;
+    }
 }

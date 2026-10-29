@@ -39,7 +39,7 @@ internal sealed class SettingsDialog : Form
 
     /// <param name="shortcut">Offers to make the Codex shortcut again (ChatGPT desktop installed, the shortcut not on the desktop); null leaves it out.</param>
     public SettingsDialog(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions, LiveSettings live, IShell shell, ShortcutOffer? shortcut = null)
-        : this(new SettingsEditor(engine, analysis, actions, live, shell), shortcut)
+        : this(new SettingsEditor(analysis, actions, live, shell), shortcut)
     {
         _engine = engine;
         _live = live;

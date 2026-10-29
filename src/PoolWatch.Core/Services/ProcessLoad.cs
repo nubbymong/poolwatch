@@ -14,6 +14,19 @@ public static class ProcessLoad
 
     public sealed record ProcessRate(ProcessKey Key, string Image, double Cores, long PageFaultsPerSec);
 
+    /// <summary>
+    /// What each process costs in the window <paramref name="rates"/> covers, by (pid, create time): its rate, (0, 0) for
+    /// a process the window does not list (it was idle there, or new in it); null for every process while there is no
+    /// window yet (PoolWatch has not measured anything). The lists that say "now" read this, not an average.
+    /// </summary>
+    public static Func<ProcessKey, (double cores, long faultsPerSec)?> CostNow(Rates? rates)
+    {
+        if (rates is null) return _ => null;
+        var byKey = new Dictionary<ProcessKey, ProcessRate>(rates.Processes.Count);
+        foreach (var r in rates.Processes) byKey.TryAdd(r.Key, r);
+        return key => byKey.TryGetValue(key, out var r) ? (r.Cores, r.PageFaultsPerSec) : (0, 0);
+    }
+
     /// <param name="cores">Logical processors, for the CPU fraction.</param>
     public static Rates Between(IReadOnlyList<ProcessSample> prev, IReadOnlyList<ProcessSample> cur, TimeSpan elapsed, int cores)
     {

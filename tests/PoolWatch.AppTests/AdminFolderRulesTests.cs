@@ -10,26 +10,25 @@ namespace PoolWatch.AppTests;
 /// </summary>
 internal static class Sddl
 {
-    private const string TrustedInstaller = TrustedInstallerSid;
     public const string TrustedInstallerSid = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
     /// <summary>A signed-in account (made up), for "the account itself".</summary>
     public const string SomeoneSid = "S-1-5-21-1-2-3-1001";
     public const string OtherSid = "S-1-5-21-1-2-3-1002";
 
     /// <summary>Program Files as Windows sets it: users may read and run what is in it, only administrators and Windows change it.</summary>
-    public const string ProgramFiles = $"O:{TrustedInstaller}G:{TrustedInstaller}D:PAI(A;;FA;;;{TrustedInstaller})(A;CIIO;GA;;;{TrustedInstaller})" +
+    public const string ProgramFiles = $"O:{TrustedInstallerSid}G:{TrustedInstallerSid}D:PAI(A;;FA;;;{TrustedInstallerSid})(A;CIIO;GA;;;{TrustedInstallerSid})" +
         "(A;;0x1301bf;;;SY)(A;OICIIO;GA;;;SY)(A;;0x1301bf;;;BA)(A;OICIIO;GA;;;BA)(A;;0x1200a9;;;BU)(A;OICIIO;GXGR;;;BU)(A;OICIIO;GA;;;CO)" +
         "(A;;0x1200a9;;;AC)(A;OICIIO;GXGR;;;AC)";
 
     /// <summary>A folder setup made in Program Files, with the rules it took from there.</summary>
-    public const string Installed = $"O:BAG:SYD:AI(A;ID;FA;;;{TrustedInstaller})(A;CIIOID;GA;;;{TrustedInstaller})(A;ID;FA;;;SY)(A;OICIIOID;GA;;;SY)" +
+    public const string Installed = $"O:BAG:SYD:AI(A;ID;FA;;;{TrustedInstallerSid})(A;CIIOID;GA;;;{TrustedInstallerSid})(A;ID;FA;;;SY)(A;OICIIOID;GA;;;SY)" +
         "(A;ID;FA;;;BA)(A;OICIIOID;GA;;;BA)(A;ID;0x1200a9;;;BU)(A;OICIIOID;GXGR;;;BU)(A;OICIIOID;GA;;;CO)(A;ID;0x1200a9;;;AC)(A;OICIIOID;GXGR;;;AC)";
 
     /// <summary>
     /// The same folder made by an account that owns what it makes (UAC off, or the built-in Administrator, with Windows'
     /// "default owner: object creator"): that account owns it and has full control through CREATOR OWNER.
     /// </summary>
-    public const string InstalledByItsOwner = $"O:{SomeoneSid}G:SYD:AI(A;ID;FA;;;{TrustedInstaller})(A;ID;FA;;;SY)(A;ID;FA;;;BA)" +
+    public const string InstalledByItsOwner = $"O:{SomeoneSid}G:SYD:AI(A;ID;FA;;;{TrustedInstallerSid})(A;ID;FA;;;SY)(A;ID;FA;;;BA)" +
         $"(A;ID;0x1200a9;;;BU)(A;ID;FA;;;{SomeoneSid})(A;OICIIOID;GA;;;CO)";
 
     /// <summary>An admin-only folder's rules with one more rule (an ACE string) added.</summary>

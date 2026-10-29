@@ -204,6 +204,14 @@ public sealed class Settings
     [System.ComponentModel.Browsable(false)]
     public bool StartAtLogon { get; set; }
 
+    /// <summary>
+    /// The owner's named service profiles (each a list of services to keep off), the one applied when PoolWatch starts and
+    /// how many minutes after. Not edited in the grid: the Services tab saves them. A profile or entry that cannot be used
+    /// is left out when read, with why (<see cref="Services.ServiceProfileSet.Problems"/>, logged at start).
+    /// </summary>
+    [System.ComponentModel.Browsable(false)]
+    public Services.ServiceProfileSet ServiceProfiles { get; set; } = new();
+
     private static readonly JsonSerializerOptions Json = new()
     {
         WriteIndented = true,
@@ -310,6 +318,8 @@ public sealed class Settings
         // Rules edited in the UI or a hand-written settings.json: drop nonsense, keep windows within the raw history.
         GrowthRules = GrowthRules.Where(r => r is not null && r.WindowMinutes > 0 && r.Bytes > 0)
             .Select(r => new GrowthRule(Math.Min(r.WindowMinutes, 60), r.Bytes)).ToList();
+        // A profile lists only services the shipped catalogue offers and the protected gate allows; the rest is left out.
+        ServiceProfiles = Services.ServiceProfileRules.Clean(ServiceProfiles ?? new(), Services.DefaultCatalogue.Shared);
     }
 
     public const int MaxPathSettingLength = 260, MaxSymbolPathLength = 2048;

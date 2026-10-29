@@ -40,6 +40,12 @@ internal static class UiRunner
         engine.Profile = () => CostReport.Json(engine, analysis, app.RankingsHeld());
         // The token-leak guard's sign-in check (the tray app is what the logon task starts).
         if (settings.TokenGuardEnabled && !smoke) _ = app.StartTokenGuard();
+        // The service profile chosen to apply at start, after its delay, through Apply's own path; it asks nothing, and the
+        // tray says what it changed (a click opens Active changes) and where the log says why a service was not changed.
+        using var stopProfile = new CancellationTokenSource();
+        analysis.Diagnostics.Services.Profiles = () => live.Running.ServiceProfiles;
+        _ = ProfileAtStart.ForApp(live, analysis.Diagnostics.Services, log.Info, smoke, explicitConfig: opt.ConfigFile is not null, CacheHelper.IsElevated,
+            stopProfile.Token, done: (profile, run) => { if (ProfileAtStart.Notice(profile, run, paths.LogFile) is { } text) app.NotifyChanges(text); });
         // The guide for AI assistants in the data folder, written only when missing or older.
         Task.Run(() => AgentsGuide.EnsureInDataRoot(paths, log));
         // The one-time move of the old per-user data, in the background once the tray and the guard run.
@@ -81,6 +87,7 @@ internal static class UiRunner
             if (secs >= 300) app.Form.StartSoakCycle(); // UI soak: walk the views like a user so the costly ones run
         }
         Application.Run(app);
+        stopProfile.Cancel();
         analysis.Diagnostics.StopTokenGuard();
         engine.Stop();
         try { analysis.Finish(paths.OutDir ?? paths.DataRoot); } catch (Exception ex) { log.Info("finishing incidents failed: " + ex); }

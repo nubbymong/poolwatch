@@ -15,7 +15,7 @@ namespace PoolWatch.Ui;
 /// <summary>What the setup guide and the suggestions ask of the app around them (the tray app implements it).</summary>
 internal interface IShell
 {
-    /// <summary>Shows the main window in Advanced view on a tab: 0 Pool causes, 1 Services.</summary>
+    /// <summary>Shows the main window in Advanced view on a tab: 0 Pool causes, 1 Services, 2 Tasks and startup apps.</summary>
     void ShowAdvanced(int tab);
     void ShowActiveChanges();
     /// <summary>Opens Report an issue, with that incident's summary offered when a folder is given.</summary>

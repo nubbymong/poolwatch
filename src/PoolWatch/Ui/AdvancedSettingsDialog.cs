@@ -1,9 +1,10 @@
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// Settings, Advanced: every setting in the property grid, as the old Settings tab showed it, with the same Save. It edits
-/// the same settings as the plain form (<see cref="SettingsEditor"/>). Created on first use, reused while Settings is open,
-/// and disposed with it.
+/// Settings, Advanced: the settings in the property grid, as the old Settings tab showed it, with the same Save. Three are
+/// hidden from the grid, as other controls set them (<see cref="Core.Settings"/>: the graph's Show RAM switch, the Start at
+/// logon checkbox and the Services tab's profiles). It edits the same settings as the plain form
+/// (<see cref="SettingsEditor"/>). Created on first use, reused while Settings is open, and disposed with it.
 /// </summary>
 internal sealed class AdvancedSettingsDialog : Form
 {

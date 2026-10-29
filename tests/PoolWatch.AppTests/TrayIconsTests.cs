@@ -50,7 +50,7 @@ public class TrayIconsTests
         using (var settings = new SettingsDialog(new PoolWatch.Core.Settings(), null)) Assert.Same(TrayIcons.App, settings.Icon);
         using (var about = new AboutDialog(new AboutFacts("1.0.0", "samples", "overhead", @"C:\ProgramData\PoolWatch"), actions: null)) Assert.Same(TrayIcons.App, about.Icon);
         using (var f = new ChangeFixture())
-        using (var advanced = new AdvancedSettingsDialog(new SettingsEditor(engine: null!, analysis: null!, actions: null!, f.Live(), shell: null!)))
+        using (var advanced = new AdvancedSettingsDialog(new SettingsEditor(analysis: null!, actions: null!, f.Live(), shell: null!)))
             Assert.Same(TrayIcons.App, advanced.Icon);
         using (var notice = GuardNotices.NewNotice("The token-leak guard is on.", ("OK", null))) Assert.Same(TrayIcons.App, notice.Icon);
         Assert.False(TrayIcons.App.Size.IsEmpty);

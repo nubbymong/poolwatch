@@ -131,6 +131,9 @@ public class SimpleSettingsTests
             Assert.Contains("automatic clearing, the token-leak guard and update notices", text, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("the next time PoolWatch starts", text);
         }
+        // With --config nothing is saved for the next start, and Save says so.
+        Assert.Contains("automatic clearing, the token-leak guard and update notices apply now", SimpleSettings.NotSavedWithConfig, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Nothing is saved for the next time PoolWatch starts", SimpleSettings.NotSavedWithConfig);
         Assert.DoesNotContain("CaptureOnAlert", SimpleSettings.DeeperCaptureHint(new Settings())); // a setting's name is not plain words
     }
 
@@ -233,8 +236,8 @@ public class SimpleSettingsTests
         new Settings { DeeperCapture = true }.Save(f.Paths.SettingsFile); // saved for the next start
         var running = new Settings { AutoClearEnabled = true, AutoClearEveryHours = 1 }; // in effect now, not saved yet
 
-        // The editor as Settings makes it; its constructor only keeps the engine, the analysis, the actions and the shell.
-        static Settings Opened(LiveSettings live) => new SettingsEditor(engine: null!, analysis: null!, actions: null!, live, shell: null!).Edit;
+        // The editor as Settings makes it; its constructor only keeps the analysis, the actions and the shell.
+        static Settings Opened(LiveSettings live) => new SettingsEditor(analysis: null!, actions: null!, live, shell: null!).Edit;
         var edit = Opened(f.Live(running, persist: true));
         Assert.True(edit.DeeperCapture);
         Assert.True(edit.AutoClearEnabled);

@@ -116,11 +116,12 @@ public static class ChangeWords
         };
     }
 
-    /// <summary>"service · was Automatic and running", "service · set to its Windows default · was Manual".</summary>
-    public static string ServiceDetail(ServiceStartType originalStart, bool originalRunning, bool turnedOff)
+    /// <summary>"service · was Automatic and running", "service · set to its Windows default · was Manual", with the profile that did it.</summary>
+    public static string ServiceDetail(ServiceStartType originalStart, bool originalRunning, bool turnedOff, string? via = null)
     {
         string was = $"was {StartWord(originalStart)}{(originalRunning ? " and running" : "")}";
-        return turnedOff ? $"service · {was}" : $"service · set to its Windows default · {was}";
+        string by = via is { } v && v.StartsWith("profile ", StringComparison.Ordinal) ? " · " + v : "";
+        return turnedOff ? $"service · {was}{by}" : $"service · set to its Windows default · {was}";
     }
 
     /// <summary>The start type as Windows' Services console names it.</summary>
@@ -185,9 +186,17 @@ public static class ChangeWords
     public static string ServiceName(string displayName, string service) =>
         displayName.Length > 0 && !displayName.Equals(service, StringComparison.OrdinalIgnoreCase) ? $"{displayName} ({service})" : service;
 
-    public static string Service(string displayName, string service, bool turnedOff) => turnedOff
-        ? $"Turned off {ServiceName(displayName, service)}"
+    /// <summary>
+    /// "Turned off Downloaded Maps Manager (MapsBroker)", with the profile that did it when one did ("... (profile Build
+    /// box, at start)"); "Set ... back to its Windows default".
+    /// </summary>
+    public static string Service(string displayName, string service, bool turnedOff, string? via = null) => turnedOff
+        ? $"Turned off {ServiceName(displayName, service)}" + (via is { } v && v.StartsWith("profile ", StringComparison.Ordinal) ? $" ({v})" : "")
         : $"Set {ServiceName(displayName, service)} back to its Windows default";
+
+    /// <summary>The warning before putting back a service the profile applied at start lists: it would be turned off again, so putting it back takes it out.</summary>
+    public static string KeptOffAtStart(string profile, string name) =>
+        $"{profile}, the profile PoolWatch applies when it starts, turns {name} off again then. Putting it back also takes it out of {profile}, so it stays on.";
 
     public static string ScheduledTask(string taskPath, bool enabledNow) => $"Turned {OnOff(enabledNow)} the scheduled task {taskPath}";
 

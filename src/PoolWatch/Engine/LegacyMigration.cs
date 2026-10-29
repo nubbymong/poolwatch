@@ -16,10 +16,11 @@ namespace PoolWatch.Engine;
 /// every entry is opened with FILE_FLAG_OPEN_REPARSE_POINT and judged by what the handle says.</item>
 /// <item>While it runs, every directory of the old tree is held open without FILE_SHARE_DELETE, so none can be renamed,
 /// removed or swapped for a junction.</item>
-/// <item>Only PoolWatch's own data is copied (<see cref="WhyNotMoved"/>): settings.json, the logs, data\, incidents\,
+/// <item>Only PoolWatch's own data is copied (<see cref="WhyNotMoved"/>): the logs, data\, incidents\,
 /// reports\, exports\ and boots\ files of PoolWatch's own types. Never cache\ (rebuilt), symbols\ (an elevated PoolWatch
 /// parses PDBs: never from a user-writable source), requests\ or service-changes.json (Restore acts on it as an
-/// administrator: it is never taken from a folder an unelevated program could write). Files over
+/// administrator: it is never taken from a folder an unelevated program could write). settings.json is taken only by
+/// <see cref="MigrateSettings"/> at start, parsed and checked, never copied as it is. Files over
 /// <see cref="MaxFileBytes"/> (traces) are left with a note.</item>
 /// <item>Each file is read through a handle whose file ID matches the one scanned, copied to a temporary name under the
 /// admin-only root, hashed again and only then moved into place. Existing files there are never overwritten.</item>
@@ -95,7 +96,10 @@ internal sealed class LegacyMigration
         if (parts.Length == 1)
         {
             if (first == "service-changes.json") return "service records are never taken from a folder an unelevated program could write; restore those services in services.msc";
-            if (first is not ("settings.json" or "poolwatch.log" or "poolwatch.log.1" or "since-boot.md" or "since-boot.json" or "boots.md"))
+            // Only the checked settings migration at start takes settings.json (MigrateSettings: parsed, clamped, and without
+            // service profiles, which PoolWatch applies as an administrator). A copy as it is would carry them over.
+            if (first == "settings.json") return "settings are taken over only by the checked settings migration at start; set them again in Settings";
+            if (first is not ("poolwatch.log" or "poolwatch.log.1" or "since-boot.md" or "since-boot.json" or "boots.md"))
                 return "not PoolWatch's data";
         }
         else
@@ -245,7 +249,7 @@ internal sealed class LegacyMigration
                 byte[] bytes;
                 using (var h = Open(src, dir: false, GENERIC_READ | FILE_READ_ATTRIBUTES, FILE_SHARE_READ))
                 {
-                    if (h.IsInvalid) return null; // none there (or in use: the background run tries later)
+                    if (h.IsInvalid) return null; // none there, or in use (the next start tries again until the move is done)
                     var q = Query(h);
                     if ((q.Attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0 || q.Links != 1)
                         return "old settings.json not migrated: it is a link or has more than one name";

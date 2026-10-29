@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-
 namespace PoolWatch.Ui;
 
 /// <summary>
@@ -10,11 +8,15 @@ namespace PoolWatch.Ui;
 internal static class PoolCausesSort
 {
     /// <summary>
-    /// The sort after a click on <paramref name="column"/>'s header: that column ascending, or, when it is already the sorted
-    /// one, the other way round. -1 is the list's own order (no sort yet).
+    /// The sort after a click on <paramref name="column"/>'s header, by the lists' one rule (<see cref="ListSort.Next"/>):
+    /// that column ascending, or, when it is already the sorted one, the other way round. -1 is the list's own order (no
+    /// sort yet).
     /// </summary>
-    public static (int Column, bool Descending) Click((int Column, bool Descending) now, int column) =>
-        (column, column == now.Column && !now.Descending);
+    public static (int Column, bool Descending) Click((int Column, bool Descending) now, int column)
+    {
+        var (sorted, ascending) = ListSort.Next((now.Column, !now.Descending), column);
+        return (sorted, !ascending);
+    }
 
     /// <summary><paramref name="rows"/> (in the list's own order) by <paramref name="column"/>, ascending or descending.</summary>
     public static List<CauseRow> Sort(IReadOnlyList<CauseRow> rows, int column, bool descending)
@@ -45,59 +47,3 @@ internal static class PoolCausesSort
     };
 }
 
-/// <summary>
-/// The sort arrow in the Pool causes list's header: the system's own (up for ascending, down for descending) on the
-/// sorted column, none on the others. It is set again whenever the list's window is made again.
-/// </summary>
-internal static class PoolCausesHeader
-{
-    private const int LVM_GETHEADER = 0x1000 + 31, HDM_GETITEMW = 0x1200 + 11, HDM_SETITEMW = 0x1200 + 12;
-    private const int HDI_FORMAT = 0x0004, HDF_SORTDOWN = 0x0200, HDF_SORTUP = 0x0400;
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct HDITEM
-    {
-        public int mask, cxy;
-        public IntPtr pszText, hbm;
-        public int cchTextMax, fmt;
-        public IntPtr lParam;
-        public int iImage, iOrder;
-        public uint type;
-        public IntPtr pvFilter;
-        public uint state;
-    }
-
-    [DllImport("user32.dll", EntryPoint = "SendMessageW")]
-    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("user32.dll", EntryPoint = "SendMessageW")]
-    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, ref HDITEM lParam);
-
-    /// <summary>The arrow on <paramref name="column"/> (none anywhere for -1); the header's other formatting is kept.</summary>
-    public static void Show(ListView list, int column, bool descending)
-    {
-        if (!list.IsHandleCreated) return;
-        var header = SendMessage(list.Handle, LVM_GETHEADER, IntPtr.Zero, IntPtr.Zero);
-        if (header == IntPtr.Zero) return;
-        for (int i = 0; i < list.Columns.Count; i++)
-        {
-            var item = new HDITEM { mask = HDI_FORMAT };
-            if (SendMessage(header, HDM_GETITEMW, i, ref item) == IntPtr.Zero) continue;
-            int fmt = item.fmt & ~(HDF_SORTUP | HDF_SORTDOWN);
-            if (i == column) fmt |= descending ? HDF_SORTDOWN : HDF_SORTUP;
-            if (fmt == item.fmt) continue;
-            item.fmt = fmt;
-            SendMessage(header, HDM_SETITEMW, i, ref item);
-        }
-    }
-
-    /// <summary>The arrow the header shows on a column: false for up (ascending), true for down (descending), null for none (tests, CI).</summary>
-    public static bool? Arrow(ListView list, int column)
-    {
-        if (!list.IsHandleCreated) return null;
-        var header = SendMessage(list.Handle, LVM_GETHEADER, IntPtr.Zero, IntPtr.Zero);
-        var item = new HDITEM { mask = HDI_FORMAT };
-        if (header == IntPtr.Zero || SendMessage(header, HDM_GETITEMW, column, ref item) == IntPtr.Zero) return null;
-        return (item.fmt & HDF_SORTDOWN) != 0 ? true : (item.fmt & HDF_SORTUP) != 0 ? false : null;
-    }
-}

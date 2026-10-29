@@ -226,6 +226,16 @@ public sealed class ActiveChangesTests : IDisposable
     }
 
     [Fact]
+    public void AServiceTheProfileHoldsIsStillPutBackByUninstalling()
+    {
+        // Its warning is about the profile applied at start; the uninstaller puts the service back and leaves profiles alone.
+        var held = Row(ChangeKind.Service) with { Warning = ChangeWords.KeptOffAtStart("Build box", "MapsBroker"), AtStart = new AtStartHold("Build box", "MapsBroker") };
+        Assert.Null(held.UninstallLeaves);
+        Assert.Null(Row(ChangeKind.LogonTask).UninstallLeaves);
+        Assert.Equal(ChangeWords.UninstallPutsAllBack, ActiveChangesView.UninstallNote([held]));
+    }
+
+    [Fact]
     public void TurningTheTokenLeakGuardOffSaysTheWindowsSettingStaysUntilYouSignOut()
     {
         var live = _f.Live(new Settings { TokenGuardEnabled = true });
@@ -313,12 +323,12 @@ public sealed class ActiveChangesTests : IDisposable
 
         public IReadOnlyList<ServiceView> Enumerate() => _live.Values.ToList();
         public bool InsiderEnrolled() => false;
-        public string? Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
+        public (string? error, NotDone? notStopped) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
         {
             _live[op.Option.Service.Name] = _live[op.Option.Service.Name] with { StartType = op.NewStart, Running = false };
-            return null;
+            return (null, null);
         }
-        public (string? error, string? startError) Restore(ServiceChange change, IReadOnlySet<string> allowed, bool insiderEnrolled) => (null, null);
+        public (string? error, NotDone? notDone) Restore(ServiceChange change, IReadOnlySet<string> allowed, bool insiderEnrolled) => (null, null);
         public string? SetDefault(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled) => null;
     }
 

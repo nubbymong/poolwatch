@@ -145,8 +145,11 @@ public static class ChangeRecordFile
 
     private static bool Plain(string? s) => s is { Length: > 0 and <= MaxTextChars } && !s.Any(char.IsControl);
 
-    /// <summary>A task path ("\Name" or "\Folder\Name"), never one of Microsoft's (TasksAndStartup leaves those alone too).</summary>
+    /// <summary>
+    /// A task path ("\Name" or "\Folder\Name"), never one of Microsoft's (TasksAndStartup leaves those alone too), and with
+    /// no "/" in it: Windows may read one as a separator too, and the Microsoft check reads only "\".
+    /// </summary>
     private static bool IsTaskPath(string? p) =>
-        Plain(p) && p!.Length > 1 && p[0] == '\\' && !p.StartsWith(@"\Microsoft", StringComparison.OrdinalIgnoreCase) &&
+        Plain(p) && p!.Length > 1 && p[0] == '\\' && !p.Contains('/') && !p.StartsWith(@"\Microsoft", StringComparison.OrdinalIgnoreCase) &&
         p[1..].Split('\\').All(part => part.Length > 0 && part != "." && part != "..");
 }

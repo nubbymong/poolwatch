@@ -28,6 +28,9 @@ public class ActiveChangesWordsTests
     {
         Assert.Equal("service · was Automatic and running", ChangeWords.ServiceDetail(ServiceStartType.Automatic, true, turnedOff: true));
         Assert.Equal("service · was Manual", ChangeWords.ServiceDetail(ServiceStartType.Manual, false, turnedOff: true));
+        Assert.Equal("service · was Manual · profile Build box, at start",
+            ChangeWords.ServiceDetail(ServiceStartType.Manual, false, turnedOff: true, "profile Build box, at start"));
+        Assert.Equal("service · was Manual", ChangeWords.ServiceDetail(ServiceStartType.Manual, false, turnedOff: true, "manual"));
         Assert.Equal("service · set to its Windows default · was Disabled", ChangeWords.ServiceDetail(ServiceStartType.Disabled, false, turnedOff: false));
     }
 
@@ -125,8 +128,8 @@ public class ActiveChangesWordsTests
             ChangeWords.OtherHeading, ChangeWords.NothingActive, ChangeWords.PutAllBack, ChangeWords.UninstallPutsAllBack,
             ChangeWords.UninstallPutsBackTheOthers, ChangeWords.CannotPutBack, ChangeWords.UninstallLeaves, ChangeWords.UninstallNeedsYourYes,
             ChangeWords.LogonTaskTitle, ChangeWords.LogonTaskDetail, ChangeWords.AutoClearTitle, ChangeWords.TokenGuardTitle, ChangeWords.ShortcutDetail,
-            ChangeWords.AutoClearWhen(1, 8), ChangeWords.AutoClearWhen(0, 0), ChangeWords.ServiceDetail(ServiceStartType.Automatic, true, true),
-            ChangeWords.ServiceDetail(ServiceStartType.Manual, false, false), ChangeWords.UnreadNote(""),
+            ChangeWords.AutoClearWhen(1, 8), ChangeWords.AutoClearWhen(0, 0), ChangeWords.ServiceDetail(ServiceStartType.Automatic, true, true, "profile Build box, at start"),
+            ChangeWords.ServiceDetail(ServiceStartType.Manual, false, false), ChangeWords.KeptOffAtStart("Build box", "maps"), ChangeWords.UnreadNote(""),
             ChangeWords.TitleOf(ChangeRecordTests.ClearTask()), ChangeWords.DetailOf(ChangeRecordTests.ClearTask()),
             ChangeWords.TitleOf(ChangeRecordTests.Shortcut()), ChangeWords.DetailOf(ChangeRecordTests.Task()), ChangeWords.DetailOf(ChangeRecordTests.Startup()),
             ChangeWords.TokenGuardTurnOffTip, ChangeWords.TokenGuardSettingStays, ChangeWords.TitleOf(ChangeRecordTests.Startup()),

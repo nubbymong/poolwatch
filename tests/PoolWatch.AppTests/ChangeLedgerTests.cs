@@ -349,6 +349,12 @@ public sealed class ChangeLedgerTests : IDisposable
         calls.Clear();
         Ledger(new FakeSource(calls, warned, plain)).UndoAll(Ui.ActiveChangesView.AsShown(shown), confirmed: true);
         Assert.Equal(["RemovedClearTask confirmed", "LogonTask confirmed"], calls); // the warning you accepted, as you saw it
+
+        // Undo all's question listed it as one that cannot be undone; it can be now, with no warning: it waits for the next look.
+        var cannot = Change(ChangeKind.Shortcut, canUndo: false);
+        calls.Clear();
+        Ledger(new FakeSource(calls, cannot with { CanUndo = true }, plain)).UndoAll(Ui.ActiveChangesView.AsShown([cannot, plain]), confirmed: true);
+        Assert.Equal(["LogonTask confirmed"], calls);
     }
 
     [Fact]
@@ -374,6 +380,44 @@ public sealed class ChangeLedgerTests : IDisposable
     }
 
     [Fact]
+    public void UndoAllSaysTheProfileAppliedAtStartOnceAndAsksNoMoreAboutIt()
+    {
+        ActiveChange Held(string service) => Change(ChangeKind.Service) with
+        {
+            Id = "service:" + service, What = $"Turned off {service} (profile Build box, at start)",
+            Warning = ChangeWords.KeptOffAtStart("Build box", service), AtStart = new AtStartHold("Build box", service),
+        };
+        var maps = Held("MapsBroker");
+        var sys = Held("SysMain");
+        var clear = Change(ChangeKind.RemovedClearTask) with { Warning = @"This task runs RAMMap from C:\Tools." };
+        var plain = Change(ChangeKind.LogonTask);
+
+        string question = Ui.ActiveChangesView.PutAllBackQuestion([maps, sys, clear, plain]);
+        Assert.DoesNotContain(maps.Warning!, question);             // not once a row
+        Assert.Contains(clear.Warning!, question);
+        Assert.EndsWith("\n\nBuild box, the profile PoolWatch applies when it starts, turns 2 of these services off again then: MapsBroker, SysMain. " +
+                        "Put all back also takes them out of Build box, so they stay on.", question);
+
+        // The yes accepts it: no box per service (each with No as its default), only the other warning is asked.
+        var asked = new List<string>();
+        var (which, declined) = Ui.ActiveChangesView.PutAllBackPlan([maps, sys, clear, plain], w => { asked.Add(w); return true; });
+        Assert.Equal([clear.Warning], asked);
+        Assert.True(which(maps) && which(sys) && which(clear) && which(plain));
+        Assert.Empty(declined);
+        var calls = new List<string>();
+        Ledger(new FakeSource(calls, maps, sys, plain)).UndoAll(which, confirmed: true);
+        Assert.Equal(["service:MapsBroker confirmed", "service:SysMain confirmed", "LogonTask confirmed"], calls);
+
+        // Past the first ten rows too: the sentence counts and names every service the profile holds.
+        var many = Enumerable.Range(1, 12).Select(i => Held($"S{i}")).ToList();
+        string long12 = Ui.ActiveChangesView.PutAllBackQuestion(many);
+        Assert.Contains("And 2 more, listed in the window.\n\nBuild box, the profile PoolWatch applies when it starts, turns 12 of these services off again then: S1, S2,", long12);
+        Assert.EndsWith("S11, S12. Put all back also takes them out of Build box, so they stay on.", long12);
+        Assert.Equal("Build box, the profile PoolWatch applies when it starts, turns 1 of these services off again then: S1. Put all back also takes it out of " +
+                     "Build box, so it stays on.", Ui.ActiveChangesView.PutAllBackQuestion([many[0]]).Split("\n\n")[^1]);
+    }
+
+    [Fact]
     public void TheDumpIsJsonWithKindsByName()
     {
         string json = ChangeLedger.ToJson([Change(ChangeKind.Service, 5), Change(ChangeKind.RemovedClearTask, canUndo: false)]);
@@ -393,7 +437,7 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.Same(ChangeRecords.Open(_f.Paths, _f.Log), ChangeRecords.Open(new AppPaths(_f.Paths.DataRoot, null, secure: false), _f.Log));
         Assert.True(_f.Records.Has(RecordKind.ScheduledTask));
         Assert.False(_f.Records.Has(RecordKind.Shortcut));
-        _f.Records.Remove(task.Id);
+        _f.Records.Remove(task);
         Assert.Empty(new ChangeRecords(_f.Paths, _f.Log).All());
     }
 
@@ -423,8 +467,11 @@ public sealed class ChangeLedgerTests : IDisposable
         var refused = Assert.Throws<InvalidDataException>(() => records.Put(ChangeRecordFixtures.Task()));
         Assert.Contains(file, refused.Message);
         Assert.Throws<InvalidDataException>(() => records.All());
-        records.RecordToggle(ChangeKind.ScheduledTask, @"\Vendor\Updater", "Updater", enabledNow: false, "the Services tab");
-        records.Remove(ChangeIds.RemovedClearTask(@"\Clear standby"));
+        bool switched = false;
+        string? notSwitched = records.Toggle(ChangeKind.ScheduledTask, @"\Vendor\Updater", "Updater", enable: false, "the Services tab", () => { switched = true; return null; });
+        Assert.StartsWith("not switched, because PoolWatch could not save how it was set: PoolWatch cannot read its list of changes", notSwitched);
+        Assert.False(switched); // never switched without its record
+        records.Remove(ChangeRecordFixtures.ClearTask());
         Assert.Equal(newer, File.ReadAllText(file));
     }
 
@@ -630,23 +677,110 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.Single(_f.Records.All());
     }
 
+    /// <summary>The Services tab's switch of the fake task or startup entry, through the records as the tab makes it.</summary>
+    private string? Switch(ChangeKind kind, bool enable, string? fails = null, Action? whileSwitching = null) =>
+        kind == ChangeKind.ScheduledTask
+            ? _f.Records.Toggle(kind, @"\Vendor\Updater", "Updater", enable, "the Services tab", () => { whileSwitching?.Invoke(); return fails ?? _f.Toggles.SetTaskEnabled(@"\Vendor\Updater", enable); })
+            : _f.Records.Toggle(kind, "HKCU Run", "Helper", enable, "the Services tab", () => { whileSwitching?.Invoke(); return fails ?? _f.Toggles.SetStartupEnabled("HKCU Run", "Helper", enable); });
+
     [Fact]
     public void ASwitchIsRecordedOnceAndSwitchingBackRemovesIt()
     {
-        _f.Records.RecordToggle(ChangeKind.ScheduledTask, @"\Vendor\Updater", "Updater", enabledNow: false, "the Services tab");
+        Assert.Null(Switch(ChangeKind.ScheduledTask, enable: false));
         var first = Assert.Single(_f.Records.All());
         Assert.Equal((RecordKind.ScheduledTask, true, @"\Vendor\Updater"), (first.Kind, first.EnabledBefore, first.Location));
 
-        _f.Records.RecordToggle(ChangeKind.ScheduledTask, @"\Vendor\Updater", "Updater", enabledNow: false, "the Services tab");
+        Assert.Null(Switch(ChangeKind.ScheduledTask, enable: false));
         Assert.Equal(first, Assert.Single(_f.Records.All())); // the first record, with the state before it, stays
 
-        _f.Records.RecordToggle(ChangeKind.ScheduledTask, @"\Vendor\Updater", "Updater", enabledNow: true, "the Services tab");
+        Assert.Null(Switch(ChangeKind.ScheduledTask, enable: true));
         Assert.Empty(_f.Records.All()); // back as it was: nothing to undo
 
-        _f.Records.RecordToggle(ChangeKind.StartupEntry, "HKCU Run", "Helper", enabledNow: true, "the Services tab");
+        Assert.Null(Switch(ChangeKind.StartupEntry, enable: true));
         var startup = Assert.Single(_f.Records.All());
         Assert.Equal((RecordKind.StartupEntry, false, "Helper"), (startup.Kind, startup.EnabledBefore, startup.Name));
-        Assert.Throws<ArgumentException>(() => _f.Records.RecordToggle(ChangeKind.Service, "x", "y", true, "z"));
+        Assert.Throws<ArgumentException>(() => _f.Records.Toggle(ChangeKind.Service, "x", "y", true, "z", () => null));
+    }
+
+    [Fact]
+    public void ASwitchIsRecordedBeforeItIsMadeAndTakenBackWhenItFails()
+    {
+        // Recorded first: the record is in the file while the switch is made, and is an Active changes row after it.
+        int seen = -1;
+        Assert.Null(Switch(ChangeKind.ScheduledTask, enable: false, whileSwitching: () => seen = _f.Records.All().Count));
+        Assert.Equal(1, seen);
+        Assert.False(_f.Toggles.Tasks[@"\Vendor\Updater"]);
+        var row = Assert.Single(_f.Recorded(_f.Live()).List());
+        Assert.Equal((ChangeKind.ScheduledTask, @"Turned off the scheduled task \Vendor\Updater", true), (row.Kind, row.What, row.CanUndo));
+        var first = Assert.Single(_f.Records.All());
+
+        // Switching it back keeps its record until it is done, so a switch that fails (or a PoolWatch that stops in
+        // between) leaves Undo knowing how it was.
+        Assert.Equal("access denied", Switch(ChangeKind.ScheduledTask, enable: true, fails: "access denied", whileSwitching: () => seen = _f.Records.All().Count));
+        Assert.Equal(1, seen);
+        Assert.Equal(first, Assert.Single(_f.Records.All()));
+
+        // A first switch that fails leaves no record of it, nor one that throws.
+        Assert.Equal("access denied", Switch(ChangeKind.StartupEntry, enable: false, fails: "access denied"));
+        Assert.Equal([first], _f.Records.All());
+        Assert.Throws<InvalidOperationException>(() => Switch(ChangeKind.StartupEntry, enable: false, whileSwitching: () => throw new InvalidOperationException("COM")));
+        Assert.Equal([first], _f.Records.All());
+
+        // Another PoolWatch saved a record of its own while this switch failed: that record stays.
+        var later = ChangeRecordFixtures.Startup() with { ChangedUtc = DateTime.UtcNow, Via = "the command line" };
+        Assert.Equal("access denied", Switch(ChangeKind.StartupEntry, enable: false, fails: "access denied", whileSwitching: () => _f.Records.Put(later)));
+        Assert.Contains(later, _f.Records.All());
+    }
+
+    [Fact]
+    public void SwitchingBackRemovesOnlyTheRecordItFoundAndOnlyOnceItIsDone()
+    {
+        Assert.Null(Switch(ChangeKind.ScheduledTask, enable: false));
+        int seen = -1;
+        Assert.Null(Switch(ChangeKind.ScheduledTask, enable: true, whileSwitching: () => seen = _f.Records.All().Count));
+        Assert.Equal(1, seen); // still recorded while it is switched back
+        Assert.Empty(_f.Records.All());
+        Assert.True(_f.Toggles.Tasks[@"\Vendor\Updater"]);
+
+        // Another PoolWatch recorded that task again while it was switched back: its record is its own to keep.
+        Assert.Null(Switch(ChangeKind.ScheduledTask, enable: false));
+        var again = Assert.Single(_f.Records.All()) with { ChangedUtc = DateTime.UtcNow.AddMinutes(1), Via = "the command line" };
+        Assert.Null(Switch(ChangeKind.ScheduledTask, enable: true, whileSwitching: () => _f.Records.Put(again)));
+        Assert.Equal([again], _f.Records.All());
+    }
+
+    [Fact]
+    public void TheServicesTabsSwitchIsAnActiveChangesRowBeforeItIsMade()
+    {
+        // The Disable / Enable buttons' own call, with the row's tag as the tab lists it.
+        var task = new ScheduledTaskView(@"\Vendor\Updater", "Updater", "Vendor", Enabled: true, "updater.exe", "");
+        var startup = new StartupView("Helper", "helper.exe", "HKCU Run", Enabled: false, Microsoft: false);
+        int rows = -1;
+        string? SetTask(string path, bool enable) { rows = _f.Recorded(_f.Live()).List().Count(); return _f.Toggles.SetTaskEnabled(path, enable); }
+
+        Assert.Null(Ui.ServicesPageText.Switch(task, enable: false, _f.Records, SetTask, _f.Toggles.SetStartupEnabled));
+        Assert.Equal(1, rows); // already a row while it is switched
+        Assert.Equal(["task \\Vendor\\Updater False"], _f.Toggles.Calls);
+        var row = Assert.Single(_f.Recorded(_f.Live()).List());
+        Assert.Equal((ChangeKind.ScheduledTask, @"Turned off the scheduled task \Vendor\Updater", true), (row.Kind, row.What, row.CanUndo));
+
+        Assert.Null(Ui.ServicesPageText.Switch(startup, enable: true, _f.Records, SetTask, _f.Toggles.SetStartupEnabled));
+        Assert.Equal(2, _f.Recorded(_f.Live()).List().Count());
+        Assert.True(_f.Toggles.Startup[@"HKCU Run\Helper"]);
+
+        Assert.Equal("select a scheduled task or startup app", Ui.ServicesPageText.Switch("an app", enable: true, _f.Records, SetTask, _f.Toggles.SetStartupEnabled));
+        Assert.Equal(2, _f.Toggles.Calls.Count);
+    }
+
+    [Fact]
+    public void ASwitchPoolWatchCannotRecordIsNotMadeAndSaysWhyOnce()
+    {
+        bool switched = false;
+        string? refused = _f.Records.Toggle(ChangeKind.ScheduledTask, @"\Microsoft\Windows\Defrag\ScheduledDefrag", "ScheduledDefrag", enable: false,
+            "the Services tab", () => { switched = true; return null; });
+        Assert.Equal("not switched, because PoolWatch cannot record it to put it back later: not a scheduled task PoolWatch may change", refused);
+        Assert.False(switched);
+        Assert.Empty(_f.Records.All());
     }
 
     [Fact]
@@ -724,6 +858,57 @@ public sealed class ChangeLedgerTests : IDisposable
 
         Assert.True(source.Undo(Assert.Single(source.List()), confirmed: false).Done);
         Assert.Equal("the command line", Assert.Single(_f.Records.All()).Via);
+    }
+
+    [Fact]
+    public async Task AnUndoAndTheServicesTabsSwitchOfATaskRunOneAtATime()
+    {
+        // Undo (a worker in Active changes) turns the task back on; while it does, Disable is clicked on the Services tab
+        // (the UI thread). Interleaved, the click would keep the record Undo then removes, and leave the task off with no
+        // record of it.
+        _f.Toggles.Tasks[@"\Vendor\Updater"] = false;
+        _f.Records.Put(ChangeRecordFixtures.Task());
+        var source = _f.Recorded(_f.Live());
+        Task<string?>? click = null;
+        bool clickWaited = false;
+        _f.Toggles.OnSet = () =>
+        {
+            click = Task.Run(() => Switch(ChangeKind.ScheduledTask, enable: false));
+            clickWaited = !click.Wait(300);
+        };
+
+        Assert.True(source.Undo(Assert.Single(source.List()), confirmed: false).Done);
+        Assert.Null(await click!.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True(clickWaited); // until the Undo was done
+        // So the click came after it: the task is off again, with a record of its own for Undo.
+        Assert.False(_f.Toggles.Tasks[@"\Vendor\Updater"]);
+        var record = Assert.Single(_f.Records.All());
+        Assert.NotEqual(ChangeRecordFixtures.Task(), record);
+        Assert.Equal((true, "the Services tab"), (record.EnabledBefore, record.Via));
+    }
+
+    [Fact]
+    public async Task AnUndoWaitsWhileTheServicesTabsSwitchOfATaskIsMade()
+    {
+        // The other order: the tab's Disable is in flight (the task is off already: the same way again, so its record
+        // stays) when Undo starts on a worker. Undo must wait; else it turns the task on and removes the record, and the
+        // tab's switch then lands, leaving the task off with no record of it.
+        _f.Toggles.Tasks[@"\Vendor\Updater"] = false;
+        _f.Records.Put(ChangeRecordFixtures.Task());
+        var source = _f.Recorded(_f.Live());
+        var row = Assert.Single(source.List());
+        Task<UndoResult>? undo = null;
+        bool undoWaited = false;
+        Assert.Null(Switch(ChangeKind.ScheduledTask, enable: false, whileSwitching: () =>
+        {
+            undo = Task.Run(() => source.Undo(row, confirmed: false));
+            undoWaited = !undo.Wait(300);
+        }));
+        Assert.True((await undo!.WaitAsync(TimeSpan.FromSeconds(10))).Done);
+        Assert.True(undoWaited); // until the tab's switch was done
+        // So Undo came after it: the task is back on, and nothing is left to undo.
+        Assert.True(_f.Toggles.Tasks[@"\Vendor\Updater"]);
+        Assert.Empty(_f.Records.All());
     }
 
     [Fact]
@@ -877,6 +1062,10 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.Empty(source.List());
     }
 
+    /// <summary>
+    /// The live services in memory. As Windows does, a service is not stopped while one that depends on it runs (its start
+    /// type is set all the same), and not started while a service it needs is Disabled (a stopped one it needs starts with it).
+    /// </summary>
     private sealed class FakeServices : IServiceBackend
     {
         public readonly Dictionary<string, ServiceView> Live = new(StringComparer.OrdinalIgnoreCase)
@@ -886,15 +1075,25 @@ public sealed class ChangeLedgerTests : IDisposable
 
         public IReadOnlyList<ServiceView> Enumerate() => Live.Values.ToList();
         public bool InsiderEnrolled() => false;
-        public string? Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
+        public (string? error, NotDone? notStopped) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
         {
-            Live[op.Option.Service.Name] = Live[op.Option.Service.Name] with { StartType = op.NewStart, Running = false };
-            return null;
+            string name = op.Option.Service.Name;
+            bool refused = op.NewStart == ServiceStartType.Disabled && Live[name].Running
+                           && Live.Values.Any(v => v.Running && v.DependsOn.Contains(name, StringComparer.OrdinalIgnoreCase));
+            Live[name] = Live[name] with { StartType = op.NewStart, Running = refused };
+            return (null, refused ? ServiceControl.Answered(1051, lookedAgain: false).Why : null); // as Windows answers: one that depends on it runs
         }
-        public (string? error, string? startError) Restore(ServiceChange change, IReadOnlySet<string> allowed, bool insiderEnrolled)
+        public (string? error, NotDone? notDone) Restore(ServiceChange change, IReadOnlySet<string> allowed, bool insiderEnrolled)
         {
-            Live[change.Service] = Live[change.Service] with { StartType = change.OriginalStart, Running = change.OriginalRunning };
-            return (null, null);
+            bool running = change.OriginalRunning;
+            NotDone? notStarted = null;
+            var needs = Live[change.Service].DependsOn;
+            if (running && needs.Any(d => Live.TryGetValue(d, out var v) && v.StartType == ServiceStartType.Disabled))
+                (running, notStarted) = (false, ServiceControl.Started(1068)); // as Windows answers: one it needs did not start
+            else if (running)
+                foreach (var d in needs.Where(Live.ContainsKey)) Live[d] = Live[d] with { Running = true };
+            Live[change.Service] = Live[change.Service] with { StartType = change.OriginalStart, Running = running };
+            return (null, notStarted);
         }
         public string? SetDefault(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled) => null;
     }
@@ -916,6 +1115,111 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.Equal(ServiceStartType.Automatic, backend.Live["MapsBroker"].StartType);
         Assert.Empty(source.List());
         Assert.True(source.Undo(row, false).Done); // already back
+    }
+
+    /// <summary>
+    /// On a PC at Windows defaults, "Agentic coding PC" ticks Xbox Live, whose services Windows ships at Manual, and Turn off
+    /// sets them to Disabled and stops them, as it does Xbox accessories, ticked by hand afterwards (the tab's Via is then
+    /// "manual"). Put all back in Active changes puts each back as Windows had it: Manual, and running again if it ran.
+    /// </summary>
+    [Fact]
+    public void PutAllBackReturnsServicesTurnedOffAtTheirManualWindowsDefaultToManual()
+    {
+        string[] manualByDefault = ["XblAuthManager", "XblGameSave", "XboxNetApiSvc", "XboxGipSvc"];
+        var backend = new FakeServices();
+        foreach (var name in manualByDefault)
+            backend.Live[name] = new ServiceView { Name = name, DisplayName = name, StartType = ServiceStartType.Manual, Running = name == "XblAuthManager", MicrosoftSigned = true };
+        var services = new ServicesController(_f.Paths, _f.Log, _ => { }, _ => null, _ => null, backend);
+
+        var ticked = ServicePlan.Tick(Preset.AgenticCodingPc, services.Options());
+        Assert.Equal(["MapsBroker", "XblAuthManager", "XblGameSave", "XboxNetApiSvc"], ticked.Order(StringComparer.OrdinalIgnoreCase));
+        Assert.All(services.Apply([.. ticked], ServiceProfileRules.AgenticCodingPc), r => Assert.Null(r.error));
+        Assert.Null(Assert.Single(services.Apply(["XboxGipSvc"], "manual")).error);
+        foreach (var name in manualByDefault)
+        {
+            Assert.Equal((ServiceStartType.Disabled, false), (backend.Live[name].StartType, backend.Live[name].Running));
+            var record = services.Changes.Single(c => c.Service == name);
+            Assert.Equal((ServiceStartType.Manual, name == "XboxGipSvc" ? "manual" : ServiceProfileRules.AgenticCodingPc), (record.OriginalStart, record.Via));
+        }
+
+        var results = Ledger(new ServicesSource(services)).UndoAll();
+        Assert.Equal(5, results.Count);
+        Assert.All(results, r => Assert.True(r.Result.Done, r.Result.Message));
+        foreach (var name in manualByDefault)
+            Assert.Equal((ServiceStartType.Manual, name == "XblAuthManager"), (backend.Live[name].StartType, backend.Live[name].Running));
+        Assert.Equal((ServiceStartType.Automatic, true), (backend.Live["MapsBroker"].StartType, backend.Live["MapsBroker"].Running));
+        Assert.Empty(new ServicesSource(services).List());
+    }
+
+    /// <summary>
+    /// Another app's service, Acme Maps, depends on MapsBroker, and both run. Turned off together, Acme Maps is stopped
+    /// first, so both stop. Put all back in Active changes then puts MapsBroker back first, so both run again: Windows
+    /// does not start a service while one it needs is Disabled.
+    /// </summary>
+    [Fact]
+    public void PutAllBackPutsAServiceBackBeforeOneThatDependsOnIt()
+    {
+        var backend = new FakeServices();
+        backend.Live["AcmeMaps"] = new ServiceView
+        {
+            Name = "AcmeMaps", DisplayName = "Acme Maps", StartType = ServiceStartType.Automatic, Running = true, DependsOn = ["RpcSs", "MapsBroker"],
+        };
+        var services = new ServicesController(_f.Paths, _f.Log, _ => { }, _ => null, _ => null, backend);
+        Assert.All(services.Apply(["MapsBroker", "AcmeMaps"], "manual"), r => Assert.Null(r.error));
+        Assert.Equal(["AcmeMaps", "MapsBroker"], services.Changes.Select(c => c.Service)); // stopped in that order
+
+        var results = Ledger(new ServicesSource(services)).UndoAll();
+        Assert.Equal(["Downloaded Maps Manager (MapsBroker) is back to how it was.", "Acme Maps (AcmeMaps) is back to how it was."],
+            results.Select(r => r.Result.Message));
+        foreach (var name in new[] { "MapsBroker", "AcmeMaps" })
+            Assert.Equal((ServiceStartType.Automatic, true), (backend.Live[name].StartType, backend.Live[name].Running));
+    }
+
+    // ---------------------------------------------------------------- a source's own order for Put all back
+
+    /// <summary>A source whose rows of one kind Put all back runs in the order it gives, unless that order is wrong or fails.</summary>
+    private sealed class OrderedSource(List<string> calls, Func<IReadOnlyList<ActiveChange>, IReadOnlyList<ActiveChange>> order, params ActiveChange[] rows) : IChangeSource
+    {
+        public IEnumerable<ActiveChange> List() => rows;
+        public UndoResult Undo(ActiveChange change, bool confirmed) { calls.Add(change.Id); return new(true, "undone " + change.Id); }
+        public ActiveChange Unread(string error) => new("unread", ChangeKind.Service, null, "not read", false, error);
+        public IReadOnlyList<ActiveChange> PutBackOrder(IReadOnlyList<ActiveChange> rows) => order(rows);
+    }
+
+    private static ActiveChange[] ThreeServices() =>
+        new[] { "a", "b", "c" }.Select(id =>new ActiveChange("service:" + id, ChangeKind.Service, null, "the service " + id, true, null)).ToArray();
+
+    /// <summary>The source's own order is used when it holds exactly the rows it was given.</summary>
+    [Fact]
+    public void PutAllBackRunsASourcesRowsInTheOrderItGives()
+    {
+        var calls = new List<string>();
+        var results = Ledger(new OrderedSource(calls, rows => rows.Reverse().ToList(), ThreeServices())).UndoAll();
+        Assert.Equal(["service:c", "service:b", "service:a"], calls);
+        Assert.All(results, r => Assert.True(r.Result.Done));
+    }
+
+    /// <summary>
+    /// An order that leaves a row out, that names one twice in another's place, or that throws: every row is put back
+    /// all the same, in the order listed, and none twice.
+    /// </summary>
+    [Theory]
+    [InlineData("drops a row")]
+    [InlineData("names one twice")]
+    [InlineData("throws")]
+    public void PutAllBackRunsEveryRowInTheListedOrderWhenTheSourcesOrderIsWrongOrFails(string how)
+    {
+        var calls = new List<string>();
+        Func<IReadOnlyList<ActiveChange>, IReadOnlyList<ActiveChange>> order = how switch
+        {
+            "drops a row" => rows => rows.Skip(1).Reverse().ToList(),
+            "names one twice" => rows => [rows[2], rows[2], rows[0]],
+            _ => _ => throw new InvalidOperationException("the services could not be read"),
+        };
+        var results = Ledger(new OrderedSource(calls, order, ThreeServices())).UndoAll();
+        Assert.Equal(["service:a", "service:b", "service:c"], calls);
+        Assert.Equal(["service:a", "service:b", "service:c"], results.Select(r => r.Change.Id));
+        Assert.All(results, r => Assert.True(r.Result.Done));
     }
 }
 

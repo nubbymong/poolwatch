@@ -7,13 +7,12 @@ namespace PoolWatch.Ui;
 /// The impact scale as every window shows it, from one rule: a level's word, its colour (the design's yellow, orange and
 /// red, <see cref="UiColors.Low"/>, <see cref="UiColors.Medium"/> and <see cref="UiColors.High"/>; None has none), how many
 /// of the meter's three bars it fills, and the meter itself: three rounded bars, the filled ones in the level's colour and
-/// the rest in the track's grey. The Pool causes Impact column draws it. With high contrast on, the filled bars are in the text colour and the rest are outlined.
+/// the rest in the track's grey. Setup's impact rows, the Pool causes Impact column and the cost meters of the Services
+/// and Tasks and startup apps tabs all draw it; only the size of the bars differs, as each design has it. With high
+/// contrast on, the filled bars are in the text colour and the rest are outlined.
 /// </summary>
 internal static class ImpactScale
 {
-    /// <summary>The meter in an Impact cell, in pixels at 100%: each bar, the gap between bars, their height and the gap before the word.</summary>
-    internal const int MeterBar = 10, MeterGap = 2, MeterHeight = 4, MeterTextGap = 7;
-
     /// <summary>"None", "Low", "Medium", "High".</summary>
     public static string Word(ImpactLevel level) => level switch
     {
@@ -73,8 +72,8 @@ internal static class ImpactScale
     }
 
     /// <summary>
-    /// One Pool causes Impact cell: the background (the row's tone, or the selection), the meter (<see cref="MeterBar"/>), then
-    /// the word, inside <paramref name="cell"/>. The meter
+    /// One Pool causes Impact cell: the background (the row's tone, or the selection), the meter at the size the Services
+    /// tab's cost meter has (<see cref="ListTabStyle.MeterBar"/>), then the word, inside <paramref name="cell"/>. The meter
     /// and the word are in <paramref name="fore"/> under high contrast, the selection's text colour on a selected row.
     /// </summary>
     public static void DrawCell(Graphics g, Rectangle cell, string text, Font font, Color back, Color fore) =>
@@ -96,9 +95,9 @@ internal static class ImpactScale
     internal static (RectangleF meter, float gap, Rectangle words) CellLayout(Rectangle cell, Font font)
     {
         float unit = Unit(font);
-        float bar = MeterBar * unit, gap = MeterGap * unit, h = Math.Max(2f, MeterHeight * unit);
+        float bar = ListTabStyle.MeterBar * unit, gap = ListTabStyle.MeterGap * unit, h = Math.Max(2f, ListTabStyle.MeterHeight * unit);
         float x = cell.Left + 6 * unit, y = cell.Top + (cell.Height - h) / 2f;
-        int tx = (int)Math.Ceiling(x + 3 * bar + 2 * gap + MeterTextGap * unit);
+        int tx = (int)Math.Ceiling(x + 3 * bar + 2 * gap + ListTabStyle.MeterTextGap * unit);
         return (new RectangleF(x, y, bar, h), gap, new Rectangle(tx, cell.Top, Math.Max(0, cell.Right - tx), cell.Height));
     }
 

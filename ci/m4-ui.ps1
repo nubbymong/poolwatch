@@ -1,8 +1,8 @@
 # Milestone 4 acceptance: the tray app starts and every window under review renders, each drawn to a PNG (the
 # ui-screenshots artifact) and checked: the main window's Simple view (the header with the next clear, Clear now, the
-# graph, up to three suggestions) and Advanced view (Clear now and Settings; the Pool causes and Services tabs), the
-# plain Settings form and its Advanced grid, the setup guide, Active changes, Report an issue, About and the update
-# notice.
+# graph, up to three suggestions) and Advanced view (Clear now and Settings; the Pool causes, Services and Tasks and
+# startup apps tabs), the plain Settings form and its Advanced grid, the setup guide, Active changes, Report an issue,
+# About and the update notice.
 # Nothing in them is clipped or overlaps, no internal name shows, everything taken off the window is in the tray menu,
 # every window made for the test is closed again, and the app exits cleanly. Runs a small File-handle leak meanwhile so
 # Pool causes has content, and turns one harmless service off first so Active changes has a service to list.
@@ -54,7 +54,7 @@ if (Test-Path $smokeFile) {
     $internal = (@($internal) + @($settingNames | ForEach-Object { '\b' + [regex]::Escape($_) + '\b' })) -join '|'
     $f = $s.form
     $shots = @($s.screenshots)
-    $names = '1-simple-view.png', '2-advanced-view.png', '3-services.png', '4-settings.png', '5-settings-advanced.png', '6-setup-guide.png',
+    $names = '1-simple-view.png', '2-advanced-view.png', '3-services.png', '3b-tasks-and-startup-apps.png', '4-settings.png', '5-settings-advanced.png', '6-setup-guide.png',
              '7-active-changes.png', '8-report-issue.png', '9-about.png', '10-update-notice.png'
     Assert-True ($shots.Count -eq $names.Count) "$($names.Count) screenshots ($($shots -join ', '))"
     foreach ($n in $names) { Assert-True ($n -in $shots) "screenshot $n taken" }
@@ -82,9 +82,9 @@ if (Test-Path $smokeFile) {
     Assert-True ($simpleProblems.Count -eq 0) "the Simple view: nothing clipped or overlapping: $($simpleProblems -join '; ')"
     Assert-Plain 'the Simple view' (@($f.status, $simple.view.nextClear) + @($cards | ForEach-Object { $_.title, $_.why }) + @($cards | ForEach-Object { $_.buttons }))
 
-    # The Advanced view on Pool causes: two buttons (Export report is in a row's details), two tabs.
+    # The Advanced view on Pool causes: two buttons (Export report is in a row's details), three tabs.
     Assert-True ((@($f.buttons) -join '|') -eq 'Clear now|Settings') "the Advanced view has two buttons: $(@($f.buttons) -join ', ')"
-    Assert-True ((@($f.tabs) -join '|') -eq 'Pool causes|Services') "two tabs: $(@($f.tabs) -join ', ')"
+    Assert-True ((@($f.tabs) -join '|') -eq 'Pool causes|Services|Tasks and startup apps') "three tabs: $(@($f.tabs) -join ', ')"
 
     # Pool causes: the leak's incident is listed, and selecting a row shows its details.
     Assert-True ([int]$f.rows.'Pool causes' -ge 1) "Pool causes lists rows ($($f.rows.'Pool causes'); by kind: $($f.causeKinds | ConvertTo-Json -Compress))"
@@ -98,8 +98,9 @@ if (Test-Path $smokeFile) {
     Assert-True ($f.copyMatches -eq $true) "Ctrl+C copies the header and exactly the selected row's cells: $($f.copiedSample)"
 
     # Nothing clipped or overlapping (text that does not fit, controls outside their parent, the chart's labels on its
-    # title), checked with each tab selected (Services once its list has loaded) and with Settings open.
-    Assert-True (@($f.layoutProblems).Count -eq 0) "Pool causes and Services: nothing clipped or overlapping at $($f.size.width) x $($f.size.height) ($($f.size.dpi) dpi): $(@($f.layoutProblems) -join '; ')"
+    # title), checked with each tab selected (Services and Tasks and startup apps once their lists have loaded) and with
+    # Settings open.
+    Assert-True (@($f.layoutProblems).Count -eq 0) "Pool causes, Services and Tasks and startup apps: nothing clipped or overlapping at $($f.size.width) x $($f.size.height) ($($f.size.dpi) dpi): $(@($f.layoutProblems) -join '; ')"
     Assert-True ([int]$f.rows.Services -ge 1) "the Services tab was checked with its list loaded ($($f.rows.Services) services)"
     Assert-True (@($f.settingsLayoutProblems).Count -eq 0) "Settings and Settings Advanced: nothing clipped: $(@($f.settingsLayoutProblems) -join '; ')"
     # The plain Settings form: its five parts in plain words, the lines under the token-leak guard and update notices, and
