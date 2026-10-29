@@ -99,9 +99,6 @@ public sealed class TokenLeakHelperTests : IDisposable
         throw new InvalidOperationException("PoolWatch.slnx not found above " + AppContext.BaseDirectory);
     }
 
-    /// <summary>A text with every run of white space made one space, and none at either end.</summary>
-    private static string OneLine(string text) => Regex.Replace(text, @"\s+", " ").Trim();
-
     [Fact]
     public async Task OnlyTheGuidesCheckRunsItsHelperSoThatItEndsWithPoolWatch()
     {
@@ -115,7 +112,7 @@ public sealed class TokenLeakHelperTests : IDisposable
         Assert.All(_runs, r => Assert.Contains($"--token-leak-test {GuardPolicy.Children} ", r.Arguments));
         Assert.All(_runs.Take(2), r => Assert.DoesNotContain("--token-test-parent", r.Arguments));
         Assert.All(_runs.Skip(2), r => Assert.Contains($"--token-test-parent {Environment.ProcessId}", r.Arguments));
-        // Each of the check's two runs says it got the job; the logon check's do not.
+        // Each of the check's two runs says it got the job (the installer test looks for this line); the logon check's do not.
         Assert.Equal(2, Regex.Matches(LogText(), "token guard: the check's helper runs in a job, so it ends with PoolWatch").Count);
     }
 
@@ -172,16 +169,16 @@ public sealed class TokenLeakHelperTests : IDisposable
         // one that only changes white space in that way. That the handlers run at a real exit is not tested. The app's guard
         // passes it as its hook.
         string source = File.ReadAllText(Path.Combine(RepoDir(), "src", "PoolWatch", "Engine", "TokenLeakGuard.cs"));
-        Assert.Contains("hookExit: HookProcessExit) { }", OneLine(source));
+        Assert.Contains("hookExit: HookProcessExit) { }", UninstallerTests.OneLine(source));
         var hook = Regex.Match(source, @"(?ms)^    private static void HookProcessExit\(.*?^    \}");
         Assert.True(hook.Success, "HookProcessExit is not in TokenLeakGuard.cs");
-        Assert.Equal(OneLine("""
+        Assert.Equal(UninstallerTests.OneLine("""
             private static void HookProcessExit(Action onExit)
             {
                 AppDomain.CurrentDomain.UnhandledException += (_, _) => onExit();
                 AppDomain.CurrentDomain.ProcessExit += (_, _) => onExit();
             }
-            """), OneLine(hook.Value));
+            """), UninstallerTests.OneLine(hook.Value));
     }
 
     [Fact]
@@ -275,6 +272,58 @@ public sealed class TokenLeakHelperTests : IDisposable
         Assert.DoesNotContain("without a job", LogText());
         Assert.ThrowsAny<Exception>(() => guard.StartHelper(missing, wantJob: true));
         Assert.Contains("token guard: the check's helper runs without a job, so it may outlive PoolWatch: CreateProcess failed: ", LogText());
+    }
+
+    [Fact]
+    public async Task TheInstallerTestLooksForTheLinesTheGuardLogs()
+    {
+        // ci/installer-e2e.ps1 reads PoolWatch's log to tell whether each helper run of a check got its job. Its two
+        // patterns (read as PowerShell's -match reads them: ignoring case) must each match their own line and not the other.
+        string e2e = File.ReadAllText(Path.Combine(RepoDir(), "ci", "installer-e2e.ps1"));
+        Regex Pattern(string variable)
+        {
+            var m = Regex.Match(e2e, $@"(?m)^\${variable} = '([^']+)'\r?$");
+            Assert.True(m.Success, $"${variable} is not in ci/installer-e2e.ps1");
+            return new Regex(m.Groups[1].Value, RegexOptions.IgnoreCase);
+        }
+        Regex inJob = Pattern("helperInJob"), noJob = Pattern("helperNoJob");
+        // The check's whole text, with every run of white space made one space: it reads the log lines written after the
+        // run started, matches each pattern into its own list, says so and returns when neither matched, and otherwise
+        // fails on any no-job line. Any edit to it fails this test, except one that only changes white space in that way.
+        var check = Regex.Match(e2e, @"(?ms)^function Assert-HelperInJob\(.*?^\}");
+        Assert.True(check.Success, "Assert-HelperInJob is not in ci/installer-e2e.ps1");
+        Assert.Equal(UninstallerTests.OneLine("""
+            function Assert-HelperInJob($running, [string]$name) {
+                $tail = @(Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Skip $running.Skip)
+                $inJob = @($tail -match $helperInJob)
+                $noJob = @($tail -match $helperNoJob)
+                if ($inJob.Count + $noJob.Count -eq 0) {
+                    Write-Host "  ${name}: the token-leak check started no helper in this run of PoolWatch, so its job is not checked"
+                    return
+                }
+                foreach ($line in $noJob) { Write-Host "  ${name}: $line" }
+                Assert-True ($noJob.Count -eq 0) "${name}: each helper run of the token-leak check got a job ($($inJob.Count) in a job, $($noJob.Count) without)"
+            }
+            """), UninstallerTests.OneLine(check.Value));
+        // Each run is checked right after the check that it was stopped through its exit signal: after the uninstall
+        // (tray-1) and after the upgrade (tray-2).
+        string script = UninstallerTests.OneLine(e2e);
+        Assert.Contains("Assert-StoppedBySignal $pw 'uninstaller' Assert-HelperInJob $pw 'tray-1' ", script);
+        Assert.Contains("Assert-StoppedBySignal $pw 'upgrade' Assert-HelperInJob $pw 'tray-2' ", script);
+
+        // A check whose two runs got the job.
+        Assert.NotNull(await Guard(finishes: true).TestOnly(CancellationToken.None));
+        string[] lines = LogText().Split('\n');
+        Assert.Equal(2, lines.Count(inJob.IsMatch));
+        Assert.DoesNotContain(lines, noJob.IsMatch);
+
+        // A run for which Windows refused the job (the real StartHelper with an exe that is not there: nothing starts).
+        var missing = new ProcessStartInfo(Path.Combine(_root, "missing", "no-such-helper.exe"), "")
+        { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = _root };
+        Assert.ThrowsAny<Exception>(() => Guard(finishes: true).StartHelper(missing, wantJob: true));
+        lines = LogText().Split('\n');
+        Assert.Single(lines, noJob.IsMatch);
+        Assert.Equal(2, lines.Count(inJob.IsMatch));
     }
 
     [Fact]

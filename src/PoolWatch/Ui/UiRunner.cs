@@ -115,6 +115,7 @@ internal static class UiRunner
     /// </summary>
     private static async Task<(List<string> files, object stats)> Smoke(TrayApp app, MonitorEngine engine, AnalysisPipeline analysis, AppPaths paths, string dir)
     {
+        app.Form.StopSoakCycle(); // the UI soak's walk: its last step is due with this timer's tick
         var files = app.Form.Screenshots(dir);
         var form = app.Form.SmokeStats(); // hides the main window last
         string Shot(Form window, string name)

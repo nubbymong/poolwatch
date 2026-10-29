@@ -12,7 +12,8 @@ using Microsoft.Win32.SafeHandles;
 //                a busy developer PC: Git Bash command chains like Claude Code runs (bash > ls/grep/head/sed/git/find),
 //                file churn, and a large system handle count
 //   token-spawn  --dir D [--segments 0,30,5,...] [--segment-seconds 6] [--hold 20] [--tokens-per-start 1]  per segment start
-//                that many short-lived cmd.exe children, leaking duplicated tokens per start (held until the end)
+//                that many short-lived cmd.exe children (fewer if they do not fit in the segment), leaking duplicated
+//                tokens per start (held until the end)
 //   cpu-burn     --dir D [--seconds 40]                              busy threads on every core at the highest priority (lag)
 //   accumulate   --dir D [--count 15] [--every 6] [--hold 30]       start a long-running cmd.exe child every N s and never
 //                end it until the hold (helpers piling up), then end its own children
@@ -367,23 +368,27 @@ void TokenSpawn(string segments, int segmentSeconds, int hold, int perStart)
     var counts = segments.Split(',').Select(x => int.Parse(x, CultureInfo.InvariantCulture)).ToList();
     var leaked = new List<IntPtr>();
     if (!Native.OpenProcessToken(Process.GetCurrentProcess().Handle, 0x0008 | 0x0002 /* QUERY | DUPLICATE */, out var self)) throw new IOException("OpenProcessToken failed");
-    Log($"token-spawn: {counts.Sum()} starts in {counts.Count} segments of {segmentSeconds} s, one leaked token per start");
+    Log($"token-spawn: {counts.Sum()} starts in {counts.Count} segments of {segmentSeconds} s, {perStart} leaked token(s) per start");
+    int started = 0;
     foreach (int n in counts)
     {
         var sw = Stopwatch.StartNew();
+        // A segment never runs past its time: on a slow machine the starts that do not fit are dropped, so the on / off
+        // pattern keeps its timing instead of stretching into a steady stream.
         if (n > 0)
             Paced(n, segmentSeconds, _ =>
             {
                 var psi = new ProcessStartInfo("cmd.exe", "/c exit 0") { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = dir };
                 using (var p = Process.Start(psi)!) p.WaitForExit();
+                started++;
                 // The simulated defect: each start leaves a token behind (a new token object, held by a handle).
                 for (int k = 0; k < perStart; k++)
                     if (Native.DuplicateTokenEx(self, 0x02000000 /* MAXIMUM_ALLOWED */, IntPtr.Zero, 2, 1, out var dup)) leaked.Add(dup);
-            });
+            }, stopAtEnd: true);
         var rest = TimeSpan.FromSeconds(segmentSeconds) - sw.Elapsed;
         if (rest > TimeSpan.Zero) Thread.Sleep(rest);
     }
-    Log($"token-spawn: {leaked.Count} tokens leaked; holding for {hold} s");
+    Log($"token-spawn: {started} starts, {leaked.Count} tokens leaked; holding for {hold} s");
     Thread.Sleep(TimeSpan.FromSeconds(hold));
     foreach (var h in leaked) Native.CloseHandle(h);
     Native.CloseHandle(self);
@@ -419,13 +424,15 @@ void CpuBurn(int seconds)
     Log("cpu-burn: done");
 }
 
-// Spreads `count` operations evenly over `seconds`, so the activity series is a steady ramp.
-static void Paced(int count, int seconds, Action<int> op)
+// Spreads `count` operations evenly over `seconds`, so the activity series is a steady ramp. With `stopAtEnd` it stops
+// when the time is up, even if fewer than `count` ran (a slow machine does less, never later).
+static void Paced(int count, int seconds, Action<int> op, bool stopAtEnd = false)
 {
     var sw = Stopwatch.StartNew();
     double perOp = seconds * 1000.0 / Math.Max(1, count);
     for (int i = 0; i < count; i++)
     {
+        if (stopAtEnd && sw.Elapsed.TotalSeconds >= seconds) break;
         op(i);
         double due = (i + 1) * perOp;
         double ahead = due - sw.Elapsed.TotalMilliseconds;

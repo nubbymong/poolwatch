@@ -1208,9 +1208,9 @@ internal sealed class MainForm : Form
             UpdateHeader(state);
         }
         if (!_isAdvanced)
-            using (Core.Util.Profiler.Stage("ui.simple")) ReadSimple(force);
+            using (Core.Util.Profiler.Stage(RefreshStage(advanced: false, 0))) ReadSimple(force);
         else
-            using (Core.Util.Profiler.Stage("ui.page" + _tabs.SelectedIndex))
+            using (Core.Util.Profiler.Stage(RefreshStage(advanced: true, _tabs.SelectedIndex)))
                 switch (_tabs.SelectedIndex)
                 {
                     case 0: RefreshCauses(force); break;
@@ -1221,6 +1221,12 @@ internal sealed class MainForm : Form
         RefreshChangeCount();
         PumpRankings();
     }
+
+    /// <summary>
+    /// The profiled stage of a refresh of the view on screen: ui.simple for the Simple view, ui.page&lt;tab&gt; for the
+    /// Advanced view's selected tab (0 Pool causes, 1 Services, 2 Tasks and startup apps). Only the view on screen is read.
+    /// </summary>
+    internal static string RefreshStage(bool advanced, int tab) => advanced ? "ui.page" + tab : "ui.simple";
 
     /// <summary>
     /// The count beside Active changes: the changes in effect, read off the UI thread when <see cref="ChangeCountSchedule"/>
@@ -1465,17 +1471,22 @@ internal sealed class MainForm : Form
 
     // ---------------------------------------------------------------- CI
 
+    /// <summary>The CI soak's walk and its minute timer (<see cref="StartSoakCycle"/>); null otherwise.</summary>
+    private SoakWalk? _soakWalk;
+    private System.Windows.Forms.Timer? _soakTimer;
+
     /// <summary>
     /// CI soak: every minute show the next page, as a user would: the Simple view, then Pool causes with its top row
-    /// selected, then Services, then Tasks and startup apps (profiled as ui.simple, ui.page0, ui.page1 and ui.page2).
+    /// selected, then Services, then Tasks and startup apps (profiled as ui.simple, ui.page0, ui.page1 and ui.page2;
+    /// <see cref="SoakWalk"/>).
     /// </summary>
     public void StartSoakCycle()
     {
-        var t = new System.Windows.Forms.Timer { Interval = 60_000 };
-        int step = 0;
+        var walk = _soakWalk = new SoakWalk(_tabs.TabCount);
+        var t = _soakTimer = new System.Windows.Forms.Timer { Interval = 60_000 };
         t.Tick += (_, _) => SafeRefresh(() =>
         {
-            int page = step++ % (_tabs.TabCount + 1) - 1; // -1: the Simple view
+            if (walk.Next() is not { } page) return; // stopped for the end-of-run screenshots
             if (page < 0) { SetView(false); return; }
             if (!_isAdvanced) SetView(true);
             _tabs.SelectedIndex = page;
@@ -1483,6 +1494,16 @@ internal sealed class MainForm : Form
             RefreshNow();
         });
         t.Start();
+    }
+
+    /// <summary>
+    /// CI soak: the walk stops before the end-of-run screenshots and checks, so its last step (due with them) cannot put
+    /// the window on another view under a shot.
+    /// </summary>
+    public void StopSoakCycle()
+    {
+        _soakWalk?.Stop();
+        _soakTimer?.Stop();
     }
 
     /// <summary>The selected tab's row count (CI).</summary>
@@ -1723,6 +1744,7 @@ internal sealed class MainForm : Form
         if (disposing)
         {
             _timer.Dispose();
+            _soakTimer?.Dispose();
             _tips.Dispose();
         }
         base.Dispose(disposing);

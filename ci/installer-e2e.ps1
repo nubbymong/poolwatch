@@ -8,7 +8,9 @@
 # an uninstall started by hand shows is not run here: the question before the cleanup, the notices after it, and what a
 # /DELETEDATA uninstall started by hand says (tests/PoolWatch.AppTests/UninstallerTests.cs holds those parts of the script).
 # A silent install still walks the setup's pages, so the first install's log also shows that the Welcome and Ready
-# pages' own code ran: where each page's text ends, that it fits on the page, and that every icon could be shown.
+# pages' own code ran: where each page's text ends, that it fits on the page, and that every icon could be shown. When the
+# setup guide that the running PoolWatch opens runs the token-leak check, each of its helper runs must have got a job that
+# ends it with PoolWatch (PoolWatch's log says which); a run in which the check started no helper is said, not failed.
 param(
     [Parameter(Mandatory)] [string]$Setup,
     [Parameter(Mandatory)] [string]$Out
@@ -28,6 +30,12 @@ $silent = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
 # holds these patterns to the script's own lines): the page's width and height, then where its parts are.
 $welcomeLine = 'Welcome page, (-?\d+) x (-?\d+): the text ends at (-?\d+)\.'
 $readyLine = 'Ready page, (-?\d+) x (-?\d+): steps end at (-?\d+), the panel runs from (-?\d+) to (-?\d+), the last line runs from (-?\d+) to (-?\d+)\.'
+# The lines PoolWatch logs (poolwatch.log) for each helper run of a token-leak check that only checks, such as the setup
+# guide's: it got a job that ends it with PoolWatch (TokenLeakGuard.RunHelper), or Windows refused the job and the helper
+# runs as a plain process that may outlive PoolWatch (TokenLeakGuard.StartHelper). TokenLeakHelperTests holds these
+# patterns to the lines PoolWatch logs.
+$helperInJob = 'helper runs in a job'
+$helperNoJob = 'helper runs without a job'
 
 # When a setup failed or an uninstall left the install folder: what is left in it (each file and folder with its size
 # and attributes) and every process that runs from it, in the job's log and in <step>-left.txt, and PoolWatch's own log
@@ -91,16 +99,18 @@ function Get-StartMode([string]$service) { (Get-CimInstance Win32_Service -Filte
 # The uninstaller's own log (/LOG): what it listed and what it chose.
 function Get-UninstallLog([string]$name) { "$(Get-Content "$Out\$name.log" -Raw -ErrorAction SilentlyContinue)" }
 
-# Starts the installed PoolWatch headless and waits until it runs and samples. Returns the process and the number of log
-# lines before it started, for Assert-StoppedBySignal.
+# Starts the installed tray app as the logon task does (--tray) and waits until it runs and samples. --tray opens no main
+# window, but while its setup guide was never completed, as on this runner, PoolWatch opens the setup guide, which on
+# Windows build 26100 and later runs the token-leak check (a hidden helper, PoolWatch.exe --token-leak-test). Returns the process and the number of
+# log lines before it started, for Assert-StoppedBySignal.
 function Start-Running([string]$name) {
     $skip = @(Get-Content $log -ErrorAction SilentlyContinue).Count
-    $p = Start-Process $exe -ArgumentList '--headless' -PassThru -RedirectStandardOutput "$Out\$name.txt"
+    $p = Start-Process $exe -ArgumentList '--tray' -PassThru -RedirectStandardOutput "$Out\$name.txt"
     $null = $p.Handle   # keeps the exit code readable after the process ends
     $deadline = (Get-Date).AddSeconds(90)
     do {
         Start-Sleep -Seconds 2
-        $started = @(Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Skip $skip) -match ' headless; '
+        $started = @(Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Skip $skip) -match ' UI; '
     } until ($started -or $p.HasExited -or (Get-Date) -gt $deadline)
     Assert-True ($started -and -not $p.HasExited) "${name}: the installed PoolWatch is running"
     Start-Sleep -Seconds 10   # past start-up, sampling
@@ -114,6 +124,21 @@ function Assert-StoppedBySignal($running, [string]$by) {
     $tail = @(Get-Content $log | Select-Object -Skip $running.Skip)
     Assert-True (@($tail -match 'exit signal: exit requested').Count -gt 0) "the $by stopped PoolWatch through its exit signal (its log says so)"
     Assert-True ($running.Process.ExitCode -eq 0) "PoolWatch exited cleanly after the $by (exit $($running.Process.ExitCode))"
+}
+
+# The setup guide's token-leak check, in the PoolWatch Start-Running started: each of its helper runs got a job, which
+# PoolWatch ends as it exits. Without one the helper may outlive PoolWatch, and only the installer's wait would cover it.
+# A run of PoolWatch in which the check started no helper is said in the job's log, not failed.
+function Assert-HelperInJob($running, [string]$name) {
+    $tail = @(Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Skip $running.Skip)
+    $inJob = @($tail -match $helperInJob)
+    $noJob = @($tail -match $helperNoJob)
+    if ($inJob.Count + $noJob.Count -eq 0) {
+        Write-Host "  ${name}: the token-leak check started no helper in this run of PoolWatch, so its job is not checked"
+        return
+    }
+    foreach ($line in $noJob) { Write-Host "  ${name}: $line" }
+    Assert-True ($noJob.Count -eq 0) "${name}: each helper run of the token-leak check got a job ($($inJob.Count) in a job, $($noJob.Count) without)"
 }
 
 # A harmless catalogue service on this runner (the candidates ci/diag-e2e.ps1 uses).
@@ -157,9 +182,10 @@ Assert-True ($code -eq 0 -and @($changes | Where-Object { $_.id -eq "service:$($
 Register-ScheduledTask -TaskName 'PoolWatch' -TaskPath '\' -Action (New-ScheduledTaskAction -Execute $exe -Argument '--tray') `
     -Trigger (New-ScheduledTaskTrigger -AtLogOn) -RunLevel Highest -Force | Out-Null
 
-$pw = Start-Running 'headless-1'
+$pw = Start-Running 'tray-1'
 Uninstall 'uninstall-1'
 Assert-StoppedBySignal $pw 'uninstaller'
+Assert-HelperInJob $pw 'tray-1'
 Assert-True ((Get-StartMode $service) -eq $before) "the uninstaller put $service back to $before (got $(Get-StartMode $service))"
 Assert-True ($null -eq (Get-ScheduledTask -TaskName 'PoolWatch' -TaskPath '\' -ErrorAction SilentlyContinue)) 'the logon task is gone'
 Assert-True (-not (Test-Path $app)) 'the install folder is gone'
@@ -179,9 +205,10 @@ Assert-True (-not (Test-Path (Join-Path $data 'uninstall-list.json'))) 'the unin
 
 Write-Host '--- Pass 2: an upgrade while PoolWatch runs, then an uninstall with /KEEPCHANGES'
 Install 'install-2'
-$pw = Start-Running 'headless-2'
+$pw = Start-Running 'tray-2'
 Install 'upgrade-2'
 Assert-StoppedBySignal $pw 'upgrade'
+Assert-HelperInJob $pw 'tray-2'
 Assert-True ((Test-Path $exe) -and (Test-Path (Join-Path $app 'unins000.exe')) -and (Test-Path $uninstallKey)) 'the upgrade left PoolWatch installed'
 $code = Invoke-Installed 'service-off-2' @('--service-off', $service)
 Assert-True ($code -eq 0 -and (Get-StartMode $service) -eq 'Disabled') "the installed PoolWatch turned $service off again (exit $code)"

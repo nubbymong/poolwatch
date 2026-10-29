@@ -108,13 +108,21 @@ switch ($Scenario) {
         Remove-Item -Recurse -Force (Split-Path (Split-Path $vendor)) -ErrorAction SilentlyContinue
     }
     'tokens' {
-        # Every start leaks one token (Leaker duplicates its token per child and holds it): Toke outstanding allocations
-        # must track Leaker's starts, and Leaker must be the top parent.
+        # Every start leaks tokens (Leaker duplicates its own token for each child and holds the copies): Toke outstanding
+        # allocations must track Leaker's starts, Leaker must be the top parent, and the leak must never be called
+        # "not a per-start leak".
         $pw = Start-PoolWatch $Exe @('--headless', '--duration', "$($Duration + 40)", '--config', "$PSScriptRoot\diag-config.json", '--out', $Out)
         Start-Sleep -Seconds 15
-        # Four tokens per start and sharp on / off segments: the runner's own token churn (services, WMI) is tens of
-        # allocations per bucket, which buries a one-per-start signal at CI scale (seen on the first run).
-        & $Leaker token-spawn --dir $work --segments '0,40,0,40,0,35,5,40,0,30,0,40' --segment-seconds 6 --tokens-per-start 4 --hold 30
+        # Eight tokens per start and sharp on / off segments: the runner's own token churn (services, WMI, a Windows Update
+        # scan) is tens of allocations per bucket, sometimes over a hundred, which buries a one-per-start signal at CI scale.
+        # Each segment lasts two buckets (diag-config's 5 s bucket closes on the 2 s sample grid, every 6 s), so whatever
+        # the phase every on segment fills at least one bucket and every off segment leaves one empty. With 6 s segments
+        # the leaker began about 3.4 buckets after PoolWatch's first sample (the 15 s wait, then a leading 6 s off
+        # segment), so every bucket held about half an on segment, the starts per bucket hardly varied, and the
+        # correlation rested on the churn. Leaker cuts a segment that overruns (a slow runner), so the timing holds:
+        # spawning ends about 99 s into PoolWatch's run and the tokens are held to about 139 s, against 160 s of run;
+        # the first verdict comes at 10 buckets (60 s, 80 s if the samples run late).
+        & $Leaker token-spawn --dir $work --segments '80,0,80,0,80,0,80' --segment-seconds 12 --tokens-per-start 8 --hold 40
         Assert-True ($LASTEXITCODE -eq 0) "Leaker token-spawn exit code 0 (got $LASTEXITCODE)"
         $code = Wait-PoolWatch $pw ($Duration + 160)
         Assert-True ($code -eq 0) "headless exit code 0 (got $code)"
@@ -125,6 +133,8 @@ switch ($Scenario) {
         Write-Host "  tokens: $($t | ConvertTo-Json -Compress -Depth 5)"
         $tf = @($findings | Where-Object { $_.kind -eq 'TokenSpawn' -and $_.data.verdict -eq 'TracksStarts' })
         Assert-True ($tf.Count -ge 1) "a TokenSpawn finding says Toke tracks process starts"
+        $ti = @($findings | Where-Object { $_.kind -eq 'TokenSpawn' -and $_.data.verdict -eq 'IndependentOfStarts' })
+        Assert-True ($ti.Count -eq 0) "no TokenSpawn finding calls this per-start leak 'not a per-start leak' ($($ti.Count))"
         if ($tf.Count -ge 1) {
             $d = $tf[0].data
             Assert-True ($d.owners[0].name -eq 'Leaker') "the owner with most starts is Leaker ($($d.owners[0].name))"
@@ -181,8 +191,9 @@ switch ($Scenario) {
         }
     }
     'shape' {
-        # Item 8: a File handle leak has the leak shape (allocations rising, frees flat) in its incident; the system-wide
-        # counters (commit, limit, available RAM, handles, System's handles by type) are recorded.
+        # Item 8: a File handle leak shows a growing shape in its incident, and the leak shape whenever, against the rates
+        # just before it, allocations rose and frees did not; the system-wide counters (commit, limit, available RAM,
+        # handles, System's handles by type) are recorded.
         $pw = Start-PoolWatch $Exe @('--headless', '--duration', "$Duration", '--config', "$PSScriptRoot\diag-config.json", '--out', $Out)
         Start-Sleep -Seconds 20
         & $Leaker leak-handles --dir $work --count 40000 --ramp 40 --hold 30
@@ -194,7 +205,20 @@ switch ($Scenario) {
         if ($file.Count -ge 1) {
             $sh = $file[0].allocationShape
             Write-Host "  File shape: $($sh | ConvertTo-Json -Compress)"
-            Assert-True ($sh.shape -eq 'LeakShape') "the File leak has the leak shape: $($sh.text)"
+            # The shape is judged against the tag's rates just before the growth: allocations up and frees not is the leak
+            # shape, and it must say so. The leak frees nothing while it ramps, but a fresh runner's Windows maintenance can
+            # open and close tens of thousands of files in those 40 s, or a burst just before them can lift the rates it is
+            # judged against: then the tag's traffic moved under the leak, and either growing shape is right.
+            $before = $sh.before
+            Assert-True ($null -ne $before) "the shape was judged against the File tag's rates just before the growth"
+            if ($null -ne $before) {
+                if ([double]$sh.allocsPerMin -gt [double]$before.allocsPerMin -and [double]$sh.freesPerMin -le [double]$before.freesPerMin) {
+                    Assert-True ($sh.shape -eq 'LeakShape') "the File leak has the leak shape: $($sh.text)"
+                } else {
+                    Write-Host "  note: the File tag's traffic moved around the growth (allocations $($before.allocsPerMin) -> $($sh.allocsPerMin), frees $($before.freesPerMin) -> $($sh.freesPerMin) a minute)"
+                    Assert-True ($sh.shape -in 'LeakShape', 'GrowingWithChurn') "the File leak is growing: $($sh.text)"
+                }
+            }
             Assert-True ([double]$sh.allocsPerMin -ge 10000) "allocations per minute >= 10,000 ($($sh.allocsPerMin))"
             Assert-True ($null -ne $file[0].systemAtEnd -and [int64]$file[0].systemAtEnd.commitBytes -gt 0) "the incident records commit / available RAM / handles"
             Assert-True ((Get-Content (Join-Path $file[0].dir 'report.md') -Raw) -match 'Allocation shape during the growth') "report.md states the allocation shape"
@@ -267,6 +291,7 @@ switch ($Scenario) {
         }
         $oldTasksLeft = { @(Get-ScheduledTask -TaskPath '\PoolWatch\' -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like 'Clear cache*' }).Count }
         $legacyName = 'Nightly memory clean'
+        $burn = $null
         try {
             if ($installedCreated) { New-Item -ItemType Directory -Force $oldDir | Out-Null; Set-Content -Path $installed -Value 'installed PoolWatch placeholder' }
             & $plantOld
@@ -284,7 +309,29 @@ switch ($Scenario) {
             $rs = [IO.File]::OpenRead($big); while ($rs.Read($buf, 0, $buf.Length) -gt 0) { }; $rs.Close()
 
             $pw = Start-PoolWatch $Exe @('--headless', '--duration', '200', '--config', "$PSScriptRoot\diag-config.json", '--out', $Out, '--clear-cache', 'standby', '--capture-now', '15')
+            # A known CPU load for the check of the CPU part below: while a CPU trace records (PoolWatch has written its
+            # profile, poolwatch-cpu.wprp, and not yet saved cpu.etl next to it), a job of its own keeps one processor
+            # busy, for at most 120 s in all. It returns how long it was busy.
+            $burn = Start-Job -ArgumentList (Join-Path $Out 'incidents'), $pw.Id -ScriptBlock {
+                param([string]$incidents, [int]$watched)
+                $busy = [Diagnostics.Stopwatch]::new()
+                $x = 1.0
+                while ((Get-Process -Id $watched -ErrorAction SilentlyContinue) -and $busy.Elapsed.TotalSeconds -lt 120) {
+                    $recording = @(Get-ChildItem -Path (Join-Path $incidents '*\poolwatch-cpu.wprp') -ErrorAction SilentlyContinue |
+                        Where-Object { -not (Test-Path (Join-Path $_.DirectoryName 'cpu.etl')) })
+                    if ($recording.Count -eq 0) { Start-Sleep -Milliseconds 100; continue }
+                    $busy.Start()
+                    for ($i = 0; $i -lt 200000; $i++) { $x = [Math]::Sqrt($x + 1) }
+                    $busy.Stop()
+                }
+                $busy.Elapsed.TotalSeconds
+            }
             $code = Wait-PoolWatch $pw 400
+            $burnSeconds = 0.0
+            if (Wait-Job $burn -Timeout 30) {
+                $burned = @(Receive-Job $burn -ErrorAction SilentlyContinue)
+                if ($burned.Count -gt 0) { $burnSeconds = [double]$burned[-1] }
+            }
             Assert-True ($code -eq 0) "headless exit code 0 (got $code)"
             $summary = Get-Content "$Out\summary.json" -Raw | ConvertFrom-Json
             Write-Host "  lists: $($summary.memoryLists | ConvertTo-Json -Compress)"
@@ -315,7 +362,21 @@ switch ($Scenario) {
             if ($cap.Count -ge 1) {
                 $cpu = $cap[0].capture.cpu
                 Write-Host "  cpu: $($cpu.summary)"
-                Assert-True ($null -ne $cpu -and [int64]$cpu.samples -gt 1000 -and @($cpu.topCpu).Count -ge 2) "the capture has the CPU part ($($cpu.samples) samples)"
+                # The CPU part must hold a real sampled profile. A fixed count cannot say so: on these VM runners an idle
+                # processor records no samples at all (none of the x64 or Arm64 CPU traces checked had an idle sample), so
+                # the count says how busy the runner was, not how long the trace ran: quiet runners gave 1690 samples (x64)
+                # and 884 (Arm64) in the 10 s recording. With the known load above, one processor is busy for the whole
+                # recording. The check asks for a quarter of one processor at the 1 ms interval over the recording length
+                # this script configures (cpuTraceSeconds in diag-config.json): 2500 for 10 s. In the four CPU traces
+                # checked (this scenario and lag, x64 and Arm64), the runners recorded 0.96 to 1.4 samples per busy
+                # millisecond of the recording, against PoolWatch's own CPU series, so the busy processor alone should
+                # give about 9600 or more: about four times the bound. A missing or broken sampled profile cannot reach
+                # it. The trace's own span (cpu.seconds) is not the base: it also counts the time wpr -stop takes to save
+                # the trace (1 to 5 s on these runners), when nothing is sampled.
+                $traceSeconds = [double]([regex]::Match((Get-Content "$PSScriptRoot\diag-config.json" -Raw), '"cpuTraceSeconds"\s*:\s*(\d+)').Groups[1].Value)
+                $need = [int64](0.25 * 1000 * $traceSeconds)
+                Assert-True ($burnSeconds -gt 0) "a known CPU load ran while the CPU trace recorded ($([Math]::Round($burnSeconds, 1)) s busy)"
+                Assert-True ($null -ne $cpu -and $need -gt 0 -and [int64]$cpu.samples -ge $need -and @($cpu.topCpu).Count -ge 2) "the capture has the CPU part ($($cpu.samples) samples, at least $need for one busy processor over the $traceSeconds s recording; the trace's span was $([Math]::Round([double]$cpu.seconds, 1)) s)"
                 Assert-True (@($cpu.topWait).Count -ge 1) "waits by module from the context switches"
             }
             Remove-Item $big -ErrorAction SilentlyContinue
@@ -338,6 +399,7 @@ switch ($Scenario) {
             Assert-True (Test-Path $installed) "an installed PoolWatch.exe next to them is left alone"
         }
         finally {
+            if ($burn) { Remove-Job $burn -Force -ErrorAction SilentlyContinue }
             Unregister-ScheduledTask -TaskPath '\' -TaskName $legacyName -Confirm:$false -ErrorAction SilentlyContinue
             foreach ($t in $oldTasks) { Unregister-ScheduledTask -TaskPath '\PoolWatch\' -TaskName $t[0] -Confirm:$false -ErrorAction SilentlyContinue }
             if ($ramMapCreated) { Remove-Item -Force $ramMap -ErrorAction SilentlyContinue; Remove-Item (Split-Path $ramMap) -ErrorAction SilentlyContinue }
