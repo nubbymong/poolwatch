@@ -52,7 +52,7 @@ internal sealed class UiActions
             return;
         }
         MessageBox.Show(owner, c.Request(Core.Cache.ClearMode.Standby, Core.Cache.ClearTrigger.Manual)
-            ? "Clearing the standby cache. PoolWatch measures the pool again in 2 minutes; the result is then a row in Pool causes and in this button's tooltip."
+            ? "Clearing the cache now. The main window shows what it freed in about 2 minutes."
             : "A clear is already running (or no sample yet).", "PoolWatch");
     }
 

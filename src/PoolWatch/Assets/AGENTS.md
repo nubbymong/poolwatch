@@ -45,7 +45,7 @@ In the data folder:
 | `data\<yyyyMMdd>\` | one folder per day, kept 7 days by default: the CSV files below and `findings.jsonl` |
 | `incidents\<id>\` | one folder per incident (section 3). `<id>` is `<yyyyMMdd-HHmmss>-<tag>-<tag in hex>` |
 | `incidents\<yyyyMMdd-HHmmss>-<kind>-<subject>\` | a report on one alert finding (such as `Experiment`, `Crash`, `SpawnStorm`): its `report.json` is that finding (time, kind, title, details, data), not an incident |
-| `cache\clears.json` | the last 100 finished cache clears: when, how and why, the pool (and its paged part) and the standby list before and after, and any error. Every tag that dropped is in the `CacheClear` findings |
+| `cache\clears.json` | the last 100 finished cache clears: when, how and why, the pool (and its paged part) and the standby list before and after, and any error; for a measured clear, the tags it freed (up to 12, each at least 1 MB, with the bytes before and after). Every tag that dropped is in the `CacheClear` findings |
 | `cache\token-guard.json` | the last token-leak test: the Windows build, the result and when it ran |
 | `cache\tagscan.json` | which driver each pool tag belongs to, from PoolWatch's scan of the drivers |
 | `cache\profile.json` | PoolWatch's own cost, written every hour: its processor time, memory and heap, what it holds in memory, and what it wrote to each file |
