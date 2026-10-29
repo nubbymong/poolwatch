@@ -158,6 +158,16 @@ public class IssueReportTests
         Assert.Equal("Incident 20261028-091200-Reff-66666552 (release): `Reff` (refs.sys FCB_DATA) dropped 1.2 GB at 09:12:00.", digest);
     }
 
+    /// <summary>The digest names every kind of incident in words (the Pool causes details use the same words), and one it does not know as an incident.</summary>
+    [Theory]
+    [InlineData("Growth", "growth")]
+    [InlineData("NonPagedTotal", "non-paged pool over its limit")]
+    [InlineData("Release", "release")]
+    [InlineData("Capture", "capture")]
+    [InlineData("Later", "incident")]
+    public void TheDigestNamesTheKindInWords(string kind, string words) =>
+        Assert.StartsWith($"Incident 20261028-091200-Reff-66666552 ({words}): `Reff` grew 1.0 GB.", IssueReport.IncidentDigest(Report(kind, "`Reff` grew 1.0 GB", null)));
+
     [Theory]
     [InlineData("")]
     [InlineData("{not json")]

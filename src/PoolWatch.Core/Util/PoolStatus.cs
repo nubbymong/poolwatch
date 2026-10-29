@@ -141,6 +141,30 @@ public static class PlainWords
     /// <summary>The same, to follow a name: "confirmed by a trace", "with strong evidence", "with some evidence".</summary>
     public static string ConfidencePhrase(Confidence c) => c == Correlation.Confidence.ConfirmedByTrace ? Confidence(c) : "with " + Confidence(c);
 
+    /// <summary>
+    /// An incident's kind as report.json names it, in words: "growth", "non-paged pool over its limit", "release",
+    /// "capture"; null for any other text. Report an issue's digest says it so.
+    /// </summary>
+    public static string? IncidentKind(string? kind) => kind switch
+    {
+        nameof(Incidents.IncidentKind.Growth) => "growth", nameof(Incidents.IncidentKind.NonPagedTotal) => "non-paged pool over its limit",
+        nameof(Incidents.IncidentKind.Release) => "release", nameof(Incidents.IncidentKind.Capture) => "capture", _ => null,
+    };
+
+    /// <summary>
+    /// How the window names a non-paged pool incident: the Pool causes row ("Open files (File), with non-paged pool over
+    /// the limit"), its details and the tray's notice when one opens.
+    /// </summary>
+    public const string NonPagedOverTheLimit = "non-paged pool over the limit";
+
+    /// <summary>
+    /// An incident's kind in the window's words, for the Pool causes details: <see cref="IncidentKind"/>, but a non-paged
+    /// pool incident as the row above the details and the tray's notice name it (<see cref="NonPagedOverTheLimit"/>), so
+    /// the pane says it one way. Null for any other text.
+    /// </summary>
+    public static string? IncidentKindInTheWindow(string? kind) =>
+        kind == nameof(Incidents.IncidentKind.NonPagedTotal) ? NonPagedOverTheLimit : IncidentKind(kind);
+
     /// <summary>A process name with its PID, in one pair of brackets: "Leaker.exe (PID 7716)", "svchost.exe (Schedule, PID 1234)".</summary>
     public static string WithPid(string name, int pid) =>
         name.EndsWith(')') && name.Contains('(') ? $"{name[..^1]}, PID {pid})" : $"{name} (PID {pid})";

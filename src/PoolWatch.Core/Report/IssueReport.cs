@@ -301,11 +301,7 @@ public static class IssueReport
                 headline = headline.Replace(suspects[0].Display, suspects[0].Public, StringComparison.Ordinal);
             else if (headline.IndexOf(TopSuspect, StringComparison.Ordinal) is int at and >= 0) headline = headline[..at];
             var sb = new StringBuilder();
-            string kind = Text(r, "kind") switch
-            {
-                nameof(IncidentKind.Growth) => "growth", nameof(IncidentKind.NonPagedTotal) => "non-paged pool over its limit",
-                nameof(IncidentKind.Release) => "release", nameof(IncidentKind.Capture) => "capture", _ => "incident",
-            };
+            string kind = PlainWords.IncidentKind(Text(r, "kind")) ?? "incident";
             sb.Append(CultureInfo.InvariantCulture, $"Incident {Text(r, "id") ?? "?"} ({kind}): {Sessions(headline).TrimEnd('.')}.\n");
             if (Text(r, "plainAnswer") is { Length: > 0 } answer) sb.Append(Sessions(answer)).Append('\n');
             if (suspects.Count > 0) sb.Append("Top suspects: ").Append(string.Join("; ", suspects.Select(s => $"{s.Public} ({s.Confidence})"))).Append('\n');

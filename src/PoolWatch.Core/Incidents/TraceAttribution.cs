@@ -148,7 +148,8 @@ public static class TraceAttribution
         // the part that has not fallen on its own since.
         else if (inc.ClearedBytes >= inc.Growth)
             held = $"; {own} of the tag, {(inc.ClearedBytes > inc.Growth ? "more than" : "as much as")} it grew: it is now " +
-                   (inc.CurrentBytes == inc.StartBytes ? $"back at the {Fmt.Bytes(inc.StartBytes)} it grew from"
+                   (inc.CurrentBytes <= 0 ? "empty"
+                       : inc.CurrentBytes == inc.StartBytes ? $"back at the {Fmt.Bytes(inc.StartBytes)} it grew from"
                        : $"at {Fmt.Bytes(inc.CurrentBytes)}, {(inc.CurrentBytes < inc.StartBytes ? "under" : "over")} the {Fmt.Bytes(inc.StartBytes)} it grew from");
         else if (peak - inc.CurrentBytes <= (inc.Growth - inc.ClearedBytes) / 10) held = $"; {own} of it, and the rest is still held";
         else held = $"; {own} of it, and {Fmt.Bytes(peak - inc.CurrentBytes)} more has been freed since";

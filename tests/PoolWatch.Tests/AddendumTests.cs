@@ -86,7 +86,7 @@ public class AddendumTests
     [InlineData(875, 575, 200, true, "Reff (FCB_DATA) grew 780 MB in 26 min; PoolWatch's own cache clear at {0} freed 200 MB of it, and 100 MB more has been freed since. The trace")]
     // Two clears freed all of it and the 95 MB it held before (no one time to say): more than it grew. Its level is said, not
     // that none of the growth is held: PoolWatch cannot tell whose bytes a purge freed.
-    [InlineData(675, 0, 675, false, "Reff (FCB_DATA) grew 580 MB in 26 min; PoolWatch's own cache clears freed 675 MB of the tag, more than it grew: it is now at 0 B, under the 95 MB it grew from. The trace")]
+    [InlineData(675, 0, 675, false, "Reff (FCB_DATA) grew 580 MB in 26 min; PoolWatch's own cache clears freed 675 MB of the tag, more than it grew: it is now empty. The trace")]
     // One clear freed 550 MB of a 500 MB growth (the cache it emptied was there before): its level, 45 MB, is under where
     // the growth began. A leak the purge could not free may still be held whole, so only the level is said.
     [InlineData(595, 45, 550, true, "Reff (FCB_DATA) grew 500 MB in 26 min; PoolWatch's own cache clear at {0} freed 550 MB of the tag, more than it grew: it is now at 45 MB, under the 95 MB it grew from. The trace")]
@@ -97,6 +97,8 @@ public class AddendumTests
     // A clear freed 200 MB of a 300 MB growth and 15 MB of the other 100 MB fell on its own: decided on the rise (15% of
     // what the clear left), not on the level (still over 90% of its 195 MB).
     [InlineData(395, 180, 200, true, "Reff (FCB_DATA) grew 300 MB in 26 min; PoolWatch's own cache clear at {0} freed 200 MB of it, and 15 MB more has been freed since. The trace")]
+    // Exactly a tenth of what the clear left fell on its own: still said as held (a tenth is the line).
+    [InlineData(395, 185, 200, true, "Reff (FCB_DATA) grew 300 MB in 26 min; PoolWatch's own cache clear at {0} freed 200 MB of it, and the rest is still held. The trace")]
     public void TheTraceAnswerSaysWhatPoolWatchsOwnClearsFreedAsTheirResult(long peakMb, long currentMb, long clearedMb, bool oneClear, string starts)
     {
         var (reg, cap) = Session(shortCommands: 0);

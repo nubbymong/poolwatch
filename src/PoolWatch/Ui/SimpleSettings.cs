@@ -109,10 +109,31 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
 
     /// <summary>
     /// The line under automatic clearing: first what a clear is like while it runs, then the spacing rule from
-    /// <see cref="Settings.AutoClearMinMinutes"/>, that each rule works on its own, and what turning it on does to a clear
-    /// task of your own.
+    /// <see cref="Settings.AutoClearMinMinutes"/>, and what turning it on does to a clear task of your own. The three rules
+    /// are named by the choices above it (<see cref="ClearRule"/>).
     /// </summary>
     public static string AutoClearHint(Settings s) =>
-        ClearStutter + $" Never more than once every {Math.Max(30, s.AutoClearMinMinutes):0} minutes. Each rule works on its own: 0 hours clears only by size, " +
-        "0 GB only on the schedule. Turning it on first offers to remove a clear task of your own (RAMMap), so the two never both run.";
+        ClearStutter + $" Never more than once every {Math.Max(30, s.AutoClearMinMinutes):0} minutes. " +
+        "Turning it on first offers to remove a clear task of your own (RAMMap), so the two never both run.";
+
+    /// <summary>The choices' words, as the setup guide names them.</summary>
+    public const string ScheduleChoice = "On a schedule", SizeChoice = "At a pool size", EitherChoice = "Whichever comes first";
+
+    /// <summary>
+    /// Which rule two values make: a schedule alone (no size rule, 0 GB), a pool size alone (no schedule, 0 hours), or
+    /// whichever comes first (both). Neither set reads as whichever comes first: the form then shows its two fields to fill.
+    /// </summary>
+    public static ClearRule RuleOf(decimal everyHours, decimal poolGb) =>
+        everyHours > 0 && poolGb <= 0 ? ClearRule.Schedule : poolGb > 0 && everyHours <= 0 ? ClearRule.PoolSize : ClearRule.Either;
+
+    /// <summary>The values a rule keeps from the two fields: the one it does not use is 0, so it is off.</summary>
+    public static (decimal EveryHours, decimal PoolGb) ForRule(ClearRule rule, decimal everyHours, decimal poolGb) => rule switch
+    {
+        ClearRule.Schedule => (everyHours, 0),
+        ClearRule.PoolSize => (0, poolGb),
+        _ => (everyHours, poolGb),
+    };
 }
+
+/// <summary>When the automatic clear runs: on a schedule, at a pool size, or whichever comes first.</summary>
+internal enum ClearRule { Schedule, PoolSize, Either }

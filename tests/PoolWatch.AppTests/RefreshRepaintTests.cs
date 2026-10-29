@@ -21,11 +21,12 @@ public class RefreshRepaintTests
     [Fact]
     public void TheMainWindowShowsNoTextInANativeLabel()
     {
-        // Every text a refresh writes is held in a field (the legend and the "Preset:" caption are never changed). The update
-        // notice is the one native label: its text changes only when a newer release appears, days apart, never with a sample.
+        // Every text a refresh writes is held in a field (the legend and the "Preset:" caption are never changed). The native
+        // labels are the update notice, whose text changes only when a newer release appears, days apart, never with a sample,
+        // and the Active changes link, whose text never changes (its count is a control that draws itself).
         var labels = typeof(MainForm).GetFields(BindingFlags.Instance | BindingFlags.NonPublic)
             .Where(f => typeof(Label).IsAssignableFrom(f.FieldType)).Select(f => f.Name);
-        Assert.Equal(["_updateNotice"], labels);
+        Assert.Equal(["_activeChanges", "_updateNotice"], labels);
     }
 
     [Theory]

@@ -33,6 +33,10 @@ public sealed class TokenCorrelator
     private static readonly PoolTag Toke = PoolTag.Parse("Toke");
     /// <summary>Fewer starts than this in the window cannot carry a "tracks starts" verdict.</summary>
     private const int MinStarts = 20;
+    /// <summary>A correlation this high (with enough starts and tokens per start) says Toke tracks the starts.</summary>
+    private const double TracksBar = 0.6;
+    /// <summary>A correlation below this shows no link.</summary>
+    private const double NoLinkBar = 0.3;
     private readonly Settings _settings;
     private readonly ProcessRegistry _registry;
     private readonly List<TokenBucket> _buckets = new();
@@ -143,8 +147,8 @@ public sealed class TokenCorrelator
         TokenVerdict verdict;
         if (n < _settings.TokenMinBuckets) verdict = TokenVerdict.NotEnoughData;
         else if (delta < _settings.TokenMinOutstandingRise) verdict = TokenVerdict.Flat;
-        else if (total >= MinStarts && r >= 0.6 && perStart >= 0.3) verdict = TokenVerdict.TracksStarts;
-        else if (double.IsNaN(r) || r < 0.3) verdict = TokenVerdict.IndependentOfStarts;
+        else if (total >= MinStarts && r >= TracksBar && perStart >= 0.3) verdict = TokenVerdict.TracksStarts;
+        else if (RulesOutPerStart(dOut, starts, r, perStart, total)) verdict = TokenVerdict.IndependentOfStarts;
         else verdict = TokenVerdict.Unclear;
 
         string span = Fmt.Duration(to - from);
@@ -158,6 +162,48 @@ public sealed class TokenCorrelator
             _ => $"Toke outstanding allocations rose {delta:+#,0} in {span}; the link with {total:N0} process starts is unclear (r = {Num(r)}, {Num(perStart)} per start){top}.",
         };
         return new TokenAnalysis(from, to, n, delta, bytesDelta, total, perStart, r, parents, family, verdict, summary);
+    }
+
+    /// <summary>
+    /// True when the buckets show that Toke rose apart from the process starts, not merely that they failed to show a link:
+    /// "not a per-start leak" is a finding, so a window that cannot tell stays Unclear. Toke rising with no starts at all
+    /// rules a per-start leak out. Otherwise three things must hold. The starts varied, and enough that a leak of the
+    /// window's tokens per start would have moved Toke with them: if every start left that many tokens, the starts alone
+    /// would move Toke from bucket to bucket by x = per start * SD(starts); on top of unrelated churn as large as the SD
+    /// Toke's rises actually had, that gives a correlation of x / sqrt(1 + x^2), which must reach the tracking bar (a steady
+    /// stream of starts, a poller say, that leaks a token each cannot be told from a steady rise). The correlation is low.
+    /// And it is low over enough buckets that a correlation at the tracking bar is outside its one-sided 95% range: near zero,
+    /// Spearman over 10 buckets has a standard error of about 0.37, so the first window, which can begin before a leak does or
+    /// catch a burst of unrelated token churn (services starting for Windows Update, say), cannot rule a leak out unless
+    /// its correlation is close to zero.
+    /// </summary>
+    private static bool RulesOutPerStart(double[] dOut, double[] starts, double r, double perStart, int total)
+    {
+        if (total == 0) return true;
+        double sdStarts = StdDev(starts), sdOut = StdDev(dOut);
+        if (sdStarts == 0) return false; // the same starts in every bucket: nothing to tell a per-start leak by
+        if (sdOut > 0)
+        {
+            double x = perStart * sdStarts / sdOut;
+            if (x / Math.Sqrt(1 + x * x) < TracksBar) return false;
+        }
+        double low = double.IsNaN(r) ? 0 : r; // NaN with varying starts: Toke rose by the same amount in every bucket
+        return low < NoLinkBar && SpearmanUpperBound(low, dOut.Length) < TracksBar;
+    }
+
+    /// <summary>
+    /// One-sided 95% upper bound of a Spearman correlation over n points: Fisher's z with the variance 1.06 / (n - 3) of
+    /// Fieller, Hartley and Pearson (1957). It is 0.63 for r = 0.10 over 10 points; from 23 points on it is under 0.6 for
+    /// any r under the 0.3 bar.
+    /// </summary>
+    private static double SpearmanUpperBound(double r, int n) =>
+        n <= 3 ? 1 : Math.Tanh(Math.Atanh(Math.Clamp(r, -0.999999, 0.999999)) + 1.645 * Math.Sqrt(1.06 / (n - 3)));
+
+    private static double StdDev(double[] v)
+    {
+        double mean = v.Average(), sum = 0;
+        foreach (double x in v) sum += (x - mean) * (x - mean);
+        return Math.Sqrt(sum / v.Length);
     }
 
     private Finding? MaybeFinding(TokenAnalysis a)

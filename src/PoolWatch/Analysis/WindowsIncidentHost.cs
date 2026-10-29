@@ -171,7 +171,7 @@ internal sealed class WindowsIncidentHost : IIncidentHost
             Machine = Environment.MachineName,
             OsDescription = string.Join(" ", new[] { product, display }.Where(s => s.Length > 0)) is { Length: > 0 } d ? d : Environment.OSVersion.VersionString,
             OsBuild = build,
-            RamBytes = (long)GC.GetGCMemoryInfo().TotalAvailableMemoryBytes,
+            RamBytes = Native.MemoryNative.TotalPhysical(),
             LogicalCpus = Environment.ProcessorCount,
             BootUtc = DateTime.UtcNow - TimeSpan.FromMilliseconds(Environment.TickCount64),
             Volumes = _engine.Volumes.ToList(),

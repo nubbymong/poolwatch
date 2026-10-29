@@ -7,8 +7,9 @@ using PoolWatch.Core.TokenGuard;
 namespace PoolWatch.Tests;
 
 /// <summary>
-/// The recommendations model: the setup guide's first-run rows, and the Simple view's suggestions, each only on its
-/// evidence, at most three, by priority, never one hidden in the last 30 days, in plain words.
+/// The recommendations model: the setup guide's first-run rows, every offer the evidence backs (each only on its evidence,
+/// at most three, by priority, never one hidden in the last 30 days, in plain words), and the few of them the Simple view
+/// shows after setup.
 /// </summary>
 public class RecommendationRulesTests
 {
@@ -25,7 +26,7 @@ public class RecommendationRulesTests
     private static RecommendationInputs Quiet(EnvironmentFacts? facts = null) =>
         new() { NowUtc = Now, Facts = facts ?? Facts(), AutoClearOn = true, TokenGuardOn = false };
 
-    private static List<RecommendationId> Ids(RecommendationInputs i, int max = 100) => RecommendationRules.Current(i, max).Select(r => r.Id).ToList();
+    private static List<RecommendationId> Ids(RecommendationInputs i, int max = 100) => RecommendationRules.OnEvidence(i, max).Select(r => r.Id).ToList();
 
     private static Recommendation Row(RecommendationInputs i, RecommendationId id) => RecommendationRules.FirstRun(i).Single(r => r.Id == id);
 
@@ -88,7 +89,7 @@ public class RecommendationRulesTests
         Assert.DoesNotContain("sign-in", offered.Why);
         var checking = Row(Quiet(Facts() with { TokenLeak = TokenLeakStatus.NeedsTest }), RecommendationId.TokenLeakGuard);
         Assert.Equal(RecommendationAction.CheckTokenLeak, checking.Action);
-        Assert.Equal("Checking whether this Windows build has the token leak (about 20 seconds)...", checking.Why);
+        Assert.Equal("Checking whether this Windows build has the token leak (usually about 20 seconds)...", checking.Why);
         Assert.Equal("Something on this PC already works around the token leak.",
             Row(Quiet(Facts() with { TokenLeak = TokenLeakStatus.WorkedAroundAlready }), RecommendationId.TokenLeakGuard).Why);
         Assert.Equal("PoolWatch's check found no token leak on this Windows build.", // what one clean check shows, no more
@@ -107,8 +108,8 @@ public class RecommendationRulesTests
     [Fact]
     public void NothingIsSuggestedWithoutEvidence()
     {
-        Assert.Empty(RecommendationRules.Current(Quiet()));
-        Assert.Empty(RecommendationRules.Current(Quiet() with { Facts = null, AutoClearOn = false }));
+        Assert.Empty(RecommendationRules.OnEvidence(Quiet()));
+        Assert.Empty(RecommendationRules.OnEvidence(Quiet() with { Facts = null, AutoClearOn = false }));
     }
 
     [Fact]
@@ -120,7 +121,11 @@ public class RecommendationRulesTests
         Assert.Empty(Ids(Quiet() with { SavedVerdict = GuardResult.Leak, SavedVerdictBuild = "26100.1000" }));
         Assert.Empty(Ids(Quiet() with { SavedVerdict = GuardResult.CleanOnce, SavedVerdictBuild = "26220.7344" }));
         Assert.Empty(Ids(Quiet() with { TokenSpawnLast24h = true, TokenGuardOn = true }));
-        Assert.Contains("saw it in the last day", RecommendationRules.Current(Quiet() with { TokenSpawnLast24h = true })[0].Why);
+        Assert.Contains("saw it in the last day", RecommendationRules.OnEvidence(Quiet() with { TokenSpawnLast24h = true })[0].Why);
+        // The known issue's own evidence (security tokens growing as the pack's rule asks) offers it too.
+        Assert.Equal([RecommendationId.TokenLeakGuard], Ids(Quiet() with { TokenLeakSeen = true }));
+        Assert.Contains("saw it in the last hour", RecommendationRules.OnEvidence(Quiet() with { TokenLeakSeen = true })[0].Why);
+        Assert.Empty(Ids(Quiet() with { TokenLeakSeen = true, TokenGuardOn = true }));
     }
 
     [Fact]
@@ -135,11 +140,11 @@ public class RecommendationRulesTests
     public void TheCheckAfterAWindowsUpdate()
     {
         var needs = Quiet(Facts() with { TokenLeak = TokenLeakStatus.NeedsTest });
-        var never = RecommendationRules.Current(needs).Single();
+        var never = RecommendationRules.OnEvidence(needs).Single();
         Assert.Equal(RecommendationId.CheckTokenLeak, never.Id);
         Assert.Equal(RecommendationAction.CheckTokenLeak, never.Action);
         Assert.StartsWith("Some Windows 11 builds", never.Why);
-        var updated = RecommendationRules.Current(needs with { SavedVerdict = GuardResult.Fixed, SavedVerdictBuild = "26220.7000" }).Single();
+        var updated = RecommendationRules.OnEvidence(needs with { SavedVerdict = GuardResult.Fixed, SavedVerdictBuild = "26220.7000" }).Single();
         Assert.StartsWith("Windows was updated", updated.Why);
         Assert.Empty(Ids(needs with { SavedVerdict = GuardResult.Unclear, SavedVerdictBuild = "26220.7344" })); // a verdict for this build
         Assert.Empty(Ids(needs with { TokenGuardOn = true }));
@@ -158,7 +163,7 @@ public class RecommendationRulesTests
     public void ReportAnIncidentWithACause()
     {
         var i = Quiet() with { ReportableIncident = ("20261028-0712-Reff", @"C:\ProgramData\PoolWatch\incidents\20261028-0712-Reff", "Kernel pool grew 2.1 GB at 07:12; the likely cause is ChatGPT, with some evidence.") };
-        var r = RecommendationRules.Current(i).Single();
+        var r = RecommendationRules.OnEvidence(i).Single();
         Assert.Equal(RecommendationId.ReportIncident, r.Id);
         Assert.Equal(RecommendationAction.ReportIssue, r.Action);
         Assert.Equal("20261028-0712-Reff", r.Subject);
@@ -174,7 +179,7 @@ public class RecommendationRulesTests
     [Fact]
     public void ReviewServicesOnTheirCostOrASaturation()
     {
-        var costly = RecommendationRules.Current(Quiet() with { CostlyOptionalServices = ["Xbox Live Auth Manager", "Fax"] }).Single();
+        var costly = RecommendationRules.OnEvidence(Quiet() with { CostlyOptionalServices = ["Xbox Live Auth Manager", "Fax"] }).Single();
         Assert.Equal(RecommendationId.ReviewServices, costly.Id);
         Assert.Equal(RecommendationAction.OpenServices, costly.Action);
         Assert.StartsWith("Xbox Live Auth Manager and 1 more used", costly.Why);
@@ -190,14 +195,14 @@ public class RecommendationRulesTests
     [Fact]
     public void DefenderAdviceOnlyWithADevDriveDefenderSlowsAndEvidence()
     {
-        var r = RecommendationRules.Current(Quiet(DevDrive(trusted: false)) with { FileSystemMetadataGrewLast24h = true }).Single();
+        var r = RecommendationRules.OnEvidence(Quiet(DevDrive(trusted: false)) with { FileSystemMetadataGrewLast24h = true }).Single();
         Assert.Equal(RecommendationId.DefenderDevDrive, r.Id);
         Assert.Equal(RecommendationAction.ShowInstructions, r.Action);
         Assert.Contains("fsutil devdrv trust E:", r.Instructions);
         Assert.StartsWith("File activity made the kernel pool grow in the last day", r.Why);
 
         // Performance mode off: every Dev Drive, and Defender's own processor time is evidence too.
-        var busy = RecommendationRules.Current(Quiet(DevDrive(trusted: true, performanceMode: false)) with { DefenderCoresAvg30Min = 0.3 }).Single();
+        var busy = RecommendationRules.OnEvidence(Quiet(DevDrive(trusted: true, performanceMode: false)) with { DefenderCoresAvg30Min = 0.3 }).Single();
         Assert.Contains("fsutil devdrv query E:", busy.Instructions);
         Assert.StartsWith("Microsoft Defender was busy in the last half hour", busy.Why);
 
@@ -220,7 +225,7 @@ public class RecommendationRulesTests
     public void TheChatGptShortcutNeedsAllFourFacts()
     {
         var all = Quiet(Facts() with { ChatGptInstalled = true }) with { ChatGptLauncherInstalled = true, ChatGptNamedInGrowth = true };
-        var r = RecommendationRules.Current(all).Single();
+        var r = RecommendationRules.OnEvidence(all).Single();
         Assert.Equal(RecommendationId.ChatGptShortcut, r.Id);
         Assert.Equal("Create shortcut", r.Button);
         Assert.Equal("Start Codex without its shader cache", r.Title); // the app as setup, Settings and Active changes name it
@@ -251,7 +256,7 @@ public class RecommendationRulesTests
             RecommendationId.ReportIncident, RecommendationId.ReviewServices, RecommendationId.DefenderDevDrive, RecommendationId.ChatGptShortcut,
         ], Ids(Everything()));
         Assert.Equal([RecommendationId.TokenLeakGuard, RecommendationId.HourlyCacheClear, RecommendationId.CheckTokenLeak], Ids(Everything(), 3));
-        Assert.Equal(3, RecommendationRules.Current(Everything()).Count);
+        Assert.Equal(3, RecommendationRules.OnEvidence(Everything()).Count);
     }
 
     [Fact]
@@ -260,7 +265,7 @@ public class RecommendationRulesTests
         var hidden = Everything() with { Dismissed = new Dictionary<string, DateTime> { ["TokenLeakGuard"] = Now.AddDays(-29) } };
         Assert.Equal([RecommendationId.HourlyCacheClear, RecommendationId.CheckTokenLeak, RecommendationId.StartAtSignIn], Ids(hidden, 3));
         var back = Everything() with { Dismissed = new Dictionary<string, DateTime> { ["TokenLeakGuard"] = Now.AddDays(-31) } };
-        Assert.Equal(RecommendationId.TokenLeakGuard, RecommendationRules.Current(back)[0].Id);
+        Assert.Equal(RecommendationId.TokenLeakGuard, RecommendationRules.OnEvidence(back)[0].Id);
         Assert.True(RecommendationRules.Hidden(hidden.Dismissed, "TokenLeakGuard", Now));
         Assert.False(RecommendationRules.Hidden(hidden.Dismissed, "TokenLeakGuard", Now.AddDays(2)));
     }
@@ -271,13 +276,13 @@ public class RecommendationRulesTests
     private static IEnumerable<Recommendation> AllTexts()
     {
         var long1 = new string('x', 300);
-        foreach (var r in RecommendationRules.Current(Everything() with
+        foreach (var r in RecommendationRules.OnEvidence(Everything() with
                  {
                      CostlyOptionalServices = [string.Join(" ", Enumerable.Repeat("Very long service name", 10)), "Fax"],
                      ReportableIncident = ("inc", "dir", string.Join(" ", Enumerable.Repeat("Kernel pool grew a lot", 20))),
                  }, max: 100)) yield return r;
-        foreach (var r in RecommendationRules.Current(Everything() with { TokenSpawnLast24h = false, LeakTestNow = LeakVerdict.Leak, FileSystemMetadataGrewLast24h = false, DefenderCoresAvg30Min = 1, CostlyOptionalServices = [], SaturationOfferedTurnOffLast24h = true }, max: 100)) yield return r;
-        foreach (var r in RecommendationRules.Current(Quiet(Facts() with { OwnClearTasks = ["t"], TokenLeak = TokenLeakStatus.NeedsTest }) with { SavedVerdictBuild = "1" }, max: 100)) yield return r;
+        foreach (var r in RecommendationRules.OnEvidence(Everything() with { TokenSpawnLast24h = false, LeakTestNow = LeakVerdict.Leak, FileSystemMetadataGrewLast24h = false, DefenderCoresAvg30Min = 1, CostlyOptionalServices = [], SaturationOfferedTurnOffLast24h = true }, max: 100)) yield return r;
+        foreach (var r in RecommendationRules.OnEvidence(Quiet(Facts() with { OwnClearTasks = ["t"], TokenLeak = TokenLeakStatus.NeedsTest }) with { SavedVerdictBuild = "1" }, max: 100)) yield return r;
         foreach (var status in Enum.GetValues<TokenLeakStatus>())
             foreach (var r in RecommendationRules.FirstRun(Quiet(Facts() with
                      {
@@ -318,5 +323,31 @@ public class RecommendationRulesTests
                 Assert.False(PoolJargon.IsMatch(text), $"pool jargon in: {text}");
             }
         }
+    }
+
+    // ------------------------------------------------------------------ what the Simple view shows after setup
+
+    [Fact]
+    public void TheSimpleViewOffersOnlyWhatShowedAfterSetup()
+    {
+        // Every offer's evidence at once: the Simple view keeps the guard, the clear setup left for later and the report;
+        // starting at sign-in, the check, the services, Defender and the Codex shortcut belong to setup (and its Services tab).
+        Assert.Equal([RecommendationId.TokenLeakGuard, RecommendationId.HourlyCacheClear, RecommendationId.ReportIncident],
+            RecommendationRules.Current(Everything()).Select(r => r.Id));
+        Assert.Equal(RecommendationRules.ShownLater, new HashSet<RecommendationId> { RecommendationId.TokenLeakGuard, RecommendationId.HourlyCacheClear, RecommendationId.ReportIncident });
+        // Your own clear task is setup's to replace: then no hourly clear is offered either (the two never both run).
+        Assert.Empty(RecommendationRules.Current(Quiet(Facts() with { OwnClearTasks = [@"\Empty standby"] }) with { AutoClearOn = false }));
+        // A hidden one stays hidden for 30 days here too.
+        var hidden = Everything() with { Dismissed = new Dictionary<string, DateTime> { ["TokenLeakGuard"] = Now.AddDays(-1) } };
+        Assert.Equal([RecommendationId.HourlyCacheClear, RecommendationId.ReportIncident], RecommendationRules.Current(hidden).Select(r => r.Id));
+    }
+
+    [Fact]
+    public void EveryOfferOfTheGuardEndsWithWhatYouWillNotice()
+    {
+        // However the leak showed, the offer says the trade-off (the Simple view's card adds the rest: how long it lasts and
+        // how to undo it).
+        foreach (var i in new[] { Quiet() with { TokenSpawnLast24h = true }, Quiet() with { LeakTestNow = LeakVerdict.Leak }, Quiet() with { TokenLeakSeen = true } })
+            Assert.EndsWith("With it on, any app may bring its window to the front.", RecommendationRules.Current(i).Single().Why);
     }
 }

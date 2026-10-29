@@ -16,6 +16,7 @@ namespace PoolWatch.AppTests;
 /// by uninstalling), Put back and Put all back over a ledger of fake sources (the order, a failure in the middle, a warning
 /// you say No to), and its size on a small screen. No test changes a real task, service, setting or registry value.
 /// </summary>
+[Collection(nameof(WholeWindowLayout))] // lays windows out: one class at a time, after the parallel ones
 public sealed class ActiveChangesTests : IDisposable
 {
     private readonly ChangeFixture _f = new();

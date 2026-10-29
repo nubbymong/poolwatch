@@ -225,8 +225,8 @@ public class MemoryTrimTests
     [Fact]
     public void TheProfileCountsTheEmptiesThatDidNotHold()
     {
-        string source = File.ReadAllText(Path.Combine(RepoRoot(), "src", "PoolWatch", "Engine", "CostReport.cs"));
-        string memory = Block(source, "memory = new");
+        string source = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "CostReport.cs"));
+        string memory = MainWindowLayoutTests.Block(source, "memory = new");
         Assert.Contains("emptiesNotHeld = engine.Trim.EmptiesNotHeld,", memory);
     }
 
@@ -238,7 +238,7 @@ public class MemoryTrimTests
     [Fact]
     public void TheEngineLeavesTheJudgeToReadTheWorkingSetItself()
     {
-        string source = File.ReadAllText(Path.Combine(RepoRoot(), "src", "PoolWatch", "Engine", "MonitorEngine.cs"));
+        string source = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "MonitorEngine.cs"));
         var wiring = source.Split('\n').Select(l => l.Trim()).Where(l => l.Contains("new MemoryTrim(", StringComparison.Ordinal)).ToList();
         Assert.Equal(["Trim = new MemoryTrim(clock: null, workingSet: () => Meter.WorkingSetNow, heap: null, empty: null);"], wiring);
     }
@@ -288,27 +288,5 @@ public class MemoryTrimTests
         {
             try { Directory.Delete(root, recursive: true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
-    }
-
-    /// <summary>The test runs from bin/&lt;config&gt;/&lt;tfm&gt;/ inside the checkout; the repo root is the folder holding PoolWatch.slnx.</summary>
-    private static string RepoRoot()
-    {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
-            if (File.Exists(Path.Combine(dir.FullName, "PoolWatch.slnx"))) return dir.FullName;
-        throw new InvalidOperationException("PoolWatch.slnx not found above " + AppContext.BaseDirectory);
-    }
-
-    /// <summary>The text between the braces of the block that follows <paramref name="header"/> in <paramref name="source"/> (its only one).</summary>
-    private static string Block(string source, string header)
-    {
-        int at = source.IndexOf(header, StringComparison.Ordinal);
-        Assert.True(at >= 0 && source.IndexOf(header, at + 1, StringComparison.Ordinal) < 0, $"\"{header}\" is not in the source once");
-        int open = source.IndexOf('{', at + header.Length), depth = 0;
-        for (int i = open; i < source.Length; i++)
-        {
-            if (source[i] == '{') depth++;
-            else if (source[i] == '}' && --depth == 0) return source[(open + 1)..i];
-        }
-        throw new InvalidOperationException($"the block after \"{header}\" does not close");
     }
 }

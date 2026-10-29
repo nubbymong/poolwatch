@@ -23,4 +23,64 @@ public class ListSyncTests
         Assert.Equal(["Open files", "File system metadata"], list.Items.Cast<ListViewItem>().Select(i => i.Text));
         Assert.Same(list.Items[0], sync.ItemFor("inc:a"));
     }
+
+    [Fact]
+    public void AColumnSortAppliesAtOnceWithARowSelectedAndTheRowStaysSelected()
+    {
+        using var host = new Form();
+        var list = new ListView { View = View.Details, FullRowSelect = true };
+        list.Columns.Add("What");
+        host.Controls.Add(list);
+        _ = list.Handle; // the native list, as on screen
+        var sync = new ListSync(list);
+        ListSync.Row R(string key) => new(key, [key]);
+        string Order() => string.Concat(list.Items.Cast<ListViewItem>().Select(i => i.Text));
+        sync.Update([R("a"), R("b"), R("c")]);
+        list.Items[1].Selected = true; // b
+        var b = list.Items[1];
+        // A refresh in another order waits while a row is selected (so the row does not jump under the pointer)...
+        sync.Update([R("c"), R("b"), R("a")]);
+        Assert.Equal(("abc", true), (Order(), sync.OrderHeld));
+        // ...but the owner's sort is applied at once, the same rows kept, and b stays selected.
+        sync.Update([R("c"), R("b"), R("a")], forceOrder: true);
+        Assert.Equal(("cba", false), (Order(), sync.OrderHeld));
+        Assert.Same(b, Assert.Single(list.SelectedItems.Cast<ListViewItem>()));
+        // A live refresh of the sorted list keeps it in place and the selection with it.
+        sync.Update([R("c"), R("b"), R("a")]);
+        Assert.Equal("cba", Order());
+        Assert.Same(b, list.SelectedItems[0]);
+    }
+
+    [Fact]
+    public void TheSortedColumnShowsTheSystemsArrowAndNoOtherDoes()
+    {
+        using var host = new Form();
+        var list = new BufferedListView { View = View.Details };
+        foreach (var c in PoolCauses.Columns) list.Columns.Add(c);
+        host.Controls.Add(list);
+        _ = list.Handle;
+        Assert.All(Enumerable.Range(0, 8), i => Assert.Null(PoolCausesHeader.Arrow(list, i)));
+        PoolCausesHeader.Show(list, PoolCauses.GrewColumn, descending: false);
+        Assert.Equal(false, PoolCausesHeader.Arrow(list, PoolCauses.GrewColumn)); // up: ascending
+        Assert.Null(PoolCausesHeader.Arrow(list, 0));
+        PoolCausesHeader.Show(list, PoolCauses.GrewColumn, descending: true);
+        Assert.Equal(true, PoolCausesHeader.Arrow(list, PoolCauses.GrewColumn)); // down: the other way
+        PoolCausesHeader.Show(list, 7, descending: false);
+        Assert.Null(PoolCausesHeader.Arrow(list, PoolCauses.GrewColumn));
+        Assert.Equal(false, PoolCausesHeader.Arrow(list, 7));
+        PoolCausesHeader.Show(list, -1, descending: false);
+        Assert.All(Enumerable.Range(0, 8), i => Assert.Null(PoolCausesHeader.Arrow(list, i)));
+        // The header's text stays as it was.
+        Assert.Equal(PoolCauses.Columns, list.Columns.Cast<ColumnHeader>().Select(c => c.Text));
+    }
+
+    [Fact]
+    public void AClickSortsByTheColumnAndASecondClickTurnsItRound()
+    {
+        var none = (-1, false);
+        Assert.Equal((2, false), PoolCausesSort.Click(none, 2));               // first click: ascending
+        Assert.Equal((2, true), PoolCausesSort.Click((2, false), 2));          // again: the other way
+        Assert.Equal((2, false), PoolCausesSort.Click((2, true), 2));          // and back
+        Assert.Equal((5, false), PoolCausesSort.Click((2, true), 5));          // another column starts ascending
+    }
 }

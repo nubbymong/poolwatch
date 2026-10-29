@@ -192,6 +192,14 @@ public sealed class Settings
     [Description("Redact the user name, home and TEMP paths, machine name, domain, SID and values that look like secrets in text copied from the window. On by default.")]
     public bool RedactCopies { get; set; } = true;
 
+    /// <summary>
+    /// The Advanced view's graph shows RAM in use, the cache (standby) and free behind the pool lines: its Show RAM switch,
+    /// kept here so it stays as the owner left it. On for a new install (and for a settings.json saved before it existed);
+    /// a settings.json that holds it keeps its value.
+    /// </summary>
+    [System.ComponentModel.Browsable(false)]
+    public bool ShowRam { get; set; } = true;
+
     /// <summary>Not edited in the grid: the "Start at logon" checkbox creates / removes the scheduled task itself.</summary>
     [System.ComponentModel.Browsable(false)]
     public bool StartAtLogon { get; set; }

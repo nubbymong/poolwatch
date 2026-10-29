@@ -102,7 +102,8 @@ internal sealed class SetupContext
     /// </summary>
     internal static IReadOnlyList<Recommendation> Suggest(RecommendationInputs inputs, IReadOnlyList<KnownIssueMatch> matches, EnvironmentFacts? facts,
         ClearEvidence evidence) =>
-        ClearAdvice.ForSimpleView(KnownIssueMatcher.Explain(RecommendationRules.Current(inputs, max: 4), matches), facts, evidence);
+        ClearAdvice.ForSimpleView(KnownIssueMatcher.Explain(RecommendationRules.Current(inputs, max: 4), matches), facts, evidence,
+            fileRecordsGrew: inputs.FileSystemMetadataGrewLast24h);
 
     /// <summary>
     /// What the known issues are matched against: the clears, the running programs and the Windows setting that stops the

@@ -22,6 +22,10 @@ internal sealed class CacheClearer
     private readonly List<ClearRecord> _history = new();
     private readonly object _lock = new();
     private readonly DateTime _startedUtc = DateTime.UtcNow;
+    /// <summary>The memory lists read once a minute, kept for the graph's RAM overlay (25 hours, in memory only). Under <see cref="_lock"/>.</summary>
+    private readonly Core.Growth.RamHistory _ram = new();
+    /// <summary>The PC's RAM, as the incident reports say it.</summary>
+    private readonly long _totalRam = SafeTotalRam();
     private int _running;
     private DateTime _nextLists = DateTime.MinValue, _nextStatus = DateTime.MinValue;
 
@@ -90,7 +94,13 @@ internal sealed class CacheClearer
     public void Observe(Sample s)
     {
         var now = s.TimeUtc;
-        if (now >= _nextLists) { _nextLists = now.AddSeconds(60); Lists = SafeLists(); }
+        if (now >= _nextLists)
+        {
+            _nextLists = now.AddSeconds(60);
+            Lists = SafeLists();
+            var lists = Lists;
+            if (lists.Known) lock (_lock) _ram.Add(now, _totalRam, lists.FreeBytes + lists.ZeroBytes, lists.StandbyBytes);
+        }
         if (now >= _nextStatus)
         {
             _nextStatus = now.AddMinutes(60); // and right after a setup step (RefreshStatus)
@@ -173,6 +183,23 @@ internal sealed class CacheClearer
     {
         try { return MemoryNative.Query(); } catch { return default; }
     }
+
+    private static long SafeTotalRam()
+    {
+        try { return MemoryNative.TotalPhysical(); } catch { return 0; }
+    }
+
+    /// <summary>
+    /// The graph's RAM columns for the <paramref name="span"/> up to <paramref name="nowUtc"/>, each <paramref name="width"/>
+    /// wide (<see cref="Core.Growth.RamHistory.Columns"/>), and the PC's RAM they are a share of; any thread.
+    /// </summary>
+    public (List<Core.Growth.RamColumn> Columns, long TotalBytes) Ram(DateTime nowUtc, TimeSpan span, TimeSpan width)
+    {
+        lock (_lock) return (_ram.Columns(nowUtc, span, width), _ram.TotalBytes);
+    }
+
+    /// <summary>The RAM readings kept (the cost report).</summary>
+    public int RamReadings { get { lock (_lock) return _ram.Count; } }
 
     // ---- the clears survive restarts (they feed the estimate, the low-priority verdict and whether clearing helps here)
     /// <summary>A clear as clears.json keeps it. <paramref name="Tags"/>: what it freed by tag; absent in older files and for a clear that did not run.</summary>

@@ -100,4 +100,65 @@ public sealed class RecommendationStoreTests : IDisposable
         Assert.Contains("ReportIncident:0", kept.Keys);      // the newest are kept
         Assert.DoesNotContain("ReportIncident:249", kept.Keys);
     }
+
+    [Fact]
+    public void AHiddenFeatureCardStaysHiddenForGood()
+    {
+        var store = new RecommendationStore(_paths, _log);
+        Assert.Empty(store.HiddenFeatures);
+        var marks = Discovery.All.Single(c => c.Id == DiscoveryId.Mark);
+        store.HideFeature(marks.Key);
+        store.HideFeature("TokenLeakGuard");          // not a feature card's key: an offer is hidden for 30 days, not for good
+        store.HideFeature(DiscoveryCard.KeyPrefix);      // no card
+        store.Dismiss("ReportIncident:x", DateTime.UtcNow);
+
+        var again = new RecommendationStore(_paths, _log);
+        Assert.Equal([marks.Key], again.HiddenFeatures);
+        Assert.Equal(["ReportIncident:x"], again.Dismissed.Keys);      // the offers' hides are kept apart
+        Assert.Equal(Discovery.All.Where(c => c.Id != DiscoveryId.Mark), Discovery.Shown(again.HiddenFeatures));
+        // A hide of a feature has no time, so it never runs out.
+        using (var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(File_)))
+            Assert.Equal(System.Text.Json.JsonValueKind.Array, doc.RootElement.GetProperty("hiddenFeatures").ValueKind);
+        // Hiding one again changes nothing; hiding them all hides every card.
+        foreach (var card in Discovery.All) again.HideFeature(card.Key);
+        Assert.Empty(Discovery.Shown(new RecommendationStore(_paths, _log).HiddenFeatures));
+    }
+
+    [Theory]
+    [InlineData("""{ "hiddenFeatures": "feature:Mark" }""")]
+    [InlineData("""{ "hiddenFeatures": [ 5, null, "TokenLeakGuard", "feature:", "feature:mark", "feature:Mark " ] }""")]
+    public void ABadListOfHiddenFeaturesHidesNothing(string text)
+    {
+        File.WriteAllText(File_, text);
+        Assert.Empty(new RecommendationStore(_paths, _log).HiddenFeatures);
+    }
+
+    [Fact]
+    public void OnlyTheKeysOfCardsThereAreAreKept()
+    {
+        // A file written by hand (or by something else) with hundreds of made-up keys: none is kept, so none is saved back,
+        // and the list is never longer than the cards.
+        var keys = Enumerable.Range(0, 300).Select(i => $"feature:{i}").Append("feature:" + new string('k', 300))
+            .Concat(Discovery.All.Select(c => c.Key)).Concat(Discovery.All.Select(c => c.Key)).ToList();
+        File.WriteAllText(File_, System.Text.Json.JsonSerializer.Serialize(new { hiddenFeatures = keys }));
+        var store = new RecommendationStore(_paths, _log);
+        Assert.Equal(Discovery.All.Select(c => c.Key).Order(), store.HiddenFeatures.Order());
+        store.HideFeature("feature:Other");
+        Assert.DoesNotContain("feature:Other", store.HiddenFeatures);
+        store.Dismiss("ReportIncident:y", DateTime.UtcNow); // saves the file again
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(File_));
+        Assert.Equal(Discovery.All.Count, doc.RootElement.GetProperty("hiddenFeatures").GetArrayLength());
+    }
+
+    [Fact]
+    public void AKeyGivenOverAndOverOrTextThatIsNotValidNeverDropsARealHide()
+    {
+        // [A, A, A, B]: B stays hidden. A lone half of a surrogate pair (as a JSON escape) is skipped, not a reason to drop
+        // the whole file (which would open setup again).
+        string a = Discovery.All[0].Key, b = Discovery.All[^1].Key;
+        File.WriteAllText(File_, $$"""{ "guideCompletedUtc": "2026-10-30T01:00:00Z", "hiddenFeatures": ["{{a}}", "{{a}}", "{{a}}", "\ud800", "{{b}}"] }""");
+        var store = new RecommendationStore(_paths, _log);
+        Assert.Equal(new[] { a, b }.Order(StringComparer.Ordinal), store.HiddenFeatures.Order(StringComparer.Ordinal));
+        Assert.True(store.GuideCompleted);
+    }
 }

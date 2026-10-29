@@ -31,6 +31,7 @@ internal sealed class AnalysisPipeline
         Host = new WindowsIncidentHost(engine, Knowledge);
         History = History.ForInterval(engine.Settings.SampleIntervalSeconds, engine.Settings.RawHistoryMinutes);
         Detector = new Detector(engine.Settings);
+        Growth = new Core.Growth.GrowthLedger(CacheClearer.MeasureAfter, TimeSpan.FromSeconds(engine.Settings.SampleIntervalSeconds));
         Incidents = new IncidentManager(engine.Settings, Knowledge, Host, engine.Registry);
         // Addendum 2 C: kernel functions in CPU traces are named from local, admin-only symbol folders only (SymbolPath, else
         // <data root>\symbols); never a symbol server, a share, a network drive or _NT_SYMBOL_PATH (Part 3 review).
@@ -57,6 +58,8 @@ internal sealed class AnalysisPipeline
     public WindowsIncidentHost Host { get; }
     public History History { get; }
     public Detector Detector { get; }
+    /// <summary>What the pool and its tags grew, cleared and fell, by the minute for 25 hours (the growth and clear stats). History lock.</summary>
+    public Core.Growth.GrowthLedger Growth { get; }
     public IncidentManager Incidents { get; }
     public long AlertsRaised { get; private set; }
     public CaptureRunner Captures { get; }
@@ -80,6 +83,8 @@ internal sealed class AnalysisPipeline
         lock (History.SyncRoot)
         {
             using (Profiler.Stage("analysis.history")) History.Add(s);
+            using (Profiler.Stage("analysis.growth"))
+                Growth.Observe(s.TimeUtc, (long)(s.Totals.CommittedPaged + s.Totals.CommittedNonPaged), s.Tags, clears ?? (IReadOnlyList<Core.Cache.ClearRecord>)[]);
             // C6: every incident since PoolWatch started (Closed keeps only the last 6 hours). In memory only: the files are
             // written by Boots.Flush below, outside the history lock.
             try { using (Profiler.Stage("analysis.boots")) Boots.Observe(s, TimeSpan.FromMilliseconds(Environment.TickCount64), Incidents.CreatedCount); }

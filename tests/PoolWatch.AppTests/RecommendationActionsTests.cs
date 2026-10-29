@@ -128,6 +128,76 @@ public sealed class RecommendationActionsTests : IDisposable
         Assert.Equal(LeakVerdict.Leak, actions.LeakTestNow);
     }
 
+    // ------------------------------------------------------------------ the token-leak watch
+
+    /// <summary>Windows 11 25H2 where the check can run: the guard off, the live setting not 0, no verdict for this build.</summary>
+    private static RecommendationInputs Watching(string build = "26200.7000", string? savedFor = "26100.4000") => new()
+    {
+        NowUtc = DateTime.UtcNow, Facts = Facts() with { Build = build, TokenLeak = TokenLeakStatus.NeedsTest }, SavedVerdictBuild = savedFor,
+        SavedVerdict = GuardResult.CleanOnce, AutoClearOn = true,
+    };
+
+    [Fact]
+    public async Task AfterAWindowsUpdateTheWatchChecksAgainByItselfOncePerBuildAndNeverTurnsTheGuardOn()
+    {
+        var actions = Actions();
+        _system.Verdict = LeakVerdict.Leak;
+        var check = actions.WatchTokenLeak(Watching());
+        Assert.NotNull(check);
+        Assert.Equal((true, "This Windows build has the token leak."), await check);
+        Assert.Equal(["check token leak"], _system.Calls);
+        Assert.Equal(LeakVerdict.Leak, actions.LeakTestNow);
+        // It changed nothing: the guard stays off until the owner turns it on, and no notice or timeline line was written.
+        Assert.False(_live.Running.TokenGuardEnabled);
+        Assert.Equal(0, _shell.GuardStarts);
+        Assert.Empty(_system.TimelineLines);
+        // The leak it found is offered as a card (which says what you will notice and how to undo it).
+        var offer = RecommendationRules.Current(Watching() with { LeakTestNow = actions.LeakTestNow }).Single();
+        Assert.Equal(RecommendationId.TokenLeakGuard, offer.Id);
+        Assert.StartsWith("PoolWatch's check found that this Windows build leaks", offer.Why);
+        // Once a verdict is in for this session, nothing more is checked.
+        Assert.Null(actions.WatchTokenLeak(Watching() with { LeakTestNow = actions.LeakTestNow }));
+        Assert.Single(_system.Calls);
+    }
+
+    [Fact]
+    public async Task ACheckThatCouldNotRunIsNotRepeatedForTheSameBuild()
+    {
+        var actions = Actions();
+        _system.Verdict = null; // another check running, or the live setting 0
+        Assert.False((await actions.WatchTokenLeak(Watching())!).Ok);
+        Assert.Null(actions.WatchTokenLeak(Watching())); // the next minute: not again for this build
+        _system.Verdict = LeakVerdict.Clean;
+        Assert.NotNull(actions.WatchTokenLeak(Watching(build: "26200.7100"))); // Windows updated again: once more
+        Assert.Equal(["check token leak", "check token leak"], _system.Calls);
+    }
+
+    [Fact]
+    public void TheWatchWaitsForAWindowsUpdateAndNeverRunsInTheCiTest()
+    {
+        var actions = Actions();
+        Assert.Null(actions.WatchTokenLeak(Watching(savedFor: "26200.7000")));                            // a verdict for this build
+        Assert.Null(actions.WatchTokenLeak(Watching() with { TokenGuardOn = true }));                      // the guard is on
+        Assert.Null(actions.WatchTokenLeak(Watching() with { Facts = Facts() with { TokenLeak = TokenLeakStatus.NotAffected } }));
+        Assert.Null(actions.WatchTokenLeak(Watching() with { Facts = Facts() with { TokenLeak = TokenLeakStatus.WorkedAroundAlready } }));
+        Assert.Null(actions.WatchTokenLeak(Watching() with { Facts = null }));
+        Assert.Null(Actions(smoke: true).WatchTokenLeak(Watching()));
+        Assert.Empty(_system.Calls);
+        // No check ever gave a verdict (setup's could not run): the watch runs it.
+        Assert.NotNull(actions.WatchTokenLeak(Watching(savedFor: null)));
+    }
+
+    [Fact]
+    public async Task SettingsMakesTheCodexShortcutAgainButNotInTheCiTest()
+    {
+        _system.FactsNow = Facts() with { ChatGptInstalled = true, ChatGptIconPath = @"C:\Program Files\WindowsApps\OpenAI.ChatGPT\app\ChatGPT.exe" };
+        var (ok, message) = await Actions().CreateCodexShortcut("Settings");
+        Assert.True(ok);
+        Assert.Contains("ChatGPT (no shader cache)", message);
+        Assert.Equal(["shortcut with C:\\Program Files\\WindowsApps\\OpenAI.ChatGPT\\app\\ChatGPT.exe via Settings"], _system.Calls);
+        Assert.Equal((false, RecommendationActions.Refused), await Actions(smoke: true).CreateCodexShortcut("Settings"));
+    }
+
     [Fact]
     public async Task ServicesInstructionsAndReportOpenWhatTheySay()
     {
@@ -306,6 +376,22 @@ public sealed class RecommendationActionsTests : IDisposable
         var helped = ClearAdvice.ForSimpleView(current, Facts(Ntfs), Evidence(true, 2));
         Assert.Equal(3, helped.Count);
         Assert.StartsWith("On this PC, clearing the cache freed 2.0 GB", helped[0].Why);
+        // File records a clear frees grew in the last day: suggested on an NTFS-only PC too, before any clear ran.
+        Assert.Equal([Hourly(), signIn, report], ClearAdvice.ForSimpleView(current, Facts(Ntfs), Evidence(null), fileRecordsGrew: true));
+    }
+
+    [Fact]
+    public void DecideLaterOnAnNtfsOnlyPcIsFollowedByTheHourlyCardOnceFileRecordsGrow()
+    {
+        // Setup's "Decide later" left clearing off on a PC with NTFS only, and no clear ran: the card waits for the evidence
+        // the window gathers each minute, then offers the clear.
+        var facts = Facts(Ntfs);
+        var quiet = new RecommendationInputs { NowUtc = DateTime.UtcNow, Facts = facts };
+        Assert.DoesNotContain(SetupContext.Suggest(quiet, [], facts, Evidence(null)), r => r.Id == RecommendationId.HourlyCacheClear);
+        var grew = quiet with { FileSystemMetadataGrewLast24h = true };
+        Assert.Contains(SetupContext.Suggest(grew, [], facts, Evidence(null)), r => r.Id == RecommendationId.HourlyCacheClear);
+        // Clearing on already: nothing to offer.
+        Assert.DoesNotContain(SetupContext.Suggest(grew with { AutoClearOn = true }, [], facts, Evidence(null)), r => r.Id == RecommendationId.HourlyCacheClear);
     }
 
     [Fact]

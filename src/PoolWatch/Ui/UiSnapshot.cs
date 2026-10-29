@@ -3,6 +3,7 @@ using PoolWatch.Core;
 using PoolWatch.Core.Cache;
 using PoolWatch.Core.Correlation;
 using PoolWatch.Core.Detection;
+using PoolWatch.Core.Growth;
 using PoolWatch.Core.History;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
@@ -263,6 +264,40 @@ internal static class UiData
         catch { return (false, null); } // still being written, or not an incident folder
     }
 
+    /// <summary>The growth and clear stats of the last <paramref name="span"/> (<see cref="GrowthLedger"/>).</summary>
+    public static GrowthWindow Growth(AnalysisPipeline a, TimeSpan span)
+    {
+        lock (a.History.SyncRoot) return a.Growth.Window(span);
+    }
+
+    /// <summary>The graph's RAM columns: a minute wide for the last hour, 5 minutes for 6 hours, a quarter hour for 24 hours.</summary>
+    public static TimeSpan RamColumnWidth(TimeSpan span) =>
+        span <= TimeSpan.FromHours(1) ? TimeSpan.FromMinutes(1) : span <= TimeSpan.FromHours(6) ? TimeSpan.FromMinutes(5) : TimeSpan.FromMinutes(15);
+
+    /// <summary>The graph's RAM columns over <paramref name="span"/> up to the newest sample, and the PC's RAM.</summary>
+    public static (List<RamColumn> Columns, long TotalBytes) Ram(AnalysisPipeline a, TimeSpan span)
+    {
+        DateTime now;
+        lock (a.History.SyncRoot) now = a.History.Count > 0 ? a.History.Times[^1] : DateTime.UtcNow;
+        return a.Diagnostics.Cache.Ram(now, span, RamColumnWidth(span));
+    }
+
+    /// <summary>Memory now, for the Simple view's tile: the newest minute's RAM in use and cache, and the PC's RAM; null before the first reading.</summary>
+    public static RamNow? MemoryNow(AnalysisPipeline a)
+    {
+        var (columns, total) = Ram(a, TimeSpan.FromMinutes(2));
+        return columns.Count > 0 && total > 0 ? new RamNow(columns[^1].InUse, columns[^1].Cache, total) : null;
+    }
+
+    /// <summary>When PoolWatch started (its first sample): the graph's band before it. Null before the first sample.</summary>
+    public static DateTime? StartedUtc(AnalysisPipeline a)
+    {
+        lock (a.History.SyncRoot) return a.Growth.StartedUtc;
+    }
+
+    /// <summary>The newest sample's paged and non-paged pool (the header's split); default before the first sample.</summary>
+    public static PoolTotals Latest(AnalysisPipeline a) => LatestTotals(a);
+
     /// <summary>Pool totals for the chart: minute averages for older data, raw samples for the last hour.</summary>
     public static List<ChartPoint> Chart(AnalysisPipeline a, TimeSpan span)
     {
@@ -326,7 +361,7 @@ internal static class UiData
         var clear = clears.LastOrDefault(r => r.Error is null && r.TimeUtc > now - TimeSpan.FromHours(1));
         // A clear that failed, or is not measured yet, has no level after it, so its record frees nothing: it is left out with
         // the clears that freed nothing.
-        var freed = clears.Where(r => r.TimeUtc > now - TimeSpan.FromHours(1) && r.TimeUtc <= now && r.Freed >= ClearScheduleText.NothingBelow).ToList();
+        var freed = clears.Where(r => r.Error is null && r.TimeUtc > now - TimeSpan.FromHours(1) && r.TimeUtc <= now && r.Freed >= ClearScheduleText.NothingBelow).ToList();
         return new TotalsNow(total, held, Change(TimeSpan.FromMinutes(10)), held.TotalMinutes >= 55 ? Change(TimeSpan.FromHours(1)) : null,
             clear is null ? null : ChartClear.Of(clear))
         {

@@ -183,7 +183,14 @@ internal sealed class UiActions
         catch (Exception ex) { _engine.Log.Info("clipboard: " + ex.Message); } // another app holds the clipboard
     }
 
+    /// <summary>What Copy summary and the tray's Copy latest incident summary copy for an incident: its summary as report.json has it.</summary>
     public static string IncidentSummary(string dir) => CopyText.IncidentSummary(File.ReadAllText(Path.Combine(dir, "report.json")));
+
+    /// <summary>
+    /// The incident's summary as the Pool causes details show it: no Markdown marks, the kind and confidence in words, local
+    /// times (<see cref="CopyText.IncidentDetails(string)"/>).
+    /// </summary>
+    public static string IncidentDetails(string dir) => CopyText.IncidentDetails(File.ReadAllText(Path.Combine(dir, "report.json")));
 
     /// <summary>Tray "Copy latest incident summary": the newest incident's summary as plain text.</summary>
     public void CopyLatestIncidentSummary(IWin32Window? owner)

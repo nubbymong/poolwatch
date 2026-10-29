@@ -1,6 +1,6 @@
 {
   // The CI UI test (m4-ui.ps1): the M2 CI thresholds, so the small leak the test runs opens an incident, plus the hourly
-  // automatic clear, so the Simple view's line shows a schedule and Active changes lists a setting.
+  // automatic clear, so the header's next clear shows a schedule and Active changes lists a setting.
   "sampleIntervalSeconds": 2,
   "handleIntervalSeconds": 10,
   "tagCsvIntervalSeconds": 10,
