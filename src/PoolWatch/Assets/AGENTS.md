@@ -108,14 +108,19 @@ matter:
   `Capture` for a trace the person started), `tag` and `tagHex`, `owner` and `description` (the driver and what the
   tag holds);
 - `openedUtc`, `onsetUtc` (when the growth began), `endUtc` (when it stopped; empty while still climbing),
-  `growthBytes`, `startBytes`, `peakBytes`, `currentBytes`;
+  `growthBytes`, `startBytes`, `peakBytes`, `currentBytes`, and `clearedBytes` (what PoolWatch's own cache clears freed
+  of the tag since the onset: the growth and the peak count it back, as a clear's drop is not the growth ending;
+  `currentBytes` is the tag's real level) with `clearedAtUtc` (when, if one clear freed it; empty for none or
+  several);
 - `headline` (one line) and `plainAnswer` (the answer in plain words, with the suspects grouped by who they work for:
   an app, a service, a Claude Code session);
 - `suspects[]`: each process with `rank`, `pid`, `image`, `displayName`, `commandLine`, `ancestry` (its parent
   chain), `services`, `confidence` and `evidence` (each line one reason it ranks there);
 - `traceOwners` and `traceAnswer`: what a confirmation trace attributed, when one ran (`capture` holds its details);
-- `release` (for a drop: how much and when), `window` (the time span the suspects were judged over), `timeline`, and
-  `notice` (the file is not redacted, as written).
+- `release` (for a drop: how much and when; `fromBytes` and `toBytes` are the tag's real levels, `dropped` is what fell
+  on its own, and `clearedBytes` what PoolWatch's own cache clears freed of it meanwhile, with `clearedAtUtc` when one
+  clear did), `window` (the time span the suspects were judged over), `timeline`, and `notice` (the file is not
+  redacted, as written).
 
 Confidence, strongest first: `ConfirmedByTrace` (a trace saw the process allocate this tag), `StronglyCorrelated` (a
 direct charge, such as its own handles of the matching type, or several signals agree), `Correlated` (one signal

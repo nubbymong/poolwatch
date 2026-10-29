@@ -103,7 +103,11 @@ internal static class RecommendationInputsBuilder
             if (UiData.CauseOf(i) is not { level: >= Confidence.Correlated } cause) continue;
             if (RecommendationRules.Hidden(dismissed, Recommendation.KeyOf(RecommendationId.ReportIncident, i.Id), nowUtc)) continue;
             string at = i.OnsetUtc.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture);
-            return (i.Id, i.Dir, $"Kernel pool grew {Fmt.Bytes(i.Growth)} at {at}; the likely cause is {cause.name}, {PlainWords.ConfidencePhrase(cause.level)}.");
+            // What PoolWatch's own clears freed of it is their result: the growth counts it, and says so. A clear that emptied
+            // more of the tag than it grew freed it "of the tag that grew", not of the growth.
+            string of = i.ClearedBytes > i.Growth ? "the tag that grew" : "it";
+            string own = i.ClearedBytes > 0 ? $" ({Fmt.OwnClearsFreed(i.ClearedBytes, i.ClearedAtUtc, seconds: false)} of {of})" : "";
+            return (i.Id, i.Dir, $"Kernel pool grew {Fmt.Bytes(i.Growth)} at {at}{own}; the likely cause is {cause.name}, {PlainWords.ConfidencePhrase(cause.level)}.");
         }
         return null;
     }

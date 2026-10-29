@@ -65,7 +65,8 @@ public static class PoolStatusLine
     /// </param>
     /// <param name="ownClear">
     /// PoolWatch's own cache clear of the last 10 minutes, as its result ("The cache clear at 03:56 freed 1.3 GB."), or
-    /// null. The changes are measured from the level it left, so its drop is said only this way, never as the pool shrinking.
+    /// null. The changes are measured across it on the detector's baseline (its drop added back, so growth before it still
+    /// counts), so its drop is said only this way, never as the pool shrinking.
     /// </param>
     /// <param name="nextClear">When the automatic clear runs next ("The next cache clear is in 12 min."), said after a growth; null when none is scheduled.</param>
     public static PoolStatus Describe(long? totalBytes, TimeSpan held, long change10Min, long? changeHour, PoolStatusLead? lead, string? saturatedBusiest = null,

@@ -13,6 +13,15 @@ internal static class BundleBuilder
 {
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
 
+    /// <summary>
+    /// An incident in the bundle's incidents.md: its growth from start to peak, and, when PoolWatch's own cache clears freed
+    /// part of it (the peak counts that back), its level now and what they freed, said as their result.
+    /// </summary>
+    internal static string IncidentLine(Incident i) =>
+        $"- {i.Kind} on `{i.Tag.ToDisplay()}`: {Fmt.Bytes(i.StartBytes)} -> {Fmt.Bytes(i.PeakBytes)} (+{Fmt.Bytes(i.Growth)}), onset {Fmt.Stamp(i.OnsetUtc)}" +
+        (i.ClosedUtc is { } c ? $", closed {Fmt.Stamp(c)}" : ", open") +
+        (i.OwnClearsFreed is { } own ? $"; now {Fmt.Bytes(i.CurrentBytes)}, after {own} of it" : "");
+
     /// <param name="redaction">Null for an unredacted bundle (the owner opted out).</param>
     public static string Export(MonitorEngine engine, AnalysisPipeline analysis, RedactionInfo? redaction)
     {
@@ -54,8 +63,7 @@ internal static class BundleBuilder
             foreach (var i in analysis.Incidents.All.TakeLast(50))
             {
                 inc.AppendLine($"## {i.Id}").AppendLine();
-                inc.AppendLine($"- {i.Kind} on `{i.Tag.ToDisplay()}`: {Fmt.Bytes(i.StartBytes)} -> {Fmt.Bytes(i.PeakBytes)} (+{Fmt.Bytes(i.Growth)}), onset {Fmt.Stamp(i.OnsetUtc)}" +
-                               (i.ClosedUtc is { } c ? $", closed {Fmt.Stamp(c)}" : ", open"));
+                inc.AppendLine(IncidentLine(i));
                 foreach (var o in (i.Owners ?? []).Where(o => o.Meaningful).Take(3)) inc.AppendLine($"- Suspect: {o.Summary} ({OwnerRankingStrength(o)})");
                 inc.AppendLine();
             }

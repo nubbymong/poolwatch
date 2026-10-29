@@ -302,28 +302,6 @@ public class ClearScheduleTests
         Assert.Same(weak, ClearPolicy.LastPoolClear([weak, Light(Now.AddMinutes(-5))]));
     }
 
-    // ------------------------------------------------------------------ PoolWatch's own impact
-
-    [Fact]
-    public void AChangeIsMeasuredFromTheLevelPoolWatchsOwnClearLeft()
-    {
-        var settle = TimeSpan.FromMinutes(2);
-        var tenMinutesAgo = Now.AddMinutes(-10);
-        Assert.Equal(tenMinutesAgo, ClearPolicy.ChangeFrom(tenMinutesAgo, Now, [], settle));
-        // A clear 6 minutes ago: its drop is its result, so the change counts from its 2-minute measurement on.
-        var clear = Full(Now.AddMinutes(-6), ClearTrigger.Schedule);
-        Assert.Equal(Now.AddMinutes(-4), ClearPolicy.ChangeFrom(tenMinutesAgo, Now, [clear], settle));
-        Assert.Equal(tenMinutesAgo, ClearPolicy.ChangeFrom(tenMinutesAgo, Now, [Full(Now.AddMinutes(-20), ClearTrigger.Schedule)], settle)); // before the span
-        // A clear just before the span still drops the pool inside it, until its own measurement point.
-        Assert.Equal(Now.AddMinutes(-9), ClearPolicy.ChangeFrom(tenMinutesAgo, Now, [Full(Now.AddMinutes(-11), ClearTrigger.Schedule)], settle));
-        // Being measured: no change can be told yet.
-        Assert.Null(ClearPolicy.ChangeFrom(tenMinutesAgo, Now, [Full(Now.AddMinutes(-1), ClearTrigger.Manual, measured: false)], settle));
-        // The latest of two clears counts; one that did not run changes nothing.
-        Assert.Equal(Now.AddMinutes(-1), ClearPolicy.ChangeFrom(Now.AddHours(-1), Now, [Full(Now.AddMinutes(-40), ClearTrigger.Schedule), Full(Now.AddMinutes(-3), ClearTrigger.Manual)], settle));
-        var failed = new ClearRecord { TimeUtc = Now.AddMinutes(-5), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = Pool(3, 3), Error = "the purge returned 0xC0000061" };
-        Assert.Equal(tenMinutesAgo, ClearPolicy.ChangeFrom(tenMinutesAgo, Now, [failed], settle));
-    }
-
     // ------------------------------------------------------------------ does clearing help on this PC
 
     [Fact]

@@ -1,5 +1,6 @@
 using PoolWatch.Core;
 using PoolWatch.Core.Correlation;
+using PoolWatch.Core.Detection;
 using PoolWatch.Core.Identity;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
@@ -48,6 +49,38 @@ public class RecommendationInputsBuilderTests
 
         var hidden = new Dictionary<string, DateTime> { ["ReportIncident:20261028-0600-Reff"] = Now.AddDays(-1) };
         Assert.Equal("20261028-0400-Reff", RecommendationInputsBuilder.Reportable([older, newer], hidden, Now)!.Value.Id);
+    }
+
+    [Fact]
+    public void WhatPoolWatchsOwnClearsFreedOfAGrowthIsSaidAsTheirResult()
+    {
+        // The growth counts back what PoolWatch's own clear freed (its drop is not the growth ending): the headline and the
+        // bundle's line say that part as the clear's, with its time; with no clear they say nothing of clears.
+        var clearUtc = Now.AddHours(-2.5);
+        var cleared = Growth("20261028-0600-Reff", Now.AddHours(-2), Owner("app:x", "X", Confidence.StronglyCorrelated));
+        cleared.ClearedBytes = 512L << 20;
+        cleared.ClearedAtUtc = clearUtc;
+        cleared.CurrentBytes = (3L << 30) - (512L << 20);
+        string at = clearUtc.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+        string onset = cleared.OnsetUtc.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal($"Kernel pool grew 2.0 GB at {onset} (PoolWatch's own cache clear at {at} freed 512 MB of it); the likely cause is X, with strong evidence.",
+            RecommendationInputsBuilder.Reportable([cleared], new Dictionary<string, DateTime>(), Now)!.Value.Headline);
+        Assert.EndsWith($", closed {Fmt.Stamp(cleared.ClosedUtc!.Value)}; now 2.5 GB, after PoolWatch's own cache clear at {Fmt.Clock(clearUtc)} freed 512 MB of it",
+            PoolWatch.Analysis.BundleBuilder.IncidentLine(cleared));
+
+        // A clear that freed more of the tag than the growth (it emptied a cache that was there before) freed it of the tag.
+        var more = Growth("20261028-0630-Reff", Now.AddHours(-1.5), Owner("app:x", "X", Confidence.StronglyCorrelated));
+        more.ClearedBytes = 3L << 30;
+        more.ClearedAtUtc = clearUtc;
+        Assert.Equal($"Kernel pool grew 2.0 GB at {onset} (PoolWatch's own cache clear at {at} freed 3.0 GB of the tag that grew); the likely cause is X, with strong evidence.",
+            RecommendationInputsBuilder.Reportable([more], new Dictionary<string, DateTime>(), Now)!.Value.Headline);
+        more.ClearedBytes = 2L << 30;
+        Assert.EndsWith(" freed 2.0 GB of it); the likely cause is X, with strong evidence.", RecommendationInputsBuilder.Reportable([more], new Dictionary<string, DateTime>(), Now)!.Value.Headline);
+
+        var plain = Growth("20261028-0700-Reff", Now.AddHours(-1), Owner("app:x", "X", Confidence.StronglyCorrelated));
+        Assert.Equal($"Kernel pool grew 2.0 GB at {onset}; the likely cause is X, with strong evidence.",
+            RecommendationInputsBuilder.Reportable([plain], new Dictionary<string, DateTime>(), Now)!.Value.Headline);
+        Assert.EndsWith($", closed {Fmt.Stamp(plain.ClosedUtc!.Value)}", PoolWatch.Analysis.BundleBuilder.IncidentLine(plain));
     }
 
     [Fact]

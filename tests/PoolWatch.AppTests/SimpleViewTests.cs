@@ -1,3 +1,4 @@
+using PoolWatch.Core;
 using PoolWatch.Core.Cache;
 using PoolWatch.Core.Correlation;
 using PoolWatch.Core.Incidents;
@@ -99,6 +100,111 @@ public class SimpleViewTests
 
         var measuring = new ClearRecord { TimeUtc = end.AddMinutes(-1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = new PoolTotals((ulong)(5 * GB), 0, 0, 0) };
         Assert.Equal(0, UiData.Totals(h, [clear, measuring]).Change10Min);           // no change is told while a clear is measured
+    }
+
+    [Fact]
+    public void TheStatusTotalsAndTheTagRowsMeasureAcrossPoolWatchsOwnClearOnOneBaseline()
+    {
+        // A sample every 10 seconds for 70 minutes: Reff carries the pool's growth, 18 MB a minute, and 40 minutes in
+        // PoolWatch's clear frees 1.5 GB of it. The total's change over the hour is its growth before the clear and after it
+        // (the clear's drop added back, its 2 minutes the clear's): the same figure as Reff's row, not only the growth since
+        // the clear, so one sentence never says "steady" of the total and "grew" of a tag from two baselines.
+        const long MB = 1L << 20;
+        const int count = 421, clearAfter = 240;
+        var start = new DateTime(2026, 10, 28, 11, 0, 0, DateTimeKind.Utc);
+        var reff = PoolTag.Parse("Reff");
+        var h = Core.History.History.ForInterval(10);
+        var clears = new List<ClearRecord>();
+        for (int i = 0; i < count; i++)
+        {
+            long tag = 2 * GB + i * 3 * MB - (i > clearAfter ? 1536 * MB : 0);
+            var t = start.AddSeconds(10 * i);
+            h.Add(new Sample(t, new PoolTotals((ulong)(4 * GB + tag), 0, 0, 0), [new PoolTagEntry(reff, 0, 0, 0, 1, 0, (ulong)tag)], []));
+            if (i == clearAfter)
+                clears.Add(new ClearRecord { TimeUtc = t.AddSeconds(1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = h.Totals[^1] });
+        }
+        var detector = new Core.Detection.Detector(new Core.Settings());
+        detector.Evaluate(h, new Core.Detection.OwnClears(clears, Analysis.CacheClearer.MeasureAfter));
+        var row = detector.Status[reff];
+        var totals = UiData.Totals(h, clears);
+        Assert.Equal((row.Delta10m, row.Delta60m), (totals.Change10Min, totals.ChangeHour!.Value));
+        long Total(int i) => (long)(h.Totals[i].CommittedPaged + h.Totals[i].CommittedNonPaged);
+        int measured = h.IndexAtOrAfter(clears[0].TimeUtc + Analysis.CacheClearer.MeasureAfter);
+        Assert.Equal(Total(clearAfter) - Total(count - 1 - 360) + Total(count - 1) - Total(measured), totals.ChangeHour);
+        Assert.True(totals.ChangeHour > Total(count - 1) - Total(measured) + 500 * MB); // far more than the growth since the clear
+        // With no clear, the plain change: the clear's drop would read as the pool falling.
+        Assert.Equal(Total(count - 1) - Total(count - 1 - 360), UiData.Totals(h, []).ChangeHour);
+    }
+
+    [Fact]
+    public void TheIssuesKernelPoolLineSaysWhatPoolWatchsOwnClearsFreedApartFromTheHoursChange()
+    {
+        // The issue text's kernel pool line reads the status line's totals (UiData.Totals): its change over the hour leaves out
+        // what PoolWatch's own clears of that hour freed (their drop is added back), so the line says that apart, as their
+        // result, whichever way the pool moved. A clear that freed nothing adds nothing, several are summed, and while a clear
+        // is still being measured no change is told.
+        const long MB = 1L << 20;
+        var end = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
+        DateTime At(int k) => end.AddSeconds(10 * (k - 420));
+        string Hm(int k) => At(k).AddSeconds(1).ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+        // A sample every 10 seconds for 70 minutes; a clear a second after sample k, its record measuring what it freed.
+        string Line(Func<int, long> pool, params (int After, long Freed)[] clearsAt)
+        {
+            var h = Core.History.History.ForInterval(10);
+            var clears = new List<ClearRecord>();
+            for (int i = 0; i <= 420; i++) h.Add(new Sample(At(i), new PoolTotals((ulong)pool(i), 0, 0, 0), [], []));
+            foreach (var (k, freed) in clearsAt)
+                clears.Add(new ClearRecord
+                {
+                    TimeUtc = At(k).AddSeconds(1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule,
+                    Before = new PoolTotals((ulong)pool(k), 0, 0, 0), After = new PoolTotals((ulong)(pool(k) - freed), 0, 0, 0),
+                });
+            return ReportIssueDialog.KernelLine(UiData.Totals(h, clears));
+        }
+        // A steady 12 GB pool; the clear 20 minutes ago frees 1.3 GB, and the cache refills 150 MB of it after: the clear freed
+        // far more than the hour's change, and is said apart from it, not as part of it.
+        long Refill(int i) => i <= 300 ? 12 * GB : 12 * GB - 1331 * MB + Math.Clamp(i - 313, 0, 60) * 150 * MB / 60;
+        Assert.Equal($"{Core.Detection.Fmt.Bytes(Refill(420))} (paged and non-paged pool), up 150 MB in the last hour; PoolWatch's own cache clear at {Hm(300)} freed 1.3 GB, not counted in that change",
+            Line(Refill, (300, 1331 * MB)));
+        // Only the hour's own clears: not one an hour and more ago, nor one dated after the newest sample (the clock was set back).
+        Assert.EndsWith($"; PoolWatch's own cache clear at {Hm(300)} freed 1.3 GB, not counted in that change", Line(Refill, (300, 1331 * MB), (40, 400 * MB), (430, 500 * MB)));
+        // Two clears in the hour: their sum, with no one time.
+        long Two(int i) => Refill(i) - (i > 380 ? 300 * MB : 0);
+        Assert.EndsWith($", up 150 MB in the last hour; PoolWatch's own cache clears freed {Core.Detection.Fmt.Bytes(1631 * MB)}, not counted in that change", Line(Two, (300, 1331 * MB), (380, 300 * MB)));
+        // Down 2 GB on its own, and a clear frees 300 MB more; and a pool that is flat but for the clear's drop.
+        long Down(int i) => 12 * GB - (i > 200 ? 2 * GB : 0) - (i > 300 ? 300 * MB : 0);
+        Assert.EndsWith($", down 2.0 GB in the last hour; PoolWatch's own cache clear at {Hm(300)} freed 300 MB, not counted in that change", Line(Down, (300, 300 * MB)));
+        long Flat(int i) => 12 * GB - (i > 300 ? 300 * MB : 0);
+        Assert.EndsWith($", unchanged in the last hour; PoolWatch's own cache clear at {Hm(300)} freed 300 MB, not counted in that change", Line(Flat, (300, 300 * MB)));
+        // A clear that freed nothing (the pool grew in its 2 minutes, or it freed under half a megabyte): nothing to say.
+        long Grow(int i) => 12 * GB + i * MB;
+        Assert.EndsWith(", up 360 MB in the last hour", Line(Grow, (300, -50 * MB)));
+        Assert.EndsWith(", up 360 MB in the last hour", Line(Grow, (300, 100 << 10)));
+        // A clear still being measured: no change is known across it yet.
+        Assert.EndsWith($", change in the last hour not known yet: PoolWatch's own cache clear at {Hm(414)} is being measured", Line(Refill, (300, 1331 * MB), (414, 0)));
+        // With no clear in the hour, before an hour is held, and before the first sample, as it always read.
+        Assert.Equal("12.0 GB (paged and non-paged pool), up 2.4 GB in the last hour", ReportIssueDialog.KernelLine(new TotalsNow(12 * GB, TimeSpan.FromHours(2), 0, 2 * GB + 410 * MB)));
+        Assert.Equal($"12.0 GB (paged and non-paged pool), up 360 MB in the last hour", Line(i => 12 * GB - 420 * MB + i * MB));
+        Assert.Equal("12.0 GB (paged and non-paged pool), watched for less than an hour", ReportIssueDialog.KernelLine(new TotalsNow(12 * GB, TimeSpan.FromMinutes(30), 0, null)));
+        Assert.Equal("not measured yet", ReportIssueDialog.KernelLine(new TotalsNow(null, TimeSpan.Zero, 0, null)));
+    }
+
+    [Fact]
+    public void ASpanThatStartsInsidePoolWatchsOwnClearIsMeasuredFromItsMeasurement()
+    {
+        // A sample a minute: 8 GB, then a clear 11 minutes ago drops the pool to 5 GB (5.5 GB a minute later, 6 GB when it is
+        // measured 2 minutes after it), then it grows 50 MB a minute. The last 10 minutes start inside the clear's interval:
+        // measured from its measurement, not from its dip, the change is the 450 MB grown since.
+        const long MB = 1L << 20;
+        var end = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
+        var h = new Core.History.History();
+        for (int m = -20; m <= 0; m++)
+        {
+            long pool = m < -11 ? 8 * GB : m == -11 ? 5 * GB : m == -10 ? 5 * GB + 512 * MB : 6 * GB + (m + 9) * 50 * MB;
+            h.Add(new Sample(end.AddMinutes(m), new PoolTotals((ulong)pool, 0, 0, 0), [], []));
+        }
+        var clear = new ClearRecord { TimeUtc = end.AddMinutes(-11), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals((ulong)(8 * GB), 0, 0, 0) };
+        Assert.Equal(450 * MB, UiData.Totals(h, [clear]).Change10Min);
     }
 
     [Fact]
