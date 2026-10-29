@@ -1,14 +1,26 @@
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// A window that sizes itself to its content (AutoSize, grow and shrink) on a screen too short for it, such as About at
-/// a high scaling on a small display: it keeps the width of its content, becomes as tall as the screen's working area
-/// and scrolls vertically. It scrolls sideways only on a working area narrower than its content.
+/// A window that sizes itself to its content (AutoSize, grow and shrink) on a screen too short for it, such as About or
+/// the setup guide at a high scaling on a small display: it keeps the width of its content, becomes as tall as the
+/// screen's working area and scrolls vertically. It scrolls sideways only on a working area narrower than its content.
 /// </summary>
 internal static class ScreenFit
 {
     /// <summary>Fits <paramref name="form"/> to the working area of the screen it is on. True when it now scrolls.</summary>
     internal static bool ToWorkingArea(Form form) => ToArea(form, Screen.FromControl(form).WorkingArea);
+
+    /// <summary>
+    /// Fits <paramref name="form"/> to <paramref name="area"/> (<see cref="ToArea(Form, Rectangle)"/>), then moves it up
+    /// when its bottom is below the area's, never above the area's top. For a window that grows as it fills in, such as
+    /// the setup guide. True when it now scrolls.
+    /// </summary>
+    internal static bool IntoArea(Form form, Rectangle area)
+    {
+        bool scrolls = ToArea(form, area);
+        if (form.Bottom > area.Bottom) form.Top = Math.Max(area.Top, area.Bottom - form.Height);
+        return scrolls;
+    }
 
     /// <summary>
     /// An auto-sized <paramref name="form"/> taller than <paramref name="area"/> becomes as tall as the area, as wide as its
