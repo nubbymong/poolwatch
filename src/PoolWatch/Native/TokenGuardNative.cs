@@ -87,7 +87,8 @@ internal static unsafe class TokenGuardNative
         if (way == ChildWay.NewConsoleHidden) { flags = CREATE_NEW_CONSOLE; si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = 0 /* SW_HIDE */; }
         else if (way == ChildWay.NoWindow) flags = CREATE_NO_WINDOW;
         string cmd = Path.Combine(Environment.SystemDirectory, "cmd.exe");
-        string line = $"\"{cmd}\" /d /c rem\0";
+        // CreateProcessW may write to the command line, so it gets a buffer of its own, never a .NET string's characters.
+        char[] line = $"\"{cmd}\" /d /c rem\0".ToCharArray();
         fixed (char* p = line)
         {
             if (!CreateProcessW(cmd, p, 0, 0, false, flags, 0, Environment.SystemDirectory, ref si, out var pi))

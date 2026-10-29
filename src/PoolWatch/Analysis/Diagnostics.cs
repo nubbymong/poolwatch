@@ -48,6 +48,7 @@ internal sealed class Diagnostics
         catch (Exception ex) { engine.Log.Info("event log feed not started: " + ex.Message); }
         analysis.Incidents.Opened += (_, _) => _instancesRequested = true;
         Cache = new CacheClearer(engine, Findings, () => AnyExperimentActive);
+        // Made whatever the guard setting; it hooks its exit failsafe as it is made (TokenLeakGuard.HookProcessExit).
         Guard = new TokenLeakGuard(engine.Paths, engine.Log, f => _guardFindings.Enqueue(f));
         // Service changes are made on a worker thread (the page's Apply / Restore): their findings are queued and recorded on
         // the sampler's next tick, like every other finding raised off the sampler thread.
@@ -257,25 +258,21 @@ internal sealed class Diagnostics
     private Task? _guardTask;
     private readonly CancellationTokenSource _guardStop = new();
 
-    private int _failsafeHooked;
-
     /// <summary>The logon check, on a worker thread (the tray app at start-up; headless with --token-guard).</summary>
     public Task StartTokenGuard(IGuardUi? ui)
     {
         GuardUi = ui;
         // C4 (review): a crash during the leak test must still leave the logon protected. The clean shutdown path calls
-        // OnExit via StopTokenGuard; these catch an unhandled exception or a bare process exit as well (OnExit is a
-        // no-op unless the test is still running). Not a kill or a native crash (no handler runs): the next start's logon
-        // check re-applies the workaround (residual risk, TokenLeakGuard.OnExit).
-        if (Interlocked.Exchange(ref _failsafeHooked, 1) == 0)
-        {
-            AppDomain.CurrentDomain.UnhandledException += (_, _) => { try { Guard.OnExit(); } catch { } };
-            AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { Guard.OnExit(); } catch { } };
-        }
+        // OnExit via StopTokenGuard; an unhandled exception or a bare process exit call it too, through the failsafe the
+        // guard hooked when it was made, whatever the guard setting (TokenLeakGuard.HookProcessExit). Not a kill or a native
+        // crash (no handler runs): the next start's logon check re-applies the workaround (residual risk, TokenLeakGuard.OnExit).
         return _guardTask ??= Task.Run(() => Guard.RunAtLogon(ui, _guardStop.Token));
     }
 
-    /// <summary>PoolWatch exits: if the check is still running, turn the workaround on before going.</summary>
+    /// <summary>
+    /// PoolWatch exits: if the logon check is still running, turn the workaround on before going; a check-only helper that
+    /// runs in a job ends (<see cref="TokenLeakGuard.OnExit"/>).
+    /// </summary>
     public void StopTokenGuard()
     {
         Guard.OnExit();

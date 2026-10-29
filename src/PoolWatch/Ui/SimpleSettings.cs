@@ -3,15 +3,16 @@ using PoolWatch.Core;
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// The values on the plain Settings form (automatic cache clearing and deeper capture; Start at logon is a scheduled
-/// task, not a setting) and how they map onto <see cref="Settings"/>. Pure, so the mapping and the checks are
-/// unit-tested; the full set of settings stays in Advanced.
+/// The values on the plain Settings form (automatic cache clearing, deeper capture and the token-leak guard; Start at
+/// logon is a scheduled task, not a setting) and how they map onto <see cref="Settings"/>. Pure, so the mapping and the
+/// checks are unit-tested; the full set of settings stays in Advanced.
 /// </summary>
 /// <param name="AutoClear"><see cref="Settings.AutoClearEnabled"/>.</param>
 /// <param name="EveryHours"><see cref="Settings.AutoClearEveryHours"/>: clear every this many hours; 0 = no schedule.</param>
 /// <param name="PoolGb"><see cref="Settings.AutoClearPoolGb"/>: clear when the kernel pool is over this many GB; 0 = no size rule.</param>
 /// <param name="DeeperCapture"><see cref="Settings.DeeperCapture"/>.</param>
-internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decimal PoolGb, bool DeeperCapture)
+/// <param name="TokenGuard"><see cref="Settings.TokenGuardEnabled"/>: the token-leak guard, started with the tray app, so a change applies at its next start.</param>
+internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decimal PoolGb, bool DeeperCapture, bool TokenGuard)
 {
     /// <summary>The ranges <see cref="Settings.Normalize"/> keeps them in (a week; a terabyte).</summary>
     public const decimal MaxHours = 168, MaxPoolGb = 1024;
@@ -19,7 +20,7 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
     public const decimal MinHours = 0.5m;
 
     public static SimpleSettings From(Settings s) =>
-        new(s.AutoClearEnabled, Field(s.AutoClearEveryHours, MaxHours), Field(s.AutoClearPoolGb, MaxPoolGb), s.DeeperCapture);
+        new(s.AutoClearEnabled, Field(s.AutoClearEveryHours, MaxHours), Field(s.AutoClearPoolGb, MaxPoolGb), s.DeeperCapture, s.TokenGuardEnabled);
 
     /// <summary>A setting as the form shows it: one decimal, within the form's range.</summary>
     private static decimal Field(double v, decimal max) => double.IsFinite(v) ? Math.Clamp(Math.Round((decimal)v, 1), 0, max) : 0;
@@ -48,8 +49,26 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
         s.AutoClearEveryHours = (double)EveryHours;
         s.AutoClearPoolGb = (double)PoolGb;
         s.DeeperCapture = DeeperCapture;
+        s.TokenGuardEnabled = TokenGuard;
         return true;
     }
+
+    /// <summary>The token-leak guard's box.</summary>
+    public const string TokenGuardLabel = "Guard against a memory leak in some Windows 11 Insider builds";
+    /// <summary>The line under the box, always shown: the one trade-off, how long it lasts, and when a change applies.</summary>
+    public const string TokenGuardHint =
+        "To stop the leak, it lets any program bring its window to the front until you sign out. A change here applies the next time PoolWatch starts.";
+    /// <summary>
+    /// The box's tooltip, one sentence a line (a tooltip wraps only at the screen's edge). True to
+    /// <see cref="Core.TokenGuard.GuardPolicy"/>: the workaround goes on unless two tests in a row on the build were clean, and
+    /// nothing sets it back before sign-out.
+    /// </summary>
+    public const string TokenGuardTip =
+        "Some Windows 11 Insider builds leak a little memory each time one program starts another.\n" +
+        "When PoolWatch starts, it tests for the leak.\n" +
+        "Unless two tests in a row on this build found none, it turns the workaround on.\n" +
+        "Windows lets only the program in front turn it on, so PoolWatch may ask you for one click.\n" +
+        "Turning this off does not undo a workaround already on: that lasts until you sign out.";
 
     /// <summary>The one-line explanation under Deeper capture, honest about whether it does anything with the current settings.</summary>
     public static string DeeperCaptureHint(Settings s) =>

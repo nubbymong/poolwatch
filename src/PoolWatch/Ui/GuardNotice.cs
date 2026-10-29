@@ -45,7 +45,7 @@ internal sealed class GuardNotices : IGuardUi
     {
         var f = new Form
         {
-            Text = "PoolWatch: token leak guard", FormBorderStyle = FormBorderStyle.FixedToolWindow, ShowInTaskbar = true, TopMost = true,
+            Text = "PoolWatch: token-leak guard", FormBorderStyle = FormBorderStyle.FixedToolWindow, ShowInTaskbar = true, TopMost = true,
             StartPosition = FormStartPosition.Manual, Width = 460, Height = 190, Font = new Font("Segoe UI", 9f),
         };
         var label = new TextBox { Text = text.Replace("\n", Environment.NewLine), Multiline = true, ReadOnly = true, BorderStyle = BorderStyle.None, Dock = DockStyle.Fill, BackColor = SystemColors.Control, TabStop = false };
