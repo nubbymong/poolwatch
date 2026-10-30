@@ -3,17 +3,22 @@ using PoolWatch.Core.Detection;
 using PoolWatch.Engine;
 using PoolWatch.Engine.Changes;
 using PoolWatch.Native;
+using PoolWatch.Ui.Setup;
 
 namespace PoolWatch.Ui;
 
 /// <summary>
 /// The tray app: an icon coloured by state (grey while starting, then green / amber / red) with the paged + non-paged
-/// totals in its tooltip, a balloon when an incident opens, and the main window on demand. Its menu opens the setup guide
-/// and Active changes, says when a newer release is out (update notices, information only), and holds the tools that
-/// are not on the main window (DESIGN.md section 11): Capture now, Since boot report, Open incident folder, Export vendor
-/// bundle, Copy latest incident summary, the clear-task removals (shown only while there is something to remove), Report
-/// an issue and About. It is the shell the setup guide and the suggestions call (<see cref="IShell"/>): one of each window
-/// at a time, and the token-leak guard's sign-in check with its notices. The installer's exit signal ends it cleanly.
+/// totals in its tooltip, a balloon when an incident opens, and the main window on demand. Until the first setup is done,
+/// setup is the way in: it opens by itself at every start, and anything that would show the main window brings setup
+/// instead (<see cref="FirstRunGate"/>). Its menu runs setup again and opens Active changes, says when a newer release is
+/// out (update notices, information only), and holds the tools that are not on the main window (DESIGN.md section 11):
+/// Capture now, Since boot report, Open incident folder, Export vendor bundle, Copy latest incident summary, the
+/// clear-task removals (shown only while there is something to remove), Report an issue and About. It is the shell setup
+/// and the suggestions call (<see cref="IShell"/>): one of each window at a time, and the token-leak guard's sign-in check
+/// with its notices. Once setup was completed, it also looks for the token leak every 30 minutes while the window is
+/// hidden (<see cref="WatchTokenLeak"/>: the check-only test, which changes nothing), and says so when it finds it with
+/// the guard off; a click shows where the window offers the guard. The installer's exit signal ends it cleanly.
 /// </summary>
 internal sealed class TrayApp : ApplicationContext, IShell
 {
@@ -24,6 +29,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
     private readonly NotifyIcon _icon;
     private readonly ContextMenuStrip _menu = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 10_000 };
+    /// <summary>The token-leak watch's slow beat in the tray (<see cref="TokenLeakWatchEvery"/>; <see cref="WatchTimer"/>).</summary>
+    private readonly System.Windows.Forms.Timer _watchTimer;
     private readonly SynchronizationContext _ui;
     private MainForm? _form;
     private TrayState _state = (TrayState)(-1);
@@ -40,9 +47,11 @@ internal sealed class TrayApp : ApplicationContext, IShell
     private UpdateRelease? _sampleUpdate;
     private bool _markOpen;
     private GuardNotices? _guardNotices;
-    private SetupGuideForm? _guide;
+    private SetupWizardForm? _guide;
+    /// <summary>Where each way into the app leads: setup until it was completed once (never in the CI UI test).</summary>
+    private readonly FirstRunGate _gate;
     private ActiveChangesForm? _activeChanges;
-    /// <summary>What a click on the balloon showing now opens (the setup guide, Active changes), if anything.</summary>
+    /// <summary>What a click on the balloon showing now opens (Active changes, or the token-leak guard where the window offers it), if anything.</summary>
     private readonly BalloonClick _balloonClick = new();
 
     /// <summary>The state the tray icon currently shows.</summary>
@@ -67,7 +76,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         }
         var menu = _menu;
         menu.Items.Add("Open PoolWatch", null, (_, _) => ShowWindow());
-        menu.Items.Add("Set up PoolWatch...", null, (_, _) => OpenGuide());
+        menu.Items.Add(FirstRunGate.MenuItem, null, (_, _) => OpenGuide());
         menu.Items.Add("Active changes...", null, (_, _) => OpenActiveChanges());
         // "PoolWatch 1.2.0 is available": shown only while a newer release is out; it opens that release's page.
         var update = new ToolStripMenuItem("", null, (_, _) => _actions.Guarded(null, "Open the release page", () =>
@@ -139,15 +148,74 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _timer.Tick += (_, _) => UpdateIcon();
         _timer.Start();
         UpdateIcon();
-        if (showWindow) ShowWindow();
-        // The first start (the guide was never completed): the guide over the main window, or, started at sign-in, a
-        // balloon. The update check starts once the guide has been completed, so the owner has seen its switch first.
-        if (Setup.Store.GuideCompleted) _updates?.Start();
-        else if (!smoke)
+        // Until setup was completed once, it opens on its own at every start (started at sign-in too), and the main window
+        // waits for it. The update check starts once setup has been completed, so the owner has seen its switch first.
+        _gate = new FirstRunGate(completed: () => Setup.Store.GuideCompleted, smoke: smoke, openSetup: OpenGuide, showMain: ShowMain,
+            switchToAdvanced: tab => Form.ShowAdvanced(tab), switchToSimple: () => Form.ShowView(advanced: false),
+            rememberView: advanced => _view?.Remember(advanced), startUpdates: () => _updates?.Start());
+        _gate.Start(showWindow);
+        // The token-leak watch also runs while the window is hidden (never in the CI UI test, where it refuses anyway).
+        _watchTimer = WatchTimer(smoke, WatchTokenLeak);
+    }
+
+    /// <summary>How often the tray's token-leak watch looks in (the main window looks in as well while it shows).</summary>
+    internal static readonly TimeSpan TokenLeakWatchEvery = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// The tray's token-leak watch beat: every <see cref="TokenLeakWatchEvery"/>, <paramref name="tick"/>; started at once,
+    /// except in the CI UI test (<paramref name="smoke"/>), where it is never started. The caller stops and disposes it.
+    /// </summary>
+    internal static System.Windows.Forms.Timer WatchTimer(bool smoke, Action tick)
+    {
+        var timer = new System.Windows.Forms.Timer { Interval = (int)TokenLeakWatchEvery.TotalMilliseconds };
+        if (smoke) return timer;
+        timer.Tick += (_, _) => tick();
+        timer.Start();
+        return timer;
+    }
+
+    /// <summary>
+    /// The tray's notice when the watch found the leak and the guard is off: a click opens the window on the guard as its
+    /// view offers it (<see cref="MainForm.ShowTokenGuardOffer"/>).
+    /// </summary>
+    internal const string TokenLeakFoundNotice = "PoolWatch found the Windows token leak on this PC. Click here to see the guard that stops it.";
+
+    /// <summary>Whether the tray's watch looks in now: once setup was completed, and only where the check could run at all.</summary>
+    internal static bool WatchFromTray(bool setupCompleted, Core.Setup.TokenLeakStatus? leak) =>
+        setupCompleted && leak == Core.Setup.TokenLeakStatus.NeedsTest;
+
+    /// <summary>The notice after a check the watch started: only when it found the leak and the guard is still off.</summary>
+    internal static string? WatchNotice(Core.TokenGuard.LeakVerdict? verdict, bool guardOn) =>
+        verdict == Core.TokenGuard.LeakVerdict.Leak && !guardOn ? TokenLeakFoundNotice : null;
+
+    /// <summary>
+    /// The token-leak watch from the tray (<see cref="RecommendationActions.WatchTokenLeak"/>): a check it starts runs in
+    /// the background and changes nothing; when it finds the leak, the tray says so and a click opens the window on the
+    /// guard (<see cref="ShowTokenGuard"/>). Anything that goes wrong is logged, never shown.
+    /// </summary>
+    private async void WatchTokenLeak()
+    {
+        try
         {
-            if (showWindow) OpenGuide();
-            else Balloon("PoolWatch is running. Click here to set it up.", 10_000, OpenGuide);
+            if (!WatchFromTray(Setup.Store.GuideCompleted, Setup.Probe.Last?.TokenLeak)) return;
+            if (Setup.Recommendations.WatchTokenLeak(Setup.Inputs()) is not { } check) return;
+            await check;
+            if (WatchNotice(Setup.Recommendations.LeakTestNow, _live.Running.TokenGuardEnabled) is { } notice) Balloon(notice, 10_000, ShowTokenGuard);
         }
+        catch (Exception ex)
+        {
+            try { _engine.Log.Info("the token-leak watch did not finish: " + ex.Message); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// The token-leak notice was clicked: the window (setup while it was never completed), then the guard as the window's
+    /// view offers it, once the window shows (the Simple view's card, or Settings in the Advanced view). Nothing is turned on.
+    /// </summary>
+    private void ShowTokenGuard()
+    {
+        ShowWindow();
+        if (_form is { Visible: true, IsDisposed: false } form) form.BeginInvoke(form.ShowTokenGuardOffer);
     }
 
     /// <summary>What the setup guide and the suggestions use (made once).</summary>
@@ -178,7 +246,10 @@ internal sealed class TrayApp : ApplicationContext, IShell
     /// <summary>Every item of the tray menu, by text (CI: what the main window gave up must still be reachable).</summary>
     public List<string> MenuItemTexts() => _menu.Items.OfType<ToolStripMenuItem>().Select(i => i.Text ?? "").ToList();
 
-    public void ShowWindow()
+    /// <summary>The main window, or setup while it was never completed (<see cref="FirstRunGate"/>).</summary>
+    public void ShowWindow() => _gate.ShowWindow();
+
+    private void ShowMain()
     {
         Form.Show();
         if (Form.WindowState == FormWindowState.Minimized) Form.WindowState = FormWindowState.Normal;
@@ -205,20 +276,25 @@ internal sealed class TrayApp : ApplicationContext, IShell
         form.Activate();
     }
 
-    /// <summary>The setup guide from the menu, the balloon or a first start: a failure to open it is shown, never thrown (PoolWatch keeps running).</summary>
+    /// <summary>Setup from the menu, a first start or a way into the app before it was done: a failure to open it is shown, never thrown (PoolWatch keeps running).</summary>
     private void OpenGuide() => _actions.Guarded(null, "Set up PoolWatch", ShowGuide);
 
-    /// <summary>The setup guide, one at a time. It marks itself completed when it closes; the update check then starts (once).</summary>
+    /// <summary>
+    /// Setup, one at a time, in a window of its own. When it closes, <see cref="FirstRunGate.SetupClosed"/> decides what
+    /// follows: finished ("Open PoolWatch", it has marked itself completed), the app takes its choice and opens;
+    /// cancelled (only possible once it was completed before), nothing more happens.
+    /// </summary>
     private void ShowGuide()
     {
         if (_guide is { IsDisposed: false } open) { Bring(open); return; }
-        _guide = new SetupGuideForm(Setup);
-        _guide.FormClosed += (_, _) =>
+        bool advancedBefore = _view?.Advanced == true;
+        var guide = _guide = new SetupWizardForm(Setup, firstRun: !Setup.Store.GuideCompleted, advanced: advancedBefore);
+        guide.FormClosed += (_, _) =>
         {
             _guide = null;
-            _updates?.Start();
+            _gate.SetupClosed(guide.Finished, guide.Advanced, advancedBefore);
         };
-        Open(_guide);
+        Open(guide);
     }
 
     /// <summary>The setup guide's update switch: the setting itself, applied at once.</summary>
@@ -227,17 +303,14 @@ internal sealed class TrayApp : ApplicationContext, IShell
         public bool Enabled
         {
             get => live.Running.CheckForUpdates;
-            set => live.Apply($"update notices {(value ? "on" : "off")} (the setup guide)", s => s.CheckForUpdates = value);
+            set => live.Apply($"update notices {(value ? "on" : "off")} (setup)", s => s.CheckForUpdates = value);
         }
     }
 
     // ---------------------------------------------------------------- IShell
 
-    public void ShowAdvanced(int tab)
-    {
-        ShowWindow();
-        Form.ShowAdvanced(tab);
-    }
+    /// <summary>The main window in Advanced view on a tab; before the first setup is done, setup (the view is not switched behind its back).</summary>
+    public void ShowAdvanced(int tab) => _gate.ShowAdvanced(tab);
 
     /// <summary>Active changes, one at a time (modeless: it reads its list off the UI thread).</summary>
     public void ShowActiveChanges()
@@ -334,11 +407,88 @@ internal sealed class TrayApp : ApplicationContext, IShell
         Microsoft.Win32.SystemEvents.SessionEnding -= _onSessionEnding;
         _timer.Stop();
         _timer.Dispose();
+        _watchTimer.Stop();
+        _watchTimer.Dispose();
         _icon.Visible = false;
         _icon.Dispose();
         _menu.Dispose();
         _form?.Dispose();
         base.ExitThreadCore();
+    }
+}
+
+/// <summary>
+/// The first run, and where each way into the app leads. Until setup was completed once, it is the way in: it opens by
+/// itself at every start (also when started at sign-in), the main window stays hidden, and anything that would show it
+/// (Open PoolWatch, a double-click on the tray icon, a suggestion's way into the Advanced view) brings setup instead.
+/// Setup finished: the app takes its Simple or Advanced choice, the update check starts and the main window opens;
+/// cancelled (only a re-run can be), nothing happens. Never in the CI UI test, which opens the main window at once.
+/// Without a window: the tray app passes what each of those does, and the tests pass fakes.
+/// </summary>
+/// <param name="completed">Setup was completed once (read each time: finishing setup marks it).</param>
+/// <param name="smoke">The CI UI test.</param>
+/// <param name="openSetup">Opens setup, or brings the one open to the front.</param>
+/// <param name="showMain">Shows the main window.</param>
+/// <param name="switchToAdvanced">Switches the main window to its Advanced view on a tab (0 Pool causes, 1 Services, 2 Tasks and startup apps).</param>
+/// <param name="switchToSimple">Switches the main window to its Simple view (setup run again chose it).</param>
+/// <param name="rememberView">Keeps the view chosen in setup (true: Advanced) for the next start.</param>
+/// <param name="startUpdates">Starts the update check (once; again does nothing).</param>
+internal sealed class FirstRunGate(Func<bool> completed, bool smoke, Action openSetup, Action showMain, Action<int> switchToAdvanced, Action switchToSimple,
+    Action<bool> rememberView, Action startUpdates)
+{
+    /// <summary>The tray menu's item that opens setup (again).</summary>
+    public const string MenuItem = "Run setup again...";
+
+    /// <summary>Setup comes first: it was never completed, and this is not the CI UI test.</summary>
+    public static bool SetupFirst(bool setupCompleted, bool smoke) => !setupCompleted && !smoke;
+
+    private bool SetupFirstNow => SetupFirst(completed(), smoke);
+
+    /// <summary>
+    /// The tray app starts: setup while it was never completed, else the main window when it was asked for (not when
+    /// started at sign-in). The update check starts only once setup was completed, so its switch was seen first.
+    /// </summary>
+    public void Start(bool showWindow)
+    {
+        if (SetupFirstNow) openSetup();
+        else if (showWindow) showMain();
+        if (completed()) startUpdates();
+    }
+
+    /// <summary>A way into the main window: setup instead while it was never completed.</summary>
+    public void ShowWindow()
+    {
+        if (SetupFirstNow) openSetup();
+        else showMain();
+    }
+
+    /// <summary>A way into the Advanced view: setup instead while it was never completed (the view is not switched behind its back).</summary>
+    public void ShowAdvanced(int tab)
+    {
+        if (SetupFirstNow)
+        {
+            openSetup();
+            return;
+        }
+        showMain();
+        switchToAdvanced(tab);
+    }
+
+    /// <summary>
+    /// Setup closed. Finished: its Simple or Advanced choice is kept, the update check starts and the main window opens,
+    /// switched to the view chosen now when it differs from the one it showed (an open main window shows the view chosen;
+    /// one made now opens in it).
+    /// Cancelled: nothing.
+    /// </summary>
+    /// <param name="advancedBefore">The app showed its Advanced view when setup opened.</param>
+    public void SetupClosed(bool finished, bool advanced, bool advancedBefore)
+    {
+        if (!finished) return;
+        rememberView(advanced);
+        startUpdates();
+        ShowWindow();
+        if (advanced && !advancedBefore) switchToAdvanced(0);
+        else if (!advanced && advancedBefore) switchToSimple();
     }
 }
 

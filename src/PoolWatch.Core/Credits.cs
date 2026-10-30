@@ -39,14 +39,28 @@ public static class Credits
     ];
 
     /// <summary>
-    /// The web pages PoolWatch may open (UiActions.OpenWebPage): the credits' pages, the repository, its notices and
-    /// private advisory pages, one release's own page (an update notice's, <see cref="ReleasePage.IsValid"/>), and a
-    /// new-issue address PoolWatch built (<see cref="IssueReport.Url"/>): short enough for explorer.exe to pass on whole,
-    /// and with a query of escaped characters only, so it can never carry a quote or a space onto explorer.exe's command line.
+    /// The pages setup's explanations cite that are not credits: Microsoft's documentation of the Windows setting the
+    /// token-leak guard changes, Microsoft's article on ReFS and memory use, and Microsoft's own report of Dev Drives
+    /// holding memory. Fixed addresses, matched whole.
+    /// </summary>
+    public static IReadOnlyList<string> ReferencePages { get; } =
+    [
+        "https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-systemparametersinfow",
+        "https://learn.microsoft.com/troubleshoot/windows-server/backup-and-storage/fix-heavy-memory-usage-refs",
+        "https://github.com/microsoft/Windows-Dev-Performance/issues/131",
+    ];
+
+    /// <summary>
+    /// The web pages PoolWatch may open (UiActions.OpenWebPage): the credits' pages and the reference pages setup cites,
+    /// each matched whole, the repository, its notices and private advisory pages, one release's own page (an update
+    /// notice's, <see cref="ReleasePage.IsValid"/>), and a new-issue address PoolWatch built (<see cref="IssueReport.Url"/>):
+    /// short enough for explorer.exe to pass on whole, and with a query of escaped characters only, so it can never carry
+    /// a quote or a space onto explorer.exe's command line.
     /// </summary>
     public static bool IsAllowedLink(string url)
     {
-        if (url is RepoUrl or NoticesUrl or IssueReport.AdvisoryUrl || All.Any(c => c.Url == url) || ReleasePage.IsValid(url)) return true;
+        if (url is RepoUrl or NoticesUrl or IssueReport.AdvisoryUrl || All.Any(c => c.Url == url) || ReferencePages.Contains(url, StringComparer.Ordinal) ||
+            ReleasePage.IsValid(url)) return true;
         const string issue = IssueReport.NewIssueUrl + "?";
         // An escaped query holds unreserved characters, '%' escapes and the '=' and '&' between fields.
         return url.Length <= IssueReport.MaxUrlLength && url.StartsWith(issue, StringComparison.Ordinal) &&

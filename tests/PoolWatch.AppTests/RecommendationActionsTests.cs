@@ -15,8 +15,9 @@ using PoolWatch.Ui;
 namespace PoolWatch.AppTests;
 
 /// <summary>
-/// The button of each suggestion and setup-guide row calls the right thing, says what happened in plain words, and does
-/// nothing in the CI UI test. Settings go to a settings.json in TEMP; everything else that would touch Windows is a fake.
+/// The button of each suggestion (setup runs the same buttons) calls the right thing, says what happened in plain words,
+/// and does nothing in the CI UI test. Settings go to a settings.json in TEMP; everything else that would touch Windows is a
+/// fake.
 /// </summary>
 public sealed class RecommendationActionsTests : IDisposable
 {
@@ -185,6 +186,44 @@ public sealed class RecommendationActionsTests : IDisposable
         Assert.Empty(_system.Calls);
         // No check ever gave a verdict (setup's could not run): the watch runs it.
         Assert.NotNull(actions.WatchTokenLeak(Watching(savedFor: null)));
+    }
+
+    [Fact]
+    public void TheTraysWatchLooksInOnceSetupWasDoneAndSaysSoOnlyWhenItFoundTheLeakWithTheGuardOff()
+    {
+        // The tray looks in every half hour, also while the window is hidden, once setup was completed and where the check
+        // could run at all.
+        Assert.Equal(TimeSpan.FromMinutes(30), TrayApp.TokenLeakWatchEvery);
+        Assert.True(TrayApp.WatchFromTray(setupCompleted: true, TokenLeakStatus.NeedsTest));
+        Assert.False(TrayApp.WatchFromTray(setupCompleted: false, TokenLeakStatus.NeedsTest));
+        Assert.False(TrayApp.WatchFromTray(setupCompleted: true, TokenLeakStatus.WorkedAroundAlready));
+        Assert.False(TrayApp.WatchFromTray(setupCompleted: true, null));
+        // A check it started found the leak and the guard is off: the tray says so, and a click opens the window's offer.
+        Assert.Equal(TrayApp.TokenLeakFoundNotice, TrayApp.WatchNotice(LeakVerdict.Leak, guardOn: false));
+        Assert.Null(TrayApp.WatchNotice(LeakVerdict.Leak, guardOn: true));
+        Assert.Null(TrayApp.WatchNotice(LeakVerdict.Clean, guardOn: false));
+        Assert.Null(TrayApp.WatchNotice(LeakVerdict.Unclear, guardOn: false));
+        Assert.Null(TrayApp.WatchNotice(null, guardOn: false));
+        Assert.True(TrayApp.TokenLeakFoundNotice.Length <= ProfileAtStart.MaxNotice);
+        // The click shows the guard where the view offers it: the Simple view's card, or Settings (its switch) in the
+        // Advanced view, which has no card.
+        Assert.Equal(TokenGuardOffer.Card, MainForm.TokenGuardOfferIn(advanced: false));
+        Assert.Equal(TokenGuardOffer.Settings, MainForm.TokenGuardOfferIn(advanced: true));
+    }
+
+    [Fact]
+    public void TheTraysWatchBeatIsStartedEveryHalfHourButNeverInTheCiUiTest()
+    {
+        int ticks = 0;
+        using (var beat = TrayApp.WatchTimer(smoke: false, () => ticks++))
+        {
+            Assert.True(beat.Enabled);
+            Assert.Equal((int)TrayApp.TokenLeakWatchEvery.TotalMilliseconds, beat.Interval);
+            beat.Stop();
+        }
+        using (var none = TrayApp.WatchTimer(smoke: true, () => ticks++))
+            Assert.False(none.Enabled);
+        Assert.Equal(0, ticks);
     }
 
     [Fact]
@@ -415,128 +454,6 @@ public sealed class RecommendationActionsTests : IDisposable
         Assert.StartsWith("On this PC, clearing the cache freed 2.0 GB", Card(Evidence(true, 2, "Reff"), RecommendationId.HourlyCacheClear).Why);
     }
 
-    // ------------------------------------------------------------------ the setup guide's rows
-
-    private static RecommendationInputs Inputs(EnvironmentFacts facts, bool autoClear = false, bool guard = false) =>
-        new() { NowUtc = DateTime.UtcNow, Facts = facts, AutoClearOn = autoClear, TokenGuardOn = guard };
-
-    [Fact]
-    public void OnANewPcTheGuideOffersEachFirstRunStepAndChecksForTheLeak()
-    {
-        var facts = Facts(Ntfs) with { InstalledInProgramFiles = true, TokenLeak = TokenLeakStatus.NeedsTest };
-        var rows = SetupGuideForm.Rows(Inputs(facts), Evidence(null), leakNotChecked: null);
-        Assert.Equal([RecommendationId.StartAtSignIn, RecommendationId.HourlyCacheClear, RecommendationId.TokenLeakGuard], rows.Select(r => r.Row.Id));
-        Assert.Equal(("Turn on", false), (rows[0].Row.Button, rows[0].TestClear));
-        Assert.Equal((ClearAdvice.CheckButton, true), (rows[1].Row.Button, rows[1].TestClear));      // NTFS only: check first
-        Assert.Equal(RecommendationState.Checking, rows[2].Row.State);
-
-        // The check could not run: the row says why, once, in this window only.
-        const string why = "The check could not run now: another check is running, or something on this PC already works around the leak.";
-        var notChecked = SetupGuideForm.Rows(Inputs(facts), Evidence(null), leakNotChecked: why)[2].Row;
-        Assert.Equal((RecommendationState.Info, why, ""), (notChecked.State, notChecked.Why, notChecked.Button));
-        // A verdict from earlier in this session stands.
-        var clean = SetupGuideForm.Rows(Inputs(facts) with { LeakTestNow = LeakVerdict.Clean }, Evidence(null), leakNotChecked: why)[2].Row;
-        Assert.Equal("PoolWatch's check found no token leak on this Windows build.", clean.Why);
-    }
-
-    [Fact]
-    public void OpenedAgainTheGuideShowsWhatIsAlreadySetUp()
-    {
-        var facts = Facts(Ntfs, DevDrive) with { InstalledInProgramFiles = true, LogonTaskExists = true, TokenLeak = TokenLeakStatus.Leaks };
-        var rows = SetupGuideForm.Rows(Inputs(facts, autoClear: true, guard: true), Evidence(true, 3.5, "Reff"), leakNotChecked: null);
-        Assert.All(rows, r => Assert.Equal(RecommendationState.Done, r.Row.State));
-        // The hourly clear confirms what clearing freed here.
-        Assert.EndsWith("On this PC, clearing the cache freed 3.5 GB of the kernel pool, mostly ReFS file records.", rows[1].Row.Why);
-
-        // With a ReFS drive the hourly clear applies, so a later clear that freed little never says it is not needed.
-        var refsLittle = SetupGuideForm.Rows(Inputs(facts, autoClear: true, guard: true), Evidence(false, 0.3, "Reff"), leakNotChecked: null)[1].Row;
-        Assert.DoesNotContain("not needed", refsLittle.Why);
-        // With NTFS only, it is said: there, what the clears free decides.
-        var ntfsLittle = SetupGuideForm.Rows(Inputs(Facts(Ntfs) with { InstalledInProgramFiles = true }, autoClear: true), Evidence(false, 0.3), leakNotChecked: null)[1].Row;
-        Assert.Contains("an hourly clear is not needed now", ntfsLittle.Why);
-    }
-
-    private static IEnumerable<T> All<T>(Control root) where T : Control =>
-        root.Controls.Cast<Control>().SelectMany(c => (c is T t ? [t] : Array.Empty<T>()).Concat(All<T>(c)));
-
-    [Theory]
-    [InlineData(9f)]
-    [InlineData(13.5f)]   // half as big again, as at 150%: the guide lays out from its fonts, in the same 620 px here
-    public void TheGuideFitsItsWidthAtTheUsualAndALargerTextSize(float points)
-    {
-        // Every kind of row: an offer, the test clear running (the longest button), the token-leak offer with what you will
-        // notice (the longest texts), a row with an error, and the services line.
-        var facts = Facts(Ntfs) with { InstalledInProgramFiles = true, TokenLeak = TokenLeakStatus.Leaks, OptionalServicesRunning = 2 };
-        var rows = SetupGuideForm.Rows(Inputs(facts), Evidence(null), leakNotChecked: null);
-        Assert.Equal([RecommendationId.StartAtSignIn, RecommendationId.HourlyCacheClear, RecommendationId.TokenLeakGuard, RecommendationId.ReviewServices],
-            rows.Select(r => r.Row.Id));
-        using var host = new Form();
-        using var font = new Font("Segoe UI", points);
-        var page = new GuidePage(font);
-        host.Controls.Add(page);
-        page.Fill(new GuideState(facts.PlainLines(), rows, new FakeUpdates(), new HashSet<string> { rows[1].Row.Key },
-            new Dictionary<string, string> { [rows[0].Row.Key] = "PoolWatch could not set itself to start when you sign in. It runs from a folder you can change." }));
-
-        Assert.Empty(page.LayoutProblems());
-        Assert.Equal(["Turn on", ClearAdvice.CheckButton, "Turn on", "Done"], All<Button>(page).Select(b => b.Text));
-        Assert.Contains(All<Label>(page), l => l.Text == TokenGuardWords.Details);
-    }
-
-    [Fact]
-    public void TheStepThatTurnsClearingOnSaysOnceThatAClearCanStutter()
-    {
-        int Said(EnvironmentFacts facts, bool autoClear = false)
-        {
-            var rows = SetupGuideForm.Rows(Inputs(facts, autoClear), Evidence(null), leakNotChecked: null);
-            using var host = new Form();
-            using var font = new Font("Segoe UI", 9f);
-            var page = new GuidePage(font);
-            host.Controls.Add(page);
-            page.Fill(new GuideState(facts.PlainLines(), rows, null, new HashSet<string>(), new Dictionary<string, string>()));
-            Assert.Empty(page.LayoutProblems());
-            return All<Label>(page).Count(l => l.Text == SimpleSettings.ClearStutter);
-        }
-        Assert.Equal(1, Said(Facts(DevDrive)));                                         // "Clear the cache every hour", Turn on
-        Assert.Equal(1, Said(Facts(Ntfs) with { OwnClearTasks = [@"\RAMMap clear"] })); // replacing your own task turns it on too
-        Assert.Equal(1, Said(Facts(Ntfs)));                                             // the one-time check runs a clear too
-        Assert.Equal(0, Said(Facts(DevDrive), autoClear: true));                        // done already
-        Assert.True(SimpleSettings.RunsAClear(Hourly()));
-        Assert.False(SimpleSettings.RunsAClear(Hourly() with { State = RecommendationState.Done }));
-    }
-
-    [Fact]
-    public void TheUpdateSwitchShowsWhatIsInEffectAfterAChangeThatDidNotWork()
-    {
-        using var host = new Form();
-        using var font = new Font("Segoe UI", 9f);
-        var page = new GuidePage(font);
-        host.Controls.Add(page);
-        var updates = new FakeUpdates();
-        page.Fill(new GuideState([], [], updates, new HashSet<string>(), new Dictionary<string, string>()));
-        page.UpdatesSwitched += on => { try { updates.Enabled = on; } catch (IOException) { } }; // as the window does, with its message
-        var box = Assert.Single(All<CheckBox>(page));
-
-        updates.Fails = true;
-        box.Checked = false;
-        Assert.Equal((true, true), (box.Checked, updates.Enabled));       // not changed: the switch says so
-        updates.Fails = false;
-        box.Checked = false;
-        Assert.Equal((false, false), (box.Checked, updates.Enabled));
-    }
-
-    [Fact]
-    public void AHeadingShowsOnlyWithSomethingUnderIt()
-    {
-        using var host = new Form();
-        using var font = new Font("Segoe UI", 9f);
-        var page = new GuidePage(font);
-        host.Controls.Add(page);
-        page.Fill(new GuideState([], [], null, new HashSet<string>(), new Dictionary<string, string>()));
-        Assert.DoesNotContain(All<Label>(page), l => l.Text is "Suggested for this PC" or "Worth a look later");
-        page.Fill(new GuideState([], [], new FakeUpdates(), new HashSet<string>(), new Dictionary<string, string>()));
-        Assert.Contains(All<Label>(page), l => l.Text == "Suggested for this PC");   // the update switch alone has it
-    }
-
     [Fact]
     public void TheTextsArePlainWords()
     {
@@ -602,18 +519,6 @@ public sealed class RecommendationActionsTests : IDisposable
         public ClearRecord? StartClear() { Calls.Add("clear"); return Clear; }
         public string IncidentsDir => @"C:\ProgramData\PoolWatch\incidents";
         public void Timeline(string line) => TimelineLines.Add(line);
-    }
-
-    private sealed class FakeUpdates : IUpdateCheck
-    {
-        private bool _on = true;
-        public bool Fails;
-
-        public bool Enabled
-        {
-            get => _on;
-            set => _on = Fails ? throw new IOException("settings.json is in use") : value;
-        }
     }
 
     private sealed class FakeShell : IShell

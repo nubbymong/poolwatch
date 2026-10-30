@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using PoolWatch.Analysis;
@@ -22,6 +23,13 @@ namespace PoolWatch.Engine.Setup;
 internal sealed class EnvironmentProbe
 {
     public static readonly TimeSpan StaleAfter = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// How long a scan may run before those waiting for it go on without it (it reads in seconds): every <see cref="ScanAsync()"/>
+    /// (the rescan after a change, the window reading the PC again when it comes back), and setup, which sets the same limit
+    /// on its own wait (<see cref="ScanToTheEnd"/>), so a read that hangs never holds a step, a button or the window for longer.
+    /// </summary>
+    public static readonly TimeSpan HungAfter = TimeSpan.FromSeconds(60);
     private const string FileName = "environment.json";
 
     private readonly AppPaths _paths;
@@ -31,15 +39,21 @@ internal sealed class EnvironmentProbe
     private EnvironmentFacts? _last;
     private bool _cacheRead;
     private Task<EnvironmentFacts>? _scan;
+    /// <summary>When the running scan started (<see cref="_clock"/>).</summary>
+    private long _scanStarted;
+    /// <summary>The time a scan is measured by: <see cref="Stopwatch.GetTimestamp"/>; the tests move it on.</summary>
+    private readonly Func<long> _clock;
 
     public EnvironmentProbe(MonitorEngine engine, AnalysisPipeline analysis, IEnvironmentReads? reads = null)
         : this(engine.Paths, engine.Log, reads ?? new WindowsEnvironmentReads(engine, analysis)) { }
 
-    internal EnvironmentProbe(AppPaths paths, Log log, IEnvironmentReads reads)
+    /// <param name="clock">The tests: a clock they move on (<see cref="Stopwatch"/> ticks); <see cref="Stopwatch.GetTimestamp"/> otherwise.</param>
+    internal EnvironmentProbe(AppPaths paths, Log log, IEnvironmentReads reads, Func<long>? clock = null)
     {
         _paths = paths;
         _log = log;
         _reads = reads;
+        _clock = clock ?? Stopwatch.GetTimestamp;
     }
 
     private string CacheFile => _paths.Guard.CheckReal(Path.Combine(_paths.EnsureDir(_paths.CacheDir), FileName));
@@ -61,12 +75,22 @@ internal sealed class EnvironmentProbe
         }
     }
 
-    /// <summary>Scans on a worker thread; while a scan runs, every caller gets that one.</summary>
-    public Task<EnvironmentFacts> ScanAsync()
+    /// <summary>
+    /// Scans on a worker thread, given up on after <see cref="HungAfter"/> (<see cref="ScanAsync(TimeSpan)"/>): the safe way for
+    /// anything that waits on the PC being read (a button, the window coming back), so a read that hangs never holds it.
+    /// </summary>
+    public Task<EnvironmentFacts> ScanAsync() => ScanAsync(HungAfter);
+
+    /// <summary>
+    /// Scans on a worker thread and waits for as long as it takes; while a scan runs, every caller gets that one. Only for a
+    /// caller that sets its own limit on the wait (setup's scan, which goes on without it after a minute).
+    /// </summary>
+    public Task<EnvironmentFacts> ScanToTheEnd()
     {
         lock (_lock)
         {
             if (_scan is { IsCompleted: false } running) return running;
+            _scanStarted = _clock();
             return _scan = Task.Run(() =>
             {
                 var facts = Scan();
@@ -75,6 +99,27 @@ internal sealed class EnvironmentProbe
                 return facts;
             });
         }
+    }
+
+    /// <summary>
+    /// <see cref="ScanToTheEnd"/>, given up on once the scan has run for <paramref name="limit"/>: the task then fails with a
+    /// <see cref="TimeoutException"/>, while the scan goes on and its facts land in <see cref="Last"/> when it ends. A caller
+    /// that joins a scan started earlier waits only for what is left of the limit, so a read that hangs holds no caller for
+    /// longer than that, however many ask.
+    /// </summary>
+    public Task<EnvironmentFacts> ScanAsync(TimeSpan limit)
+    {
+        Task<EnvironmentFacts> scan;
+        TimeSpan left;
+        lock (_lock)
+        {
+            scan = ScanToTheEnd();
+            left = limit - Stopwatch.GetElapsedTime(_scanStarted, _clock());
+        }
+        if (scan.IsCompleted) return scan;
+        return left > TimeSpan.Zero
+            ? scan.WaitAsync(left)
+            : Task.FromException<EnvironmentFacts>(new TimeoutException($"reading this PC has taken longer than {limit.TotalSeconds:0} seconds"));
     }
 
     /// <summary>

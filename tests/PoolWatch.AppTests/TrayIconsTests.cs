@@ -54,11 +54,19 @@ public class TrayIconsTests
             Assert.Same(TrayIcons.App, advanced.Icon);
         using (var notice = GuardNotices.NewNotice("The token-leak guard is on.", ("OK", null))) Assert.Same(TrayIcons.App, notice.Icon);
         Assert.False(TrayIcons.App.Size.IsEmpty);
-        // The main window needs the whole app to build: its source sets the same icon, and no window here sets a state's.
+        // The main window needs the whole app to build: its source sets the same icon. No window anywhere in the UI sets a
+        // state's icon (only the tray icon itself, TrayApp's _icon, shows a state), and each window that sets one sets the app's.
         string ui = Path.Combine(RepoRoot(), "src", "PoolWatch", "Ui");
         Assert.Contains("Icon = TrayIcons.App;", File.ReadAllText(Path.Combine(ui, "MainForm.cs")));
-        foreach (var file in new[] { "MainForm.cs", "SettingsDialog.cs", "AboutDialog.cs", "AdvancedSettingsDialog.cs", "GuardNotice.cs" })
-            Assert.DoesNotContain("Icon = TrayIcons.For(", File.ReadAllText(Path.Combine(ui, file)));
+        var windows = Directory.GetFiles(ui, "*.cs", SearchOption.AllDirectories);
+        Assert.Contains(windows, f => Path.GetFileName(f) == "SetupWizardForm.cs");
+        foreach (var file in windows.Where(f => Path.GetFileName(f) != "TrayApp.cs")) // the tray icon shows the state
+            foreach (var line in File.ReadLines(file))
+                if (System.Text.RegularExpressions.Regex.IsMatch(line, @"(^|[\s{,])Icon = TrayIcons\."))
+                    Assert.True(line.Contains("Icon = TrayIcons.App", StringComparison.Ordinal), $"{Path.GetFileName(file)} gives a window a tray state's icon: {line.Trim()}");
+        foreach (var file in new[] { "ActiveChangesForm.cs", "AgentPromptWindow.cs", "InstructionsDialog.cs", "ReportIssueDialog.cs", "PromptDialog.cs",
+                                     Path.Combine("Setup", "SetupWizardForm.cs"), Path.Combine("Setup", "HowItWorksForm.cs") })
+            Assert.Contains("Icon = TrayIcons.App", File.ReadAllText(Path.Combine(ui, file)));
     }
 
     [Theory]

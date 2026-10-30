@@ -11,7 +11,7 @@ or driver makes them grow, and can clear the standby cache. It sends nothing abo
 only what they choose. Its one connection of its own is an optional check for a new version, about once a day: an HTTPS
 request to api.github.com for PoolWatch's latest release, which carries PoolWatch's version and nothing about the PC.
 GitHub sees the IP address it comes from, as for any web page. Nothing is downloaded or installed, and the person can
-turn the check off in Settings or in the setup guide.
+turn the check off in Settings or in Set up PoolWatch.
 
 This folder is one of these:
 
@@ -57,7 +57,7 @@ In the data folder:
 | `service-changes.json` | every background service PoolWatch changed, with its original start type (Put back needs it, on the Services tab and in Active changes) |
 | `applied-changes.json` | the other changes PoolWatch made that can be put back (Active changes needs it) |
 | `removed-tasks\<name>.xml` | only when a clear task of the owner's that PoolWatch removed could not be put back by itself: its definition, to import in Task Scheduler |
-| `setup.json` | when the setup guide was completed, and the suggestions the owner hid (each shows again after 30 days) |
+| `setup.json` | when setup was completed, the suggestions the owner hid (each shows again after 30 days), and the feature cards of the Simple view the owner hid (for good) |
 | `ui-state.json` | which view the main window opens in: Simple or Advanced |
 | `uninstall-summary.txt` | written by the uninstaller: each change it put back, and any it could not put back (and why) or kept |
 | `uninstall-list.json` | only while the uninstaller runs: the list of changes it asked PoolWatch for, deleted again once read |
@@ -139,9 +139,9 @@ reproduction confirms it.
   filter manager's file-name cache), `MmSt` and `CcVl` grow while programs touch many files and stay while the files
   stay in the standby cache. They drop sharply after a cache clear: compare the `CacheClear` findings ("By tag: Reff
   722 MB -> 72 MB") and `cache\clears.json`. Common drivers: a crawl of a whole drive, many git worktrees, and an app
-  that opens files in a loop, such as a desktop app's GPU shader cache (for the ChatGPT desktop app, starting it with
-  `--disable-gpu-shader-disk-cache` stops that, as traced by Faarfarin in openai/codex issue 31212; PoolWatch can make
-  a shortcut that does).
+  that opens files in a loop, such as a desktop app's GPU shader cache (for the Codex desktop app, whose program is
+  `ChatGPT.exe`, starting it with `--disable-gpu-shader-disk-cache` stops that, as traced by Faarfarin in openai/codex
+  issue 31212; PoolWatch can make a shortcut that does).
 - **The token leak.** `Toke` can rise with every process start on some Windows 11 24H2 and 25H2 builds (26100 and
   26200); other builds are untested, and only a test tells. PoolWatch's result for this build is in
   `cache\token-guard.json`. Look for `TokenSpawn` findings; the token-leak guard works around it.

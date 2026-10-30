@@ -297,8 +297,12 @@ internal static class ClearAdvice
 /// </summary>
 internal static class TokenGuardWords
 {
-    public const string Why = $"On some Windows 11 versions, a Windows bug leaks a little of {PoolName.InText} every time one program starts another. " +
-                              "Coding assistants start thousands of programs an hour, so it adds up quickly. PoolWatch tested this PC and found the leak.";
+    /// <summary>Why the guard is there, without saying that a check found the leak here (<see cref="Tested"/> says that).</summary>
+    public const string Reason = $"On some Windows 11 versions, a Windows bug leaks a little of {PoolName.InText} every time one program starts another. " +
+                                 "Coding assistants start thousands of programs an hour, so it adds up quickly.";
+    /// <summary>The sentence said only where a check found the leak on this PC.</summary>
+    public const string Tested = "PoolWatch tested this PC and found the leak.";
+    public const string Why = Reason + " " + Tested;
     public const string Notice = "Other programs can bring their windows to the front by themselves, even while you're typing somewhere else (for example " +
                                  "a chat app or an installer popping up and taking your keystrokes). Most people find it rare and easy to live with.";
     public const string Undo = "It lasts until you sign out, and PoolWatch turns it back on each time it starts. To stop it, turn it off in Active changes.";
