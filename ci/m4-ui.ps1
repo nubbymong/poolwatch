@@ -1,8 +1,8 @@
 # Milestone 4 acceptance: the tray app starts and every window under review renders, each drawn to a PNG (the
 # ui-screenshots artifact) and checked: the main window's Simple view (the header with the next clear, Clear now, the
 # graph, up to three suggestions) and Advanced view (Clear now and Settings; the Pool causes, Services and Tasks and
-# startup apps tabs), the plain Settings form and its Advanced grid, the setup guide, Active changes, Report an issue,
-# About and the update notice.
+# startup apps tabs), the plain Settings form and its Advanced grid, each step of setup and How PoolWatch works, Active
+# changes, Report an issue, About and the update notice.
 # Nothing in them is clipped or overlaps, no internal name shows, everything taken off the window is in the tray menu,
 # every window made for the test is closed again, and the app exits cleanly. Runs a small File-handle leak meanwhile so
 # Pool causes has content, and turns one harmless service off first so Active changes has a service to list.
@@ -54,7 +54,9 @@ if (Test-Path $smokeFile) {
     $internal = (@($internal) + @($settingNames | ForEach-Object { '\b' + [regex]::Escape($_) + '\b' })) -join '|'
     $f = $s.form
     $shots = @($s.screenshots)
-    $names = '1-simple-view.png', '2-advanced-view.png', '3-services.png', '3b-tasks-and-startup-apps.png', '4-settings.png', '5-settings-advanced.png', '6-setup-guide.png',
+    $names = '1-simple-view.png', '2-advanced-view.png', '3-services.png', '3b-tasks-and-startup-apps.png', '4-settings.png', '5-settings-advanced.png',
+             '6-setup-1-welcome.png', '6-setup-2-your-pc.png', '6-setup-3-safety.png', '6-setup-4-standby-cache.png', '6-setup-5-fixes.png', '6-setup-6-services.png',
+             '6-setup-7-ready.png', '6-setup-how-it-works.png',
              '7-active-changes.png', '8-report-issue.png', '9-about.png', '10-update-notice.png'
     Assert-True ($shots.Count -eq $names.Count) "$($names.Count) screenshots ($($shots -join ', '))"
     foreach ($n in $names) { Assert-True ($n -in $shots) "screenshot $n taken" }
@@ -119,17 +121,38 @@ if (Test-Path $smokeFile) {
     Assert-True ($f.timerWhileVisible -eq $true -and $f.timerWhileHidden -eq $false) "refresh timer runs only while visible (visible=$($f.timerWhileVisible), hidden=$($f.timerWhileHidden))"
     Assert-True ([int]$f.rowsAfterHide -ge 1) "hidden and shown again, Pool causes lists its rows again ($($f.rowsAfterHide))"
 
-    # The setup guide, after it read the PC (no leak check in the test): the first-run rows and Done, nothing clipped.
+    # Setup as on a first run, after it read the PC (no leak check in the test): its own window with no close button, the
+    # seven steps of the approved design, nothing clipped, no tour, and "How PoolWatch works".
     $g = $s.guide
-    Assert-True ($g.ready -eq $true) "the setup guide read the PC"
-    $titles = @($g.stats.rows | ForEach-Object { $_.title })
-    foreach ($row in 'Start PoolWatch when you sign in', 'Clear the cache every hour', 'Protect this PC from the Windows token leak') {
-        Assert-True ($row -in $titles) "the setup guide lists '$row' ($($titles -join ' | '))"
+    Assert-True ($g.ready -eq $true) "setup read the PC"
+    Assert-True ($g.window.fits -eq $true) "the setup window fits the working area ($($g.window.width) x $($g.window.height) in $($g.window.area))"
+    Assert-True ($g.window.closeButton -eq $false) "the first-run setup has no close button"
+    $steps = @($g.steps | ForEach-Object { $_.stats })
+    $rail = @($steps | ForEach-Object { $_.rail }) -join '|'
+    Assert-True ($rail -eq 'Welcome|Your PC|Safety|Standby cache|Fixes|Services|Ready') "setup has its seven steps: $rail"
+    foreach ($st in $steps) {
+        Assert-True (@($st.layoutProblems).Count -eq 0) "setup step $($st.number) ($($st.rail)): nothing clipped: $(@($st.layoutProblems) -join '; ')"
+        Assert-Plain "setup step $($st.number)" (@($st.texts) + @($st.buttons))
     }
-    Assert-True ($null -ne $g.stats.updates) "the setup guide has the update notices switch"
-    Assert-True ($g.stats.done -eq 'Done') "the setup guide closes with Done"
-    Assert-True (@($g.stats.layoutProblems).Count -eq 0) "the setup guide: nothing clipped: $(@($g.stats.layoutProblems) -join '; ')"
-    Assert-Plain 'the setup guide' (@($g.stats.facts) + @($g.stats.rows | ForEach-Object { $_.title, $_.why, $_.button }))
+    Assert-True ((@($steps[0].choices) -join '|') -eq 'Simple|Advanced') "Welcome offers Simple and Advanced: $(@($steps[0].choices) -join ', ')"
+    $impact = @($steps[1].impact)
+    Assert-True ($impact.Count -eq 5) "Your PC has a row per known cause ($($impact.Count): $(@($impact | ForEach-Object { $_.title }) -join ' | '))"
+    foreach ($r in $impact) {
+        Assert-True ($r.level -in 'None', 'Low impact', 'Medium impact', 'High impact', 'Checking...') "'$($r.title)' has a level on the scale: $($r.level)"
+        Assert-True ("$($r.under)" -notmatch 'Fixed') "'$($r.title)' says where it is fixed, never that it is: $($r.under)"
+    }
+    $cache = $steps[3]
+    Assert-True ((@($cache.choices) -join '|') -eq 'On a schedule|At a pool size|Whichever comes first|Decide later') "Standby cache has four choices: $(@($cache.choices) -join ', ')"
+    Assert-True ("$($cache.recommended)" -eq 'Whichever comes first') "Whichever comes first is the recommended choice, on any PC: $($cache.recommended)"
+    Assert-True (($cache.stutter -eq $true) -eq ($cache.chosen -ne 'Decide later')) "the stutter warning shows where clearing is turned on (chosen: $($cache.chosen))"
+    Assert-True ($null -ne $steps[6].updates) "the Ready step has the update notices tick"
+    Assert-True ((@($steps[6].buttons) -join '|') -eq 'Open PoolWatch') "the Ready step ends with Open PoolWatch: $(@($steps[6].buttons) -join ', ')"
+    Assert-True (@($steps | ForEach-Object { $_.texts } | Where-Object { "$_" -match 'Show me around|restore point' }).Count -eq 0) "setup offers no tour and no restore point"
+    $how = $g.howItWorks.stats
+    Assert-True ($how.fits -eq $true) "How PoolWatch works fits the working area"
+    Assert-True (@($how.layoutProblems).Count -eq 0) "How PoolWatch works: nothing clipped: $(@($how.layoutProblems) -join '; ')"
+    Assert-True ('Emptying it is safe' -in @($how.texts)) "How PoolWatch works says why emptying the cache is safe"
+    Assert-Plain 'How PoolWatch works' @($how.texts)
 
     # Active changes: each row with its own button (Turn off, Remove or Put back), Put all back and Close (no restore
     # point), the "Not listed" line and the uninstall note.
@@ -166,7 +189,7 @@ if (Test-Path $smokeFile) {
 
     # Everything taken off the window is in the tray menu (the clear-task removals show only when there is one to remove).
     $tray = @($s.trayMenu)
-    foreach ($item in 'Open PoolWatch', 'Set up PoolWatch...', 'Active changes...', 'Capture now', 'Since boot report', 'Open incident folder',
+    foreach ($item in 'Open PoolWatch', 'Run setup again...', 'Active changes...', 'Capture now', 'Since boot report', 'Open incident folder',
                       'Export vendor bundle...', 'Copy latest incident summary', 'Remove my clear task...', 'Remove old clear-cache tasks...',
                       'Report an issue...', 'About PoolWatch', 'Exit') {
         Assert-True ($item -in $tray) "tray menu has '$item'"

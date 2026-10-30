@@ -155,15 +155,80 @@ public sealed class EnvironmentProbeTests : IDisposable
         using var gate = new ManualResetEventSlim();
         var reads = new FakeReads { Gate = gate };
         var probe = Probe(reads);
-        var first = probe.ScanAsync();
-        var second = probe.ScanAsync();
+        var first = probe.ScanToTheEnd();
+        var second = probe.ScanToTheEnd();
         Assert.Same(first, second);
         gate.Set();
         await first;
         Assert.Equal(1, reads.Scans);
-        var next = probe.ScanAsync(); // a finished scan does not stop the next one
+        var next = probe.ScanToTheEnd(); // a finished scan does not stop the next one
         Assert.NotSame(first, next);
         await next;
+        Assert.Equal(2, reads.Scans);
+    }
+
+    /// <summary>
+    /// A caller that names no limit (the rescan after a change, the window reading the PC again) waits at most
+    /// <see cref="EnvironmentProbe.HungAfter"/>: only setup's own scan waits to the end, under a limit of its own.
+    /// </summary>
+    [Fact]
+    public async Task EveryScanThatNamesNoLimitIsGivenUpOnAfterAMinute()
+    {
+        using var gate = new ManualResetEventSlim();
+        long now = 0;
+        var probe = new EnvironmentProbe(_paths, _log, new FakeReads { Gate = gate }, () => Interlocked.Read(ref now));
+        var scan = probe.ScanToTheEnd(); // a read that hangs
+        try
+        {
+            var early = probe.ScanAsync();   // joins it with the whole minute left: waits for it
+            Assert.False(early.IsCompleted);
+            Interlocked.Exchange(ref now, (long)((EnvironmentProbe.HungAfter.TotalSeconds + 1) * System.Diagnostics.Stopwatch.Frequency));
+            var late = probe.ScanAsync();    // a minute and a second on: given up on at once
+            Assert.True(late.IsFaulted);
+            Assert.IsType<TimeoutException>(late.Exception!.InnerException);
+            Assert.False(scan.IsCompleted);  // while the scan goes on
+        }
+        finally
+        {
+            gate.Set();
+            await scan; // it writes the cache file as it ends: before the test's folder is removed, not after
+        }
+    }
+
+    [Fact]
+    public async Task AScanThatRunsPastItsLimitIsGivenUpOnAtOnceAndStillLands()
+    {
+        using var gate = new ManualResetEventSlim();
+        var reads = new FakeReads { Gate = gate };
+        var probe = Probe(reads);
+        var scan = probe.ScanToTheEnd();                                    // setup's own wait for it
+        try
+        {
+            var patient = probe.ScanAsync(TimeSpan.FromSeconds(30));        // joins it, with time left: waits for it
+            var bounded = probe.ScanAsync(TimeSpan.FromMilliseconds(200));
+            await Assert.ThrowsAsync<TimeoutException>(() => bounded);     // given up on at its limit
+            Assert.False(scan.IsCompleted || patient.IsCompleted);         // while the scan goes on
+            // Joining a scan that has run past the limit waits for none of it: what is left of the limit is nothing.
+            var late = probe.ScanAsync(TimeSpan.FromMilliseconds(100));
+            Assert.True(late.IsFaulted);
+            Assert.IsType<TimeoutException>(late.Exception!.InnerException);
+            gate.Set();
+            var facts = await patient;
+            Assert.Same(await scan, facts);
+            Assert.Same(facts, probe.Last);                                 // and it lands where everyone reads it
+            Assert.Equal(1, reads.Scans);                                   // one scan for all of them
+        }
+        finally
+        {
+            gate.Set();
+            await scan; // ended before the test's folder is removed, even when an assert above failed
+        }
+
+        // No scan running: a new one, waited for while it reads.
+        var before = probe.Last;
+        var again = await probe.ScanAsync(TimeSpan.FromSeconds(30));
+        Assert.NotSame(before, again);
+        Assert.Same(again, probe.Last);
         Assert.Equal(2, reads.Scans);
     }
 

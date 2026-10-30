@@ -57,6 +57,25 @@ public class CreditsTests
         Assert.True(Credits.IsAllowedLink(IssueReport.AdvisoryUrl));
     }
 
+    [Fact]
+    public void TheReferencePagesSetupCitesMayBeOpenedWholeAndNothingNextToThem()
+    {
+        Assert.Equal(3, Credits.ReferencePages.Count);
+        foreach (string page in Credits.ReferencePages)
+        {
+            Assert.True(Credits.IsAllowedLink(page), page);
+            // Fixed https addresses with nothing explorer.exe could read as a second argument.
+            Assert.True(Uri.TryCreate(page, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps, page);
+            Assert.True(page.IndexOfAny([' ', '"', '\'', '#', '?']) < 0, page);
+            // Matched whole: a longer address, another case, or one with a query or fragment added is not one of them.
+            Assert.False(Credits.IsAllowedLink(page + "x"));
+            Assert.False(Credits.IsAllowedLink(page + "?a=b"));
+            Assert.False(Credits.IsAllowedLink(page + "#top"));
+            Assert.False(Credits.IsAllowedLink(page.ToUpperInvariant()));
+            Assert.False(Credits.IsAllowedLink(page[..^1]));
+        }
+    }
+
     [Theory]
     [InlineData("It \"crashed\" & then \"C:\\Windows\\System32\\calc.exe\"")]
     [InlineData("a\r\nb\tc %41 #x ?y=z")]

@@ -358,6 +358,29 @@ internal sealed class MainForm : Form
         _tabs.SelectedIndex = Math.Clamp(tab, 0, _tabs.TabCount - 1);
     }
 
+    /// <summary>Switches the open window to the Simple or the Advanced view (setup run again chose one); kept like the switch.</summary>
+    public void ShowView(bool advanced)
+    {
+        _view?.Remember(advanced);
+        if (_isAdvanced != advanced) SetView(advanced);
+    }
+
+    /// <summary>
+    /// The tray's token-leak notice was clicked, with the window showing: the guard as this view offers it
+    /// (<see cref="TokenGuardOfferIn"/>). The Simple view's cards are read again now (one offers the guard while the leak is
+    /// found and the guard is off); the Advanced view has no card, so Settings opens over it, at the guard's switch. A
+    /// window already open over it is left as it is. Nothing is turned on.
+    /// </summary>
+    public void ShowTokenGuardOffer()
+    {
+        if (IsDisposed || !Visible || OwnedForms.Any(f => f.Visible)) return;
+        if (TokenGuardOfferIn(_isAdvanced) == TokenGuardOffer.Settings) _actions.Guarded(this, "Settings", OpenSettings);
+        else ReadSimpleNow();
+    }
+
+    /// <summary>Where a view offers the token-leak guard: the Simple view as a card, the Advanced view in Settings (its switch and hint).</summary>
+    internal static TokenGuardOffer TokenGuardOfferIn(bool advanced) => advanced ? TokenGuardOffer.Settings : TokenGuardOffer.Card;
+
     /// <summary>
     /// The header for the view and tab shown now (<see cref="LayoutHeader(Panel, PoolHeaderView, FlowLayoutPanel, IReadOnlyList{Button}, int, bool, int)"/>),
     /// then the Advanced view's graph row, which keeps its room under it (<see cref="FitGraphRow(TableLayoutPanel, Control, PoolChart, GrowthPanel, bool)"/>).
@@ -1638,3 +1661,6 @@ internal sealed class MainForm : Form
         base.Dispose(disposing);
     }
 }
+
+/// <summary>Where a view of the main window offers the token-leak guard (<see cref="MainForm.TokenGuardOfferIn"/>).</summary>
+internal enum TokenGuardOffer { Card, Settings }

@@ -71,9 +71,12 @@ internal sealed class SetupContext
     public RecommendationStore Store { get; }
     public RecommendationActions Recommendations { get; }
 
+    /// <summary>The installer put the ChatGPT shortcut's launcher next to PoolWatch (read once).</summary>
+    public bool LauncherInstalled => _launcherInstalled.Value;
+
     /// <summary>The rules' inputs, from memory and the cached facts (nothing is scanned): cheap enough for a once-a-minute refresh.</summary>
     public RecommendationInputs Inputs() => RecommendationInputsBuilder.Build(Engine, Analysis, Probe.Last, Store, Ledger.Records.Has(RecordKind.Shortcut),
-        _launcherInstalled.Value, Recommendations.LeakTestNow, DateTime.UtcNow);
+        LauncherInstalled, Recommendations.LeakTestNow, DateTime.UtcNow);
 
     /// <summary>Whether clearing the cache frees kernel pool on this PC, from the clears so far.</summary>
     public ClearEvidence ClearEvidence() => Analysis.Diagnostics.Cache.Evidence();
@@ -125,6 +128,7 @@ internal sealed class WindowsSetupSystem(SetupContext c) : ISetupSystem
     private CacheClearer Cache => c.Analysis.Diagnostics.Cache;
 
     public EnvironmentFacts? Facts => c.Probe.Last;
+    /// <summary>The PC read again after a change: given up on once the scan has run for a minute, as every scan is by default (the facts from before stay).</summary>
     public Task<EnvironmentFacts> Rescan() => c.Probe.ScanAsync();
     public bool Elevated => CacheHelper.IsElevated;
     public bool OwnClearTask => Cache.HelperStatus?.LegacyTaskPresent ?? c.Probe.Last?.OwnClearTasks.Count > 0;

@@ -668,8 +668,8 @@ public class PoolCausesTests
     public void EveryWindowDrawsTheImpactScaleAndItsColoursFromOnePlace()
     {
         if (SystemInformation.HighContrast) return; // then every window uses the system's colours instead
-        // One meter: at either size (three bars of 14 by 5, 3 apart, or 10 by 4, 2 apart) it fills the same bars in the same
-        // colours.
+        // One meter: setup's size (three bars of 14 by 5, 3 apart) and the cost meter's (10 by 4, 2 apart) fill the same bars
+        // in the same colours.
         foreach (var (bar, gap) in new[] { (new SizeF(14, 5), 3f), (new SizeF(10, 4), 2f) })
         {
             using var bitmap = new Bitmap(60, 20);
@@ -681,7 +681,12 @@ public class PoolCausesTests
             var middles = Enumerable.Range(0, 3).Select(i => bitmap.GetPixel((int)(2 + i * (bar.Width + gap) + bar.Width / 2), (int)(8 + bar.Height / 2)).ToArgb()).ToList();
             Assert.Equal([UiColors.Medium.ToArgb(), UiColors.Medium.ToArgb(), UiColors.Track.ToArgb()], middles);
         }
-        // One palette: the Services and Tasks tabs and Active changes take the design's colours from UiColors.
+        // One palette: setup, the Services and Tasks tabs and Active changes take the design's colours from UiColors.
+        Assert.Equal((UiColors.Ink, UiColors.Muted, UiColors.Faint, UiColors.Good, UiColors.Line),
+            (PoolWatch.Ui.Setup.SetupTheme.Ink, PoolWatch.Ui.Setup.SetupTheme.Muted, PoolWatch.Ui.Setup.SetupTheme.Faint, PoolWatch.Ui.Setup.SetupTheme.Good,
+             PoolWatch.Ui.Setup.SetupTheme.Line));
+        Assert.Equal((UiColors.Accent, UiColors.Track, UiColors.Border), (PoolWatch.Ui.Setup.SetupTheme.Accent, PoolWatch.Ui.Setup.SetupTheme.Empty,
+            PoolWatch.Ui.Setup.SetupTheme.Border));
         Assert.Equal((UiColors.Ink, UiColors.Muted, UiColors.Faint, UiColors.Good, UiColors.Line), (ListTabStyle.Ink, ListTabStyle.Muted, ListTabStyle.Faint,
             ListTabStyle.Good, ListTabStyle.Line));
         Assert.Equal((UiColors.Ink, UiColors.Muted, UiColors.Faint, UiColors.Good, UiColors.RowLine, UiColors.Warn),

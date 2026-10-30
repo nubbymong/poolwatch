@@ -5,6 +5,7 @@ using PoolWatch.Core.Updates;
 using PoolWatch.Engine;
 using PoolWatch.Engine.Changes;
 using PoolWatch.Headless;
+using PoolWatch.Ui.Setup;
 
 namespace PoolWatch.Ui;
 
@@ -14,7 +15,7 @@ namespace PoolWatch.Ui;
 /// </summary>
 internal static class UiRunner
 {
-    /// <summary>The longest the CI UI test waits for a window that reads in the background (the guide's scan, the list of changes).</summary>
+    /// <summary>The longest the CI UI test waits for a window that reads in the background (setup's scan, the list of changes).</summary>
     private static readonly TimeSpan SmokeWait = TimeSpan.FromSeconds(60);
 
     public static int Run(CommandLineOptions opt)
@@ -107,10 +108,10 @@ internal static class UiRunner
 
     /// <summary>
     /// CI: every window under review, drawn to a PNG and checked, in the order of the screenshots: the main window
-    /// (its Simple and Advanced views, Services, Settings and its Advanced grid), the setup guide once it has read the PC
-    /// (it runs no leak check in the test), Active changes once its list is read, Report an issue with a sample text,
-    /// About, and the main window's update notice for a sample release. Each window made for the test is closed again, so
-    /// at the end only the main window is open.
+    /// (its Simple and Advanced views, Services, Tasks and startup apps, Settings and its Advanced grid), each step of setup
+    /// once it has read the PC (it runs no leak check in the test) and "How PoolWatch works", Active changes once its list
+    /// is read, Report an issue with a sample text, About, and the main window's update notice for a sample release. Each
+    /// window made for the test is closed again, so at the end only the main window is open.
     /// </summary>
     private static async Task<(List<string> files, object stats)> Smoke(TrayApp app, MonitorEngine engine, AnalysisPipeline analysis, AppPaths paths, string dir)
     {
@@ -122,11 +123,24 @@ internal static class UiRunner
             return name;
         }
 
-        var guide = new SetupGuideForm(app.Setup);
+        // Setup as on a first run (no close button), each of its seven steps once it has read the PC, then "How PoolWatch
+        // works". Nothing is applied: the test goes straight to each step, and every change refuses in the test anyway.
+        var guide = new SetupWizardForm(app.Setup, firstRun: true, advanced: false);
         guide.Show();
         bool guideReady = await Task.WhenAny(guide.Ready, Task.Delay(SmokeWait)) == guide.Ready;
-        var guideStats = new { ready = guideReady, stats = guide.SmokeStats(), shot = Shot(guide, "6-setup-guide.png") };
-        guide.Close();
+        var steps = new List<object>();
+        foreach (var step in SetupFlow.Steps)
+        {
+            await guide.ShowStepForTest(step);
+            var stats = guide.SmokeStats();
+            steps.Add(new { stats, shot = Shot(guide, SetupWizardForm.ShotName(step)) });
+        }
+        var how = guide.OpenHowItWorks();
+        Application.DoEvents(); // it lays out as it loads
+        var howStats = new { stats = how.SmokeStats(), shot = Shot(how, SetupWizardForm.HowItWorksShot) };
+        how.Close();
+        var guideStats = new { ready = guideReady, window = guide.WindowStats(), steps, howItWorks = howStats };
+        guide.CloseForTest();
 
         var active = new ActiveChangesForm(app.Setup.Ledger, app.Setup.Actions);
         active.Show();
