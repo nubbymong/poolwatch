@@ -3,7 +3,7 @@ using System.Text;
 
 namespace PoolWatch.Tests;
 
-/// <summary>Builds native-layout byte fixtures (x64) for the parser tests.</summary>
+/// <summary>Builds native-layout byte fixtures (64-bit) for the parser tests.</summary>
 internal static class FixtureBuilder
 {
     public static byte[] PoolTags(params (string tag, uint pa, uint pf, ulong pu, uint na, uint nf, ulong nu)[] entries)

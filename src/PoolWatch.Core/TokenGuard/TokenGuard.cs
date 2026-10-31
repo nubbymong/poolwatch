@@ -129,14 +129,14 @@ public static class GuardPolicy
             last is not null && last.Build == build
                 ? last with { Detail = "already on at logon (Windows may have stopped resetting it)" }
                 : new GuardState(build, GuardResult.Unclear, nowUtc, "already on at logon (new build, not yet tested)"),
-            TurnOn: false, Message: "Token leak guard: the workaround was already on at logon, nothing changed. Safe to start work.", Changed: false),
+            TurnOn: false, Message: "Token-leak guard: the workaround was already on at logon, nothing changed. Safe to start work.", Changed: false),
         GuardStep.TurnOnKnownLeak => new GuardOutcome(last! with { Detail = "same build, last result leak: turned on without testing" + (last.Detail.Length > 0 ? $" (last: {Trim(last.Detail)})" : "") },
-            TurnOn: true, Message: "Token leak guard: workaround ON (this build leaks), safe to start work."),
+            TurnOn: true, Message: "Token-leak guard: workaround ON (this build leaks), safe to start work."),
         GuardStep.TurnOnUnreported => new GuardOutcome(new GuardState(build, GuardResult.Unclear, nowUtc, "Windows did not report the foreground lock timeout"),
-            TurnOn: true, Message: "Token leak guard: Windows did not report the setting; workaround ON to be safe."),
+            TurnOn: true, Message: "Token-leak guard: Windows did not report the setting; workaround ON to be safe."),
         // Unclear for this build, so the logon after this one tests again.
         GuardStep.TurnOnInterrupted => new GuardOutcome(new GuardState(build, GuardResult.Unclear, nowUtc, "the previous leak test did not finish (PoolWatch was stopped during it)"),
-            TurnOn: true, Message: "Token leak guard: the last check did not finish; workaround ON to be safe (tests again next logon)."),
+            TurnOn: true, Message: "Token-leak guard: the last check did not finish; workaround ON to be safe (tests again next logon)."),
         _ => throw new ArgumentException("this step needs the leak test", nameof(step)),
     };
 
@@ -147,17 +147,17 @@ public static class GuardPolicy
         switch (verdict)
         {
             case LeakVerdict.Leak:
-                return new GuardOutcome(new GuardState(build, GuardResult.Leak, nowUtc, detail), true, "Token leak guard: this build leaks; workaround ON, safe to start work.");
+                return new GuardOutcome(new GuardState(build, GuardResult.Leak, nowUtc, detail), true, "Token-leak guard: this build leaks; workaround ON, safe to start work.");
             case LeakVerdict.Unclear:
-                return new GuardOutcome(new GuardState(build, GuardResult.Unclear, nowUtc, detail), true, "Token leak guard: the test was unclear; workaround ON to be safe (tests again next logon).");
+                return new GuardOutcome(new GuardState(build, GuardResult.Unclear, nowUtc, detail), true, "Token-leak guard: the test was unclear; workaround ON to be safe (tests again next logon).");
             default:
                 // C4 (review): a build already judged Fixed that tests clean again must STAY Fixed (workaround off),
                 // not drop back to CleanOnce (which turned the workaround back on and then off, alternating every
                 // logon). So "clean and already fixed-or-clean-once on this build" keeps the workaround off.
                 bool secondClean = last is { Result: GuardResult.CleanOnce or GuardResult.Fixed } && last.Build == build;
                 return secondClean
-                    ? new GuardOutcome(new GuardState(build, GuardResult.Fixed, nowUtc, detail), false, "Token leak guard: the leak looks FIXED on this build (clean twice in a row); Windows left alone, will test again next logon.")
-                    : new GuardOutcome(new GuardState(build, GuardResult.CleanOnce, nowUtc, detail), true, "Token leak guard: clean once on this build; workaround ON anyway (tests again next logon).");
+                    ? new GuardOutcome(new GuardState(build, GuardResult.Fixed, nowUtc, detail), false, "Token-leak guard: the leak looks FIXED on this build (clean twice in a row); Windows left alone, will test again next logon.")
+                    : new GuardOutcome(new GuardState(build, GuardResult.CleanOnce, nowUtc, detail), true, "Token-leak guard: clean once on this build; workaround ON anyway (tests again next logon).");
         }
     }
 

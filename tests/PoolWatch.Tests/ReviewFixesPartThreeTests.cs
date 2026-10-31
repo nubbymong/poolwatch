@@ -45,7 +45,7 @@ public class ReviewFixesPartThreeTests
         Assert.Contains("not off outside PoolWatch", Assert.Throws<InvalidOperationException>(() => ServicePlan.BuildDefault("DiagTrack", running, false, T0)).Message);
         var mine = ServicePlan.Options([new ServiceView { Name = "DiagTrack", StartType = ServiceStartType.Disabled }], Cat, false, new HashSet<string>(),
             [Rec("DiagTrack", ServiceStartType.Automatic, ServiceStartType.Disabled)]);
-        Assert.Contains("use Restore", Assert.Throws<InvalidOperationException>(() => ServicePlan.BuildDefault("DiagTrack", mine, false, T0)).Message);
+        Assert.Contains("use Put back", Assert.Throws<InvalidOperationException>(() => ServicePlan.BuildDefault("DiagTrack", mine, false, T0)).Message);
     }
 
     private const long PerSecond = 10_000_000;

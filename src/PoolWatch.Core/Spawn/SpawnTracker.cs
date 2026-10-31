@@ -172,8 +172,7 @@ public sealed class SpawnTracker
     {
         // -C / --work-tree first, then the child's own cwd (cwd-only PEB read in the ETW start callback, rate-limited, when
         // the process was still there), then the parent's.
-        string? cwd = null;
-        if (rec is not null) lock (rec.Context) cwd = rec.Context.GetValueOrDefault(Aicc.SessionContext.CwdKey);
+        string? cwd = rec?.ContextValue(Aicc.SessionContext.CwdKey);
         string source = "cwd";
         if (cwd is null && r.Parent is { } pk) { cwd = _cwdOf(pk); source = "parent cwd"; }
         string? dir = GitRootResolver.WorkingDirectory(r.CommandLine, cwd, out bool viaC);
@@ -270,19 +269,26 @@ public sealed class SpawnTracker
         return new Finding
         {
             TimeUtc = nowUtc, Kind = FindingKind.SpawnStorm, Severity = opened ? FindingSeverity.Alert : FindingSeverity.Info, Title = title,
-            Details = details, Pid = s.ParentPid, Image = s.ParentImage, Data = StormData(s),
+            Details = details, Pid = s.ParentPid, Image = s.ParentImage, Data = StormData(s, FindingKeys),
         };
     }
 
-    public Dictionary<string, object?> StormData(SpawnStorm s) => new()
+    /// <summary>
+    /// The keys of each map a storm's finding keeps: a finding stays in memory with up to 1,000 others (and is a line of
+    /// findings.jsonl); the storm's report.json has every key.
+    /// </summary>
+    public const int FindingKeys = 15;
+
+    /// <param name="top">The most keys of each map (images, peak images, git roots), the largest first; patterns are always the top 15.</param>
+    public Dictionary<string, object?> StormData(SpawnStorm s, int top = int.MaxValue) => new()
     {
         ["parent"] = s.ParentImage, ["parentPid"] = s.ParentPid, ["parentCommandLine"] = s.ParentCommandLine, ["parentChain"] = s.ParentChain,
         ["opened"] = s.OpenedUtc, ["closed"] = s.ClosedUtc, ["windowSeconds"] = _settings.SpawnStormWindowSeconds, ["threshold"] = _settings.SpawnStormThreshold,
         ["peakShortLived"] = s.PeakShortLived, ["peakStarts"] = s.PeakStarts, ["totalStarts"] = s.TotalStarts,
-        ["byImage"] = s.ByImage.OrderByDescending(kv => kv.Value).ToDictionary(kv => kv.Key, kv => (object)kv.Value),
-        ["peakByImage"] = s.PeakByImage.OrderByDescending(kv => kv.Value).ToDictionary(kv => kv.Key, kv => (object)kv.Value),
+        ["byImage"] = s.ByImage.OrderByDescending(kv => kv.Value).Take(top).ToDictionary(kv => kv.Key, kv => (object)kv.Value),
+        ["peakByImage"] = s.PeakByImage.OrderByDescending(kv => kv.Value).Take(top).ToDictionary(kv => kv.Key, kv => (object)kv.Value),
         ["patterns"] = s.Patterns.OrderByDescending(kv => kv.Value).Take(15).Select(kv => new Dictionary<string, object?> { ["pattern"] = kv.Key, ["count"] = kv.Value }).ToList(),
-        ["gitRoots"] = s.GitRoots.OrderByDescending(kv => kv.Value.Count).Select(kv => new Dictionary<string, object?>
+        ["gitRoots"] = s.GitRoots.OrderByDescending(kv => kv.Value.Count).Take(top).Select(kv => new Dictionary<string, object?>
         {
             ["root"] = kv.Key, ["count"] = kv.Value.Count, ["flags"] = kv.Value.Info.Flags.ToList(), ["trackedFiles"] = kv.Value.Info.TrackedFiles,
         }).ToList(),

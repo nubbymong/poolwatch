@@ -22,6 +22,10 @@ internal sealed class CacheClearer
     private readonly List<ClearRecord> _history = new();
     private readonly object _lock = new();
     private readonly DateTime _startedUtc = DateTime.UtcNow;
+    /// <summary>The memory lists read once a minute, kept for the graph's RAM overlay (25 hours, in memory only). Under <see cref="_lock"/>.</summary>
+    private readonly Core.Growth.RamHistory _ram = new();
+    /// <summary>The PC's RAM, as the incident reports say it.</summary>
+    private readonly long _totalRam = SafeTotalRam();
     private int _running;
     private DateTime _nextLists = DateTime.MinValue, _nextStatus = DateTime.MinValue;
 
@@ -90,7 +94,13 @@ internal sealed class CacheClearer
     public void Observe(Sample s)
     {
         var now = s.TimeUtc;
-        if (now >= _nextLists) { _nextLists = now.AddSeconds(60); Lists = SafeLists(); }
+        if (now >= _nextLists)
+        {
+            _nextLists = now.AddSeconds(60);
+            Lists = SafeLists();
+            var lists = Lists;
+            if (lists.Known) lock (_lock) _ram.Add(now, _totalRam, lists.FreeBytes + lists.ZeroBytes, lists.StandbyBytes);
+        }
         if (now >= _nextStatus)
         {
             _nextStatus = now.AddMinutes(60); // and right after a setup step (RefreshStatus)
@@ -107,10 +117,11 @@ internal sealed class CacheClearer
         {
             if (r.Error is null)
             {
-                r.After = s.Totals;
-                r.ListsAfter = SafeLists();
+                var lists = SafeLists();
                 var before = r.TagsBefore.Select(t => t.Tag).ToHashSet();
-                r.TagsAfter = s.Tags.Where(t => before.Contains(t.Tag)).Select(t => (t.Tag, (long)t.TotalUsed)).ToList();
+                var tags = s.Tags.Where(t => before.Contains(t.Tag)).Select(t => (t.Tag, (long)t.TotalUsed)).ToList();
+                // Under the lock, so Evidence and Next, which read under it, never see the clear measured without its tags.
+                lock (_lock) { r.ListsAfter = lists; r.TagsAfter = tags; r.After = s.Totals; }
             }
             _reported.Add(r);
             _findings.Add(r.ToFinding());
@@ -120,22 +131,30 @@ internal sealed class CacheClearer
         // Automatic clear (off by default; never while one runs or is being measured, never while a clear
         // task of your own is still there: the two must not both run; C1: never during an A/B experiment, whose phases a
         // clear would skew; the "lag before / after a clear" preset makes its own clear).
-        DateTime? last;
-        ClearRecord? lastPool;
-        lock (_lock)
-        {
-            last = _history.LastOrDefault()?.TimeUtc;
-            lastPool = _history.LastOrDefault(r => r.Trigger == ClearTrigger.PoolOverLimit && r.Done);
-        }
-        if (!Busy && !due.Any() && CacheHelper.AutoClearAllowed(HelperStatus)
-            && ClearPolicy.Due(_engine.Settings, s.Totals, now, last, _startedUtc, lastPool, experimentRunning: _experimentActive()) is { } trigger)
-        {
-            ClearMode mode;
-            bool experiment;
-            lock (_lock) { mode = ClearPolicy.ModeFor(_history, _engine.Settings); experiment = ClearPolicy.IsExperiment(_history, _engine.Settings); }
-            Request(mode, experiment ? ClearTrigger.Experiment : trigger);
-        }
+        if (Busy || due.Count > 0 || !CacheHelper.AutoClearAllowed(HelperStatus)) return;
+        bool experimentRunning = _experimentActive();
+        (ClearMode Mode, ClearTrigger Trigger)? start;
+        lock (_lock) start = ClearPolicy.Automatic(_history, _engine.Settings, s.Totals, now, _startedUtc, experimentRunning);
+        if (start is { } clear) Request(clear.Mode, clear.Trigger);
     }
+
+    /// <summary>
+    /// When the automatic clear runs next (any thread): <see cref="ClearPolicy.Next"/> with the inputs <see cref="Observe"/>
+    /// decides with, so the "Next cache clear" line can never disagree with it.
+    /// </summary>
+    public NextClear Next(DateTime nowUtc)
+    {
+        var now = _engine.Latest?.Totals ?? default;
+        var status = HelperStatus;
+        bool experimentRunning = _experimentActive();
+        lock (_lock)
+            return ClearPolicy.Next(_engine.Settings, now, nowUtc, _history.LastOrDefault()?.TimeUtc, _startedUtc,
+                ClearPolicy.LastPoolClear(_history), status?.CanPurge, status?.LegacyTaskPresent,
+                experimentRunning, Busy || _history.Any(r => !r.Done), ClearPolicy.EscalateNow(_history, _engine.Settings, nowUtc));
+    }
+
+    /// <summary>Whether clearing frees kernel pool on this PC, from every measured clear so far (they survive restarts).</summary>
+    public ClearEvidence Evidence() { lock (_lock) return ClearEvidence.From(_history); }
 
     private readonly HashSet<ClearRecord> _reported = new(ReferenceEqualityComparer.Instance);
 
@@ -165,16 +184,69 @@ internal sealed class CacheClearer
         try { return MemoryNative.Query(); } catch { return default; }
     }
 
-    // ---- the clears survive restarts (they feed the estimate and the low-priority verdict)
-    private sealed record Saved(DateTime TimeUtc, string Mode, string Trigger, long PoolBefore, long PoolAfter, long PagedBefore, long PagedAfter, long StandbyBefore, long StandbyAfter, string? Error);
+    private static long SafeTotalRam()
+    {
+        try { return MemoryNative.TotalPhysical(); } catch { return 0; }
+    }
+
+    /// <summary>
+    /// The graph's RAM columns for the <paramref name="span"/> up to <paramref name="nowUtc"/>, each <paramref name="width"/>
+    /// wide (<see cref="Core.Growth.RamHistory.Columns"/>), and the PC's RAM they are a share of; any thread.
+    /// </summary>
+    public (List<Core.Growth.RamColumn> Columns, long TotalBytes) Ram(DateTime nowUtc, TimeSpan span, TimeSpan width)
+    {
+        lock (_lock) return (_ram.Columns(nowUtc, span, width), _ram.TotalBytes);
+    }
+
+    /// <summary>The RAM readings kept (the cost report).</summary>
+    public int RamReadings { get { lock (_lock) return _ram.Count; } }
+
+    // ---- the clears survive restarts (they feed the estimate, the low-priority verdict and whether clearing helps here)
+    /// <summary>A clear as clears.json keeps it. <paramref name="Tags"/>: what it freed by tag; absent in older files and for a clear that did not run.</summary>
+    internal sealed record Saved(DateTime TimeUtc, string Mode, string Trigger, long PoolBefore, long PoolAfter, long PagedBefore, long PagedAfter, long StandbyBefore, long StandbyAfter, string? Error,
+        IReadOnlyList<SavedTag>? Tags = null);
+
+    /// <summary>A tag the clear freed, before and after: the evidence of whose records it freed.</summary>
+    internal sealed record SavedTag(string Tag, long Before, long After);
+
+    /// <summary>The tags a clear freed at least 1 MB of, most first, at most 12 (enough to tell whose records they were).</summary>
+    private static List<SavedTag> FreedTags(ClearRecord r)
+    {
+        var after = r.TagsAfter.ToDictionary(t => t.Tag, t => t.Bytes);
+        return r.TagsBefore.Select(t => new SavedTag(t.Tag.ToString(), t.Bytes, after.GetValueOrDefault(t.Tag)))
+            .Where(t => t.Before - t.After >= 1L << 20).OrderByDescending(t => t.Before - t.After).Take(12).ToList();
+    }
+
+    internal static Saved ToSaved(ClearRecord r) => new(r.TimeUtc, r.Mode.ToString(), r.Trigger.ToString(), r.PoolBefore, r.PoolAfter,
+        (long)r.Before.CommittedPaged, (long)(r.After?.CommittedPaged ?? r.Before.CommittedPaged), r.ListsBefore.StandbyBytes, r.ListsAfter.StandbyBytes, r.Error,
+        r.Error is null ? FreedTags(r) : null); // a clear that did not run freed nothing, whatever its tags before were
+
+    /// <summary>A saved clear as a record again: sizes below 0 read as 0, and a tag that is not a pool tag is left out.</summary>
+    internal static ClearRecord FromSaved(Saved r)
+    {
+        ulong paged = (ulong)Math.Max(0, r.PagedBefore), pagedAfter = (ulong)Math.Max(0, r.PagedAfter);
+        var tags = new List<(Core.PoolTag Tag, SavedTag Saved)>();
+        foreach (var saved in r.Tags ?? [])
+            if (Core.PoolTag.TryParse(saved.Tag, out var tag)) tags.Add((tag, saved));
+        var rec = new ClearRecord
+        {
+            TimeUtc = r.TimeUtc, Mode = Enum.TryParse<ClearMode>(r.Mode, out var m) ? m : ClearMode.Standby, Trigger = Enum.TryParse<ClearTrigger>(r.Trigger, out var t) ? t : ClearTrigger.Manual,
+            Before = new PoolTotals(paged, (ulong)Math.Max(0, r.PoolBefore - r.PagedBefore), 0, 0),
+            ListsBefore = new MemoryLists(0, 0, r.StandbyBefore, 0, 0),
+            TagsBefore = tags.Select(x => (x.Tag, Math.Max(0, x.Saved.Before))).ToList(),
+        };
+        if (r.Error is null) { rec.After = new PoolTotals(pagedAfter, (ulong)Math.Max(0, r.PoolAfter - r.PagedAfter), 0, 0); rec.ListsAfter = new MemoryLists(0, 0, r.StandbyAfter, 0, 0); }
+        else rec.Error = r.Error;
+        rec.TagsAfter = tags.Select(x => (x.Tag, Math.Max(0, x.Saved.After))).ToList();
+        return rec;
+    }
 
     private void Save()
     {
         try
         {
             List<Saved> rows;
-            lock (_lock) rows = _history.Where(r => r.Done).TakeLast(100).Select(r => new Saved(r.TimeUtc, r.Mode.ToString(), r.Trigger.ToString(), r.PoolBefore, r.PoolAfter,
-                (long)r.Before.CommittedPaged, (long)(r.After?.CommittedPaged ?? r.Before.CommittedPaged), r.ListsBefore.StandbyBytes, r.ListsAfter.StandbyBytes, r.Error)).ToList();
+            lock (_lock) rows = _history.Where(r => r.Done).TakeLast(100).Select(ToSaved).ToList();
             File.WriteAllText(_engine.Paths.Guard.CheckReal(_stateFile + ".tmp"), JsonSerializer.Serialize(rows));
             File.Move(_engine.Paths.Guard.CheckReal(_stateFile + ".tmp"), _engine.Paths.Guard.CheckReal(_stateFile), overwrite: true);
         }
@@ -186,17 +258,8 @@ internal sealed class CacheClearer
         try
         {
             if (!File.Exists(_stateFile)) return;
-            foreach (var r in JsonSerializer.Deserialize<List<Saved>>(File.ReadAllText(_stateFile)) ?? [])
+            foreach (var rec in (JsonSerializer.Deserialize<List<Saved>>(File.ReadAllText(_stateFile)) ?? []).Select(FromSaved))
             {
-                ulong paged = (ulong)Math.Max(0, r.PagedBefore), pagedAfter = (ulong)Math.Max(0, r.PagedAfter);
-                var rec = new ClearRecord
-                {
-                    TimeUtc = r.TimeUtc, Mode = Enum.TryParse<ClearMode>(r.Mode, out var m) ? m : ClearMode.Standby, Trigger = Enum.TryParse<ClearTrigger>(r.Trigger, out var t) ? t : ClearTrigger.Manual,
-                    Before = new PoolTotals(paged, (ulong)Math.Max(0, r.PoolBefore - r.PagedBefore), 0, 0),
-                    ListsBefore = new MemoryLists(0, 0, r.StandbyBefore, 0, 0),
-                };
-                if (r.Error is null) { rec.After = new PoolTotals(pagedAfter, (ulong)Math.Max(0, r.PoolAfter - r.PagedAfter), 0, 0); rec.ListsAfter = new MemoryLists(0, 0, r.StandbyAfter, 0, 0); }
-                else rec.Error = r.Error;
                 _reported.Add(rec);
                 _history.Add(rec);
             }

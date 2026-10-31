@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nubbymong/poolwatch/blob/main/knowledge/schema.json",
+  "title": "PoolWatch knowledge pack",
+  "description": "One known issue: what it is, the evidence that shows it on a PC, what helps, where to read more and who found it. docs/knowledge-packs.md explains each field. PoolWatch itself ignores fields it does not know, so that a pack written for a newer version still loads; this schema flags them, so a misspelt field is caught while you edit.",
+  "type": "object",
+  "required": ["format", "id", "title", "explanation", "workaround", "evidence", "links"],
+  "dependentRequired": { "actions": ["suggestion"], "suggestion": ["actions"] },
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "format": { "description": "The pack format: 1.", "const": 1 },
+    "id": {
+      "description": "Lower-case letters and digits, words joined by hyphens; also the file name (id.json).",
+      "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64
+    },
+    "title": { "description": "The issue's name, in plain words.", "$ref": "#/$defs/text", "maxLength": 60 },
+    "explanation": { "description": "What is going on, in plain words.", "$ref": "#/$defs/text", "maxLength": 600 },
+    "workaround": { "description": "What helps, in plain words. Say so plainly when PoolWatch cannot fix it.", "$ref": "#/$defs/text", "maxLength": 400 },
+    "actions": {
+      "description": "The built-in actions that work around the issue. Never a command, a path or a web address.",
+      "type": "array", "maxItems": 3, "uniqueItems": true,
+      "items": { "enum": ["auto-clear", "token-guard", "chatgpt-shortcut"] }
+    },
+    "suggestion": {
+      "description": "Needed with actions, not allowed without: the sentence after the evidence on the action's suggestion card.",
+      "$ref": "#/$defs/text", "maxLength": 160
+    },
+    "evidence": {
+      "description": "The ways the issue shows. It applies when any one rule holds; within a rule, every condition given must hold.",
+      "type": "array", "minItems": 1, "maxItems": 8,
+      "items": { "$ref": "#/$defs/rule" }
+    },
+    "links": {
+      "description": "Pages to read more on.",
+      "type": "array", "minItems": 1, "maxItems": 8,
+      "items": {
+        "type": "object", "required": ["title", "url"], "additionalProperties": false,
+        "properties": {
+          "title": { "$ref": "#/$defs/text", "maxLength": 100 },
+          "url": { "$ref": "#/$defs/url" }
+        }
+      }
+    },
+    "credits": {
+      "description": "Who found or documented it.",
+      "type": "array", "maxItems": 8,
+      "items": {
+        "type": "object", "required": ["name", "what"], "additionalProperties": false,
+        "properties": {
+          "name": { "$ref": "#/$defs/text", "maxLength": 40 },
+          "what": { "description": "Reads on from the name: \"documented the leak and its cause\".", "$ref": "#/$defs/text", "maxLength": 200 },
+          "url": { "$ref": "#/$defs/url" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "text": {
+      "description": "Plain text on one line, with no spaces at the start or end and no control characters. PoolWatch also refuses invisible formatting characters.",
+      "type": "string", "minLength": 1,
+      "pattern": "^[^\\s\\u0000-\\u001F\\u007F](?:[^\\u0000-\\u001F\\u007F\\u2028\\u2029]*[^\\s\\u0000-\\u001F\\u007F])?$"
+    },
+    "url": {
+      "description": "An https:// address on github.com, learn.microsoft.com or support.microsoft.com, with letters, digits and - . _ ~ : / ? # = & % + only.",
+      "type": "string", "maxLength": 300,
+      "pattern": "^https://(github\\.com|learn\\.microsoft\\.com|support\\.microsoft\\.com)/[A-Za-z0-9._~:/?#=&%+-]*$"
+    },
+    "tags": {
+      "description": "Pool tags, 1 to 4 printable characters each (a shorter tag is padded with spaces, as Windows does). Case matters: Reff and RefF are different tags.",
+      "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[\\x21-\\x7E]{1,4}$" }
+    },
+    "name": {
+      "description": "What it is in plain words, as written in the middle of a sentence: \"security tokens\", \"Codex desktop\".",
+      "$ref": "#/$defs/text", "maxLength": 40
+    },
+    "amount": { "type": "number", "exclusiveMinimum": 0, "maximum": 1073741824 },
+    "rule": {
+      "description": "Every condition given must hold, and each rule needs tagGrowth or clearFreed: an issue is named only on what PoolWatch measured.",
+      "type": "object", "additionalProperties": false,
+      "anyOf": [{ "required": ["tagGrowth"] }, { "required": ["clearFreed"] }],
+      "properties": {
+        "tagGrowth": {
+          "description": "These tags together grew at least this fast, measured over the last hour or since the last cache clear (1 MB = 1,048,576 bytes).",
+          "type": "object", "required": ["tags", "name", "minMBPerHour"], "additionalProperties": false,
+          "properties": {
+            "tags": { "$ref": "#/$defs/tags" },
+            "name": { "$ref": "#/$defs/name" },
+            "pool": { "enum": ["any", "paged", "nonPaged"], "default": "any" },
+            "minMBPerHour": { "$ref": "#/$defs/amount" }
+          }
+        },
+        "clearFreed": {
+          "description": "A cache clear in the last day freed at least this much of these tags together.",
+          "type": "object", "required": ["tags", "name", "minMB"], "additionalProperties": false,
+          "properties": {
+            "tags": { "$ref": "#/$defs/tags" },
+            "name": { "$ref": "#/$defs/name" },
+            "minMB": { "$ref": "#/$defs/amount" }
+          }
+        },
+        "running": {
+          "description": "Any one of these programs is running.",
+          "type": "array", "minItems": 1, "maxItems": 16,
+          "items": {
+            "type": "object", "required": ["name"], "additionalProperties": false,
+            "oneOf": [{ "required": ["image"] }, { "required": ["storePackage"] }],
+            "properties": {
+              "name": { "$ref": "#/$defs/name" },
+              "image": { "description": "The program's file name.", "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}\\.[eE][xX][eE]$" },
+              "storePackage": { "description": "The start of its Microsoft Store package's name.", "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,49}$" }
+            }
+          }
+        },
+        "windowsBuild": {
+          "description": "Windows build numbers, both ends included (26100 is Windows 11 24H2).",
+          "type": "object", "minProperties": 1, "additionalProperties": false,
+          "properties": {
+            "min": { "type": "integer", "minimum": 1, "maximum": 99999 },
+            "max": { "type": "integer", "minimum": 1, "maximum": 99999 }
+          }
+        },
+        "fileSystems": {
+          "description": "A fixed drive has any one of these file systems.",
+          "type": "array", "minItems": 1, "maxItems": 8,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9]{1,16}$" }
+        }
+      }
+    }
+  }
+}

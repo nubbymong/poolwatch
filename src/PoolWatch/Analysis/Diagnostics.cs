@@ -255,11 +255,15 @@ internal sealed class Diagnostics
     public IGuardUi? GuardUi { get; set; }
     private readonly System.Collections.Concurrent.ConcurrentQueue<Finding> _guardFindings = new();
     private Task? _guardTask;
+    private readonly object _guardStartLock = new();
     private readonly CancellationTokenSource _guardStop = new();
 
     private int _failsafeHooked;
 
-    /// <summary>The logon check, on a worker thread (the tray app at start-up; headless with --token-guard).</summary>
+    /// <summary>
+    /// The logon check, on a worker thread (the tray app at start-up; headless with --token-guard; the guard turned on later).
+    /// While a check runs, the caller gets that one.
+    /// </summary>
     public Task StartTokenGuard(IGuardUi? ui)
     {
         GuardUi = ui;
@@ -272,7 +276,13 @@ internal sealed class Diagnostics
             AppDomain.CurrentDomain.UnhandledException += (_, _) => { try { Guard.OnExit(); } catch { } };
             AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { Guard.OnExit(); } catch { } };
         }
-        return _guardTask ??= Task.Run(() => Guard.RunAtLogon(ui, _guardStop.Token));
+        // Once a check has finished, a new one starts: the guard turned off (Undo) and on again in the same run must check
+        // this logon again, or it stays unprotected until the next start.
+        lock (_guardStartLock)
+        {
+            if (_guardTask is not { IsCompleted: false }) _guardTask = Task.Run(() => Guard.RunAtLogon(ui, _guardStop.Token));
+            return _guardTask;
+        }
     }
 
     /// <summary>PoolWatch exits: if the check is still running, turn the workaround on before going.</summary>

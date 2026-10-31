@@ -1,231 +1,392 @@
-# PoolWatch
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/poolwatch-wordmark-header-dark.png">
+    <img alt="PoolWatch" src="docs/brand/poolwatch-wordmark-header-light.png" width="440">
+  </picture>
+</h1>
 
-A low-overhead Windows tray app that watches the kernel **paged and non-paged pool**, works out which process,
-service or driver activity is making it grow, and writes an **evidence pack** good enough for a vendor bug report.
-It can also find and switch off background services that saturate the PC, and it knows about AI coding-agent
-sessions (Claude Code, AI Code Conductor) when they are the ones starting the processes.
+<p align="center"><sub>THE MISSION</sub></p>
 
-![Main window, taken by the CI UI test during a File-handle leak](docs/screenshots/1-main-window.png)
+<h3 align="center">Keeps your Windows 11 PC fast and stable through long days of agentic coding.</h3>
 
-How it works is in [docs/DESIGN.md](docs/DESIGN.md). What it can change on your PC, and how to report a security
-problem, is in [SECURITY.md](SECURITY.md).
+<p align="center">
+  PoolWatch is a free Windows tray app for people who run Claude Code, Codex and other coding agents all day. It
+  watches the kernel pool (memory that Windows and its drivers keep for themselves), clears what holds it, fixes known
+  issues and, if you want, trims background work. Every change it makes is listed, with a way to put it back.
+</p>
 
-## Requirements
+<p align="center">
+  <a href="https://github.com/nubbymong/poolwatch/releases/latest"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/github/v/release/nubbymong/poolwatch?style=for-the-badge&amp;label=Download&amp;labelColor=486581&amp;color=C62F37">
+    <img alt="Download the latest PoolWatch release" src="https://img.shields.io/github/v/release/nubbymong/poolwatch?style=for-the-badge&amp;label=Download&amp;labelColor=102A43&amp;color=C62F37">
+  </picture></a>
+  <br>
+  Get <code>PoolWatch-v1.0.0-setup-win-x64.exe</code> from the release page (<a href="#install">install steps</a>).
+  <br>
+  Free and open source · Windows 11, 64-bit · Signed · No telemetry ·
+  <a href="docs/TECHNICAL.md#why-it-needs-administrator-rights">Runs as administrator</a>
+</p>
 
-- Windows 10 22H2 or later, or Windows 11; x64.
-- Administrator rights (see [Why it runs as administrator](#why-it-runs-as-administrator)).
-- For the smaller download, the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) (x64). The
-  self-contained download needs nothing else.
-- Optional: the Debugging Tools for Windows (part of the Windows SDK), whose `pooltag.txt` gives every pool tag an owner
-  and a description. Without it PoolWatch scans the drivers for the tag and uses a built-in table.
+<p align="center">
+  <a href="https://github.com/nubbymong/poolwatch/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush"><img alt="Tests on main: status" src="https://github.com/nubbymong/poolwatch/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push"></a>
+  <a href="LICENSE"><img alt="Licence: MIT" src="https://img.shields.io/github/license/nubbymong/poolwatch"></a>
+</p>
 
-## Install
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/compare-dark.svg">
+    <img alt="An illustration with made-up numbers. Without PoolWatch, the kernel pool climbs from about 3 GB to about 21 GB over a working day, and the PC goes from fast to slower until even typing lags. With PoolWatch, an hourly cache clear gives most of it back each time, a green mark shows each clear, the pool stays near 4 GB, and the PC stays fast all day." src="docs/screenshots/compare-light.svg" width="830">
+  </picture>
+</p>
 
-Each [release](https://github.com/nubbymong/poolwatch/releases) has two zips and a checksum file. The names carry the
-release tag, for example tag `v1.0.0`:
+<p align="center">
+  The kernel pool over one working day: an illustration with made-up numbers. On one developer PC the kernel pool
+  reached about 23 GB, and even typing lagged.
+</p>
 
-| File (tag `v1.0.0`) | Needs | The exe inside |
-|---|---|---|
-| `PoolWatch-v1.0.0-win-x64.zip` | the .NET 10 Desktop Runtime (x64) | `PoolWatch.exe` |
-| `PoolWatch-v1.0.0-win-x64-selfcontained.zip` | nothing (the runtime is inside) | `PoolWatch-selfcontained.exe` |
-| `SHA256SUMS.txt` | the SHA-256 of each zip | |
+## What PoolWatch does
 
-Every PoolWatch exe in them is signed (Authenticode, timestamped) by **Nicholas Moger**, certificate thumbprint
-`00EC0DEE208F91785D253C0731E28249C68053FD`. The other DLLs are Microsoft's, signed by Microsoft.
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/pillar-watch-dark.svg">
+        <img alt="" src="docs/screenshots/pillar-watch-light.svg" width="32" height="32">
+      </picture>
+      <br>
+      <b>Watches the kernel pool</b>
+      <br>
+      Shows what is making it grow, in plain words.
+    </td>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/pillar-clear-dark.svg">
+        <img alt="" src="docs/screenshots/pillar-clear-light.svg" width="32" height="32">
+      </picture>
+      <br>
+      <b>Stops the build-up</b>
+      <br>
+      Empties the standby cache before the pool slows you down.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/pillar-fix-dark.svg">
+        <img alt="" src="docs/screenshots/pillar-fix-light.svg" width="32" height="32">
+      </picture>
+      <br>
+      <b>Fixes known issues</b>
+      <br>
+      The token leak, Codex's shader cache, Defender on Dev Drives.
+    </td>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/pillar-trim-dark.svg">
+        <img alt="" src="docs/screenshots/pillar-trim-light.svg" width="32" height="32">
+      </picture>
+      <br>
+      <b>Trims background work</b>
+      <br>
+      If you want: services, scheduled tasks and startup apps you don't need.
+    </td>
+  </tr>
+</table>
 
-Below, use the zip you downloaded, and the exe name from the table (`PoolWatch.exe` for the framework-dependent zip,
-`PoolWatch-selfcontained.exe` for the self-contained one).
+## Why your PC slows down
 
-1. Check the download, in PowerShell (the name is the file you downloaded):
-   ```powershell
-   (Get-FileHash .\PoolWatch-v1.0.0-win-x64.zip -Algorithm SHA256).Hash   # compare with SHA256SUMS.txt
-   ```
-2. Unpack the **whole zip** into `%ProgramFiles%\PoolWatch`, from an administrator PowerShell, and check the signature of
-   the exe that zip holds:
-   ```powershell
-   Expand-Archive .\PoolWatch-v1.0.0-win-x64.zip -DestinationPath "$env:ProgramFiles\PoolWatch"
-   (Get-AuthenticodeSignature "$env:ProgramFiles\PoolWatch\PoolWatch.exe").Status   # Valid
-   # self-contained zip: check PoolWatch-selfcontained.exe instead
-   ```
-   Keep the `amd64` folder next to the exe: it holds the native DLLs PoolWatch loads.
-3. Start the exe (`PoolWatch.exe`, or `PoolWatch-selfcontained.exe`) from there and accept the UAC prompt. A tray icon
-   appears and the main window opens.
-4. Optional: tick **Start at logon** (Settings). It creates a scheduled task with highest privileges, so there is no
-   UAC prompt at every logon. It is only created for a copy installed under `%ProgramFiles%`.
+Coding agents start thousands of short programs an hour and touch files all day. Windows and its drivers keep memory
+for themselves to track that work: the kernel pool. On some developer PCs part of it is never handed back: a Dev
+Drive's file records stay pinned by the file cache, a Windows 11 bug leaks a little with every program started, and
+NTFS file records pile up while some AI desktop apps run. No app in Task Manager accounts for it, so the PC just gets
+slower until you restart. PoolWatch was built after the kernel pool on one developer PC reached about 23 GB and slowed
+even typing ([how PoolWatch started](docs/DESIGN.md#1-why-it-exists)).
 
-To update, exit PoolWatch (tray menu → Exit) and replace the files. To uninstall: untick Start at logon, use **Restore
-all** on the Services tab if you turned services off, exit, then delete `%ProgramFiles%\PoolWatch` and
-`%ProgramData%\PoolWatch`.
+### Is this you?
 
-## Why it runs as administrator
+- Memory use climbs over a day or two, and no app in Task Manager accounts for it.
+- Typing, the mouse or windows start to lag, although Task Manager shows spare CPU and memory.
+- Only a restart makes the PC feel fast again.
 
-Pool tags, the system handle table, the kernel ETW session that sees every process start, and the WPR traces that
-attribute pool allocations to a process all need administrator rights. So PoolWatch always runs elevated, and because
-of that it is careful about where it runs from and what it touches:
+To check, open Task Manager, go to **Performance** > **Memory**, and watch **Paged pool** and **Non-paged pool** while
+you work. If they keep growing over hours, PoolWatch can help. If they stay flat, you do not need it.
 
-- it refuses to run from a folder you can write to without administrator rights (Desktop, Downloads, OneDrive): another
-  program could replace it there and be started as administrator;
-- it writes only to its own admin-only data folder;
-- it changes the system only in the ways listed below.
+It helps most if you:
 
-## What it can change, and how each change is confirmed
+- use a Dev Drive, or another drive formatted with ReFS (not sure? setup checks for you);
+- run coding assistants such as Claude Code, Codex or Copilot, which start thousands of programs an hour;
+- want evidence to send to whoever makes the program or driver that grows the pool.
 
-PoolWatch watches and reads. [SECURITY.md](SECURITY.md#what-poolwatch-changes-on-your-pc) has the full table; in short:
+## How it works
 
-| Change | Confirmed by |
+The picture at the top is an illustration. The screenshots below come from PoolWatch's own tests on a GitHub test
+machine, not a developer's PC, so the programs they name are test programs: Leaker is the test tool that grows the
+pool. They are taken a minute or two after PoolWatch starts, so no cache clear has run yet and the growth rate is not
+known yet.
+
+### 1. It looks at your PC and sets it up with you
+
+At first start, **Set up PoolWatch** opens on its own, before the main window: seven short steps, about 3 minutes. It
+reads your PC and shows, for each known cause of a growing kernel pool, how much it affects this PC (none, low, medium
+or high) and which step fixes it. Then you choose when PoolWatch empties the standby cache (on a schedule, at a pool
+size, whichever comes first, or decide later) and the fixes that fit this PC: start PoolWatch when you sign in, the
+token-leak guard if this Windows build has the leak, and, if the Codex app is installed, a Codex shortcut without its
+shader cache. For Microsoft Defender on a Dev Drive it shows you where the setting is; PoolWatch never changes
+Defender. Setup changes no services: it shows where to trim them later, in the app. Nothing changes until you press
+**Next** on the step where you chose it
+([setup in the user guide](docs/USER-GUIDE.md#at-first-start-set-up-poolwatch)).
+
+<p align="center">
+  <img alt="Set up PoolWatch, step 2 of 7, How your PC is impacted: each known cause of a growing kernel pool with its impact level (none, low, medium or high) and the step that fixes it" src="docs/screenshots/6-setup-2-your-pc.png">
+</p>
+
+### 2. It watches, and says what grew
+
+The window opens in the view you chose in setup (the **Simple view** unless you picked Advanced). The Simple view
+shows the kernel pool now, which way it went in the last 10 minutes, when the next cache clear runs and what the last
+one freed; four tiles (over the last 6 hours, how fast the pool grew per hour with the clears added back, what the
+clears freed and the net change, and the memory in use now); the graph, with a mark at each cache clear; and **Get
+more from PoolWatch**, up to three cards for what PoolWatch found on this PC and for parts of the app you may not have
+found yet. It stays calm, because growth often goes away by itself, and turns red only for a real risk.
+
+<p align="center">
+  <img alt="The Simple view: the kernel pool now with its paged and non-paged parts, the trend arrow, the next cache clear with its ring, four tiles for the last 6 hours, the graph, and the Get more from PoolWatch cards" src="docs/screenshots/1-simple-view.png" width="830">
+</p>
+
+Switch on **Advanced view** for the details: a graph of the last hour, 6 or 24 hours with the growth and clears beside
+it (and **Show RAM** for the PC's memory behind it), and **Pool causes**, which lists what grew, what the clears freed
+of it, its impact, the likely cause and how sure PoolWatch is
+([the Advanced view in the user guide](docs/USER-GUIDE.md#advanced-view)).
+
+<p align="center">
+  <img alt="The Advanced view: the graph with the PC's RAM behind it and its Growth and clears panel beside it, and Pool causes: what grew, its impact, the likely cause and how sure PoolWatch is, with the top row selected and its evidence below" src="docs/screenshots/2-advanced-view.png" width="830">
+</p>
+
+### 3. It recognises known issues
+
+When what PoolWatch measures on your PC matches a known issue, it says what it is, what helps and who found it.
+
+| Known issue | What PoolWatch can do |
 |---|---|
-| Records a bounded WPR trace (at most 5 minutes) | **Capture now** (tray menu), or the `CaptureOnAlert` setting (off by default, at most one an hour) |
-| Empties the Windows standby list (the file cache) | **Clear cache now**, or the automatic clear (off by default) |
-| Deletes your own RAMMap clear task (never RAMMap itself) | A Yes in a dialog that shows the task |
-| Stops / disables, or restores, a background service | A dialog listing them; the original is saved; protected services are never offered |
-| Disables / enables a non-Microsoft scheduled task or startup app | Your click on the selected row |
-| Ends a heavy background process | A dialog with its identity, PID, start time and command line |
-| Sets the live foreground lock timeout to 0 (token-leak guard) | The `TokenGuardEnabled` setting (off by default) |
-| Creates or removes the Start-at-logon task; fixes an unsafe existing one | The checkbox; a question |
-| Creates and locks `%ProgramData%\PoolWatch`; removes an older PoolWatch's own Clear cache tasks | Automatic, and noted in the findings log (`findings.jsonl`) |
+| The Windows 11 token leak (pool tag `Toke`), documented by [bentoner](https://github.com/bentoner/windows-token-leak); how to keep the fix on after sign-in found by [gunrgbcr](https://github.com/gunrgbcr/windows-token-leak-logon-fix) | the token-leak guard |
+| ReFS file records kept in the kernel pool by the file cache | the automatic cache clear |
+| NTFS file records piling up while the Codex or Claude desktop app runs | nothing yet: the note says what helped others |
+| NTFS file records piling up while the Codex desktop app (its program is ChatGPT.exe) opens its GPU shader cache files thousands of times a second | a desktop shortcut that starts the app without that cache: worth trying, not a sure fix ([traced and measured by Faarfarin](https://github.com/openai/codex/issues/31212#issuecomment-5635622083); [a report where it did not help](https://github.com/openai/codex/issues/56160)). PoolWatch never changes the Codex app itself |
 
-PoolWatch never installs a driver, never uninstalls anything, and never ships or runs third-party tools.
+**The token-leak guard.** On some Windows 11 24H2 and 25H2 builds, a Windows bug leaks a little of the kernel pool
+every time one program starts another, and coding assistants start thousands of programs an hour. A Windows setting
+stops it, but Windows resets it at each sign-in, so the guard sets it again each time PoolWatch starts. What you will
+notice: another program can bring its window to the front by itself, even while you type somewhere else, and your
+typing then goes into that window. Most people find that rare and easy to live with. To stop it, turn it off in Active
+changes; the setting itself lasts until you sign out. A restart frees what has already leaked. When setup did not find
+the leak, PoolWatch keeps watching for it, checks again after a Windows update, and offers the guard if it appears.
 
-## Using it
+The known issues live in [`knowledge/`](knowledge), one file each, built into every release; PoolWatch does not
+download them. A file holds only text, pool tags, program names, numbers and links: nothing PoolWatch would run. Know
+another one? Add it with a pull request ([how to write a known-issue file](docs/knowledge-packs.md)), or describe it
+with the [known-issue form](https://github.com/nubbymong/poolwatch/issues/new?template=known_issue.yml).
 
-- **Tray icon**: green = normal, amber = a tag is growing or retained, red = an incident is open. The tooltip shows the
-  committed paged / non-paged pool (the Task Manager numbers). Closing the window keeps PoolWatch running. Right-click it
-  for the tools that are not on the window: **Capture now**, **Since boot report** (what grew since boot, hour by hour),
-  **Open incident folder**, **Export vendor bundle**, **Copy latest incident summary**, **Mark**, the experiments,
-  **About PoolWatch** (version, overhead, data folder) and, only while there is one to remove, **Remove my clear task** /
-  **Remove old clear-cache tasks**.
-- **Main window**, top to bottom:
-  - one line in plain words: the kernel pool is steady, growing or dropping, by how much, and, when it grows, what is
-    growing, the most likely cause and how sure PoolWatch is ("Kernel pool is steady at 9.6 GB, but File system metadata
-    (Reff, refs.sys) grew 400 MB in the last hour. Most likely cause: ..., with strong evidence."). While every core is
-    busy it also says so, naming the busiest process;
-  - one graph: the committed paged and non-paged pool (the Task Manager figures) over the last 6 hours;
-  - three buttons: **Clear cache now** (its tooltip shows the last clear's result), **Export report** (the selected
-    row's report, or the newest incident's, redacted by default) and **Settings**: a short form with Start at logon
-    (applies at once), automatic cache clearing (on or off, every how many hours, over what pool size) and deeper
-    captures, each explained in a line; **Advanced...** opens every setting in a grid. Saved settings take effect when
-    PoolWatch next starts;
-  - two tabs. **Pool causes** is one list of what grew or was released: open and recent incidents, tags growing
-    before any incident, processes piling up handles or pool (or orphaned and still busy), spawn storms and other
-    pool-related findings, and each cache clear's result. Each row says what is growing, how much, how fast, the likely
-    cause, the confidence in words and when; a line above the list says what the colours mean (pink: an open incident
-    or an alert; yellow: growing or held now, or a warning). A growing tag's cause is ranked in the background and
-    filled in when ready. Select a row for its details (the incident report's summary, or a tag's suspects with their
-    evidence), and **Open report folder** for the full report. **Services** lists the background services you may
-    turn off, with their live cost, and the non-Microsoft scheduled tasks, startup apps and heavy background apps (see
-    below).
+### 4. It trims background work, if you want
 
-| | |
-|---|---|
-| ![Pool causes with a row selected](docs/screenshots/2-pool-causes.png) | ![Services](docs/screenshots/3-services.png) |
-| ![Settings](docs/screenshots/4-settings.png) | ![Settings, Advanced](docs/screenshots/5-settings-advanced.png) |
+In the Advanced view, the **Services** tab lists the background services you may not need, with what each one costs
+now and what you lose by turning it off. Windows' own services come first, each with the source PoolWatch follows
+(Microsoft's virtual-desktop optimisation tool, the CIS security checklist for company PCs, or no official source);
+those sources were written for virtual desktops and company PCs, so check what you lose first. For the services of
+other apps there is no official source, so **Decide with your AI agent** saves a prompt for Claude Code, Codex or any
+other agent: it asks how you use this PC and writes an answer, and **Import answer** shows every change before
+anything is turned off. The **Tasks and startup apps** tab ranks startup apps, scheduled tasks and apps busy in the
+background by what each costs now, and switches one off with the same switch as Task Manager's Startup apps or Task
+Scheduler's Disable: nothing is deleted. Protected services (security, Windows Update, input and audio, Hyper-V and
+WSL, core) are never changed ([services, tasks and the AI agent in the user guide](docs/USER-GUIDE.md#services)).
 
-The screenshots (main window, Pool causes with a row selected, Services, Settings, Settings Advanced) are taken on the
-CI runner, at 100% display scaling, by the UI test (`ci/m4-ui.ps1`); the CI `ui` job's artifacts always have fresh ones.
+<p align="center">
+  <img alt="The Services tab: Windows services and services of other apps in two groups, each Windows service with its source, the Decide with your AI agent and Import answer buttons, and Turn off on the right" src="docs/screenshots/3-services.png" width="830">
+</p>
 
-### How it decides
+### 5. It writes reports for whoever makes the program or driver
 
-Per tag it looks for **growth** (by default 200 MB in 10 minutes, 1 GB in 60 minutes, or non-paged pool over 5 GB and
-still rising), **retention** (still held 15 minutes after the activity stopped) and **release** (a sharp drop: whatever
-exited or was deleted then was holding the memory). Suspects are ranked on direct charge (handles of the matching type,
-quota pool), activity correlation (Spearman, with a lag), lifecycle (started at onset, exited at the end, orphaned) and
-ancestry. Labels are *correlated*, *strongly correlated* or *confirmed by trace*; PoolWatch never claims causation from
-correlation alone.
+When something keeps growing, PoolWatch writes a report with a timeline, the likely causes and the evidence for each.
+The reports stay on your PC. **Export report** makes a copy to share, with your user and PC names, home paths and
+anything that looks like a password or key taken out, as best it can. Read it before you post it.
 
-### Background services
+## You stay in control
 
-When the PC is saturated (all cores busy, typing lags) but pool and memory look fine, PoolWatch says so at the end of
-the status line, naming the busiest process; the findings log (`findings.jsonl`) has the full answer, with the
-processes by CPU and page faults. The **Services** tab groups services into *optional* (from a catalogue,
-with what you lose and the risk), *unknown* third-party ("you decide") and *protected* (never changed), shows each
-one's live cost, and turns them off reversibly: the original is saved first, and **Restore** puts it back exactly.
+<p align="center">
+  <img alt="Active changes: the features PoolWatch turned on, each with Turn off, what it turned off, each with Put back, and Put all back at the bottom" src="docs/screenshots/7-active-changes.png">
+</p>
 
-### Token-leak guard (optional, off by default)
+Nothing changes without your OK. Every change PoolWatch made to your PC that is still in effect is listed under
+**Active changes**: the features you turned on (starting at sign-in, the automatic cache clear, the token-leak guard,
+the Codex shortcut), each with **Turn off** (the shortcut: **Remove**), and what PoolWatch turned off (services,
+scheduled tasks, startup apps, and a RAMMap clear task of yours it replaced), each with **Put back**, and any other
+change it made (a service set to its Windows default, a task or startup app turned on), also with **Put back**.
+**Put all back** does them all, after one question. A few things cannot fully come back, and the list says which: for
+example, the token-leak guard's Windows setting lasts until you sign out. Programs you ended are not listed: start them
+again. Uninstalling puts back everything it can by default, and says what it put back and what it could not
+([Active changes in the user guide](docs/USER-GUIDE.md#active-changes)).
 
-Some Windows 11 Insider builds leak one token reference (pool tag `Toke`) each time a process that is not allowed to take
-the foreground starts a child; agent sessions start hundreds of processes a minute. With `TokenGuardEnabled` on, the
-tray app tests for the leak at logon in a hidden helper and, when the build leaks, sets the **live**
-`ForegroundLockTimeout` to 0 for that logon (never the registry). With 0, any app may take the focus. The workaround and
-the test come from [gunrgbcr/windows-token-leak-logon-fix](https://github.com/gunrgbcr/windows-token-leak-logon-fix),
-re-implemented in C#.
+**Why it asks for administrator rights.** Reading the kernel pool by tag, seeing every program that starts, recording a
+trace and clearing the standby cache all need them. Watching happens on its own. Every change to your PC waits for your
+click or a setting you turned on, apart from creating PoolWatch's own data folder and tidying up after an older
+PoolWatch (SECURITY.md lists each). It never installs a driver, runs only from inside Program Files and refuses a copy
+there that you could change without administrator rights, and never writes through a file-system link (a junction or
+symbolic link). [What it does with those rights](docs/TECHNICAL.md#why-it-needs-administrator-rights); how each
+action is checked: [SECURITY.md](SECURITY.md), which also lists the [known limitations](SECURITY.md#known-limitations),
+one of them with no defence yet in 1.0.0.
 
-### AI coding-agent awareness (optional)
-
-When a suspect runs under Claude Code, PoolWatch searches that session's transcripts (bounded) for the tool call that
-started it, and names the session, project, workflow and sub-agent. Under AI Code Conductor it also labels the session
-and its account profile. Nothing needs configuring: the transcripts are found from the session itself and from
-`%USERPROFILE%\.claude`. `AiccResourcesRoot` can point at an AI Code Conductor resources folder to search all its
-profiles.
-
-## Where it stores data
-
-Everything goes under `%ProgramData%\PoolWatch\` (admin-only; your account can read it), kept 7 days by default:
-
-- `data\<yyyyMMdd>\`: `totals.csv`, `tags.csv`, `processes.csv`, `handles.csv`, `events.csv`, `services.csv`,
-  `volumes.csv`, `lag.csv`, `load.csv`, `findings.jsonl` (about 2-3 MB an hour);
-- `incidents\<yyyyMMdd-HHmmss>-<tag>-<hex>\`: `report.md` (headline, timeline chart, ranked suspects with evidence,
-  process details, system info, a draft bug report), `report.json`, `timeline.csv`, `processes.csv`, `events.csv`,
-  `timeline.png`, and `capture.etl` when a trace was taken ([an example](docs/example-incident/report.md) from CI);
-- `settings.json`, `poolwatch.log`, `service-changes.json` (the original of every service PoolWatch changed),
-  `boots\`, `cache\`, `exports\`, `reports\`.
+**Signed and checkable.** Every PoolWatch program, the setup and its uninstaller are signed, with a timestamp, and each
+release lists the SHA-256 of the setup and both zips in `SHA256SUMS.txt`
+([how to verify a release](docs/TECHNICAL.md#verify-a-release)).
 
 ## Privacy
 
-**Nothing leaves your PC.** PoolWatch makes no network connections: no update check, no telemetry, no crash upload, no
-symbol server. The only programs it starts are Windows' own `wpr.exe`, `fltmc.exe`, `schtasks.exe` and `cmd.exe` (the
-token-leak test, and the self-test), `explorer.exe` to open a folder or show a file you asked for, and itself (the
-hidden token-leak-test helper). Windows' programs are started by their full path under `%SystemRoot%`, and PoolWatch by
-its own full path; never a bare name resolved through a shell association or the current directory.
+**Nothing leaves your PC except the update check**, which is on by default and easy to turn off. Once a day,
+PoolWatch asks GitHub's API whether a newer stable release of PoolWatch is out:
 
-**Redact before sharing.** The incident folders hold full command lines (which can contain passwords or tokens), your
-user and machine names, paths and your SID. They are for you, and each report says "NOT REDACTED" at the top. To
-share:
+- It sends one request for PoolWatch's latest release on GitHub, which carries PoolWatch's own version in its
+  User-Agent line ("PoolWatch/1.0.0"). No sign-in, no cookies, nothing about you or your PC. The full request is in
+  [SECURITY.md](SECURITY.md#security-model).
+- GitHub sees your IP address and the time, as it does for any web page.
+- The first check waits until you have finished setup; its last step has the switch.
+- When a newer version is out, the bottom of the window says "PoolWatch x.y.z is available. See what's new", and the
+  tray menu says "PoolWatch x.y.z is available". Either opens that release's page in your browser. PoolWatch never
+  downloads, installs or runs anything.
+- Turn it off with **Tell me when a new version is out** on setup's last step, or under **Update notices** in Settings
+  (in the Advanced view).
 
-- use **Export report** (or **Export vendor bundle** in the tray menu), and keep the default **Yes** to redact: your
-  user name, machine name, home and TEMP paths, domain and SID become placeholders, values that look like secrets become
-  `<SECRET>`, and the `.etl` trace is left out;
-- read the exported files before you post them: redaction is best-effort and cannot know every secret format;
-- `RedactCopies` (on by default) applies the same redaction to rows and summaries you copy from the window.
+Your browser opens a web page only when **you** click one: Report an issue (its address holds only the title,
+PoolWatch's version and Windows), the links in About and in setup's explanations, or an update notice. PoolWatch has no
+telemetry, no crash upload and no symbol server.
 
-## Command line
+**Your coding agents' transcripts stay on your PC.** PoolWatch reads Claude Code transcripts on this PC only, to name
+the session behind a growth, and never sends them. To explain a growth it also reads every program's command line and,
+for a program that runs under Claude Code, its working folder; for setup, it looks at your installed Store apps and AI
+tools. It keeps what it finds in its data folder and sends none of it: Report an issue takes out session names and ids,
+project folders and command lines before it shows you the preview, and the update check sends nothing about your PC.
+An export you choose to share can contain session ids and project names (see below).
 
-```
-PoolWatch.exe                       tray app (opens the window)
-PoolWatch.exe --tray                tray app without the window (the logon task uses this)
-PoolWatch.exe --headless [--duration <s>] [--interval <s>] [--config <settings.json>] [--out <dir>] [--verbose-csv]
-PoolWatch.exe --mark "<note>"       put a note in the running PoolWatch's findings log (and incident timelines)
-PoolWatch.exe --services-dump <file> | --tasks-dump <file>
-PoolWatch.exe --service-off <name> | --service-restore <name|all>
-PoolWatch.exe --selftest --out <dir>   native collector checks against independent sources
-```
+**The AI agent prompt is yours to give.** **Decide with your AI agent** shows every word of its prompt before you save
+or copy it: the names and publishers of the services, scheduled tasks and startup apps on this PC, what each does, and
+your Windows version. Never your name, user or PC name, folder paths, or anything from your files (as best it can, as
+with an export). PoolWatch saves it only where you pick, or copies it, and nothing is sent until you give it to your
+agent yourself.
 
-Any unknown option (for example `--help`) prints the full list, run from a console.
+**Redact before you share.** The reports in PoolWatch's data folder hold full command lines (which can contain
+passwords or tokens), your user and PC names, paths, your account's ID (SID), and, for a program a coding agent
+started, the session, project, sub-agent and the command from its transcript. They are for you, and each says "NOT
+REDACTED" at the top. To share one, use **Export report** (or **Export vendor bundle** in the tray menu) and keep the
+default **Yes** to redact. Redaction replaces your user and PC names, home paths, the SID and anything that looks like
+a secret; it keeps session ids, project names and the commands themselves, and cannot know every secret format, so read
+an export before you post it.
 
-## Build from source
+## Install
 
-You need the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0). The code builds on any OS
-(`EnableWindowsTargeting`) but runs only on Windows.
+1. From the [latest release](https://github.com/nubbymong/poolwatch/releases/latest), download
+   `PoolWatch-v1.0.0-setup-win-x64.exe`.
+2. Run it, and click **Yes** when Windows asks whether to allow it to make changes
+   ([why it needs administrator rights](docs/TECHNICAL.md#why-it-needs-administrator-rights)).
+3. Click **Next**, then **Install**. Setup installs PoolWatch in `C:\Program Files\PoolWatch`, with .NET included, and
+   adds it to the Start menu. Leave **Start PoolWatch now** ticked and click **Finish**.
 
-```
-dotnet build PoolWatch.slnx -c Release
-dotnet test tests/PoolWatch.Tests -c Release
-dotnet test tests/PoolWatch.AppTests -c Release     (Windows only: the app layer, with fakes for every system change)
-dotnet publish src/PoolWatch/PoolWatch.csproj -c Release -r win-x64 -p:SelfContained=false -p:PublishSingleFile=true -o publish/fd
-dotnet publish src/PoolWatch/PoolWatch.csproj -c Release -r win-x64 -p:SelfContained=true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o publish/sc
-```
+**Set up PoolWatch** opens next, on its own. The first time, it cannot be skipped, and the main window waits until you
+finish it; if PoolWatch stops before then, setup opens again at its next start. Its icon stays in the notification
+area by the clock (if you do not see it, click the **^** arrow there): closing the window keeps it running. To stop
+PoolWatch, right-click the icon and choose **Exit**. If it starts when you sign in, it starts again at your next
+sign-in, until you turn off "Start PoolWatch when you sign in" in Active changes. **Run setup again...** in the tray
+menu opens setup later.
 
-Package versions are locked (`packages.lock.json`); CI restores in locked mode. A publish folder is what gets installed.
-To run a build from its output folder as administrator (CI does), add `--allow-any-location`; never use that for a
-copy you keep.
+To update, run the new version's setup: it asks the running PoolWatch to exit first, and keeps your settings, reports
+and Active changes.
 
-The CI (`.github/workflows/ci.yml`) runs, on every pull request and push to `main`: the unit tests (also on Linux), the
-native self-test, the CSV checks, end-to-end leak scenarios with `tools/Leaker`, thirteen diagnostics scenarios and the
-UI smoke test. The soak and overhead checks run on demand and before every release. A tag `v*` builds, signs, verifies
-and publishes the release.
+> [!NOTE]
+> **Warnings for a new app.** Releases are signed, but Windows and your browser still warn about a program few people
+> have downloaded yet. The warnings fade as more people install it.
+>
+> - Your browser may say the file "isn't commonly downloaded": choose **Keep**.
+> - Windows may show **Windows protected your PC**: click **More info**, check that **Publisher** is the name in the
+>   copyright line of [LICENSE](LICENSE), then click **Run anyway**.
+
+Prefer to install by hand? Each release also has two zips: see
+[the zips in the user guide](docs/USER-GUIDE.md#the-zips-install-by-hand).
+
+**Requirements**
+
+- Windows 11, 64-bit. The setup also installs on Windows 10 22H2, which is not tested: Dev Drives and the token leak
+  exist only on Windows 11.
+- Windows on Arm: PoolWatch runs through Windows' built-in x64 emulation. Its unit tests and headless checks run on
+  GitHub's Windows 11 Arm machines, but it is not tested on a real Arm PC yet. Use the setup or the self-contained zip
+  there.
+- Optional: the Debugging Tools for Windows (part of the Windows SDK). Its `pooltag.txt` names most of Windows' pool
+  tags; without it, PoolWatch looks up the tag in the drivers and in a built-in table.
+
+**Uninstall.** Open **Settings** > **Apps** > **Installed apps**, click **...** next to **PoolWatch**, and choose
+**Uninstall**. It lists what PoolWatch changed and puts back everything it can (it lists anything it cannot), unless
+you choose to keep your changes. Once everything is put back, it asks whether to delete its reports, logs and
+settings: the default keeps them
+([uninstall details and silent options](docs/USER-GUIDE.md#uninstall)).
+
+## Learn more
+
+- [User guide](docs/USER-GUIDE.md): setup, the Simple and Advanced views, Settings, growth and clears, services,
+  tasks and startup apps, deciding with your AI agent, service profiles, the tray icon, Active changes, Report an
+  issue, the zips and uninstalling.
+- [Technical details](docs/TECHNICAL.md): why it needs administrator rights, how it decides, where it stores data, the
+  command line, verifying a release and building from source.
+- [Design](docs/DESIGN.md) · [Security](SECURITY.md) · [Known-issue files](docs/knowledge-packs.md) ·
+  [An example incident report](docs/example-incident/report.md), from CI · [Changelog](CHANGELOG.md)
+
+## Credits
+
+PoolWatch builds on other people's work. The About window (tray menu, **About PoolWatch**) lists the same credits,
+with links; [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) has the licence texts.
+
+- [bentoner/windows-token-leak](https://github.com/bentoner/windows-token-leak): documented the Windows 11 token leak,
+  its cause and the setting that stops it.
+- [gunrgbcr/windows-token-leak-logon-fix](https://github.com/gunrgbcr/windows-token-leak-logon-fix): found why Windows
+  undoes that setting at each sign-in and how to keep it on. PoolWatch's guard is an independent re-implementation of
+  that idea; no code was copied.
+- [Faarfarin, openai/codex issue 31212](https://github.com/openai/codex/issues/31212#issuecomment-5635622083): traced
+  the Codex desktop app's GPU shader-cache growth and measured the workaround the Codex shortcut uses.
+- [Sysinternals RAMMap](https://learn.microsoft.com/sysinternals/downloads/rammap): PoolWatch recognises a clear task
+  of yours that runs it. It never ships, starts or changes RAMMap.
+
+The Services tab also says, row by row, where the advice to turn off a Windows service comes from:
+[Microsoft's Windows Desktop Optimization Tool](https://github.com/The-Virtual-Desktop-Team/Windows-Desktop-Optimization-Tool)
+and the CIS Microsoft Windows 11 Enterprise Benchmark. PoolWatch's list of services cites each by item and copies no
+text from either. Neither says a service is safe to turn off on your own PC.
+
+<details>
+<summary>Libraries and tools PoolWatch is built with</summary>
+
+- [TraceEvent](https://github.com/microsoft/perfview) and its native `KernelTraceControl` and `msdia140` DLLs: read
+  Windows' event traces.
+- [Microsoft.Diagnostics.NETCore.Client](https://github.com/dotnet/diagnostics), the
+  [Microsoft.Extensions packages](https://github.com/dotnet/runtime) and
+  [System.Management](https://github.com/dotnet/runtime): parts TraceEvent needs, and reading Windows Management
+  Instrumentation.
+- [.NET and the Windows Desktop runtime](https://github.com/dotnet/runtime): run PoolWatch; the setup and the
+  self-contained zip include them.
+- [Inno Setup](https://jrsoftware.org/isinfo.php): builds the setup and the uninstaller.
+- [pooltag.txt](https://learn.microsoft.com/windows-hardware/drivers/debugger/), from the Debugging Tools for Windows:
+  names pool tags when installed.
+- [xUnit and the .NET test SDK](https://xunit.net/): run PoolWatch's tests (not part of a release).
+
+</details>
+
+## Contributing
+
+Bug reports, known issues and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) has the short version;
+[AGENTS.md](AGENTS.md) has the full rules for working on the code, for people and AI coding agents alike. Questions
+and ideas: [Discussions](https://github.com/nubbymong/poolwatch/discussions). Security problems: privately, as
+[SECURITY.md](SECURITY.md) says. What changed in each release: [CHANGELOG.md](CHANGELOG.md).
+
+Something wrong with PoolWatch itself? **Report an issue...** in the tray menu shows you exactly the text that will go
+into the issue, with your names, paths and anything that looks like a secret replaced, before your browser opens
+GitHub's form ([how Report an issue works](docs/USER-GUIDE.md#report-an-issue)).
 
 ## Licence
 
-PoolWatch itself is [MIT](LICENSE). It also ships Microsoft's TraceEvent library and other Microsoft NuGet packages
-(each declaring MIT), and, inside the TraceEvent package, two Microsoft native binaries (`KernelTraceControl.dll` and
-`msdia140.dll`) that are Microsoft redistributables under Microsoft's own terms, not open source. The self-contained
-download also bundles the Microsoft .NET runtime. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+PoolWatch is [MIT](LICENSE). A release also ships Microsoft's TraceEvent library and other Microsoft packages (each
+MIT), two Microsoft native DLLs inside TraceEvent (`KernelTraceControl.dll`, `msdia140.dll`) under Microsoft's own
+redistribution terms, the .NET runtime in the setup and the self-contained zip, and the setup and uninstaller made
+with Inno Setup (Inno Setup License). See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

@@ -24,6 +24,12 @@ public sealed record ServiceChange
     /// <summary>What the service's process cost just before the change (cores, page faults/s), for "saved about N cores".</summary>
     [JsonPropertyName("beforeCores")] public double? BeforeCores { get; init; }
     [JsonPropertyName("beforePageFaultsPerSec")] public long? BeforePageFaultsPerSec { get; init; }
+    /// <summary>
+    /// Set when the change set the start type but the service did not stop (Windows does not stop a service while one that
+    /// depends on it runs): the process it went on running in, 0 when not known. Taken off once the service is seen
+    /// stopped, in another process or at another start type (<see cref="ServicePlan.KeptRunning"/>).
+    /// </summary>
+    [JsonPropertyName("notStoppedPid")] public int? NotStoppedPid { get; init; }
 
     public string Summary() =>
         $"{Service}{(DisplayName.Length > 0 ? $" ({DisplayName})" : "")}: {OriginalStart} -> {NewStart}" +
@@ -38,10 +44,19 @@ public static class ServiceChangeLog
         WriteIndented = true, Converters = { new JsonStringEnumConverter() },
     };
 
-    public static List<ServiceChange> Parse(string json)
+    /// <summary>
+    /// The records, or null when the text is not a list of records shaped as PoolWatch writes them ("[]" when empty):
+    /// damaged, cut off, empty or zero-filled (as a power cut can leave a file), or a record without its fields or its
+    /// service. Null is never "no changes", so a file that may hold the only originals of the services PoolWatch changed
+    /// is never written over. A start type out of range still parses: Restore's gate refuses that record alone.
+    /// </summary>
+    public static List<ServiceChange>? Parse(string json)
     {
-        try { return JsonSerializer.Deserialize<List<ServiceChange>>(json, Options) ?? new(); }
-        catch (JsonException) { return new(); }
+        List<ServiceChange>? list;
+        try { list = JsonSerializer.Deserialize<List<ServiceChange>>(json, Options); }
+        catch (JsonException) { return null; }
+        // "null", a null in the list, or a record whose service is null or "": none is anything PoolWatch writes.
+        return list is not null && list.All(c => c is not null && !string.IsNullOrEmpty(c.Service)) ? list : null;
     }
 
     public static string ToJson(IEnumerable<ServiceChange> changes) => JsonSerializer.Serialize(changes.ToList(), Options);

@@ -40,6 +40,7 @@ internal static class PromptDialog
     {
         Text = title, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false, ShowInTaskbar = true,
         StartPosition = FormStartPosition.CenterScreen, ClientSize = new Size(430, height), TopMost = true, Font = new Font("Segoe UI", 9f),
+        Icon = TrayIcons.App, // its taskbar button shows the binoculars, as every window does
     };
 
     private static void AddButtons(Form form, int top)

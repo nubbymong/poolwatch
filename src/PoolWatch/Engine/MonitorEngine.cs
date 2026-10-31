@@ -195,10 +195,40 @@ internal sealed class MonitorEngine : IDisposable
         LastSampleDuration = Stopwatch.GetElapsedTime(t0);
         Meter.Tick();
         using (Profiler.Stage("tick.sampleHandlers")) Sampled?.Invoke(sample);
-        _trim.MaybeRun();
+        Trim.MaybeRun();
+        if (Profile is { } profile && now >= _nextProfile)
+        {
+            _nextProfile = now.AddHours(1);
+            WriteProfile(profile);
+        }
     }
 
-    private readonly MemoryTrim _trim = new();
+    public MemoryTrim Trim { get; } = new();
+
+    /// <summary>Any thread: the next sample compacts PoolWatch's heap and empties its working set (the main window hid and dropped its caches).</summary>
+    public void ReleaseMemory() => Trim.Request();
+
+    /// <summary>Builds profile.json (CostReport.Json); when set, the sampler writes it to cache\profile.json every hour.</summary>
+    public Func<string>? Profile { get; set; }
+    private DateTime _nextProfile = DateTime.UtcNow.AddHours(1);
+
+    /// <summary>
+    /// PoolWatch's own cost and what it holds, measured on the PC it runs on. Written to a temporary file and moved into
+    /// place, so a vendor bundle built meanwhile reads the previous hour's file, never half of this one.
+    /// </summary>
+    private void WriteProfile(Func<string> profile)
+    {
+        try
+        {
+            string json = profile();
+            string path = Path.Combine(_paths.EnsureDir(_paths.CacheDir), "profile.json");
+            string tmp = _paths.Guard.CheckReal(path + ".tmp");
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, _paths.Guard.CheckReal(path), overwrite: true);
+            Profiler.Wrote(path, json.Length);
+        }
+        catch (Exception ex) { _log.Info("profile.json failed: " + ex.Message); }
+    }
 
     private string? ParentName(int pid) => Registry.GetLive(pid)?.Image ?? Registry.RecentImage(pid);
     private Core.Identity.Owner? OwnerName(int pid) => Registry.GetLive(pid) is { } r ? Core.Identity.ProcessIdentities.OwnerOf(Registry.Ancestry(r.Key)) : null;

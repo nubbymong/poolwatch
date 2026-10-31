@@ -31,6 +31,7 @@ internal sealed class AnalysisPipeline
         Host = new WindowsIncidentHost(engine, Knowledge);
         History = History.ForInterval(engine.Settings.SampleIntervalSeconds, engine.Settings.RawHistoryMinutes);
         Detector = new Detector(engine.Settings);
+        Growth = new Core.Growth.GrowthLedger(CacheClearer.MeasureAfter, TimeSpan.FromSeconds(engine.Settings.SampleIntervalSeconds));
         Incidents = new IncidentManager(engine.Settings, Knowledge, Host, engine.Registry);
         // Addendum 2 C: kernel functions in CPU traces are named from local, admin-only symbol folders only (SymbolPath, else
         // <data root>\symbols); never a symbol server, a share, a network drive or _NT_SYMBOL_PATH (Part 3 review).
@@ -57,6 +58,8 @@ internal sealed class AnalysisPipeline
     public WindowsIncidentHost Host { get; }
     public History History { get; }
     public Detector Detector { get; }
+    /// <summary>What the pool and its tags grew, cleared and fell, by the minute for 25 hours (the growth and clear stats). History lock.</summary>
+    public Core.Growth.GrowthLedger Growth { get; }
     public IncidentManager Incidents { get; }
     public long AlertsRaised { get; private set; }
     public CaptureRunner Captures { get; }
@@ -72,9 +75,16 @@ internal sealed class AnalysisPipeline
 
     private void OnSample(Sample s)
     {
+        // PoolWatch's own cache clears are its own impact, not the pool's: the detector measures across them. Read before
+        // the history lock, as the other readers of both do. The clearer measures a clear at this same sample, after the
+        // detector, from this sample's totals. Diagnostics is null only while the constructor runs: this handler is
+        // subscribed before Diagnostics is made.
+        var clears = Diagnostics is { } d ? d.Cache.History() : null;
         lock (History.SyncRoot)
         {
             using (Profiler.Stage("analysis.history")) History.Add(s);
+            using (Profiler.Stage("analysis.growth"))
+                Growth.Observe(s.TimeUtc, (long)(s.Totals.CommittedPaged + s.Totals.CommittedNonPaged), s.Tags, clears ?? (IReadOnlyList<Core.Cache.ClearRecord>)[]);
             // C6: every incident since PoolWatch started (Closed keeps only the last 6 hours). In memory only: the files are
             // written by Boots.Flush below, outside the history lock.
             try { using (Profiler.Stage("analysis.boots")) Boots.Observe(s, TimeSpan.FromMilliseconds(Environment.TickCount64), Incidents.CreatedCount); }
@@ -89,7 +99,7 @@ internal sealed class AnalysisPipeline
                 _lastReads = reads;
             }
             List<Alert> alerts;
-            using (Profiler.Stage("analysis.detector")) alerts = Detector.Evaluate(History);
+            using (Profiler.Stage("analysis.detector")) alerts = Detect(Detector, History, clears);
             AlertsRaised += alerts.Count;
             using (Profiler.Stage("analysis.incidents")) Incidents.Process(History, Detector, alerts, s.TimeUtc);
             try { RequestPoolCaptures(); }
@@ -109,6 +119,14 @@ internal sealed class AnalysisPipeline
     }
 
     private string? _lastBootError;
+
+    /// <summary>
+    /// The detector on the newest sample, with PoolWatch's own cache clears as the clearer holds them (null: none yet),
+    /// each measured <see cref="CacheClearer.MeasureAfter"/> after it ran, as the clearer measures it. The caller holds the
+    /// history lock.
+    /// </summary>
+    internal static List<Alert> Detect(Detector detector, History history, IReadOnlyList<Core.Cache.ClearRecord>? clears) =>
+        detector.Evaluate(history, clears is null ? OwnClears.None : new OwnClears(clears, CacheClearer.MeasureAfter));
 
     private void OnIncidentOpened(Incident inc, Alert a)
     {

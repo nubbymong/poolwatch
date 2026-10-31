@@ -8,6 +8,7 @@
     <AssemblyName>PoolWatch</AssemblyName>
     <RootNamespace>PoolWatch</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\poolwatch.ico</ApplicationIcon>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
@@ -26,10 +27,23 @@
     <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
   </ItemGroup>
   <ItemGroup>
+    <!-- The guide for a user's AI assistant (Engine/AgentsGuide.cs): written into the data folder and every export. -->
+    <EmbeddedResource Include="Assets\AGENTS.md" LogicalName="AGENTS.md" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The tray and window icons (Ui/TrayIcons.cs), named one by one so a missing file fails the build: the binoculars
+         with a dot in each state's colour for the tray, and the plain binoculars (the program's icon) for the windows. -->
+    <EmbeddedResource Include="Assets\poolwatch.ico" LogicalName="poolwatch.ico" />
+    <EmbeddedResource Include="Assets\tray-healthy.ico" LogicalName="tray-healthy.ico" />
+    <EmbeddedResource Include="Assets\tray-warning.ico" LogicalName="tray-warning.ico" />
+    <EmbeddedResource Include="Assets\tray-critical.ico" LogicalName="tray-critical.ico" />
+    <EmbeddedResource Include="Assets\tray-inactive.ico" LogicalName="tray-inactive.ico" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\PoolWatch.Core\PoolWatch.Core.csproj" />
     <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.30" />
     <PackageReference Include="System.Management" Version="10.0.0" />
-    <!-- S5 (review round 2): the Clear cache helper (PoolWatch.CacheHelper, run by two SYSTEM tasks) is gone; the purge is
-         in-process. Nothing is embedded or written into Program Files any more. -->
+    <!-- The Clear cache helper (PoolWatch.CacheHelper, run by two SYSTEM tasks) is gone: the purge is in-process, and
+         nothing is written into Program Files. -->
   </ItemGroup>
 </Project>

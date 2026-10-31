@@ -1,0 +1,30 @@
+{
+  "$schema": "./schema.json",
+  "format": 1,
+  "id": "refs-standby-metadata",
+  "title": "ReFS file records kept in the kernel pool by the file cache",
+  "explanation": "On a ReFS drive, such as a Dev Drive, Windows keeps a record in the kernel pool for each file whose contents are in the file cache, and on a PC with lots of memory the cache rarely shrinks. Builds, Git and AI coding tools touch many thousands of files, so these records can grow by gigabytes. Clearing the cache frees them; your files are not touched.",
+  "workaround": "Clear the cache regularly. Microsoft also documents memory settings for ReFS on Windows Server.",
+  "actions": ["auto-clear"],
+  "suggestion": "That is ReFS keeping records for files in the cache, and an hourly clear keeps them down; your files are not touched.",
+  "evidence": [
+    {
+      "clearFreed": { "tags": ["Reff", "RefF", "RLin", "MSPi", "MSeb", "MSb+"], "name": "ReFS file records", "minMB": 256 },
+      "fileSystems": ["ReFS"]
+    },
+    {
+      "tagGrowth": { "tags": ["Reff", "RefF", "RLin", "MSPi", "MSeb", "MSb+"], "name": "ReFS file records", "minMBPerHour": 256 },
+      "fileSystems": ["ReFS"]
+    }
+  ],
+  "links": [
+    {
+      "title": "Tuning memory usage in ReFS, Microsoft Learn",
+      "url": "https://learn.microsoft.com/en-us/troubleshoot/windows-server/backup-and-storage/fix-heavy-memory-usage-refs"
+    },
+    {
+      "title": "ReFS Dev Drives consume physical RAM as cache, Windows-Dev-Performance issue 131",
+      "url": "https://github.com/microsoft/Windows-Dev-Performance/issues/131"
+    }
+  ]
+}

@@ -40,6 +40,27 @@ public class ServicesPartThreeTests
     }
 
     [Fact]
+    public void AServiceApplySetToManualReadsAsPoolWatchLeftItRunningOrNot()
+    {
+        // edgeupdate's entry turns it off to Manual, and Apply does not stop it: running is how Apply left it.
+        var manual = new ServiceChange
+        {
+            Service = "edgeupdate", OriginalStart = ServiceStartType.Automatic, OriginalRunning = true, NewStart = ServiceStartType.Manual, ChangedUtc = T0, Via = "manual",
+        };
+        string when = T0.ToLocalTime().ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal($"set to Manual, running (turned off by PoolWatch {when})",
+            ServicePlan.StateText(ServicePlan.Options([V("edgeupdate", ServiceStartType.Manual, running: true)], Cat, false, NoDefaults, [manual])[0]));
+        Assert.Equal($"set to Manual, stopped (turned off by PoolWatch {when})",
+            ServicePlan.StateText(ServicePlan.Options([V("edgeupdate", ServiceStartType.Manual, running: false)], Cat, false, NoDefaults, [manual])[0]));
+        // Set back to Automatic outside PoolWatch: switched back on.
+        Assert.Equal($"running (turned off by PoolWatch {when}, then switched back on outside it)",
+            ServicePlan.StateText(ServicePlan.Options([V("edgeupdate", ServiceStartType.Automatic, running: true)], Cat, false, NoDefaults, [manual])[0]));
+        // A service Apply disabled that runs again was switched back on outside PoolWatch, as before.
+        Assert.Equal($"running (turned off by PoolWatch {when}, then switched back on outside it)",
+            ServicePlan.StateText(ServicePlan.Options([V("SysMain", ServiceStartType.Disabled, running: true)], Cat, false, NoDefaults, [Off("SysMain")])[0]));
+    }
+
+    [Fact]
     public void CatalogueKnowsWindowsDefaultsOnlyWhereItSaysSo()
     {
         Assert.Equal(ServiceStartType.Automatic, Cat.WindowsDefault("DiagTrack"));
@@ -93,6 +114,29 @@ public class ServicesPartThreeTests
         var opts = ServicePlan.Options([V("WinDefend", ServiceStartType.Disabled, ms: true, running: false)], rogue, false, NoDefaults);
         Assert.False(opts[0].CanRestoreDefault);
         Assert.Throws<InvalidOperationException>(() => ServicePlan.BuildDefault("WinDefend", opts, false, T0));
+    }
+
+    /// <summary>
+    /// Turning off, a service comes after those that depend on it; putting back, after those it depends on, also through a
+    /// service that is not listed (C depends on B, which depends on A). Otherwise the order is as given, and a loop of
+    /// dependencies, which Windows refuses, keeps its own order.
+    /// </summary>
+    [Fact]
+    public void ServicesAreOrderedByWhatTheyDependOn()
+    {
+        var deps = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["C"] = ["B"], ["B"] = ["A"], ["Loop1"] = ["Loop2"], ["Loop2"] = ["Loop1"],
+        };
+        IReadOnlyList<string> DependsOn(string s) => deps.TryGetValue(s, out var d) ? d : [];
+        List<string> Order(bool dependentsFirst, params string[] items) => ServicePlan.InDependencyOrder(items, s => s, DependsOn, dependentsFirst);
+
+        Assert.Equal(["X", "C", "A", "Y"], Order(dependentsFirst: true, "X", "A", "C", "Y"));
+        Assert.Equal(["X", "A", "C", "Y"], Order(dependentsFirst: false, "X", "C", "A", "Y"));
+        Assert.Equal(["X", "A", "C", "Y"], Order(dependentsFirst: false, "X", "A", "C", "Y"));
+        Assert.Equal(["X", "Loop1", "Loop2"], Order(dependentsFirst: true, "Loop1", "Loop2", "X"));
+        Assert.Equal(["Loop2", "Loop1"], Order(dependentsFirst: false, "Loop2", "Loop1"));
+        Assert.Empty(Order(dependentsFirst: true));
     }
 
     [Fact]

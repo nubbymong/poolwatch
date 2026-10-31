@@ -86,7 +86,19 @@ internal sealed class AppPaths
         if (!OperatingSystem.IsWindows()) return null;
         string legacy = LegacyDataRoot();
         if (legacy.Equals(DataRoot, StringComparison.OrdinalIgnoreCase) || !DataRoot.Equals(Path.GetFullPath(DefaultDataRoot()), StringComparison.OrdinalIgnoreCase)) return null;
-        return new LegacyMigration(legacy, DataRoot, Guard.CheckReal, _ => { }).MigrateSettings(json => Core.Settings.Parse(json).ToJson());
+        return new LegacyMigration(legacy, DataRoot, Guard.CheckReal, _ => { }).MigrateSettings(LegacySettingsJson);
+    }
+
+    /// <summary>
+    /// The old per-user settings.json as the admin-only root takes it: read as any settings load (checked and clamped),
+    /// without service profiles. That file was one your account could write, and a profile is applied as an administrator
+    /// at start; no PoolWatch that wrote it had profiles.
+    /// </summary>
+    internal static string LegacySettingsJson(string json)
+    {
+        var s = Core.Settings.Parse(json);
+        s.ServiceProfiles = new();
+        return s.ToJson();
     }
 
     public string SettingsFile => Path.Combine(DataRoot, "settings.json");

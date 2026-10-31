@@ -40,7 +40,7 @@ internal static unsafe class ServiceEnumeration
     /// </summary>
     internal static List<ServiceStatusParser.Entry> Query(EnumCall call, int initialSize = InitialSize, int maxSize = MaxSize, int maxCalls = MaxCalls)
     {
-        if (IntPtr.Size != 8) throw new PlatformNotSupportedException("the service list is parsed with the x64 layout");
+        if (IntPtr.Size != 8) throw new PlatformNotSupportedException("the service list is parsed with the 64-bit layout");
         var all = new List<ServiceStatusParser.Entry>();
         int resume = 0, size = Math.Min(initialSize, maxSize);
         for (int calls = 0; calls < maxCalls; calls++)

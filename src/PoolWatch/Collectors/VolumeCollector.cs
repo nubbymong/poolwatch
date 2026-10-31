@@ -10,6 +10,7 @@ internal static unsafe class VolumeCollector
     // CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 143, METHOD_BUFFERED, FILE_ANY_ACCESS)
     private const uint FSCTL_QUERY_PERSISTENT_VOLUME_STATE = 0x0009023C;
     private const uint PERSISTENT_VOLUME_STATE_DEV_VOLUME = 0x00002000;
+    private const uint PERSISTENT_VOLUME_STATE_TRUSTED_VOLUME = 0x00004000; // winioctl.h: an administrator trusted the volume
     private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     private const uint OPEN_EXISTING = 3;
 
@@ -47,7 +48,16 @@ internal static unsafe class VolumeCollector
     /// </summary>
     public static bool? QueryDevDrive(string root) => QueryDevDrive(root, out _);
 
-    public static bool? QueryDevDrive(string root, out string detail)
+    public static bool? QueryDevDrive(string root, out string detail) => QueryFlag(root, PERSISTENT_VOLUME_STATE_DEV_VOLUME, "not a Dev Drive", out detail);
+
+    /// <summary>
+    /// True if a Dev Drive is trusted (at its creation by default, or with <c>fsutil devdrv trust</c>): only then does Microsoft
+    /// Defender scan it in performance mode. The same query and answers as <see cref="QueryDevDrive(string)"/>.
+    /// </summary>
+    public static bool? QueryDevDriveTrusted(string root) => QueryFlag(root, PERSISTENT_VOLUME_STATE_TRUSTED_VOLUME, "not trusted", out _);
+
+    /// <summary>One persistent-volume-state flag; <paramref name="unsupported"/> says what "the query is not supported" means.</summary>
+    private static bool? QueryFlag(string root, uint flag, string unsupported, out string detail)
     {
         detail = "";
         bool? answer = null;
@@ -58,13 +68,13 @@ internal static unsafe class VolumeCollector
             if (h == NativeMethods.InvalidHandle) { detail += $"{target}: open error {Marshal.GetLastWin32Error()}; "; continue; }
             try
             {
-                var input = new FILE_FS_PERSISTENT_VOLUME_INFORMATION { Version = 1, FlagMask = PERSISTENT_VOLUME_STATE_DEV_VOLUME };
+                var input = new FILE_FS_PERSISTENT_VOLUME_INFORMATION { Version = 1, FlagMask = flag };
                 var output = new FILE_FS_PERSISTENT_VOLUME_INFORMATION();
                 if (NativeMethods.DeviceIoControl(h, FSCTL_QUERY_PERSISTENT_VOLUME_STATE, &input, sizeof(FILE_FS_PERSISTENT_VOLUME_INFORMATION),
                         &output, sizeof(FILE_FS_PERSISTENT_VOLUME_INFORMATION), out _, IntPtr.Zero))
                 {
                     detail += $"{target}: flags 0x{output.VolumeFlags:x}";
-                    return (output.VolumeFlags & PERSISTENT_VOLUME_STATE_DEV_VOLUME) != 0;
+                    return (output.VolumeFlags & flag) != 0;
                 }
                 int err = Marshal.GetLastWin32Error();
                 detail += $"{target}: FSCTL error {err}; ";
@@ -72,7 +82,7 @@ internal static unsafe class VolumeCollector
             }
             finally { NativeMethods.CloseHandle(h); }
         }
-        if (answer == false) detail += "query not supported here, so not a Dev Drive";
+        if (answer == false) detail += $"query not supported here, so {unsupported}";
         return answer;
     }
 }

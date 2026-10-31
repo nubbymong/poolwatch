@@ -13,7 +13,7 @@ namespace PoolWatch.AppTests;
 /// </summary>
 public sealed class ServiceEnumerationLoopTests
 {
-    private const int Entry = 0x38, ServiceName = 0x00, DisplayName = 0x08, State = 0x14, ProcessId = 0x2C; // x64 layout
+    private const int Entry = 0x38, ServiceName = 0x00, DisplayName = 0x08, State = 0x14, ProcessId = 0x2C; // 64-bit layout
 
     private sealed class FakeScm((string Name, string Display, int Pid)[] services)
     {

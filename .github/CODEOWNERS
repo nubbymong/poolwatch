@@ -1,0 +1,3 @@
+# The maintainer reviews every pull request. Some changes also need an independent security review before they merge:
+# the list is in AGENTS.md ("Branches, reviews and releases").
+* @nubbymong

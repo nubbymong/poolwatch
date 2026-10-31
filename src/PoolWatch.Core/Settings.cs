@@ -17,7 +17,7 @@ public sealed record GrowthRule
 
 /// <summary>
 /// User-configurable settings, persisted as JSON in the data root: %ProgramData%\PoolWatch\settings.json on Windows
-/// (administrators only, S3), %LOCALAPPDATA%\PoolWatch\settings.json on the Linux build.
+/// (administrators only), %LOCALAPPDATA%\PoolWatch\settings.json on the Linux build.
 /// </summary>
 public sealed class Settings
 {
@@ -25,7 +25,7 @@ public sealed class Settings
 
     /// <summary>Format version of settings.json: older files are migrated on load (e.g. the 60 s handle census default).</summary>
     public int SettingsVersion { get; set; }
-    /// <summary>2: the 5-minute handle census. 3 (C1): CpuTraceEnabled off by default. 4 (M1): RedactCopies on by default.</summary>
+    /// <summary>2: the 5-minute handle census. 3: CpuTraceEnabled off by default. 4: RedactCopies on by default.</summary>
     public const int CurrentSettingsVersion = 4;
 
     // Collection cadence.
@@ -33,7 +33,7 @@ public sealed class Settings
     /// <summary>The handle census is expensive with a million handles: every 5 minutes, plus on alert and on Capture now.</summary>
     public double HandleIntervalSeconds { get; set; } = 300;
 
-    // Clear cache (addendum 2). PoolWatch purges in-process (it runs as administrator); no setup.
+    // Clear cache. PoolWatch purges in-process (it runs as administrator); no setup.
     /// <summary>Clear the standby cache automatically (off by default).</summary>
     public bool AutoClearEnabled { get; set; }
     /// <summary>Clear when paged + non-paged pool is over this (GB); 0 = no pool rule.</summary>
@@ -46,19 +46,26 @@ public sealed class Settings
     public string AutoClearMode { get; set; } = "auto";
     /// <summary>
     /// Add a CPU trace (sampling with stacks, DPC/ISR, context switches) to Capture now, and (with <see cref="DeeperCapture"/>)
-    /// record one when the lag probe trips. Off by default since C1: a 30 s CPU trace with stacks lags a busy PC itself.
+    /// record one when the lag probe trips. Off by default: a 30 s CPU trace with stacks lags a busy PC itself.
     /// </summary>
     [Description("Add a CPU trace (sampling with stacks) to Capture now; with DeeperCapture also when the lag probe trips. Off by default: it lags a busy PC itself.")]
     public bool CpuTraceEnabled { get; set; }
-    // Token-leak guard (addendum 3): at start-up, test for the Toke leak and set the live ForegroundLockTimeout to 0.
+    // Token-leak guard: test for the Toke leak and set the live ForegroundLockTimeout to 0.
     /// <summary>
-    /// Run the token-leak guard when the tray app starts (at logon). Off by default: only some Windows 11 Insider builds
-    /// leak, and while the workaround is on any app may take the focus. Turn it on when the Toke tag grows with process starts.
+    /// Run the token-leak guard when the tray app starts, and at once when it is turned on while PoolWatch runs. Off by
+    /// default: the leak is documented on Windows 11 24H2 and 25H2, and while the workaround is on any app may take the
+    /// focus. The setup guide and a suggestion offer it when this build leaks or the Toke tag grows with process starts.
     /// </summary>
-    [Description("Run the token-leak guard when the tray app starts (at logon): it tests for the Toke leak of some Windows 11 Insider builds and, when the build leaks, sets the live foreground lock timeout to 0 (any app may then take the focus). Off by default. Takes effect at the next start.")]
+    [Description("Run the token-leak guard when the tray app starts, and at once when turned on: it tests for the Toke leak documented on Windows 11 24H2 and 25H2 and, unless two tests in a row on this build were clean, sets the live foreground lock timeout to 0 until you sign out (any app may then take the focus). Off by default. Applied when you save.")]
     public bool TokenGuardEnabled { get; set; }
     /// <summary>How often the live foreground lock timeout is re-checked while PoolWatch runs.</summary>
     public double TokenGuardRecheckMinutes { get; set; } = 3;
+    /// <summary>
+    /// Update notices, information only: about once a day the tray app asks GitHub for PoolWatch's latest stable release
+    /// and says when a newer one is out. On by default (also for an older settings.json without it).
+    /// </summary>
+    [Description("Tell me when a new version is out. Checks GitHub once a day; information only, nothing is downloaded or installed.")]
+    public bool CheckForUpdates { get; set; } = true;
     [Description("Length of the CPU trace (seconds, 5-120), when one is recorded (CpuTraceEnabled).")]
     public int CpuTraceSeconds { get; set; } = 30;
     [Description("Local admin-only folder(s) with Windows symbols (PDBs), ';'-separated, to name kernel functions in CPU traces. Empty = the 'symbols' folder in PoolWatch's data folder. A folder that users can write to, a network drive or a symbol server is never used (PoolWatch runs as administrator).")]
@@ -97,7 +104,7 @@ public sealed class Settings
     public double IncidentQuietMinutes { get; set; } = 10;
     public double IncidentMaxMinutes { get; set; } = 120;
 
-    // Confirmation trace. Every automatic trace goes through the capture governor (C1, Core.Incidents.CaptureGovernor).
+    // Confirmation trace. Every automatic trace goes through the capture governor (Core.Incidents.CaptureGovernor).
     [Description("Record a confirmation trace when a pool-growth incident opens. At most one automatic capture per AutoCaptureMinMinutes, never while the PC is saturated or in use.")]
     public bool CaptureOnAlert { get; set; } = false;
     [Description("Length of the pool-event trace (seconds, at most 300).")]
@@ -180,14 +187,30 @@ public sealed class Settings
 
     /// <summary>
     /// Redact the user name, home paths, machine name, SID and common secret patterns in text copied from the window (Copy
-    /// row / summary). On by default (M1).
+    /// row / summary). On by default.
     /// </summary>
     [Description("Redact the user name, home and TEMP paths, machine name, domain, SID and values that look like secrets in text copied from the window. On by default.")]
     public bool RedactCopies { get; set; } = true;
 
+    /// <summary>
+    /// The Advanced view's graph shows RAM in use, the cache (standby) and free behind the pool lines: its Show RAM switch,
+    /// kept here so it stays as the owner left it. On for a new install (and for a settings.json saved before it existed);
+    /// a settings.json that holds it keeps its value.
+    /// </summary>
+    [System.ComponentModel.Browsable(false)]
+    public bool ShowRam { get; set; } = true;
+
     /// <summary>Not edited in the grid: the "Start at logon" checkbox creates / removes the scheduled task itself.</summary>
     [System.ComponentModel.Browsable(false)]
     public bool StartAtLogon { get; set; }
+
+    /// <summary>
+    /// The owner's named service profiles (each a list of services to keep off), the one applied when PoolWatch starts and
+    /// how many minutes after. Not edited in the grid: the Services tab saves them. A profile or entry that cannot be used
+    /// is left out when read, with why (<see cref="Services.ServiceProfileSet.Problems"/>, logged at start).
+    /// </summary>
+    [System.ComponentModel.Browsable(false)]
+    public Services.ServiceProfileSet ServiceProfiles { get; set; } = new();
 
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -199,7 +222,7 @@ public sealed class Settings
     };
 
     /// <param name="explicitConfig">
-    /// True for a file given with <c>--config</c>. C1 e (review round 2): the version migrations below exist because
+    /// True for a file given with <c>--config</c>. The version migrations below exist because
     /// PoolWatch's own Save wrote every setting, old defaults included, into the default settings.json, so an old value
     /// there is not a choice. A hand-written --config file without <c>settingsVersion</c> holds only what its author
     /// chose (a CI config asking for <c>cpuTraceEnabled: true</c>), so it is read exactly as written, never migrated.
@@ -208,7 +231,7 @@ public sealed class Settings
         File.Exists(path) ? Parse(File.ReadAllText(path), explicitConfig) : new Settings();
 
     /// <summary>
-    /// Settings from JSON with the same migrations, validation and clamping as <see cref="Load"/> (review round 3: the old
+    /// Settings from JSON with the same migrations, validation and clamping as <see cref="Load"/> (the old
     /// per-user settings.json, a user-writable file, goes through this before the elevated app takes it over).
     /// </summary>
     public static Settings Parse(string json, bool explicitConfig = false)
@@ -217,10 +240,10 @@ public sealed class Settings
         if (!explicitConfig)
         {
             if (s.SettingsVersion < 2 && s.HandleIntervalSeconds == 60) s.HandleIntervalSeconds = 300; // v1.0 default, not a choice
-            // C1: every saved file before v3 says cpuTraceEnabled: true (the old default, written out by Save), so it is not a
+            // Every saved file before v3 says cpuTraceEnabled: true (the old default, written out by Save), so it is not a
             // choice either: the CPU trace with stacks lags a busy PC. Turned on again after this, it is kept.
             if (s.SettingsVersion < 3) s.CpuTraceEnabled = false;
-            // M1: every saved file before v4 says redactCopies: false (the old default, written out by Save): not a choice.
+            // Every saved file before v4 says redactCopies: false (the old default, written out by Save): not a choice.
             if (s.SettingsVersion < 4) s.RedactCopies = true;
         }
         s.SettingsVersion = CurrentSettingsVersion;
@@ -256,7 +279,7 @@ public sealed class Settings
         ProcessCsvIntervalSeconds = Math.Max(ProcessCsvIntervalSeconds, SampleIntervalSeconds);
         RetentionDays = Math.Clamp(RetentionDays, 1, 90);
         CaptureSeconds = Math.Clamp(CaptureSeconds, 5, CaptureHardCapSeconds);
-        // C1: never back to back; 1 minute is the floor (CI configs), the default an hour.
+        // Never back to back; 1 minute is the floor (CI configs), the default an hour.
         AutoCaptureMinMinutes = double.IsFinite(AutoCaptureMinMinutes) ? Math.Clamp(AutoCaptureMinMinutes, 1, 24 * 60) : 60;
         TranscriptMaxFiles = Math.Clamp(TranscriptMaxFiles, 1, 5000);
         SpawnStormWindowSeconds = Math.Clamp(SpawnStormWindowSeconds, 5, 600);
@@ -269,7 +292,7 @@ public sealed class Settings
         AccumulationMinCount = Math.Clamp(AccumulationMinCount, 2, 10_000);
         AccumulationMinRise = Math.Clamp(AccumulationMinRise, 1, 10_000);
         VersionCheckMinutes = double.IsFinite(VersionCheckMinutes) ? Math.Clamp(VersionCheckMinutes, 1, 24 * 60) : 60;
-        // L1: the elevated app reads these paths, and an old per-user settings.json (a file the user could write) is migrated
+        // The elevated app reads these paths, and an old per-user settings.json (a file the user could write) is migrated
         // through here, so a path must be a plain local drive path ("D:\x"). Anything else (a share, a device or \\?\ path,
         // a relative path, an alternate data stream, a wildcard, a control character, an over-long value) goes back to the
         // default. The symbol path is a ';' list that is checked folder by folder at use (Util.SymbolPaths); here it is
@@ -295,6 +318,8 @@ public sealed class Settings
         // Rules edited in the UI or a hand-written settings.json: drop nonsense, keep windows within the raw history.
         GrowthRules = GrowthRules.Where(r => r is not null && r.WindowMinutes > 0 && r.Bytes > 0)
             .Select(r => new GrowthRule(Math.Min(r.WindowMinutes, 60), r.Bytes)).ToList();
+        // A profile lists only services the shipped catalogue offers and the protected gate allows; the rest is left out.
+        ServiceProfiles = Services.ServiceProfileRules.Clean(ServiceProfiles ?? new(), Services.DefaultCatalogue.Shared);
     }
 
     public const int MaxPathSettingLength = 260, MaxSymbolPathLength = 2048;
@@ -302,7 +327,7 @@ public sealed class Settings
     private static readonly char[] NotInAppName = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
 
     /// <summary>
-    /// L1: true for a plain local drive path: a drive letter, a colon and a separator ("C:\x", "D:/x"), at most
+    /// True for a plain local drive path: a drive letter, a colon and a separator ("C:\x", "D:/x"), at most
     /// <see cref="MaxPathSettingLength"/> characters, no further colon (an alternate data stream), no wildcard or quote and
     /// no control character. UNC, device (\\.\, \\?\), relative and drive-relative ("C:x") paths are not.
     /// </summary>

@@ -15,12 +15,14 @@
   // Lag probe: every 2 s, baseline from the first 6 probes.
   "lagProbeSeconds": 2,
   "lagBaselineSamples": 6,
-  // CPU trace (Capture now, lag trips): 10 s so it finishes inside the run. C1 turned it off by default and made the lag
-  // trip's CPU trace a deeper capture: on here so the clearcache (Capture now) and lag scenarios still exercise both.
-  // settingsVersion 3: not needed since review round 2 (a --config file is read as written, never migrated); kept so an
+  // CPU trace (Capture now, lag trips): 10 s so it finishes inside the run. It is off by default, and the lag
+  // trip's CPU trace is a deeper capture: on here so the clearcache (Capture now) and lag scenarios still exercise both.
+  // settingsVersion 3: not needed, since a --config file is read as written (never migrated); kept so an
   // older build reads it the same way.
   "settingsVersion": 3,
   "cpuTraceEnabled": true,
   "deeperCapture": true,
-  "cpuTraceSeconds": 10
+  "cpuTraceSeconds": 10,
+  // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
+  "checkForUpdates": false
 }

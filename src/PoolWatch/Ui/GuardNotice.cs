@@ -3,7 +3,7 @@ using PoolWatch.Engine;
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// The token-leak guard's notices (addendum 3): small non-modal windows at the bottom right of the screen, never a
+/// The token-leak guard's notices: small non-modal windows at the bottom right of the screen, never a
 /// modal box. Clicking a button there makes PoolWatch the foreground program, which is what Windows needs before it
 /// accepts the ForegroundLockTimeout change. All calls marshal to the UI thread.
 /// </summary>
@@ -40,12 +40,20 @@ internal sealed class GuardNotices : IGuardUi
         return done.Task;
     }
 
-    /// <summary>A small top-most window with the text and buttons; a null action just closes it.</summary>
+    /// <summary>A small top-most window with the text and buttons, shown; a null action just closes it.</summary>
     private static Form Notice(string text, params (string label, Func<Form, Task>? action)[] buttons)
+    {
+        var f = NewNotice(text, buttons);
+        f.Show(); // non-modal
+        return f;
+    }
+
+    /// <summary>The notice's window as <see cref="Notice"/> shows it, not shown yet (its test looks at it here).</summary>
+    internal static Form NewNotice(string text, params (string label, Func<Form, Task>? action)[] buttons)
     {
         var f = new Form
         {
-            Text = "PoolWatch: token leak guard", FormBorderStyle = FormBorderStyle.FixedToolWindow, ShowInTaskbar = true, TopMost = true,
+            Text = "PoolWatch: token-leak guard", Icon = TrayIcons.App, FormBorderStyle = FormBorderStyle.FixedToolWindow, ShowInTaskbar = true, TopMost = true,
             StartPosition = FormStartPosition.Manual, Width = 460, Height = 190, Font = new Font("Segoe UI", 9f),
         };
         var label = new TextBox { Text = text.Replace("\n", Environment.NewLine), Multiline = true, ReadOnly = true, BorderStyle = BorderStyle.None, Dock = DockStyle.Fill, BackColor = SystemColors.Control, TabStop = false };
@@ -65,7 +73,6 @@ internal sealed class GuardNotices : IGuardUi
         f.Controls.Add(bar);
         var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 800);
         f.Location = new Point(area.Right - f.Width - 12, area.Bottom - f.Height - 12);
-        f.Show(); // non-modal
         return f;
     }
 }

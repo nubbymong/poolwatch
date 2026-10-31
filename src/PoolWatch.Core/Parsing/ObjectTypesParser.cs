@@ -5,7 +5,7 @@ using PoolWatch.Core.Model;
 namespace PoolWatch.Core.Parsing;
 
 /// <summary>
-/// Parses OBJECT_TYPES_INFORMATION (x64) from NtQueryObject(NULL, ObjectTypesInformation):
+/// Parses OBJECT_TYPES_INFORMATION (64-bit) from NtQueryObject(NULL, ObjectTypesInformation):
 /// ULONG NumberOfTypes, then entries aligned to 8 starting at offset 8. Each OBJECT_TYPE_INFORMATION is
 /// 0x68 bytes (TypeName UNICODE_STRING@0, TotalNumberOfObjects@0x10, TotalNumberOfHandles@0x14,
 /// TypeIndex(UCHAR)@0x5A) followed by the name buffer; the next entry starts at

@@ -1,0 +1,35 @@
+{
+  "$schema": "./schema.json",
+  "format": 1,
+  "id": "codex-gpu-shader-cache",
+  "title": "The Codex desktop app's GPU shader cache",
+  "explanation": "Faarfarin traced one case of NTFS file records (pool tag NtFC) piling up in the non-paged kernel pool to the Codex desktop app, whose main program is ChatGPT.exe: it tried to open files in its GPU shader cache about 14,000 times a second. Starting the app with its shader disk cache turned off stopped almost all of the new growth on that PC. Another report found it did not help there, so it is worth trying, not a sure fix.",
+  "workaround": "Start the app without its GPU shader disk cache. It stops new growth only: a restart frees what has already built up.",
+  "actions": ["chatgpt-shortcut"],
+  "suggestion": "Starting the app without its GPU shader disk cache stopped this for one user (found by Faarfarin on GitHub). The shortcut starts it that way.",
+  "evidence": [
+    {
+      "tagGrowth": { "tags": ["NtFC"], "name": "NTFS file records", "pool": "nonPaged", "minMBPerHour": 100 },
+      "running": [
+        { "name": "Codex desktop", "storePackage": "OpenAI.Codex" }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "title": "Faarfarin's measurements and the shader disk cache workaround, openai/codex issue 31212",
+      "url": "https://github.com/openai/codex/issues/31212#issuecomment-5635622083"
+    },
+    {
+      "title": "A report where the workaround did not help, openai/codex issue 56160",
+      "url": "https://github.com/openai/codex/issues/56160"
+    }
+  ],
+  "credits": [
+    {
+      "name": "Faarfarin",
+      "what": "traced the growth to the shader cache and measured the workaround",
+      "url": "https://github.com/openai/codex/issues/31212#issuecomment-5635622083"
+    }
+  ]
+}

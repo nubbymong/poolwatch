@@ -134,8 +134,25 @@ public static class TraceAttribution
         if (total <= 0 || owners.Count == 0) return null;
         string what = info.Description.Length > 0 && info.Description.Length <= 60 ? $"{inc.Tag.ToDisplay()} ({info.Description})" : inc.Tag.ToDisplay();
         string span = Fmt.Duration((inc.EndUtc ?? inc.LastRiseUtc) - inc.OnsetUtc);
-        string held = inc.PeakBytes > 0 && inc.CurrentBytes >= inc.PeakBytes * 9 / 10 ? " and is still held"
-            : inc.PeakBytes > inc.CurrentBytes ? $"; {Fmt.Bytes(inc.PeakBytes - inc.CurrentBytes)} has been freed since" : "";
+        // On the tag's own scale: the peak counts back what PoolWatch's own clears freed (their drop is not the growth ending),
+        // so the level it reached and fell from on its own is the peak less that; the clears' part is said as their result.
+        long peak = inc.PeakBytes - inc.ClearedBytes;
+        string? own = inc.OwnClearsFreed;
+        string held;
+        if (own is null)
+            held = peak > 0 && inc.CurrentBytes >= peak * 9 / 10 ? " and is still held"
+                : peak > inc.CurrentBytes ? $"; {Fmt.Bytes(peak - inc.CurrentBytes)} has been freed since" : "";
+        // The clears often empty more of the tag than it grew (a cache that was there before the growth). That says where the
+        // tag's level is, not whose bytes they freed: a leak a purge cannot free can still be held whole. So the level is
+        // said, against where the growth began. Otherwise what is held is decided on the rise: of the growth the clears left,
+        // the part that has not fallen on its own since.
+        else if (inc.ClearedBytes >= inc.Growth)
+            held = $"; {own} of the tag, {(inc.ClearedBytes > inc.Growth ? "more than" : "as much as")} it grew: it is now " +
+                   (inc.CurrentBytes <= 0 ? "empty"
+                       : inc.CurrentBytes == inc.StartBytes ? $"back at the {Fmt.Bytes(inc.StartBytes)} it grew from"
+                       : $"at {Fmt.Bytes(inc.CurrentBytes)}, {(inc.CurrentBytes < inc.StartBytes ? "under" : "over")} the {Fmt.Bytes(inc.StartBytes)} it grew from");
+        else if (peak - inc.CurrentBytes <= (inc.Growth - inc.ClearedBytes) / 10) held = $"; {own} of it, and the rest is still held";
+        else held = $"; {own} of it, and {Fmt.Bytes(peak - inc.CurrentBytes)} more has been freed since";
         var top = owners[0];
         string trace = Fmt.Duration(cap.EndUtc - cap.StartUtc);
         var images = top.Processes.OrderByDescending(p => p.Usage.NetBytes).Select(p => Path.GetFileNameWithoutExtension(p.Identity.Image)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();

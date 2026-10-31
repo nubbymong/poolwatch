@@ -78,6 +78,44 @@ public class AddendumTests
         Assert.Equal(3, grep.Chain.Count);
     }
 
+    [Theory]
+    // Still climbing after PoolWatch's own clear freed 200 MB of it: its real level is its highest now (the peak counts the
+    // drop back, as Rank leaves it); the 200 MB is the clear's, not "freed since", and the rest is still held.
+    [InlineData(875, 675, 200, true, "Reff (FCB_DATA) grew 780 MB in 26 min; PoolWatch's own cache clear at {0} freed 200 MB of it, and the rest is still held. The trace")]
+    // It also fell 100 MB on its own since its peak: each part is said as what it was.
+    [InlineData(875, 575, 200, true, "Reff (FCB_DATA) grew 780 MB in 26 min; PoolWatch's own cache clear at {0} freed 200 MB of it, and 100 MB more has been freed since. The trace")]
+    // Two clears freed all of it and the 95 MB it held before (no one time to say): more than it grew. Its level is said, not
+    // that none of the growth is held: PoolWatch cannot tell whose bytes a purge freed.
+    [InlineData(675, 0, 675, false, "Reff (FCB_DATA) grew 580 MB in 26 min; PoolWatch's own cache clears freed 675 MB of the tag, more than it grew: it is now empty. The trace")]
+    // One clear freed 550 MB of a 500 MB growth (the cache it emptied was there before): its level, 45 MB, is under where
+    // the growth began. A leak the purge could not free may still be held whole, so only the level is said.
+    [InlineData(595, 45, 550, true, "Reff (FCB_DATA) grew 500 MB in 26 min; PoolWatch's own cache clear at {0} freed 550 MB of the tag, more than it grew: it is now at 45 MB, under the 95 MB it grew from. The trace")]
+    // Exactly as much as it grew: back where the growth began.
+    [InlineData(675, 95, 580, true, "Reff (FCB_DATA) grew 580 MB in 26 min; PoolWatch's own cache clear at {0} freed 580 MB of the tag, as much as it grew: it is now back at the 95 MB it grew from. The trace")]
+    // A level over where it began (the stitch does not make one, but the text stays true for any input): said as over.
+    [InlineData(675, 120, 600, true, "Reff (FCB_DATA) grew 580 MB in 26 min; PoolWatch's own cache clear at {0} freed 600 MB of the tag, more than it grew: it is now at 120 MB, over the 95 MB it grew from. The trace")]
+    // A clear freed 200 MB of a 300 MB growth and 15 MB of the other 100 MB fell on its own: decided on the rise (15% of
+    // what the clear left), not on the level (still over 90% of its 195 MB).
+    [InlineData(395, 180, 200, true, "Reff (FCB_DATA) grew 300 MB in 26 min; PoolWatch's own cache clear at {0} freed 200 MB of it, and 15 MB more has been freed since. The trace")]
+    // Exactly a tenth of what the clear left fell on its own: still said as held (a tenth is the line).
+    [InlineData(395, 185, 200, true, "Reff (FCB_DATA) grew 300 MB in 26 min; PoolWatch's own cache clear at {0} freed 200 MB of it, and the rest is still held. The trace")]
+    public void TheTraceAnswerSaysWhatPoolWatchsOwnClearsFreedAsTheirResult(long peakMb, long currentMb, long clearedMb, bool oneClear, string starts)
+    {
+        var (reg, cap) = Session(shortCommands: 0);
+        var clearUtc = T0.AddMinutes(12);
+        var inc = Inc();
+        inc.PeakBytes = peakMb * MB;
+        inc.CurrentBytes = currentMb * MB;
+        inc.ClearedBytes = clearedMb * MB;
+        inc.ClearedAtUtc = oneClear ? clearUtc : null;
+        inc.EndUtc = null;
+        inc.Capture = cap;
+        inc.Traced = TraceAttribution.Resolve(cap, Reff, reg);
+        inc.TraceOwners = TraceAttribution.Owners(inc.Traced);
+        string line = TraceAttribution.Answer(inc, new TagInfo("refs.sys", "FCB_DATA", "test"), inc.TraceOwners, cap)!;
+        Assert.StartsWith(string.Format(System.Globalization.CultureInfo.InvariantCulture, starts, Fmt.Clock(clearUtc)), line);
+    }
+
     [Fact]
     public void TracedPidIsMatchedByCreateTimeNotJustPid()
     {

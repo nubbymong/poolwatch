@@ -5,12 +5,14 @@ namespace PoolWatch.Collectors;
 
 /// <summary>
 /// Reads a process's current directory and selected environment variables from its PEB (read-only:
-/// NtQueryInformationProcess + ReadProcessMemory with PROCESS_VM_READ). x64 processes only.
+/// NtQueryInformationProcess + ReadProcessMemory with PROCESS_VM_READ). 64-bit processes only: x64 and Arm64 share the
+/// layout, and on Arm64 an x64 app running under emulation is not WOW64 and has the same 64-bit PEB. A 32-bit (WOW64)
+/// process, such as an x86 app, is skipped.
 /// </summary>
 internal static unsafe class PebReader
 {
     private const int ProcessBasicInformation = 0;
-    // x64 offsets: PEB.ProcessParameters; RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath, Environment, EnvironmentSize.
+    // 64-bit offsets: PEB.ProcessParameters; RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath, Environment, EnvironmentSize.
     private const int PebProcessParameters = 0x20, ParamsCurrentDirectory = 0x38, ParamsEnvironment = 0x80, ParamsEnvironmentSize = 0x3F0;
     private const int MaxEnvironmentBytes = 256 * 1024;
 
@@ -26,7 +28,9 @@ internal static unsafe class PebReader
         using var h = SafeProcess.Open(pid, NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION | NativeMethods.PROCESS_VM_READ);
         if (h is null) return null;
         if (createTime != 0 && NativeMethods.GetProcessTimes(h.Handle, out long created, out _, out _, out _) && created != createTime) return null; // PID reused
-        if (NativeMethods.IsWow64Process(h.Handle, out bool wow64) && wow64) return null;
+        // IsWow64Process2, not IsWow64Process: Microsoft documents the older call as returning FALSE for a 32-bit app on
+        // Arm64, which would let a WOW64 process through. If the call fails, the process is skipped too.
+        if (!NativeMethods.IsWow64Process2(h.Handle, out ushort machine, out _) || machine != 0) return null;
         PROCESS_BASIC_INFORMATION pbi;
         if (NativeMethods.NtQueryInformationProcess(h.Handle, ProcessBasicInformation, &pbi, sizeof(PROCESS_BASIC_INFORMATION), out _) != NtStatus.Success) return null;
         if (!ReadPtr(h.Handle, pbi.PebBaseAddress + PebProcessParameters, out var parameters) || parameters == IntPtr.Zero) return null;

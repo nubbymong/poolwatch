@@ -1,0 +1,16 @@
+name: Dependency review
+
+# Fails a pull request that adds or updates a dependency (a NuGet package or a GitHub Action) with a known
+# vulnerability, using GitHub's dependency graph and advisory database. It reads the pull request's changes through
+# the API: no checkout, no secrets, and a read-only token, so fork pull requests are safe too.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0

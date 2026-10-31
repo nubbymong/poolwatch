@@ -11,7 +11,11 @@ using PoolWatch.Core.Util;
 
 namespace PoolWatch.Ui;
 
-/// <summary>A growing tag's suspects and events (a Pool causes row's details), copied under the history lock.</summary>
+/// <summary>
+/// A growing tag's suspects and events (a Pool causes row's details), copied under the history lock. It keeps what the
+/// details can show (<see cref="TagViewBuilder.ShownOwners"/> owners, <see cref="TagViewBuilder.ShownEvents"/> events), not
+/// the whole ranking: the cache holds one of these per growing tag.
+/// </summary>
 internal sealed record TagViewData(PoolTag Tag, string Title, TagAnswer Answer, IReadOnlyList<OwnerSuspect> Owners, IReadOnlyList<EventRow> Events,
     DateTime FromUtc, DateTime ToUtc, DateTime OnsetUtc)
 {
@@ -25,6 +29,11 @@ internal sealed record EventRow(DateTime TimeUtc, string Text, bool Notable, str
 
 internal static class TagViewBuilder
 {
+    /// <summary>The most meaningful owners the details print (the copied summary lists five, the details pane three).</summary>
+    public const int ShownOwners = 5;
+    /// <summary>The recent notable events the details pane lists.</summary>
+    public const int ShownEvents = 10;
+
     /// <summary>A tag over the last hour (or what the raw history holds), ranked by owner, in plain words.</summary>
     public static TagViewData? Build(AnalysisPipeline a, ProcessRegistry registry, PoolTag tag)
     {
@@ -60,10 +69,28 @@ internal static class TagViewBuilder
                 owners = TraceAttribution.Rank(traced.TraceOwners!, owners, tag);
             }
             string title = $"{tag.ToDisplay()} · {info.Description} ({info.Owner}): {Fmt.Bytes(p + np)} now, {Fmt.SignedBytes(growth)} in {span}";
-            var events = EventRows(a.Incidents.EventsBetween(from, now), registry, all: false);
-            return new TagViewData(tag, title, answer, owners, events, from, now, onset) { TraceBacked = traceBacked };
+            return View(tag, title, answer, owners, a.Incidents.EventsBetween(from, now), registry, window, traceBacked);
         }
     }
+
+    /// <summary>
+    /// What the row keeps of a finished ranking: the <see cref="ShownOwners"/> meaningful owners its details print, trimmed
+    /// (<see cref="OwnerRanking.Keep"/>), and the <see cref="RecentNotable"/> events, not the whole ranking or the hour's events.
+    /// </summary>
+    internal static TagViewData View(PoolTag tag, string title, TagAnswer answer, IEnumerable<OwnerSuspect> owners, IReadOnlyList<LifecycleEvent> events,
+        ProcessRegistry registry, CorrelationWindow window, bool traceBacked)
+    {
+        var shown = OwnerRanking.Keep(owners, ShownOwners);
+        var recent = RecentNotable(events, registry);
+        return new TagViewData(tag, title, answer with { Owners = shown }, shown, recent, window.FromUtc, window.ToUtc, window.OnsetUtc) { TraceBacked = traceBacked };
+    }
+
+    /// <summary>
+    /// The last <see cref="ShownEvents"/> notable rows of <see cref="EventRows"/> (all: false), built from those events only:
+    /// a notable row is one non-rollup event, in time order, so the rest of the hour is never described.
+    /// </summary>
+    public static List<EventRow> RecentNotable(IReadOnlyList<LifecycleEvent> events, ProcessRegistry registry) =>
+        EventRows(events.Where(e => e.Kind != LifecycleKind.Rollup).TakeLast(ShownEvents).ToList(), registry, all: false);
 
     /// <summary>
     /// Notable events one per row; short-lived process rollups (and, with "all events", raw starts / exits) summarised per

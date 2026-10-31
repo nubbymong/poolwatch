@@ -1,0 +1,18 @@
+{
+  // Churn soak (Leaker agent-load, a few hours, nightly or on a release tag): PoolWatch at the defaults a busy PC runs
+  // with. The in-memory windows are NOT shortened (unlike soak-config.json), so it holds what that PC holds once they
+  // fill: 70 min of raw history, 15 min of short-lived processes, 90 min of incident events.
+  "rawHistoryMinutes": 70,
+  "shortLivedKeepMinutes": 15,
+  "incidentEventKeepMinutes": 90,
+  // An automatic cache clear as often as the settings allow (every 30 minutes; the runner is elevated): each one
+  // releases pool and opens a release incident, as on a PC that clears on a schedule.
+  "autoClearEnabled": true,
+  "autoClearEveryHours": 0.5,
+  "autoClearMinMinutes": 30,
+  "autoClearPoolGb": 0,
+  // As in the 45-minute soak: the on-alert CPU trace is an alert-time cost, not steady-state overhead.
+  "cpuTraceEnabled": false,
+  // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
+  "checkForUpdates": false
+}

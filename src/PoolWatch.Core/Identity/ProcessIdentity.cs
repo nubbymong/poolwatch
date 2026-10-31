@@ -127,7 +127,7 @@ public static partial class ProcessIdentities
             if (SystemRoots.Contains(r.Image)) break;
             if (Transparent.Contains(r.Image) || SharedRuntimes.Contains(r.Image) || IsShellTool(r)) continue;
             bool isSelf = i == chainRootFirst.Count - 1;
-            if (r.Services.Count > 0) return new Owner(OwnerKind.Service, "svc:" + string.Join(",", r.Services), $"{r.Image} ({string.Join(", ", r.Services)})") { IsSelf = isSelf };
+            if (r.Services.Count > 0) return new Owner(OwnerKind.Service, ServiceKey + string.Join(",", r.Services), $"{r.Image} ({string.Join(", ", r.Services)})") { IsSelf = isSelf };
             string name = AppName(r);
             return new Owner(OwnerKind.App, "app:" + name.ToLowerInvariant(), name) { IsSelf = isSelf };
         }
@@ -137,6 +137,13 @@ public static partial class ProcessIdentities
         var top = chainRootFirst.FirstOrDefault(r => !SystemRoots.Contains(r.Image) && !Transparent.Contains(r.Image)) ?? self;
         return new Owner(OwnerKind.Unknown, $"proc:{top.Key}", $"{top.Image} (PID {top.Pid})");
     }
+
+    /// <summary>A service owner's key: this, then the names of the services its process runs.</summary>
+    private const string ServiceKey = "svc:";
+
+    /// <summary>The names of the services a service owner stands for (read back from its key); none for any other owner.</summary>
+    public static IReadOnlyList<string> ServicesOf(Owner owner) =>
+        owner.Kind == OwnerKind.Service && owner.Key.StartsWith(ServiceKey, StringComparison.Ordinal) ? owner.Key[ServiceKey.Length..].Split(',') : [];
 
     /// <summary>"Codex", "Stream Deck", "AI Code Conductor": the exe name without .exe, with a few friendly names.</summary>
     public static string AppName(ProcessRecord r)

@@ -38,6 +38,7 @@ body:
     attributes:
       label: Download
       options:
+        - installer (setup.exe)
         - framework-dependent (win-x64.zip)
         - self-contained (win-x64-selfcontained.zip)
         - built from source
@@ -45,6 +46,7 @@ body:
     id: what
     attributes:
       label: What happened, and what you expected
+      description: Report an issue in PoolWatch copies its text for you, redacted. Paste it here.
     validations:
       required: true
   - type: textarea
@@ -55,5 +57,5 @@ body:
     id: evidence
     attributes:
       label: Evidence (redacted)
-      description: The headline and suspects from a redacted export, or the relevant lines of poolwatch.log with names removed.
+      description: Not needed when you pasted the text from Report an issue in PoolWatch, which already holds what PoolWatch saw. Otherwise the headline and suspects from a redacted export, or the relevant lines of poolwatch.log with names removed.
       render: text
