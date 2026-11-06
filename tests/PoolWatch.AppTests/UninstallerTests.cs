@@ -4235,10 +4235,10 @@ public sealed class UninstallerTests
         // CI's check, on a setup run while another process has app\PoolWatch.exe in use: Inno Setup logs "Found <n> files to
         // register with RestartManager." whenever its session is started and asked (QueryRestartManager), and "Shutting
         // down applications using our files." before it closes any (ShutdownApplications); neither may be in the log, and
-        // the process must still run.
+        // the process must still run (the test reads that through the handle it holds to it, never by its ID alone).
         string e2e = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "ci", "installer-e2e.ps1"));
         Assert.Contains("Assert-True (($setupLog -notmatch 'files to register with RestartManager|Shutting down applications using our files') -and " +
-                        "$null -ne (Get-Process -Id $id -ErrorAction SilentlyContinue)) \"${name}: the setup closed no program", e2e);
+                        "-not $process.HasExited) \"${name}: the setup closed no program", e2e);
     }
 
     [Fact]
@@ -6555,7 +6555,7 @@ public sealed class UninstallerTests
         Assert.Contains("Holders := HoldersOf(Path); AddShown(HeldList, HeldCount, Rel + Name + Holders); HeldAll := HeldAll + #13#10 + Rel + Name + Holders; " +
                         "if Logged then Log('In use, so it cannot be replaced or removed now: ' + Path + Holders);", Code());
         Assert.Contains("Result := Result + Format('%s, process %d, run by %s', [Name, Id, AccountOf(Id)]);", Code());
-        InE2e(@"""[^\r\n]*process $holder, run by """);
+        InE2e(@"""[^\r\n]*process $($holder.Id), run by """);
         InE2e($"$p.ExitCode -eq {Number("ExitFinishesAtRestart")}");
         InE2e($"$code -eq {Number("ExitFinishesAtRestart")}");
         InE2e($@"$app\{Constant("StageFolder")}\*\app\PoolWatch.exe");
@@ -6606,6 +6606,94 @@ public sealed class UninstallerTests
         Assert.Equal(2, Regex.Matches(e2e, Regex.Escape("$from = Get-ListedPath $ops[$i]")).Count);
         Assert.Equal(2, Regex.Matches(e2e, Regex.Escape("$to = Get-ListedPath $ops[$i + 1]")).Count);
         Assert.Contains("if (CharAt(Result, 1) = '*') and ((CharAt(Result, 2) = '1') or (CharAt(Result, 2) = '2')) then", Whole("ListedPath"));
+        // The test does the restart's work itself (Complete-RestartWork), then takes every entry for the install folder
+        // out of Windows' list, done or not, so a check after it that the list holds no work could not fail. So it
+        // writes out, one by one, each entry it could not carry out (one that failed, or a move whose file is not
+        // there), but not a folder left because it is not empty, which Windows leaves too; each call keeps them, and
+        // the check after it, the next to read Windows' list, fails on any.
+        Assert.Equal(OneLine("""
+            function Complete-RestartWork {
+                foreach ($name in 'PendingFileRenameOperations', 'PendingFileRenameOperations2') {
+                    $ops = @(Get-RestartValue $name)
+                    if ($ops.Count -eq 0) { continue }
+                    $keep = [System.Collections.Generic.List[string]]::new()
+                    for ($i = 0; $i + 1 -lt $ops.Count; $i += 2) {
+                        $from = Get-ListedPath $ops[$i]
+                        $to = Get-ListedPath $ops[$i + 1]
+                        if (-not $from.StartsWith($app, [StringComparison]::OrdinalIgnoreCase)) { $keep.Add($ops[$i]); $keep.Add($ops[$i + 1]); continue }
+                        try {
+                            if ($to -eq '') {
+                                if (Test-Path -LiteralPath $from -PathType Container) {
+                                    if (@(Get-ChildItem -LiteralPath $from -Force).Count -eq 0) { [System.IO.Directory]::Delete($from) }
+                                    else { Write-Host "  at the restart: $from is not empty, so it stays, as Windows leaves it" }
+                                }
+                                elseif (Test-Path -LiteralPath $from) { [System.IO.File]::Delete($from) }
+                            }
+                            elseif (Test-Path -LiteralPath $from) { [System.IO.File]::Move($from, $to, $true) }
+                            else { throw "$from is not there" }
+                        }
+                        catch {
+                            Write-Host "  at the restart: $from -> '$to' was not done ($($_.Exception.Message)), as Windows would leave it"
+                            "$from -> '$to'"
+                        }
+                    }
+                    if ($keep.Count -eq 0) { Remove-ItemProperty -LiteralPath $sessionManager -Name $name }
+                    else { Set-ItemProperty -LiteralPath $sessionManager -Name $name -Value $keep.ToArray() -Type MultiString }
+                }
+            }
+            """), OneLine(ScriptCode.PowerShellFunction(e2e, "Complete-RestartWork").Value));
+        string psLf = ScriptCode.PowerShell(e2e).Replace("\r\n", "\n");
+        const string RestartWorkCheck = "Assert-True ($notDone.Count -eq 0 -and @(Get-RestartWork).Count -eq 0) ";
+        Assert.Equal(7, Regex.Matches(psLf, @"(?<!function )Complete-RestartWork\b").Count);
+        Assert.Equal(7, Regex.Matches(psLf, Regex.Escape("$notDone = @(Complete-RestartWork)")).Count);
+        Assert.Equal(7, Regex.Matches(psLf, Regex.Escape("$notDone = @(Complete-RestartWork)") + @"\n(?:(?![^\n]*(?:Get-RestartWork|Complete-RestartWork))[^\n]*\n)*?[ ]*" +
+                                            Regex.Escape(RestartWorkCheck)).Count);
+        pinned.Add(RestartWorkCheck);
+        // A process the test starts and later ends or checks is kept as the process its start gave, with a handle to
+        // it held, never as its ID alone: Windows gives no other process that ID while the handle is open, so a holder
+        // that has ended already (the setup ended it, or an earlier Stop-Held did) is seen to have ended, and no other
+        // program is ended in its place. StartSuspended takes that handle while CreateProcessW's own is still open.
+        Assert.Equal(OneLine("""
+            function Stop-Held([System.Diagnostics.Process]$process) {
+                if (-not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(30000) }
+            }
+            """), OneLine(ScriptCode.PowerShellFunction(e2e, "Stop-Held").Value));
+        InE2e("public static Process StartSuspended(string exe, string arguments)");
+        InLf("        CloseHandle(information.thread);\n        try\n        {\n            var process = Process.GetProcessById(information.processId);\n" +
+             "            IntPtr held = process.Handle;\n            return process;\n        }\n        finally { CloseHandle(information.process); }\n");
+        Assert.Equal(2, Regex.Matches(lf, Regex.Escape("-WindowStyle Hidden -PassThru\n    $null = $p.Handle   # keeps its ID from being another process's once it has " +
+                                                       "ended\n")).Count); // Start-Holder's and Start-Watcher's
+        Assert.Equal(2, Regex.Matches(lf, @"\n    return \$p\n\}\n").Count);
+        Assert.Contains("function Assert-FinishesAtRestart([string]$name, [System.Diagnostics.Process]$process) {", e2e);
+        Assert.Contains("-and $helper.HasExited) \"a token-leak test helper started through the short spelling was ended", e2e);
+        foreach (string byId in new[] { "Get-Process -Id", "Stop-Process -Id $id", "Wait-Process", "return $p.Id", "return information.processId" })
+            Assert.DoesNotContain(byId, ScriptCode.PowerShell(e2e));
+        // common.ps1 sets $ErrorActionPreference to Stop, so a check, or a value one uses, that reads a file an earlier
+        // failure left missing would end the run there, hiding every later result and skipping Complete-Assertions.
+        // Each check's read of a file's version, hash or bytes follows a Test-Path of that file in the same -and chain,
+        // and the values the checks use read nothing when the file is not there.
+        Assert.Contains("$hash = if ($staged -and (Test-Path -LiteralPath $staged)) { (Get-FileHash -LiteralPath $staged).Hash } else { '' }", e2e);
+        Assert.Contains("$oldVersion = (Get-Item $second -ErrorAction SilentlyContinue).VersionInfo.ProductVersion", e2e);
+        Assert.Contains("$saved = @(Get-Content (Join-Path $data 'service-changes.json') -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json)", e2e);
+        Assert.Contains("$tail = @(Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Skip $running.Skip)", e2e);
+        var checks = new List<string>();
+        void Checks(string code)
+        {
+            foreach (string statement in ScriptCode.Statements(code))
+            {
+                if (statement.StartsWith("Assert-True ", StringComparison.Ordinal)) checks.Add(OneLine(statement));
+                foreach (var block in ScriptCode.Blocks(statement)) Checks(block.Inside);
+            }
+        }
+        Checks(ScriptCode.PowerShell(e2e));
+        var reads = checks.SelectMany(c => Regex.Matches(c, @"\((?:Get-Item|Get-FileHash -LiteralPath) (\$\w+)\)|ReadAllBytes\((\$\w+)\)").Select(m => (Check: c, Read: m))).ToList();
+        Assert.Equal(13, reads.Count); // the reader finds them: three pairs of versions, the zip step's three, two exes' bytes and two hashes
+        var unguarded = reads.Where(r =>
+        {
+            string file = r.Read.Groups[1].Success ? r.Read.Groups[1].Value : r.Read.Groups[2].Value, before = r.Check[..r.Read.Index];
+            return !before.Contains($"(Test-Path -LiteralPath {file}) -and ", StringComparison.Ordinal) && !before.Contains($"(Test-Path {file}) -and ", StringComparison.Ordinal);
+        }).Select(r => r.Check).Distinct().ToList();
+        Assert.True(unguarded.Count == 0, "checks that read a file no Test-Path before it guards: " + string.Join(Environment.NewLine, unguarded));
         InE2e("foreach ($f in @(Get-ChildItem -LiteralPath $app -Recurse -Force -File -ErrorAction SilentlyContinue)) {");
         InLf("$changed = @($filesBefore.Keys | Where-Object { $filesAfter[$_] -ne $filesBefore[$_] }) + @($filesAfter.Keys | Where-Object { -not $filesBefore.ContainsKey($_) })\n" +
                         "Assert-True ($changed.Count -eq 0) \"the failed upgrade left every file of the version that was there as it was, and no other ($($changed -join ', '))\"");
@@ -6824,10 +6912,10 @@ public sealed class UninstallerTests
                 $failedLog = Get-UninstallLog 'upgrade-beta1-failed-held'
                 Assert-True ($code -ne 0 -and $code -ne 3010) "upgrade-beta1-failed-held: the upgrade fails (exit $code)"
                 Assert-True ((Get-Watched 'upgrade-beta1-failed-held') -ieq $exe) "upgrade-beta1-failed-held: the second process held the new app\PoolWatch.exe ($(Get-Watched 'upgrade-beta1-failed-held'))"
-                Assert-True ($failedLog -match ([regex]::Escape("Another program has $exe open (in use by ") + "[^\r\n]*process $holder, run by [^\r\n]*so it stays until the next restart, and no old file goes back before then\.")) 'upgrade-beta1-failed-held: the setup named the new file in use and what has it open'
+                Assert-True ($failedLog -match ([regex]::Escape("Another program has $exe open (in use by ") + "[^\r\n]*process $($holder.Id), run by [^\r\n]*so it stays until the next restart, and no old file goes back before then\.")) 'upgrade-beta1-failed-held: the setup named the new file in use and what has it open'
                 Assert-True ($failedLog -match [regex]::Escape("Set aside $beta1Dat until the next restart, when Windows puts it back")) 'upgrade-beta1-failed-held: the setup set 1.0.0-beta.1''s uninstaller record aside until the restart'
                 Assert-True ($failedLog -match 'Until that restart PoolWatch does not start: no file that starts it is in place\. Until that restart PoolWatch''s uninstaller removes nothing') 'upgrade-beta1-failed-held: the setup said PoolWatch does not start and its uninstaller removes nothing until the restart'
-                Assert-True ($failedLog -match ('names every one\):(\r?\n[^\r\n]*){0,10}?\r?\n[^\r\n]{0,40}?- ' + [regex]::Escape('app\PoolWatch.exe (in use by ') + "[^\r\n]*process $holder, run by ")) 'upgrade-beta1-failed-held: the setup''s words name the file in use and what has it open, on one of the lines of their list'
+                Assert-True ($failedLog -match ('names every one\):(\r?\n[^\r\n]*){0,10}?\r?\n[^\r\n]{0,40}?- ' + [regex]::Escape('app\PoolWatch.exe (in use by ') + "[^\r\n]*process $($holder.Id), run by ")) 'upgrade-beta1-failed-held: the setup''s words name the file in use and what has it open, on one of the lines of their list'
                 Assert-True ((Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $launcher) -and -not (Test-Path -LiteralPath $beta1Dat)) 'upgrade-beta1-failed-held: until the restart the install folder has no PoolWatch.exe and no uninstaller record'
                 $work = @(Get-RestartWork)
                 $back = @($work | Where-Object { $_.To -ne '' })
@@ -6846,12 +6934,12 @@ public sealed class UninstallerTests
                 Assert-True ((Get-ItemProperty $uninstallKey -ErrorAction SilentlyContinue).DisplayName -eq 'PoolWatch' -and $null -ne (Get-ScheduledTask -TaskName 'PoolWatch' -TaskPath '\' -ErrorAction SilentlyContinue)) 'upgrade-beta1-failed-held: the Uninstall entry and the logon task are still there'
             } finally { Stop-Held $holder }
             Write-Host 'CHECK-RAN: upgrade-beta1-failed-held-before-restart'
-            Complete-RestartWork
+            $notDone = @(Complete-RestartWork)
             $filesAfter = Get-ProgramFiles
             $changed = @($beta1Files.Keys | Where-Object { $filesAfter[$_] -ne $beta1Files[$_] }) + @($filesAfter.Keys | Where-Object { -not $beta1Files.ContainsKey($_) })
             Assert-True ($changed.Count -eq 0) "upgrade-beta1-failed-held: after the restart's work every file of 1.0.0-beta.1 is back as it was, its uninstaller's record included, and no other ($($changed -join ', '))"
             Assert-True (-not (Test-Path -LiteralPath (Split-Path $exe))) 'upgrade-beta1-failed-held: after the restart''s work the app folder the setup made is gone'
-            Assert-True (@(Get-RestartWork).Count -eq 0) 'upgrade-beta1-failed-held: Windows has no work left in the install folder'
+            Assert-True ($notDone.Count -eq 0 -and @(Get-RestartWork).Count -eq 0) "upgrade-beta1-failed-held: the restart's work in the install folder all went through, and Windows has none left ($($notDone -join ', '))"
             Write-Host 'CHECK-RAN: upgrade-beta1-failed-held'
             """.Replace("\r\n", "\n"));
         Step("""
@@ -6862,8 +6950,8 @@ public sealed class UninstallerTests
             foreach ($step in 'upgrade-beta1-msg-aside', 'upgrade-beta1-exe-aside', 'upgrade-beta1-uninstaller-held') {
                 $holder = Start-Watcher $step 'LICENSE.*.old' $exe 'Read'
                 $datHolder = Start-Holder $beta1Dat
-                $msgHolder = 0
-                $exeHolder = 0
+                $msgHolder = $null
+                $exeHolder = $null
                 if ($step -ne 'upgrade-beta1-msg-aside') { $msgHolder = Start-Holder $beta1Msg }
                 if ($step -eq 'upgrade-beta1-uninstaller-held') { $exeHolder = Start-Holder $beta1Exe }
                 try {
@@ -6881,7 +6969,7 @@ public sealed class UninstallerTests
                         # The record's holder lets go. 1.0.0-beta.1's uninstaller, started before the restart as a silent uninstall
                         # would start it, finds no messages, stops at its start and removes nothing.
                         Stop-Held $datHolder
-                        $datHolder = 0
+                        $datHolder = $null
                         $filesHeld = Get-ProgramFiles
                         $p = Start-Process (Get-Uninstaller) -ArgumentList ($silent + "/LOG=`"$Out\$step-uninstall.log`"") -PassThru
                         $null = $p.Handle   # keeps the exit code readable after the process ends
@@ -6901,9 +6989,9 @@ public sealed class UninstallerTests
                         # The record's and the messages file's holders let go: the program the Uninstall entry starts is still
                         # not there.
                         Stop-Held $datHolder
-                        $datHolder = 0
+                        $datHolder = $null
                         Stop-Held $msgHolder
-                        $msgHolder = 0
+                        $msgHolder = $null
                         Assert-True ((Get-Uninstaller) -ieq $beta1Exe -and -not (Test-Path -LiteralPath (Get-Uninstaller))) "${step}: until the restart the Uninstall entry starts nothing ($(Get-Uninstaller))"
                         Assert-True ((Get-ItemProperty $uninstallKey -ErrorAction SilentlyContinue).DisplayName -eq 'PoolWatch' -and $null -ne (Get-ScheduledTask -TaskName 'PoolWatch' -TaskPath '\' -ErrorAction SilentlyContinue)) "${step}: the Uninstall entry and the logon task are still there"
                         Write-Host 'CHECK-RAN: upgrade-beta1-exe-aside'
@@ -6916,16 +7004,16 @@ public sealed class UninstallerTests
                     }
                 } finally {
                     Stop-Held $holder
-                    if ($datHolder -ne 0) { Stop-Held $datHolder }
-                    if ($msgHolder -ne 0) { Stop-Held $msgHolder }
-                    if ($exeHolder -ne 0) { Stop-Held $exeHolder }
+                    if ($datHolder) { Stop-Held $datHolder }
+                    if ($msgHolder) { Stop-Held $msgHolder }
+                    if ($exeHolder) { Stop-Held $exeHolder }
                 }
-                Complete-RestartWork
+                $notDone = @(Complete-RestartWork)
                 $filesAfter = Get-ProgramFiles
                 $changed = @($beta1Files.Keys | Where-Object { $filesAfter[$_] -ne $beta1Files[$_] }) + @($filesAfter.Keys | Where-Object { -not $beta1Files.ContainsKey($_) })
                 Assert-True ($changed.Count -eq 0) "${step}: after the restart's work every file of 1.0.0-beta.1 is back as it was, and no other ($($changed -join ', '))"
                 Assert-True (-not (Test-Path -LiteralPath (Split-Path $exe))) "${step}: after the restart's work the app folder the setup made is gone"
-                Assert-True (@(Get-RestartWork).Count -eq 0) "${step}: Windows has no work left in the install folder"
+                Assert-True ($notDone.Count -eq 0 -and @(Get-RestartWork).Count -eq 0) "${step}: the restart's work in the install folder all went through, and Windows has none left ($($notDone -join ', '))"
                 Write-Host 'CHECK-RAN: upgrade-beta1-held-after-restart'
             }
             """.Replace("\r\n", "\n"));
@@ -6938,7 +7026,7 @@ public sealed class UninstallerTests
                 $failedLog = Get-UninstallLog 'upgrade-failed-held'
                 Assert-True ($code -ne 0 -and $code -ne 3010) "upgrade-failed-held: the upgrade fails (exit $code)"
                 Assert-True ((Get-Watched 'upgrade-failed-held') -ieq $license) "upgrade-failed-held: the second process held the new LICENSE ($(Get-Watched 'upgrade-failed-held'))"
-                Assert-True ($failedLog -match ([regex]::Escape("Another program has $license open (in use by ") + "[^\r\n]*process $holder, run by [^\r\n]*so it stays until the next restart, and no old file goes back before then\.")) 'upgrade-failed-held: the setup named the new file in use and what has it open'
+                Assert-True ($failedLog -match ([regex]::Escape("Another program has $license open (in use by ") + "[^\r\n]*process $($holder.Id), run by [^\r\n]*so it stays until the next restart, and no old file goes back before then\.")) 'upgrade-failed-held: the setup named the new file in use and what has it open'
                 Assert-True ((Test-Path -LiteralPath $license) -and -not (Test-Path -LiteralPath $launcher) -and -not (Test-Path -LiteralPath $exe)) 'upgrade-failed-held: until the restart the install folder has no launcher and no PoolWatch itself'
                 Assert-True ($failedLog -match 'Until that restart PoolWatch does not start: no file that starts it is in place\. Until that restart PoolWatch''s uninstaller removes nothing') 'upgrade-failed-held: the setup said PoolWatch does not start and its uninstaller removes nothing until the restart'
                 $back = @((Get-RestartWork) | Where-Object { $_.To -ne '' })
@@ -6955,12 +7043,12 @@ public sealed class UninstallerTests
                 Assert-True ((Test-Path $startMenu) -and (Get-ItemProperty $uninstallKey -ErrorAction SilentlyContinue).DisplayName -eq 'PoolWatch' -and (Get-StartMode $service) -eq 'Disabled') "upgrade-failed-held: after that uninstall the Start menu entry, the Uninstall entry and the change to $service are as they were"
             } finally { Stop-Held $holder }
             Write-Host 'CHECK-RAN: upgrade-failed-held-before-restart'
-            Complete-RestartWork
+            $notDone = @(Complete-RestartWork)
             $filesAfter = Get-ProgramFiles
             $changed = @($filesBefore.Keys | Where-Object { $filesAfter[$_] -ne $filesBefore[$_] }) + @($filesAfter.Keys | Where-Object { -not $filesBefore.ContainsKey($_) })
             Assert-True ($changed.Count -eq 0) "upgrade-failed-held: after the restart's work every file of the version that was there is back as it was, and no other ($($changed -join ', '))"
             Assert-True ((Test-Path $startMenu) -and (Get-ItemProperty $uninstallKey -ErrorAction SilentlyContinue).DisplayName -eq 'PoolWatch') 'upgrade-failed-held: the Start menu entry and the Uninstall entry are there'
-            Assert-True (@(Get-RestartWork).Count -eq 0) 'upgrade-failed-held: Windows has no work left in the install folder'
+            Assert-True ($notDone.Count -eq 0 -and @(Get-RestartWork).Count -eq 0) "upgrade-failed-held: the restart's work in the install folder all went through, and Windows has none left ($($notDone -join ', '))"
             Write-Host 'CHECK-RAN: upgrade-failed-held'
             """.Replace("\r\n", "\n"));
         Step("""
@@ -7000,7 +7088,7 @@ public sealed class UninstallerTests
                 Assert-True ($watched -like "$app\*.old" -and $original -ne $watched) "upgrade-aside-held: the second process held an old file set aside ($watched)"
                 Assert-True ($asideLog -match ([regex]::Escape($watched) + ' \(in use by [^\r\n]*came into use while Setup was setting the old files aside')) 'upgrade-aside-held: the setup said which file came into use while it set the files aside'
                 Assert-True ($asideLog -match [regex]::Escape("Put back $original under a second name of the same file: $watched is in use")) "upgrade-aside-held: the setup put $original back under a second name of the same file"
-                Assert-True ($asideLog -match ([regex]::Escape("In use, so it cannot be replaced or removed now: $watched (in use by ") + "[^\r\n]*process $holder, run by ")) 'upgrade-aside-held: the setup named the file in use and the process that has it open'
+                Assert-True ($asideLog -match ([regex]::Escape("In use, so it cannot be replaced or removed now: $watched (in use by ") + "[^\r\n]*process $($holder.Id), run by ")) 'upgrade-aside-held: the setup named the file in use and the process that has it open'
                 Assert-True ((Test-Path -LiteralPath $original) -and (Test-Path -LiteralPath $launcher) -and (Test-Path -LiteralPath $exe)) "upgrade-aside-held: until the restart the version that was there is in place, $original among its files"
                 Assert-True ($asideLog -match 'Windows puts this version of PoolWatch in place the next time it restarts; until then the version you had stays in place\.') 'upgrade-aside-held: the setup said the version that was there stays in place until the restart'
             } finally { Stop-Held $holder }
@@ -7011,12 +7099,12 @@ public sealed class UninstallerTests
             $added = @($filesAfter.Keys | Where-Object { -not $filesBefore.ContainsKey($_) -and $_ -ine $watched -and $_ -notlike "$app\at-restart\*" -and $_ -notlike "$app\uninstall\*" })
             Assert-True ($changed.Count -eq 0 -and $added.Count -eq 0) "upgrade-aside-held: until the restart every file of the version that was there is as it was ($(@($changed + $added) -join ', '))"
             Write-Host 'CHECK-RAN: upgrade-aside-held-files-as-they-were'
-            Complete-RestartWork
-            Assert-True ((Get-Item $launcher).VersionInfo.ProductVersion -eq (Get-Item $exe).VersionInfo.ProductVersion) 'upgrade-aside-held: after the restart''s work the launcher and PoolWatch itself are of one version'
+            $notDone = @(Complete-RestartWork)
+            Assert-True ((Test-Path -LiteralPath $launcher) -and (Test-Path -LiteralPath $exe) -and (Get-Item $launcher).VersionInfo.ProductVersion -eq (Get-Item $exe).VersionInfo.ProductVersion) 'upgrade-aside-held: after the restart''s work the launcher and PoolWatch itself are of one version'
             Write-Host 'CHECK-RAN: upgrade-aside-held-one-version'
             $aside = @(Get-ChildItem -LiteralPath $app -Recurse -Force -Filter '*.old' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
             Assert-True ($aside.Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $app 'at-restart'))) "upgrade-aside-held: after the restart's work nothing of the setup's own is left ($($aside -join ', '))"
-            Assert-True (@(Get-RestartWork).Count -eq 0) 'upgrade-aside-held: Windows has no work left in the install folder'
+            Assert-True ($notDone.Count -eq 0 -and @(Get-RestartWork).Count -eq 0) "upgrade-aside-held: the restart's work in the install folder all went through, and Windows has none left ($($notDone -join ', '))"
             Write-Host 'CHECK-RAN: upgrade-aside-held'
             """.Replace("\r\n", "\n"));
         // Each check of these steps prints its CHECK-RAN marker where it must be, so CI shows that each ran.
