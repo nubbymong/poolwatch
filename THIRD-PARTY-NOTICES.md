@@ -10,12 +10,14 @@ yours that runs RAMMap. Work PoolWatch builds on without shipping it is credited
 
 | Component | Version | In the release as | Licence (as declared by the package) |
 |---|---|---|---|
-| Microsoft.Diagnostics.Tracing.TraceEvent ([PerfView](https://github.com/microsoft/perfview)) | 3.1.30 | `Microsoft.Diagnostics.Tracing.TraceEvent.dll`, `Microsoft.Diagnostics.FastSerialization.dll`, `Dia2Lib.dll`, `TraceReloggerLib.dll` (inside `PoolWatch.exe`) | MIT, © Microsoft Corporation |
-| TraceEvent's native DLLs | from TraceEvent 3.1.30 | `amd64\KernelTraceControl.dll` (Windows Performance Toolkit, 10.0.22000.1) and `amd64\msdia140.dll` (the Debug Interface Access SDK, 14.50.35403.0), next to the exe; both Microsoft binaries, Authenticode-signed by Microsoft Corporation | Microsoft redistributable binaries. Microsoft ships them inside the TraceEvent NuGet package, which declares MIT (see below), and distributes them under Microsoft's own terms; they are not themselves open source. See the note below. |
-| Microsoft.Diagnostics.NETCore.Client ([dotnet/diagnostics](https://github.com/dotnet/diagnostics)) | 0.2.510501 | inside `PoolWatch.exe` (a TraceEvent dependency) | MIT, © Microsoft Corporation |
-| Microsoft.Extensions.DependencyInjection, .DependencyInjection.Abstractions, .Logging, .Logging.Abstractions, .Options, .Primitives ([dotnet/runtime](https://github.com/dotnet/runtime)) | 6.0.0 | inside `PoolWatch.exe` (dependencies of Microsoft.Diagnostics.NETCore.Client) | MIT, © .NET Foundation and Contributors |
-| System.Management ([dotnet/runtime](https://github.com/dotnet/runtime)) | 10.0.0 | inside `PoolWatch.exe` | MIT, © .NET Foundation and Contributors |
-| .NET runtime and Windows Desktop runtime (Microsoft.NETCore.App, Microsoft.WindowsDesktop.App) | the .NET 10 patch the release was built with | inside `PoolWatch-selfcontained.exe` (the self-contained download) and the installer, which installs that build | MIT, © .NET Foundation and Contributors; the runtime's own third-party notices are in [dotnet/runtime THIRD-PARTY-NOTICES.TXT](https://github.com/dotnet/runtime/blob/main/THIRD-PARTY-NOTICES.TXT) and [dotnet/winforms THIRD-PARTY-NOTICES.TXT](https://github.com/dotnet/winforms/blob/main/THIRD-PARTY-NOTICES.TXT). The self-contained download and the installer also carry the runtime packs' own files, in `licenses\Microsoft.NETCore.App\` (`LICENSE.TXT` and `THIRD-PARTY-NOTICES.TXT`) and `licenses\Microsoft.WindowsDesktop.App\` (`LICENSE.TXT`, the pack's `LICENSE`; that pack carries no notices file) |
+| Microsoft.Diagnostics.Tracing.TraceEvent ([PerfView](https://github.com/microsoft/perfview)) | 3.1.30 | `Microsoft.Diagnostics.Tracing.TraceEvent.dll`, `Microsoft.Diagnostics.FastSerialization.dll`, `Dia2Lib.dll`, `TraceReloggerLib.dll` (inside `app\PoolWatch.exe`, PoolWatch itself) | MIT, © Microsoft Corporation |
+| TraceEvent's native DLLs | from TraceEvent 3.1.30 | `app\amd64\KernelTraceControl.dll` (Windows Performance Toolkit, 10.0.22000.1) and `app\amd64\msdia140.dll` (the Debug Interface Access SDK, 14.50.35403.0), next to PoolWatch itself; both Microsoft binaries, Authenticode-signed by Microsoft Corporation | Microsoft redistributable binaries. Microsoft ships them inside the TraceEvent NuGet package, which declares MIT (see below), and distributes them under Microsoft's own terms; they are not themselves open source. See the note below. |
+| Microsoft.Diagnostics.NETCore.Client ([dotnet/diagnostics](https://github.com/dotnet/diagnostics)) | 0.2.510501 | inside `app\PoolWatch.exe` (a TraceEvent dependency) | MIT, © Microsoft Corporation |
+| Microsoft.Extensions.DependencyInjection, .DependencyInjection.Abstractions, .Logging, .Logging.Abstractions, .Options, .Primitives ([dotnet/runtime](https://github.com/dotnet/runtime)) | 6.0.0 | inside `app\PoolWatch.exe` (dependencies of Microsoft.Diagnostics.NETCore.Client) | MIT, © .NET Foundation and Contributors |
+| System.Management ([dotnet/runtime](https://github.com/dotnet/runtime)) | 10.0.0 | inside `app\PoolWatch.exe` | MIT, © .NET Foundation and Contributors |
+| .NET runtime and Windows Desktop runtime (Microsoft.NETCore.App, Microsoft.WindowsDesktop.App) | the .NET 10 patch the release was built with | inside `app\PoolWatch.exe` of the self-contained download and of the installer, which installs that build | MIT, © .NET Foundation and Contributors; the runtime's own third-party notices are in [dotnet/runtime THIRD-PARTY-NOTICES.TXT](https://github.com/dotnet/runtime/blob/main/THIRD-PARTY-NOTICES.TXT) and [dotnet/winforms THIRD-PARTY-NOTICES.TXT](https://github.com/dotnet/winforms/blob/main/THIRD-PARTY-NOTICES.TXT). The self-contained download and the installer also carry the runtime packs' own files, in `licenses\Microsoft.NETCore.App\` (`LICENSE.TXT` and `THIRD-PARTY-NOTICES.TXT`) and `licenses\Microsoft.WindowsDesktop.App\` (`LICENSE.TXT`, the pack's `LICENSE`; that pack carries no notices file) |
+| The .NET runtime's native parts compiled into the launcher (NativeAOT: the Microsoft.DotNet.ILCompiler packages and their runtime pack) | the .NET 10 patch the release was built with | inside the launcher: the install folder's `PoolWatch.exe` (and the same file as `PoolWatch-selfcontained.exe` in both zips, and in an install where a zip's copy had that file) | MIT, © .NET Foundation and Contributors; the runtime's own third-party notices as in the row above. Both downloads and the installer carry the files of the NativeAOT compiler packages the launcher was built with, in `licenses\Microsoft.DotNet.ILCompiler\` (`LICENSE.TXT` and `THIRD-PARTY-NOTICES.TXT`) |
+| Microsoft Visual C++ runtime static libraries | from the Visual Studio C++ build tools CI links the launcher with | compiled into the launcher by its NativeAOT build (the .NET runtime's native libraries are built against the static Visual C++ runtime): code from those of `libcmt.lib`, `libvcruntime.lib`, `libcpmt.lib`, `libconcrt.lib` and `oldnames.lib` that the link uses, and GUID definitions from the Windows SDK's `uuid.lib` if it uses that. CI lists the libraries each build's link used, from the linker's map, and stops the build on any library this file does not cover. The Universal C Runtime is not compiled in: the launcher uses Windows' own (`ucrtbase.dll`, through the `api-ms-win-crt` DLLs), and imports no Visual C++ runtime DLL; CI stops the build if either changes | Microsoft's Visual Studio licence terms (Distributable Code), which come with those build tools and let a program built with them carry that code; the Windows SDK's licence terms for `uuid.lib`; not open source |
 | [Inno Setup](https://jrsoftware.org/isinfo.php) | 6.7.3 | the installer's setup program and the uninstaller, `unins000.exe` | the Inno Setup License (below): permissive, any purpose including commercial, keeping its copyright notice; © Jordan Russell, portions © Martijn Laan |
 
 The test projects use xUnit (Apache 2.0) and the .NET test SDK (MIT); they are not part of a release.
@@ -23,8 +25,11 @@ The test projects use xUnit (Apache 2.0) and the .NET test SDK (MIT); they are n
 ### Note on the native DLLs
 
 `KernelTraceControl.dll` and `msdia140.dll` are the only non-managed, non-.NET-runtime binaries in a
-framework-dependent release (the installer adds Inno Setup's `unins000.exe`). They are Microsoft components (Windows
-Performance Toolkit and the Debug Interface Access SDK), carried inside the TraceEvent NuGet package by its publisher,
+framework-dependent release (the installer adds Inno Setup's `unins000.exe`; the launcher, the install folder's
+`PoolWatch.exe`, is native code too, but it is PoolWatch's own code with the .NET runtime and the Visual C++ runtime code
+compiled in, the rows above).
+They are Microsoft components (Windows Performance Toolkit and the Debug Interface Access SDK), carried inside the
+TraceEvent NuGet package by its publisher,
 Microsoft. The package itself carries **no licence file and no third-party-notice file**; its `.nuspec` is the only
 licence statement, and it declares:
 
@@ -68,6 +73,14 @@ Microsoft.WindowsDesktop.App.Runtime.win-x64 carries `LICENSE` only); Inno Setup
 jrsoftware.org; the licence files of the two token-leak repositories; and PoolWatch's 48 built-in tag descriptions
 against `pooltag.txt` from the Windows 10 SDK Debugging Tools (7 short object-type names read the same; the rest are
 PoolWatch's own words).
+
+The NativeAOT compiler packages (Microsoft.DotNet.ILCompiler and runtime.win-x64.Microsoft.DotNet.ILCompiler), whose
+runtime parts the launcher carries, are not in this repository's lock files: only CI's publish of the launcher downloads
+them, for the .NET 10 patch of the SDK it uses. What was checked is their source: dotnet/runtime builds them with the
+same package settings as its runtime packs (its root `Directory.Build.props`: `PackageLicenseExpression` MIT,
+`LicenseFile` LICENSE.TXT and `PackageThirdPartyNoticesFile` THIRD-PARTY-NOTICES.TXT); CI lists the libraries the
+launcher's link takes from them, from the linker's map. No such package was opened here: CI copies the `LICENSE` and
+`THIRD-PARTY-NOTICES` files of the packages its publish used into both builds, and stops the build if either is missing.
 
 ## Licence texts
 
