@@ -21,7 +21,7 @@ internal interface IProcessOpener
 }
 
 /// <summary>
-/// S6 (review round 2): "End process" for a heavy background app. The PID in the list may be stale and a PID is reused, so:
+/// "End process" for a heavy background app. The PID in the list may be stale and a PID is reused, so:
 /// the process is opened FIRST (PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION); its create time is read from that
 /// handle (GetProcessTimes) and must equal the listed one exactly; the owner is asked; the create time is read again from
 /// the same handle; and the process is ended through that SAME handle. An open handle keeps the process object, and so its

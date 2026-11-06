@@ -29,7 +29,7 @@ public sealed record EntryCostResult(int Processes, double Cores, long PageFault
 }
 
 /// <summary>
-/// The cost of a scheduled task or a startup entry (addendum 4 C): the program it runs is matched against the live
+/// The cost of a scheduled task or a startup entry: the program it runs is matched against the live
 /// processes by image (full path when both are known, else the file name), and their costs are added up. "Not running"
 /// when nothing matches. A program that runs through a shared launcher (cmd, PowerShell, rundll32, wscript, ...) is not
 /// measurable this way: every other use of that launcher would be counted too.
@@ -193,8 +193,8 @@ public static class TaskTriggers
 }
 
 /// <summary>
-/// "End process" for a heavy background app (addendum 4 C) is offered only where ending it cannot take Windows down
-/// (Part 3 review): never a core system process, a security process, a process that hosts a Windows service (turn the
+/// "End process" for a heavy background app is offered only where ending it cannot take Windows down
+///: never a core system process, a security process, a process that hosts a Windows service (turn the
 /// service off on the services list instead: that is reversible) or a virtual machine's memory process.
 /// </summary>
 public static class EndProcessPolicy
@@ -221,8 +221,8 @@ public static class EndProcessPolicy
 }
 
 /// <summary>
-/// Where startup entries live and which Explorer StartupApproved key Task Manager keeps their enabled state in (addendum
-/// 4 C): the Run keys of both registry views and the two Startup folders. A disable writes the same 12-byte value Task
+/// Where startup entries live and which Explorer StartupApproved key Task Manager keeps their enabled state in:
+/// the Run keys of both registry views and the two Startup folders. A disable writes the same 12-byte value Task
 /// Manager writes, so the owner can flip it back there.
 /// </summary>
 public sealed record StartupLocation(string Label, bool Machine, string? RunKey, bool StartupFolder, string ApprovedKey)

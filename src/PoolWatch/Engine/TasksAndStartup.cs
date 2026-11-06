@@ -7,7 +7,7 @@ using PoolWatch.Engine.Changes;
 namespace PoolWatch.Engine;
 
 /// <summary>
-/// A non-Microsoft scheduled task the owner may disable (addendum 4 C). <paramref name="Starts"/>: when it starts, in
+/// A non-Microsoft scheduled task the owner may disable. <paramref name="Starts"/>: when it starts, in
 /// plain words from the kinds of its triggers (<see cref="TaskTriggers.Words"/>), "" when none can be named.
 /// </summary>
 internal sealed record ScheduledTaskView(string Path, string Name, string Author, bool Enabled, string Runs, string NextRun, string Starts = "");
@@ -16,7 +16,7 @@ internal sealed record ScheduledTaskView(string Path, string Name, string Author
 internal sealed record StartupView(string Name, string Command, string Location, bool Enabled, bool Microsoft);
 
 /// <summary>
-/// Scheduled tasks and startup apps (addendum 4 C): enumerate the non-Microsoft ones, and enable/disable them
+/// Scheduled tasks and startup apps: enumerate the non-Microsoft ones, and enable/disable them
 /// reversibly — a task through its Enabled property, a startup entry through the same Explorer StartupApproved bytes
 /// Task Manager uses, so the owner can flip it back there too. Microsoft's own tasks and entries are left alone.
 /// Put back under Active changes flips them back through <see cref="ITaskToggles"/>.
@@ -27,10 +27,10 @@ internal sealed class TasksAndStartup : ITaskToggles
     public TasksAndStartup(Log log) => _log = log;
 
     // ---- scheduled tasks (Task Scheduler COM)
-    // C6 (review): every COM object a call touches (the service, folders, task and folder collections, each task, its
+    // Every COM object a call touches (the service, folders, task and folder collections, each task, its
     // definition, registration info, actions and each action) is tracked by a ComScope and released when the call ends.
     // Left to the finalizer they kept RPC handles and native buffers alive: the leak ComScope exists to fix.
-    // Review round 2: the collections are walked with ComScope.Each, which also releases the enumerator behind each
+    // The collections are walked with ComScope.Each, which also releases the enumerator behind each
     // foreach (the collection's IEnumVARIANT); a plain foreach (dynamic ...) left those to the finalizer.
 
     public List<ScheduledTaskView> Tasks()
@@ -145,7 +145,7 @@ internal sealed class TasksAndStartup : ITaskToggles
         Environment.GetFolderPath(l.Machine ? Environment.SpecialFolder.CommonStartup : Environment.SpecialFolder.Startup);
 
     /// <summary>
-    /// Every startup entry Task Manager lists (addendum 4 C, Part 3 review: not only the HKCU / HKLM Run keys): the Run keys
+    /// Every startup entry Task Manager lists (not only the HKCU / HKLM Run keys): the Run keys
     /// of both registry views and the per-user and all-users Startup folders, each with its StartupApproved state.
     /// </summary>
     public List<StartupView> Startup()
@@ -194,7 +194,7 @@ internal sealed class TasksAndStartup : ITaskToggles
 
     /// <summary>
     /// A shortcut's target and arguments, or null when it cannot be read. Read by PoolWatch's own bounded parser
-    /// (<see cref="ShellLink"/>), not the shell: the file is user-writable and PoolWatch runs elevated (Part 3 review).
+    /// (<see cref="ShellLink"/>), not the shell: the file is user-writable and PoolWatch runs elevated.
     /// </summary>
     private static string? ShortcutTarget(string lnk)
     {

@@ -436,6 +436,14 @@ public sealed class ClearTaskReplacerTests : IDisposable
         Assert.Equal($"This task runs {VendorRam}, a link to a file elsewhere (so PoolWatch cannot check the folders that file is in), as SYSTEM. " +
                      "Anything that replaces that file would run as SYSTEM.", Warning(VendorRam, Sddl.Link));
         Assert.Null(Warning(VendorRam, Sddl.Installed));
+        // RAMMap's folder is a link that leads outside Program Files: that place is named.
+        _f.ClearTasks.RealPaths[@"C:\Program Files\Vendor"] = @"D:\Apps\Vendor";
+        try
+        {
+            Assert.Equal(@"This task runs RAMMap from D:\Apps\Vendor, a place outside Program Files that a folder link leads to, as SYSTEM. " +
+                         "Anything that replaces that file would run as SYSTEM.", Warning(VendorRam, Sddl.Installed));
+        }
+        finally { _f.ClearTasks.RealPaths.Clear(); }
     }
 
     [Fact]

@@ -79,11 +79,16 @@ internal sealed class SettingsEditor
         bool kept = _live.SaveForNextStart(Edit); // every setting, for the next start (nothing with --config)
         _live.Apply("Settings", apply.ApplyTo);   // and these at once
         apply.ApplyTo(_shown);
-        if (apply.TurnsGuardOn(running)) _ = _shell.StartTokenGuard(); // its notices say how the check went
-        else if (apply.TurnsGuardOff(running)) _analysis.Diagnostics.Guard.WorkaroundWanted = false;
+        // Turned off: the guard also puts back the Windows setting it changed when Windows allows it (Save was clicked here,
+        // so PoolWatch is in front), and says what happened.
+        string? guardOff = null;
+        if (apply.TurnsGuardOn(running)) _ = _shell.StartTokenGuard(); // a notice only when it needs the user's click
+        else if (apply.TurnsGuardOff(running)) guardOff = _analysis.Diagnostics.Guard.TurnOff();
         _analysis.Diagnostics.Cache.RefreshStatus();
         string said = kept ? SimpleSettings.Saved : SimpleSettings.NotSavedWithConfig;
-        MessageBox.Show(owner, clearStaysOff is null ? said : said + "\n\n" + clearStaysOff, "PoolWatch");
+        foreach (string? more in new[] { guardOff, clearStaysOff })
+            if (more is not null) said += "\n\n" + more;
+        MessageBox.Show(owner, said, "PoolWatch");
     }
 
     /// <summary>

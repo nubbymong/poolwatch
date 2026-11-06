@@ -105,7 +105,7 @@ internal sealed class AgentDecisions(Form owner, SetupContext context, IAgentFil
         var system = context.Analysis.Host;
         return new AgentPcReader(
             () => AgentPcReader.Build(Services.Options(), _tasks.Startup(), _tasks.Tasks(), live, cost, ServicesController.InsiderEnrolled(),
-                MainForm.CurrentRedaction(), Environment.ExpandEnvironmentVariables),
+                MainForm.CurrentRedaction(), UserEnvironment.Expander()),
             () =>
             {
                 var s = system.GetSystemInfo();

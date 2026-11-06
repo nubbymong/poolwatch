@@ -286,6 +286,7 @@ internal static class ClearTaskReplacer
                                   "able to change it without administrator rights)",
         OpenBecause.NotThere => $"{open.Program}, which is not there now (so PoolWatch cannot check the permissions a file put there would get)",
         OpenBecause.Link => $"{open.Program}, a link to a file elsewhere (so PoolWatch cannot check the folders that file is in)",
+        OpenBecause.LinkedFolder => $"RAMMap from {open.Folder}, a place outside Program Files that a folder link leads to",
         _ => $"RAMMap from {open.Folder}, a folder you can change without administrator rights",
     };
 

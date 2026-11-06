@@ -7,7 +7,7 @@ namespace PoolWatch.Native;
 internal readonly record struct SystemLoadReading(double? RunQueue, FaultSplit? Faults);
 
 /// <summary>
-/// System-wide load counters (addendum 4 A) from the in-box performance counters (PDH, English names, locale-independent;
+/// System-wide load counters from the in-box performance counters (PDH, English names, locale-independent;
 /// no WMI), one query collected once per sample: the processor queue length (threads ready to run but waiting for a core)
 /// and the page-fault split per second: demand-zero (fresh zeroed pages: what one vendor telemetry service did 887k times a second),
 /// transition (pages taken back from the standby / modified lists) and pages input (read from disk to resolve hard faults).

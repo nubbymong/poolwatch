@@ -401,7 +401,7 @@ internal static class ActiveChangesView
             .Where(s => s.Rows.Count > 0)
             .ToList();
 
-    /// <summary>A feature is turned off (a shortcut removed); anything else is put back.</summary>
+    /// <summary>A feature is turned off (a shortcut, or a logon task that does not start PoolWatch, removed); anything else is put back (<see cref="ActiveChange.ButtonOf"/>).</summary>
     internal static string ButtonText(ActiveChange c) => ActiveChange.ButtonOf(c);
 
     /// <summary>What the row's button does, in plain words (its tooltip).</summary>
@@ -410,9 +410,10 @@ internal static class ActiveChangesView
         if (!c.CanUndo) return ChangeWords.CannotPutBack;
         return c.Kind switch
         {
-            ChangeKind.LogonTask => "Removes PoolWatch's sign-in task: PoolWatch no longer starts by itself when you sign in.",
+            ChangeKind.LogonTask => c.What == ChangeWords.LogonTask ? "Removes PoolWatch's sign-in task: PoolWatch no longer starts by itself when you sign in."
+                : "Deletes PoolWatch's sign-in task.",
             ChangeKind.AutoClear => "Stops the automatic cache clears. Clear cache now still works.",
-            ChangeKind.TokenGuard => ChangeWords.TokenGuardTurnOffTip,
+            ChangeKind.TokenGuard => c.Id == ChangeIds.TokenGuardSetting ? ChangeWords.TokenGuardSettingPutBackTip : ChangeWords.TokenGuardTurnOffTip,
             ChangeKind.Shortcut => "Deletes the shortcut, if it is still as PoolWatch made it. A shortcut you changed stays.",
             ChangeKind.Service => "Puts the service back to how it was before PoolWatch changed it, and starts it again if it was running.",
             ChangeKind.ScheduledTask => "Turns the scheduled task back to how it was before PoolWatch changed it.",
@@ -445,8 +446,9 @@ internal static class ActiveChangesView
     }
 
     /// <summary>
-    /// The footer: uninstalling puts all of these back, unless a row says it does not; null with no rows (nothing listed,
-    /// or the list could not be read), when the window makes no promise about "these".
+    /// The footer: uninstalling puts each of these back, or says why it could not, and leaves a row that says it does not
+    /// put it back; null with no rows (nothing listed, or the list could not be read), when the window makes no promise
+    /// about "these".
     /// </summary>
     internal static string? UninstallNote(IReadOnlyList<ActiveChange> changes) =>
         changes.Count == 0 ? null

@@ -138,7 +138,7 @@ internal sealed class ServicesTab
                     _state.ReadFinished();
                     if (t.IsFaulted)
                     {
-                        _idleStatus = ServicesPageText.ReadFailed(t.Exception!.GetBaseException().Message);
+                        _idleStatus = ServicesPageText.ReadFailed(t.Exception!);
                         ShowState();
                     }
                     else Show(t.Result);
@@ -258,7 +258,9 @@ internal sealed class ServicesTab
             DoRestore(o.Service.Name);
             return;
         }
-        string again = ServicePlan.StartAfterRestore(c) ? " and start it again (it was running before)" : "";
+        string again = ServicePlan.StartAfterRestore(c) ? " and start it again (it was running before)"
+            : ServicePlan.RunningNotKnown(c, o.Service)
+                ? " (it is not started: PoolWatch does not know whether it was running when it was turned off)" : "";
         string keep = ServicePlan.OnAfterRestore(c, o.Catalogue) && ProfileText.RestoreKeepsOn(_profileStore.Current, [o.Service.Name], action: "Put back") is { } k ? "\n\n" + k : "";
         if (MessageBox.Show(_owner, $"Put {o.Service.Name} back to {c.OriginalStart}{again}?{keep}", "PoolWatch: put back a service", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
         var services = Services;

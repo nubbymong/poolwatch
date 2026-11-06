@@ -70,11 +70,11 @@ internal sealed class AgentReview
     /// <summary>Why the answer was not read; null when it was.</summary>
     public string? Error { get; }
 
-    /// <summary>The services on this PC as the plan was read against them: which running ones depend on a planned one.</summary>
+    /// <summary>The services on this PC as the plan was read against them: which ones not seen stopped depend on a planned one.</summary>
     private readonly IReadOnlyList<ServiceOption> _services;
 
     /// <param name="services">The services as read for the plan (<see cref="AgentItemList.Options"/>), so a row can say
-    /// that a running service depends on one it would stop; none: no row says so.</param>
+    /// that a service not seen stopped depends on one it would stop; none: no row says so.</param>
     public static AgentReview Of(AgentPlan plan, IReadOnlyList<ServiceOption>? services = null) => new(plan, null, services);
 
     public static AgentReview Failed(string why) => new(null, why);

@@ -3,7 +3,7 @@ using PoolWatch.Core.Services;
 
 namespace PoolWatch.Tests;
 
-/// <summary>Addendum 4: the catalogue, the protected gate, presets (tick only), and save/restore.</summary>
+/// <summary>The services catalogue, the protected gate, presets (tick only), and save/restore.</summary>
 public class ServiceCatalogueTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 11, 35, 0, DateTimeKind.Utc);
@@ -138,7 +138,7 @@ public class ServiceCatalogueTests
     [Fact]
     public void ACatalogueCannotPromoteAHardProtectedService()
     {
-        // S2: even if a catalogue (external or tampered) names a protected service, the hard gate still wins.
+        // Even if a catalogue (external or tampered) names a protected service, the hard gate still wins.
         var rogue = ServiceCatalogue.Load("""[{ "services": ["WinDefend"], "name": "x", "category": "Telemetry and diagnostics", "risk": "safe", "preset": true }]""");
         Assert.Equal(ServiceGroup.Protected, rogue.GroupOf("WinDefend", microsoftSigned: true, insiderEnrolled: false));
         Assert.True(ServiceCatalogue.IsProtected("WinDefend", insiderEnrolled: false));
@@ -147,7 +147,7 @@ public class ServiceCatalogueTests
     [Fact]
     public void RestoreGateRefusesTamperedRecords()
     {
-        // S1: a record read back from service-changes.json is re-validated against the live service.
+        // A record read back from service-changes.json is re-validated against the live service.
         var good = new ServiceOption { Service = V("SysMain"), Group = ServiceGroup.Optional, Catalogue = Cat.Find("SysMain") };
         var rec = new ServiceChange { Service = "SysMain", OriginalStart = ServiceStartType.Automatic, OriginalRunning = true, NewStart = ServiceStartType.Disabled, ChangedUtc = T0 };
         ServicePlan.GateRestore(good, rec, insiderEnrolled: false); // ok
@@ -207,7 +207,7 @@ public class ServiceCatalogueTests
     public void AChangeLogThatCannotBeReadIsNotRead(string json) => Assert.Null(ServiceChangeLog.Parse(json));
 }
 
-/// <summary>Addendum 4 A: per-process CPU / page-fault rates and the whole-machine CPU fraction.</summary>
+/// <summary>Per-process CPU / page-fault rates and the whole-machine CPU fraction.</summary>
 public class ProcessLoadTests
 {
     private const double HundredNsPerSec = 10_000_000.0;
@@ -218,7 +218,7 @@ public class ProcessLoadTests
     [Fact]
     public void IdleProcessIsNotCountedAsBusyCpu()
     {
-        // C2: on a 4-core box idle for the whole 10 s window, the Idle process (PID 0) accrues ~4 cores of "CPU".
+        // On a 4-core box idle for the whole 10 s window, the Idle process (PID 0) accrues ~4 cores of "CPU".
         // One real process uses half a core. The machine CPU fraction must reflect the real process, not ~100%.
         int cores = 4;
         var elapsed = TimeSpan.FromSeconds(10);

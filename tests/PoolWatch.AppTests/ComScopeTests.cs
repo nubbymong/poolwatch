@@ -4,7 +4,7 @@ using PoolWatch.Engine;
 namespace PoolWatch.AppTests;
 
 /// <summary>
-/// C6 (review round 2): ComScope.Each walks a collection and always ends its enumerator, also on an early break (with a
+/// ComScope.Each walks a collection and always ends its enumerator, also on an early break (with a
 /// real COM collection that enumerator wraps the IEnumVARIANT that is then released). A plain collection stands in for
 /// Task Scheduler here: no test touches the real one.
 /// </summary>

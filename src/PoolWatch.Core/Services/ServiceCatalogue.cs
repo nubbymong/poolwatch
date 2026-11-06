@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 
 namespace PoolWatch.Core.Services;
 
-/// <summary>Which of the three groups a service falls in (addendum 4 B).</summary>
+/// <summary>Which of the three groups a service falls in.</summary>
 public enum ServiceGroup
 {
     /// <summary>On the catalogue: a known optional service the owner may turn off.</summary>
@@ -208,7 +208,7 @@ public static class ServiceSourceText
 }
 
 /// <summary>
-/// The optional-services catalogue (addendum 4 B.1), loaded from a data file so it grows without code changes, and the
+/// The optional-services catalogue, loaded from a data file so it grows without code changes, and the
 /// protected gate (B.3) which no catalogue, request or preset can get past. The gate is hard-coded here, never from data.
 /// </summary>
 public sealed class ServiceCatalogue
@@ -261,7 +261,7 @@ public sealed class ServiceCatalogue
 
     /// <summary>
     /// Whether a service binary counts as Microsoft's (the Protected vs Unknown split for services the catalogue does not
-    /// list). C6 (review): <paramref name="signer"/> is the verified signer of the embedded signature OR of the system
+    /// list). <paramref name="signer"/> is the verified signer of the embedded signature OR of the system
     /// catalog that lists the file, so catalog-signed Microsoft binaries outside %WINDIR% (which have no embedded
     /// signature) are Microsoft too; they used to land in the turn-off-able "Unknown" group. The certificate's organization
     /// counts as well (Microsoft signs .NET binaries as CN=.NET, O=Microsoft Corporation). A file with no signature at all
@@ -314,7 +314,7 @@ public sealed class ServiceCatalogue
         "RpcSs", "RpcEptMapper", "DcomLaunch", "LSM", "Power", "PlugPlay", "BrokerInfrastructure", "SystemEventsBroker",
         "Dhcp", "Dnscache", "NlaSvc", "nsi", "Winmgmt", "ProfSvc", "Themes", "gpsvc", "SamSs", "EventLog", "Schedule",
         "CoreMessagingRegistrar", "UserManager", "CryptSvc", "KeyIso", "EventSystem", "Netlogon", "SENS",
-        // Virtualization / Hyper-V / WSL and base filtering: turning these off can break VMs, WSL or the firewall (review S2).
+        // Virtualization / Hyper-V / WSL and base filtering: turning these off can break VMs, WSL or the firewall.
         "vmms", "vmcompute", "HvHost", "WSLService", "BFE", "MDCoreSvc",
     };
     private static readonly HashSet<string> ProtectedNames =

@@ -49,16 +49,20 @@ internal static class ProfileAtStart
     public const int MaxNotice = 250;
 
     /// <summary>
-    /// What the tray says after a run that changed something or could not: "Build box turned off 2 services that were on:
-    /// MapsBroker, DiagTrack. Click here to see them in Active changes." and "It could
-    /// not turn off 1 service: C:\ProgramData\PoolWatch\poolwatch.log says why." (<paramref name="logFile"/>, where each
-    /// failure's reason is). A service it set to Disabled but that is not known to have stopped is neither turned off nor
-    /// "could not turn off": "It set 1 more service to Disabled, but it is not known to have stopped: ... says why." (with
-    /// where to see it when nothing was turned off). Null when it found everything off already. When it would be longer
-    /// than <see cref="MaxNotice"/>, fewer names first; then where to see them is left out (a click on the notice opens
-    /// Active changes all the same); then the profile is called "The profile applied at start" when that is shorter than
-    /// its name. The log's place and "says why." stay whole, and no word is cut: only with a log folder so long (one given
-    /// with --out) that the notice is still too long do the words before the log's place give way (<see cref="Cut"/>).
+    /// What the tray says after a run that changed something or could not: "Build box turned off 2 services that were
+    /// on: MapsBroker, DiagTrack. Click here to see them in Active changes." and "It could not turn off 1 service:
+    /// C:\ProgramData\PoolWatch\poolwatch.log says why." (<paramref name="logFile"/>: the file the log goes to when the
+    /// run ends; a reason logged before the log moved on to a new file is in one of the run's earlier files or their
+    /// .1, while they are kept, and each new file's first line names the file before it (in its .1 once that new file
+    /// has rolled over, until a second roll-over replaces it): see <see cref="Log.CurrentPath"/>). A service it set to
+    /// Disabled but that is not known to have stopped is neither turned off nor "could not turn off": "It set 1 more
+    /// service to Disabled, but it is not known to have stopped: ... says why." (with where to see it when nothing was
+    /// turned off). Null when it found everything off already. When it would be longer than <see cref="MaxNotice"/>,
+    /// fewer names first; then where to see them is left out (a click on the notice opens Active changes all the same);
+    /// then the profile is called "The profile applied at start" when that is shorter than its name. The log's place
+    /// and "says why." stay whole, and no word is cut: only with a log place so long (a folder given with --out, or the
+    /// longer name of the new file a run's log goes on in when the log was held, <see cref="Log.CurrentPath"/>) that
+    /// the notice is still too long do the words before the log's place give way (<see cref="Cut"/>).
     /// </summary>
     public static string? Notice(string profile, ServicesController.ProfileRun run, string logFile)
     {

@@ -3,7 +3,7 @@ using PoolWatch.Core.Model;
 namespace PoolWatch.Core.Services;
 
 /// <summary>
-/// Per-process CPU and page-fault rates from two consecutive process snapshots (addendum 4 A). CPU time and the page
+/// Per-process CPU and page-fault rates from two consecutive process snapshots. CPU time and the page
 /// fault count are cumulative in the snapshot PoolWatch already takes; the rate is the delta over the elapsed time.
 /// Pure: matched by (pid, create time) so a reused PID is not mistaken for the same process.
 /// </summary>
@@ -40,7 +40,7 @@ public static class ProcessLoad
         long totalFaults = 0;
         foreach (var p in cur)
         {
-            // C2 (review): the System Idle Process (PID 0) "runs" on every idle core, so its CPU delta is the idle
+            // The System Idle Process (PID 0) "runs" on every idle core, so its CPU delta is the idle
             // time. Counting it made the whole-machine CPU fraction read ~100% at all times. Skip it entirely.
             if (p.Pid == 0) continue;
             if (!before.TryGetValue(p.Key, out var b)) continue; // new this window: no baseline, skip (next window counts it)

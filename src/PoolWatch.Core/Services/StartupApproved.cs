@@ -1,7 +1,7 @@
 namespace PoolWatch.Core.Services;
 
 /// <summary>
-/// The Explorer "StartupApproved" state (addendum 4 C): Task Manager enables/disables a startup entry by writing a
+/// The Explorer "StartupApproved" state: Task Manager enables/disables a startup entry by writing a
 /// 12-byte value under ...\Explorer\StartupApproved\*; byte 0 is 0x02 (enabled) or 0x03 (disabled), the rest a
 /// timestamp. PoolWatch uses the same bytes, so the owner can flip it back in Task Manager. Pure byte logic here; the
 /// registry read/write is the caller's.
