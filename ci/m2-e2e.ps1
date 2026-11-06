@@ -167,10 +167,12 @@ switch ($Scenario) {
         Assert-True ($orph.Count -ge 1) "the child is flagged as an orphan with I/O (lifecycle signal)"
         $topHit = @($reports | Where-Object { $_.suspects.Count -gt 0 -and $_.suspects[0].pid -eq $leakerPid })
         Assert-True ($topHit.Count -ge 1) "the orphaned child is the top suspect of at least one incident"
-        if ($topHit.Count -ge 1) {
-            Assert-True ($topHit[0].headline -match 'orphaned') "headline says orphaned: $($topHit[0].headline)"
-            Test-IncidentFiles $topHit[0]
-        }
+        # A headline says orphaned when its top suspect was one at that incident: an incident from before the parent
+        # exited (a drop seconds after the child started, say) has the child on top, not yet orphaned, and says nothing.
+        $orphanTop = @($topHit | Where-Object { $_.suspects[0].isOrphan -eq $true })
+        $unsaid = @($orphanTop | Where-Object { $_.headline -notmatch 'orphaned' })
+        Assert-True ($orphanTop.Count -ge 1 -and $unsaid.Count -eq 0) "every incident with the orphaned child on top as an orphan says orphaned in its headline ($($orphanTop.Count) incidents; not said: $(@($unsaid | ForEach-Object { $_.headline }) -join ' | '))"
+        if ($orphanTop.Count -ge 1) { Test-IncidentFiles $orphanTop[0] }
     }
 }
 
