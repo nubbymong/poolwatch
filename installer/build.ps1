@@ -1,9 +1,10 @@
 # Builds the PoolWatch installer (CI only: the installer and sign jobs). Installs the pinned Inno Setup after checking its
-# download, stages the self-contained build with the files that ship next to PoolWatch.exe, and compiles PoolWatch.iss.
-# A release passes -SignTool and -Thumbprint: the launcher script is signed before it is packed, and Inno Setup signs the
-# setup and its uninstaller as it makes them.
+# download, stages the self-contained build as it is installed (the launcher PoolWatch.exe, PoolWatch itself in app\),
+# and compiles PoolWatch.iss.
+# A release passes -SignTool and -Thumbprint: the Codex shortcut's launcher script is signed before it is packed, and Inno
+# Setup signs the setup and its uninstaller as it makes them.
 param(
-    [Parameter(Mandatory)] [string]$Publish,    # the self-contained build (PoolWatch-selfcontained.exe and its DLLs)
+    [Parameter(Mandatory)] [string]$Publish,    # the self-contained build (the launcher PoolWatch.exe; app\ with PoolWatch and its DLLs)
     [Parameter(Mandatory)] [string]$Out,        # a new folder: gets stage\ (what is installed) and the setup
     [string]$SignTool,
     [string]$Thumbprint
@@ -25,14 +26,15 @@ if (-not (Test-Path "$inno\ISCC.exe")) {
     if ($p.ExitCode -ne 0 -or -not (Test-Path "$inno\ISCC.exe")) { throw "Inno Setup did not install (exit $($p.ExitCode))" }
 }
 
-# What is installed: the build, the ChatGPT launcher, the guide for AI assistants and the licences.
+# What is installed: the build (the launcher PoolWatch.exe, and app\ with PoolWatch itself and its DLLs), the ChatGPT
+# launcher script, the guide for AI assistants and the licences.
 $stage = Join-Path $Out 'stage'
 New-Item -ItemType Directory -Path $stage | Out-Null
 Copy-Item -Path (Join-Path $Publish '*') -Destination $stage -Recurse
 Copy-Item -Destination $stage -Path "$PSScriptRoot\chatgpt-no-shader-cache.ps1", "$repo\src\PoolWatch\Assets\AGENTS.md", "$repo\LICENSE", "$repo\THIRD-PARTY-NOTICES.md"
 if ($SignTool) {
     & $SignTool sign /fd sha256 /tr http://ts.ssl.com /td sha256 /sha1 $Thumbprint "$stage\chatgpt-no-shader-cache.ps1"
-    if ($LASTEXITCODE -ne 0) { throw "signtool failed on the launcher (exit $LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0) { throw "signtool failed on the launcher script (exit $LASTEXITCODE)" }
 }
 
 $version = ([xml](Get-Content "$repo\Directory.Build.props" -Raw)).SelectSingleNode('/Project/PropertyGroup/Version').InnerText
