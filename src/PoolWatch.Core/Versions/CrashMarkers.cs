@@ -22,9 +22,12 @@ public static class CrashMarkers
     public const string AppErrorProvider = "Application Error";
     public const string WerProvider = "Windows Error Reporting";
 
-    /// <summary>Apps whose crashes are reported (image names without .exe, case-insensitive).</summary>
+    /// <summary>
+    /// Apps whose crashes are reported (image names without .exe, case-insensitive, so each name once: "claude" matches
+    /// claude.exe and Claude.exe alike).
+    /// </summary>
     public static readonly IReadOnlyList<string> DefaultWatchedApps =
-        ["ChatGPT", "Codex", "claude", "Claude", "node", "AI Code Conductor", "StreamDeck", "Code", "WindowsTerminal", "explorer", "dwm"];
+        ["ChatGPT", "Codex", "claude", "node", "AI Code Conductor", "StreamDeck", "Code", "WindowsTerminal", "explorer", "dwm"];
 
     /// <summary>The logs read and, per log, the records of interest (providers and event IDs). The system crash records
     /// (BugCheck, Kernel-Power) have a log of their own, so app records can never crowd them out.</summary>
@@ -40,7 +43,7 @@ public static class CrashMarkers
 
     /// <summary>
     /// One log's query: the records after <paramref name="afterRecord"/> (EventRecordID, read oldest first: paging, so none
-    /// is skipped) when the cursor has one, else those since <paramref name="sinceUtc"/> (C6, <see cref="CrashCursor"/>).
+    /// is skipped) when the cursor has one, else those since <paramref name="sinceUtc"/> (<see cref="CrashCursor"/>).
     /// </summary>
     public static string XPath(string filter, DateTime sinceUtc, DateTime nowUtc, long? afterRecord)
     {
@@ -125,7 +128,7 @@ public static class CrashMarkers
     };
 
     /// <summary>App crash findings per check: the newest <paramref name="maxEach"/> one by one; older ones (a backlog paged
-    /// in at once) in one summary finding with every record's line, so none is dropped (C6).</summary>
+    /// in at once) in one summary finding with every record's line, so none is dropped.</summary>
     public static List<Finding> AppFindings(IReadOnlyList<CrashRecord> apps, int maxEach = 50)
     {
         var ordered = apps.OrderBy(a => a.TimeUtc).ToList();

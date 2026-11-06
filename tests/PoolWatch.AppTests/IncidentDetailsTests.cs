@@ -5,8 +5,8 @@ namespace PoolWatch.AppTests;
 
 /// <summary>
 /// An incident's summary in the Pool causes details, and in Copy summary: the details show it without Markdown marks and
-/// with local times (<see cref="CopyText.IncidentDetails"/>); Copy summary and the tray copy it as report.json has it
-/// (<see cref="CopyText.IncidentSummary"/>).
+/// with local times (<see cref="CopyText.IncidentDetails"/>); Copy summary and the tray copy it as report.json has it,
+/// but for each suspect's confidence, which both give in the Confidence column's words (<see cref="CopyText.IncidentSummary"/>).
 /// </summary>
 public sealed class IncidentDetailsTests : IDisposable
 {
@@ -38,11 +38,11 @@ public sealed class IncidentDetailsTests : IDisposable
     }
 
     /// <summary>
-    /// The details show an incident's summary for the pane, and Copy summary and the tray copy it as report.json has it.
-    /// Read from the window's source, as the window needs the whole app to build.
+    /// The details show an incident's summary for the pane, and Copy summary and the tray copy it as report.json has it
+    /// (but for the confidence). Read from the window's source, as the window needs the whole app to build.
     /// </summary>
     [Fact]
-    public void TheDetailsShowTheSummaryForThePaneAndTheCopiesKeepItAsItIs()
+    public void TheDetailsShowTheSummaryForThePaneAndTheCopiesCopyTheSummary()
     {
         string ui = Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui");
         string main = File.ReadAllText(Path.Combine(ui, "MainForm.cs")), actions = File.ReadAllText(Path.Combine(ui, "UiActions.cs"));

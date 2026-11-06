@@ -34,7 +34,7 @@ public class CopyTests
         string s = CopyText.IncidentSummary(json);
         Assert.StartsWith("`File` grew 12 MB; top suspect Leaker.exe\r\nIncident 20261026-0530-File (Growth), tag File\r\n", s);
         Assert.Contains("Most likely cause: Leaker (strong).", s);
-        Assert.Contains("1. Leaker.exe (PID 7716), StronglyCorrelated\r\n   - direct charge: File handles 0 -> 30,026\r\n   command line: Leaker.exe leak-handles", s);
+        Assert.Contains("1. Leaker.exe (PID 7716), strong evidence\r\n   - direct charge: File handles 0 -> 30,026\r\n   command line: Leaker.exe leak-handles", s);
     }
 
     /// <summary>An incident's report.json as IncidentWriter writes it: the tag in a code span in the headline, the window in UTC to the tick.</summary>
@@ -51,10 +51,10 @@ public class CopyTests
         new DateTime(2026, 10, day, hour, minute, second, DateTimeKind.Utc).AddTicks(ticks);
 
     /// <summary>
-    /// The Pool causes details show an incident without Markdown marks, with its kind and confidence in words and its window
-    /// in local time to the second, as the window prints times (Fmt.Stamp, the onset Fmt.Clock on the same day): not
-    /// "`Ntfc` (ntfs.sys ...)", "(Growth)", "StronglyCorrelated" and "Window: 2026-10-31T19:10:12.7734278Z to ...".
-    /// Everything else reads as Copy summary has it.
+    /// The Pool causes details show an incident without Markdown marks, with its kind in words and its window in local
+    /// time to the second, as the window prints times (Fmt.Stamp, the onset Fmt.Clock on the same day): not
+    /// "`Ntfc` (ntfs.sys ...)", "(Growth)" and "Window: 2026-10-31T19:10:12.7734278Z to ...". Everything else, the
+    /// suspects' confidence in words included, reads as Copy summary has it.
     /// </summary>
     [Fact]
     public void TheDetailsShowAnIncidentWithoutMarkdownAndInLocalTime()
@@ -69,19 +69,20 @@ public class CopyTests
         Assert.DoesNotContain("`", pane);
         Assert.DoesNotContain("T19:10", pane);
         Assert.DoesNotContain(".77", pane);
-        // Only the headline, the kind, the window and the confidence differ from what Copy summary copies.
+        // Only the headline, the kind and the window differ from what Copy summary copies.
         string[] copy = CopyText.IncidentSummary(Ntfc).Split("\r\n"), shown = pane.Split("\r\n");
         Assert.Equal(copy.Length, shown.Length);
+        Assert.Equal("1. Leaker.exe (PID 1512), strong evidence", shown[5]);
         for (int i = 0; i < copy.Length; i++)
-            if (i is not (0 or 1 or 2 or 5)) Assert.Equal(copy[i], shown[i]);
+            if (i is not (0 or 1 or 2)) Assert.Equal(copy[i], shown[i]);
     }
 
     /// <summary>
-    /// A time zone east or west of UTC with no daylight saving, made here: the PC's own zone is not changed. The tests can
-    /// run where local time and UTC read the same, so only another zone shows which of the two the details print and compare.
+    /// A time zone east or west of UTC with no daylight saving, passed to the details: this test process's zone is not
+    /// changed. The tests can run where local time and UTC read the same, so only another zone shows which of the two the
+    /// details print and compare (<see cref="PcZoneCopyTests"/> sets this test process's zone for the window's own details).
     /// </summary>
-    private static TimeZoneInfo Zone(int minutes) =>
-        TimeZoneInfo.CreateCustomTimeZone($"PoolWatch test {minutes}", TimeSpan.FromMinutes(minutes), $"test {minutes}", $"test {minutes}");
+    private static TimeZoneInfo Zone(int minutes) => PcZone.Fixed(minutes);
 
     /// <summary>The whole of an incident's details in a zone east of UTC, where its window is on the next day.</summary>
     [Fact]
@@ -130,27 +131,11 @@ public class CopyTests
     }
 
     /// <summary>
-    /// The window's own details are in the PC's zone, as Fmt.Stamp prints, with a time without an offset read as UTC and
-    /// one with an offset (+02:00) as that instant: in summer and in winter, as a PC's zone can be ahead of UTC in one and
-    /// not in the other. Where the PC's zone is UTC all year (CI) local time and UTC read the same, which is why the tests
-    /// above use zones of their own.
-    /// </summary>
-    [Theory]
-    [InlineData(7)]
-    [InlineData(12)]
-    public void TheWindowsDetailsAreInThePcsZoneInSummerAndInWinter(int month)
-    {
-        var at = new DateTime(2026, month, 1, 12, 0, 0, DateTimeKind.Utc);
-        string json = $$"""{ "headline": "h", "window": { "fromUtc": "2026-{{month:00}}-01T12:00:00", "onsetUtc": "2026-{{month:00}}-01T12:00:00Z", "toUtc": "2026-{{month:00}}-01T14:00:00+02:00" } }""";
-        Assert.Equal($"h\r\nWindow: {Fmt.Stamp(at)} to {Fmt.Stamp(at)} (onset {Fmt.Clock(at)})\r\n", CopyText.IncidentDetails(json));
-        Assert.Equal(CopyText.IncidentDetails(json, TimeZoneInfo.Local), CopyText.IncidentDetails(json));
-    }
-
-    /// <summary>
     /// The details name an incident's kind and each suspect's confidence in the words the window uses for them (the Pool
     /// causes list's "strong evidence"; "non-paged pool over the limit", as the row above the details and the tray's notice
     /// say it, not Report an issue's "over its limit"), where report.json has the names in the code. Text that names
-    /// neither is shown as written, not guessed at. Copy summary keeps report.json's text.
+    /// neither is shown as written, not guessed at. Copy summary keeps report.json's kind and names the confidence as the
+    /// details do.
     /// </summary>
     [Theory]
     [InlineData("Growth", "growth", "StronglyCorrelated", "strong evidence")]
@@ -168,7 +153,7 @@ public class CopyTests
             """;
         Assert.Equal($"h\r\nIncident x ({kindWords}), tag Mm\r\nSuspects:\r\n1. a.exe (PID 7), {confidenceWords}\r\n2. b.exe (PID 8), weak evidence\r\n",
             CopyText.IncidentDetails(json, Zone(330)));
-        Assert.Equal($"h\r\nIncident x ({kind}), tag Mm\r\nSuspects:\r\n1. a.exe (PID 7), {confidence}\r\n2. b.exe (PID 8), Weak\r\n", CopyText.IncidentSummary(json));
+        Assert.Equal($"h\r\nIncident x ({kind}), tag Mm\r\nSuspects:\r\n1. a.exe (PID 7), {confidenceWords}\r\n2. b.exe (PID 8), weak evidence\r\n", CopyText.IncidentSummary(json));
     }
 
     /// <summary>
@@ -209,14 +194,53 @@ public class CopyTests
 
     /// <summary>
     /// Copy summary (and the tray's Copy latest incident summary) copies the summary as report.json has it: the headline's
-    /// code span, which renders where it is pasted (an issue, a chat), and the window in UTC to the tick, which reads the
-    /// same in every time zone and matches report.json.
+    /// code span, which renders where it is pasted (an issue, a chat), the kind's name, and the window in UTC to the tick,
+    /// which reads the same in every time zone and matches report.json. A suspect's confidence alone is in the Confidence
+    /// column's words, as everywhere a person reads one, not report.json's name.
     /// </summary>
     [Fact]
     public void CopySummaryKeepsTheReportsMarkdownAndUtcTimes()
     {
         string copy = CopyText.IncidentSummary(Ntfc);
         Assert.StartsWith("`Ntfc` (ntfs.sys CCB_DATA) grew 4 MB in 29 s;", copy);
+        Assert.Contains("\r\nIncident 20261031-191052-Ntfc-6366744e (Growth), tag Ntfc\r\n", copy);
         Assert.Contains("\r\nWindow: 2026-10-31T19:10:12.7734278Z to 2026-10-31T19:10:52.7693026Z (onset 2026-10-31T19:10:22.7705869Z)\r\n", copy);
+        Assert.Contains("\r\n1. Leaker.exe (PID 1512), strong evidence\r\n", copy);
+        Assert.DoesNotContain("StronglyCorrelated", copy);
+    }
+}
+
+/// <summary>
+/// The window's own details are in the PC's zone (<see cref="CopyText.IncidentDetails(string)"/>, as Fmt.Stamp prints),
+/// with a time without an offset read as UTC, one with a Z as UTC, and one with another offset (+02:00) as that instant.
+/// Each case sets the PC's zone for this test process (<see cref="PcZone"/>): east of UTC, west of it, and one on UTC in
+/// winter and an hour ahead in summer. So code that reads a time through the PC's zone where it should not, or prints
+/// UTC as the PC's time, fails here on every PC, CI's UTC included, not only where the PC's own zone is not UTC.
+/// </summary>
+[Collection(PcZone.Collection)]
+public class PcZoneCopyTests
+{
+    private static TimeZoneInfo Zone(string name) => name switch
+    {
+        "east" => PcZone.Fixed(330), "west" => PcZone.Fixed(-420), _ => PcZone.UtcInWinter(),
+    };
+
+    [Theory]
+    [InlineData("east", 7, "2026-07-01 17:30:00 +05:30", "17:30:00")]
+    [InlineData("east", 12, "2026-12-01 17:30:00 +05:30", "17:30:00")]
+    [InlineData("west", 7, "2026-07-01 05:00:00 -07:00", "05:00:00")]
+    [InlineData("west", 12, "2026-12-01 05:00:00 -07:00", "05:00:00")]
+    [InlineData("utc in winter", 7, "2026-07-01 13:00:00 +01:00", "13:00:00")]
+    [InlineData("utc in winter", 12, "2026-12-01 12:00:00 +00:00", "12:00:00")]
+    public void TheWindowsDetailsAreInThePcsZone(string zone, int month, string stamp, string clock)
+    {
+        string json = $$"""{ "headline": "h", "window": { "fromUtc": "2026-{{month:00}}-01T12:00:00", "onsetUtc": "2026-{{month:00}}-01T12:00:00Z", "toUtc": "2026-{{month:00}}-01T14:00:00+02:00" } }""";
+        var at = new DateTime(2026, month, 1, 12, 0, 0, DateTimeKind.Utc);
+        using (PcZone.Set(Zone(zone)))
+        {
+            Assert.Equal($"h\r\nWindow: {stamp} to {stamp} (onset {clock})\r\n", CopyText.IncidentDetails(json));
+            Assert.Equal((stamp, clock), (Fmt.Stamp(at), Fmt.Clock(at))); // as the window prints its other times
+        }
+        Assert.DoesNotContain("PoolWatch test", TimeZoneInfo.Local.Id); // Windows' own zone again
     }
 }

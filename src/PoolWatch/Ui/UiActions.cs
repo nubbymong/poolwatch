@@ -183,7 +183,10 @@ internal sealed class UiActions
         catch (Exception ex) { _engine.Log.Info("clipboard: " + ex.Message); } // another app holds the clipboard
     }
 
-    /// <summary>What Copy summary and the tray's Copy latest incident summary copy for an incident: its summary as report.json has it.</summary>
+    /// <summary>
+    /// What Copy summary and the tray's Copy latest incident summary copy for an incident: its summary as report.json has
+    /// it, each suspect's confidence in the Confidence column's words (<see cref="CopyText.IncidentSummary"/>).
+    /// </summary>
     public static string IncidentSummary(string dir) => CopyText.IncidentSummary(File.ReadAllText(Path.Combine(dir, "report.json")));
 
     /// <summary>

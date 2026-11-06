@@ -129,7 +129,13 @@ public static class PoolStatusLine
 /// <summary>Small plain-English formatters shared by the window (pure, unit-tested).</summary>
 public static class PlainWords
 {
-    /// <summary>Confidence in words: "confirmed by a trace", "strong evidence", "some evidence", "weak evidence".</summary>
+    /// <summary>
+    /// Confidence in words: "confirmed by a trace", "strong evidence", "some evidence", "weak evidence". Pool causes'
+    /// Confidence column says it this way, and so does every other place a person reads a confidence: the details, the
+    /// plain answer and headline, report.md, Copy summary (an incident's, a tag's and the tray's), a vendor bundle's
+    /// incidents.md and Report an issue. report.json keeps the names (<c>StronglyCorrelated</c>), which are what PoolWatch
+    /// reads back.
+    /// </summary>
     public static string Confidence(Confidence c) => c switch
     {
         Correlation.Confidence.ConfirmedByTrace => "confirmed by a trace",

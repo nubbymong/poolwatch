@@ -4,9 +4,9 @@ using PoolWatch.Core.Tags;
 namespace PoolWatch.Tests;
 
 /// <summary>
-/// L1 and L4 (security review): what the elevated app reads from its settings is bounded. Path settings must be plain
-/// local drive paths (an old per-user settings.json, a file the user could write, is migrated through Settings.Parse),
-/// and pooltag.txt is read only up to a size a real one never reaches.
+/// What the elevated app reads from its settings is bounded. Path settings must be plain
+/// local drive paths (Settings.Parse puts any other value back to its default), and pooltag.txt is read only up to a
+/// size a real one never reaches.
 /// </summary>
 public class InputBoundsTests
 {
@@ -31,9 +31,9 @@ public class InputBoundsTests
     public void ALongPathIsNotAccepted() => Assert.False(Settings.IsLocalDrivePath(@"C:\" + new string('a', Settings.MaxPathSettingLength)));
 
     [Fact]
-    public void MigratedPathSettingsAreValidatedNotTakenAsWritten()
+    public void PathSettingsAreValidatedNotTakenAsWritten()
     {
-        // What a user-writable settings.json could have said: shares, pipes, relative paths, over-long values.
+        // Values a settings file could hold that are not plain local paths: shares, pipes, relative paths, over-long values.
         string json = $$"""
             {
               "aiccResourcesRoot": "\\\\attacker\\share\\aicc",

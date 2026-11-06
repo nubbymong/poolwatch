@@ -29,19 +29,21 @@ public static class CopyText
 
     /// <summary>
     /// An incident's summary from its report.json: headline, window, plain answer, ranked suspects with evidence. What Copy
-    /// summary copies, as report.json has it: the headline's tag in a Markdown code span, the kind and each suspect's
-    /// confidence by their names in report.json ("NonPagedTotal", "StronglyCorrelated"), the window's times in UTC.
+    /// summary copies, as report.json has it: the headline's tag in a Markdown code span, the kind by its name in
+    /// report.json ("NonPagedTotal"), the window's times in UTC; and each suspect's confidence in the words of Pool causes'
+    /// Confidence column, as everywhere a person reads one (<see cref="PlainWords.Confidence"/>: "strong evidence"; a value
+    /// that names none stays as written).
     /// </summary>
     public static string IncidentSummary(string reportJson) => Incident(reportJson, zone: null);
 
     /// <summary>
     /// The same summary as the Pool causes details show it: the headline without the backticks report.json writes its tag
     /// between (<c>IncidentWriter.Headline</c>; the summary's only Markdown mark, so a backtick in a name or a command line
-    /// stays); the kind and each suspect's confidence in the window's words for them (the kind as the row above the details
-    /// and the tray's notice name it, <see cref="PlainWords.IncidentKindInTheWindow"/>; <see cref="PlainWords.Confidence"/>:
-    /// "non-paged pool over the limit", "strong evidence"; a value that names neither stays as written); and the window's
-    /// times in local time to the second, as the window prints times elsewhere (<see cref="Fmt.Stamp"/>, the onset
-    /// <see cref="Fmt.Clock"/> on the window's first day). A time that does not read as one stays as written.
+    /// stays); the kind in the window's words for it (as the row above the details and the tray's notice name it,
+    /// <see cref="PlainWords.IncidentKindInTheWindow"/>: "non-paged pool over the limit"; a value that names none stays as
+    /// written); each suspect's confidence as Copy summary gives it; and the window's times in local time to the second,
+    /// as the window prints times elsewhere (<see cref="Fmt.Stamp"/>, the onset <see cref="Fmt.Clock"/> on the window's
+    /// first day). A time that does not read as one stays as written.
     /// </summary>
     public static string IncidentDetails(string reportJson) => IncidentDetails(reportJson, TimeZoneInfo.Local);
 
@@ -51,7 +53,9 @@ public static class CopyText
     /// </summary>
     internal static string IncidentDetails(string reportJson, TimeZoneInfo zone) => Incident(reportJson, zone);
 
-    /// <param name="zone">The zone the details show times in; null for the summary as report.json has it (Copy summary).</param>
+    /// <param name="zone">
+    /// The zone the details show times in; null for the summary as report.json has it, but for the confidence (Copy summary).
+    /// </param>
     private static string Incident(string reportJson, TimeZoneInfo? zone)
     {
         bool details = zone is not null;
@@ -71,8 +75,7 @@ public static class CopyText
             foreach (var s in sus.EnumerateArray())
             {
                 if (++i > 5) break;
-                string confidence = S(s, "confidence");
-                sb.Append($"{i}. {S(s, "displayName")} (PID {(s.TryGetProperty("pid", out var pid) ? pid.ToString() : "?")}), {(details ? ConfidenceWords(confidence) : confidence)}\r\n");
+                sb.Append($"{i}. {S(s, "displayName")} (PID {(s.TryGetProperty("pid", out var pid) ? pid.ToString() : "?")}), {ConfidenceWords(S(s, "confidence"))}\r\n");
                 if (s.TryGetProperty("evidence", out var ev) && ev.ValueKind == JsonValueKind.Array)
                     foreach (var line in ev.EnumerateArray()) sb.Append("   - ").Append(line.GetString()).Append("\r\n");
                 if (S(s, "commandLine") is { Length: > 0 } cl) sb.Append("   command line: ").Append(cl).Append("\r\n");
