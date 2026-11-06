@@ -27,9 +27,9 @@ public sealed class CiConfigTests
     }
 
     [Fact]
-    public void TheUiTestRunsWithTheM2ThresholdsAndTheHourlyClear()
+    public void TheUiTestRunsWithTheEndToEndScenariosThresholdsAndTheHourlyClear()
     {
-        // ci/m4-ui.ps1: the Simple view's line shows a schedule and Active changes lists a setting; the rest is as in M2.
+        // ci/m4-ui.ps1: the Simple view's line shows a schedule and Active changes lists a setting; the rest is as in m2-config.json.
         var ui = Config("ui-config.json");
         Assert.True(ui.AutoClearEnabled);
         Assert.Equal(1, ui.AutoClearEveryHours);

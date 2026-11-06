@@ -117,6 +117,21 @@ public class IdentityTests
         Assert.Equal("node.exe · server.js under VS Code", Id(code, node).Display);
     }
 
+    /// <summary>
+    /// An ancestry read in full that holds no process PoolWatch names an owner by (a cmd.exe that Explorer started) gives
+    /// an owner PoolWatch could not tell, named by its image and process ID; so does a shell below a shared runtime.
+    /// </summary>
+    [Fact]
+    public void AShellThatExplorerStartedHasNoOwnerPoolWatchCanTell()
+    {
+        var cmd = P("cmd.exe", @"C:\Windows\System32\cmd.exe", "cmd.exe");
+        var owner = ProcessIdentities.OwnerOf([P("explorer.exe"), cmd]);
+        Assert.Equal(OwnerKind.Unknown, owner.Kind);
+        Assert.Equal($"cmd.exe (PID {cmd.Pid})", owner.Name);
+        var shell = P("pwsh.exe", @"C:\Program Files\PowerShell\7\pwsh.exe", "pwsh");
+        Assert.Equal($"cmd.exe (PID {cmd.Pid})", ProcessIdentities.OwnerOf([P("explorer.exe"), cmd, shell]).Name);
+    }
+
     [Fact]
     public void BundleFromTheCommandLineWhenThePathIsUnknown()
     {

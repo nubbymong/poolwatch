@@ -24,7 +24,7 @@ if ($service) {
     Assert-True ($r.ExitCode -eq 0) "turned $service off for Active changes (exit $($r.ExitCode))"
 } else { Write-Host '  (no harmless catalogue service on this runner: Active changes lists the setting only)' }
 
-# ui-config.json: the M2 thresholds plus the hourly automatic clear; the default 10 s interval.
+# ui-config.json: m2-config.json's thresholds plus the hourly automatic clear; the default 10 s interval.
 $pw = Start-PoolWatch $Exe @('--ui-smoke', '80', '--config', "$PSScriptRoot\ui-config.json", '--interval', '10', '--out', $Out)
 Start-Sleep -Seconds 15
 & $Leaker leak-handles --dir $work --count 30000 --ramp 30 --hold 40
@@ -59,7 +59,11 @@ if (Test-Path $smokeFile) {
              '6-setup-7-ready.png', '6-setup-how-it-works.png',
              '7-active-changes.png', '8-report-issue.png', '9-about.png', '10-update-notice.png'
     Assert-True ($shots.Count -eq $names.Count) "$($names.Count) screenshots ($($shots -join ', '))"
-    foreach ($n in $names) { Assert-True ($n -in $shots) "screenshot $n taken" }
+    # A CHECK-RAN line follows each check the tests pin: CI fails a run that does not print it (ci/expected-checks.txt).
+    foreach ($n in $names) {
+        Assert-True ($n -in $shots) "screenshot $n taken"
+        Write-Host 'CHECK-RAN: ui-screenshots-taken'
+    }
 
     # The status line, the same in both views.
     Assert-True ($f.status -match '^Kernel pool') "the status line reads in plain English: $($f.status)"
@@ -87,6 +91,7 @@ if (Test-Path $smokeFile) {
     # The Advanced view on Pool causes: two buttons (Export report is in a row's details), three tabs.
     Assert-True ((@($f.buttons) -join '|') -eq 'Clear now|Settings') "the Advanced view has two buttons: $(@($f.buttons) -join ', ')"
     Assert-True ((@($f.tabs) -join '|') -eq 'Pool causes|Services|Tasks and startup apps') "three tabs: $(@($f.tabs) -join ', ')"
+    Write-Host 'CHECK-RAN: ui-three-tabs'
 
     # Pool causes: the leak's incident is listed, and selecting a row shows its details.
     Assert-True ([int]$f.rows.'Pool causes' -ge 1) "Pool causes lists rows ($($f.rows.'Pool causes'); by kind: $($f.causeKinds | ConvertTo-Json -Compress))"
@@ -99,12 +104,12 @@ if (Test-Path $smokeFile) {
     Assert-True ($f.selectionKept -eq $true) "a refresh keeps the selected row"
     Assert-True ($f.copyMatches -eq $true) "Ctrl+C copies the header and exactly the selected row's cells: $($f.copiedSample)"
 
-    # Nothing clipped or overlapping (text that does not fit, controls outside their parent, the chart's labels on its
-    # title), checked with each tab selected (Services and Tasks and startup apps once their lists have loaded) and with
-    # Settings open.
+    # Nothing clipped or overlapping (text that does not fit, controls outside their parent or on their siblings, the
+    # chart's labels on its title), checked with each tab selected (Services and Tasks and startup apps once their lists
+    # have loaded) and with Settings open.
     Assert-True (@($f.layoutProblems).Count -eq 0) "Pool causes, Services and Tasks and startup apps: nothing clipped or overlapping at $($f.size.width) x $($f.size.height) ($($f.size.dpi) dpi): $(@($f.layoutProblems) -join '; ')"
     Assert-True ([int]$f.rows.Services -ge 1) "the Services tab was checked with its list loaded ($($f.rows.Services) services)"
-    Assert-True (@($f.settingsLayoutProblems).Count -eq 0) "Settings and Settings Advanced: nothing clipped: $(@($f.settingsLayoutProblems) -join '; ')"
+    Assert-True (@($f.settingsLayoutProblems).Count -eq 0) "Settings and Settings Advanced: nothing clipped or overlapping: $(@($f.settingsLayoutProblems) -join '; ')"
     # The plain Settings form: its five parts in plain words, the lines under the token-leak guard and update notices, and
     # Advanced for the full grid. (The layout check above covers the whole form at its own size: it sizes itself.)
     $form = @($f.settingsForm)
@@ -117,30 +122,46 @@ if (Test-Path $smokeFile) {
     Assert-True (@($form | Where-Object { $_ -like 'While it is on, other programs can bring their windows to the front*until you untick this.' }).Count -eq 1) "Settings says what the token-leak guard does to you and how long it lasts"
     Assert-True (@($form | Where-Object { $_ -like '*Save puts automatic clearing, the token-leak guard and update notices into effect at once*' }).Count -eq 1) "Settings says what Save applies at once"
     Assert-Plain 'the Settings form' $form
-    if (@($f.layoutProblemsAtMinimumSize).Count -gt 0) { Write-Host "  note, at the smallest window size: $(@($f.layoutProblemsAtMinimumSize) -join '; ')" }
+    Assert-True (@($f.layoutProblemsAtMinimumSize).Count -eq 0) "the three tabs at the window's smallest size: nothing clipped or overlapping: $(@($f.layoutProblemsAtMinimumSize) -join '; ')"
     Assert-True ($f.timerWhileVisible -eq $true -and $f.timerWhileHidden -eq $false) "refresh timer runs only while visible (visible=$($f.timerWhileVisible), hidden=$($f.timerWhileHidden))"
     Assert-True ([int]$f.rowsAfterHide -ge 1) "hidden and shown again, Pool causes lists its rows again ($($f.rowsAfterHide))"
+    # [int]$null is 0, so a field that is missing from smoke.json must fail here, not pass as 0.
+    $hiddenFields = @('chartPointsWhileHidden', 'taskRowsWhileHidden', 'taskListRowsWhileHidden')
+    $missingHidden = @($hiddenFields | Where-Object { $null -eq $f.$_ })
+    Assert-True ($missingHidden.Count -eq 0) "smoke.json has the hidden window's counts (missing: $($missingHidden -join ', '))"
+    Assert-True ($missingHidden.Count -eq 0 -and [int]$f.chartPointsWhileHidden -eq 0 -and [int]$f.taskRowsWhileHidden -eq 0 -and [int]$f.taskListRowsWhileHidden -eq 0) "hidden, the window holds no graph points, no task rows and no rows in the Tasks list (points=$($f.chartPointsWhileHidden), rows=$($f.taskRowsWhileHidden), list=$($f.taskListRowsWhileHidden))"
+    Write-Host 'CHECK-RAN: ui-hidden-window-holds-nothing'
 
-    # Setup as on a first run, after it read the PC (no leak check in the test): its own window, whose close button does
-    # nothing, the seven steps of the approved design, nothing clipped, no tour, and "How PoolWatch works".
+    # Setup as on a first run, after it read the PC (no leak check in the test): its own window, whose close button works
+    # and asks first, the seven steps of the approved design, nothing clipped or overlapping, no tour, and "How PoolWatch
+    # works".
     $g = $s.guide
     Assert-True ($g.ready -eq $true) "setup read the PC"
     Assert-True ($g.window.fits -eq $true) "the setup window fits the working area ($($g.window.width) x $($g.window.height) in $($g.window.area))"
-    Assert-True ($g.window.closeButtonWorks -eq $false) "the first-run setup's close button does nothing"
+    # closeAsksFirst comes from the closing path: the window was sent its close button's message, the question answered No.
+    Assert-True ($g.window.closeButtonEnabled -eq $true -and $g.window.closeAsksFirst -eq $true) "the first-run setup's close button is enabled, and its close asks first and keeps setup open on No (enabled=$($g.window.closeButtonEnabled), asks=$($g.window.closeAsksFirst))"
+    Write-Host 'CHECK-RAN: ui-setup-close-button'
     $steps = @($g.steps | ForEach-Object { $_.stats })
     $rail = @($steps | ForEach-Object { $_.rail }) -join '|'
     Assert-True ($rail -eq 'Welcome|Your PC|Safety|Standby cache|Fixes|Services|Ready') "setup has its seven steps: $rail"
     foreach ($st in $steps) {
-        Assert-True (@($st.layoutProblems).Count -eq 0) "setup step $($st.number) ($($st.rail)): nothing clipped: $(@($st.layoutProblems) -join '; ')"
+        Assert-True (@($st.layoutProblems).Count -eq 0) "setup step $($st.number) ($($st.rail)): nothing clipped or overlapping: $(@($st.layoutProblems) -join '; ')"
         Assert-Plain "setup step $($st.number)" (@($st.texts) + @($st.buttons))
     }
     Assert-True ((@($steps[0].choices) -join '|') -eq 'Simple|Advanced') "Welcome offers Simple and Advanced: $(@($steps[0].choices) -join ', ')"
     $impact = @($steps[1].impact)
     Assert-True ($impact.Count -eq 5) "Your PC has a row per known cause ($($impact.Count): $(@($impact | ForEach-Object { $_.title }) -join ' | '))"
     foreach ($r in $impact) {
-        Assert-True ($r.level -in 'None', 'Low impact', 'Medium impact', 'High impact', 'Checking...') "'$($r.title)' has a level on the scale: $($r.level)"
+        Assert-True ($r.level -in 'None', 'Low impact', 'Medium impact', 'High impact', 'Not known', 'Checking...') "'$($r.title)' shows a level on the scale, Not known or Checking...: $($r.level)"
         Assert-True ("$($r.under)" -notmatch 'Fixed') "'$($r.title)' says where it is fixed, never that it is: $($r.under)"
+        # A cause PoolWatch could not check (such as the token leak on a build that needs its check, which the UI test never
+        # runs) reads Not known, never None, and PoolWatch keeps watching for it.
+        Assert-True (($r.level -ne 'Not known') -or ("$($r.under)" -eq 'Still watching')) "'$($r.title)', not known, says Still watching: $($r.under)"
     }
+    # The rows are listed by level, the highest first, with Not known (and a check still running) just above None.
+    $rank = @{ 'High impact' = 0; 'Medium impact' = 1; 'Low impact' = 2; 'Not known' = 3; 'Checking...' = 3; 'None' = 4 }
+    $ranks = @($impact | ForEach-Object { $rank["$($_.level)"] })
+    Assert-True ((@($ranks | Sort-Object) -join ',') -eq ($ranks -join ',')) "Your PC lists its rows by level, the highest first: $(@($impact | ForEach-Object { "$($_.title) ($($_.level))" }) -join ' | ')"
     $cache = $steps[3]
     Assert-True ((@($cache.choices) -join '|') -eq 'On a schedule|At a pool size|Whichever comes first|Decide later') "Standby cache has four choices: $(@($cache.choices) -join ', ')"
     Assert-True ("$($cache.recommended)" -eq 'Whichever comes first') "Whichever comes first is the recommended choice, on any PC: $($cache.recommended)"
@@ -150,7 +171,7 @@ if (Test-Path $smokeFile) {
     Assert-True (@($steps | ForEach-Object { $_.texts } | Where-Object { "$_" -match 'Show me around|restore point' }).Count -eq 0) "setup offers no tour and no restore point"
     $how = $g.howItWorks.stats
     Assert-True ($how.fits -eq $true) "How PoolWatch works fits the working area"
-    Assert-True (@($how.layoutProblems).Count -eq 0) "How PoolWatch works: nothing clipped: $(@($how.layoutProblems) -join '; ')"
+    Assert-True (@($how.layoutProblems).Count -eq 0) "How PoolWatch works: nothing clipped or overlapping: $(@($how.layoutProblems) -join '; ')"
     Assert-True ('Emptying it is safe' -in @($how.texts)) "How PoolWatch works says why emptying the cache is safe"
     Assert-Plain 'How PoolWatch works' @($how.texts)
 
@@ -165,8 +186,8 @@ if (Test-Path $smokeFile) {
     Assert-True ((@($a.stats.buttons) -join '|') -eq 'Put all back|Close') "Active changes has Put all back and Close: $(@($a.stats.buttons) -join ', ')"
     if ($service) { Assert-True (@($rows | Where-Object { $_.group -eq 'TurnedOff' -and $_.button -eq 'Put back' }).Count -ge 1) "the service PoolWatch turned off has Put back" }
     Assert-True ("$($a.stats.notListed)" -like 'Not listed:*') "Active changes says what it does not list"
-    Assert-True ("$($a.stats.uninstallNote)" -like 'Uninstalling puts all of these back*') "Active changes says uninstalling puts them back"
-    Assert-True (@($a.stats.layoutProblems).Count -eq 0) "Active changes: nothing clipped: $(@($a.stats.layoutProblems) -join '; ')"
+    Assert-True ("$($a.stats.uninstallNote)" -like 'Uninstalling puts each of these back*') "Active changes says uninstalling puts them back"
+    Assert-True (@($a.stats.layoutProblems).Count -eq 0) "Active changes: nothing clipped or overlapping: $(@($a.stats.layoutProblems) -join '; ')"
     Assert-Plain 'Active changes' (@($rows | ForEach-Object { $_.what, $_.title, $_.detail, $_.note }))
 
     # Report an issue: the preview is redacted, and the address carries only the title, version and Windows.
@@ -174,18 +195,21 @@ if (Test-Path $smokeFile) {
     Assert-True ("$($rep.preview)".IndexOf($env:USERNAME, [StringComparison]::OrdinalIgnoreCase) -lt 0) "the report's preview does not hold the user name"
     Assert-True ("$($rep.preview)".IndexOf($env:COMPUTERNAME, [StringComparison]::OrdinalIgnoreCase) -lt 0) "the report's preview does not hold the PC's name"
     Assert-True ([int]$rep.urlLength -gt 0 -and [int]$rep.urlLength -le 255) "the issue address is short ($($rep.urlLength) characters)"
-    Assert-True (@($rep.layoutProblems).Count -eq 0) "Report an issue: nothing clipped: $(@($rep.layoutProblems) -join '; ')"
+    Assert-True (@($rep.layoutProblems).Count -eq 0) "Report an issue: nothing clipped or overlapping: $(@($rep.layoutProblems) -join '; ')"
 
-    # About: the credits, and nothing clipped.
+    # About: the credits, and nothing clipped or overlapping.
     $credits = @($s.about.credits)
     foreach ($name in 'TraceEvent', 'Inno Setup', 'gunrgbcr', 'bentoner', 'RAMMap') {
         Assert-True (@($credits | Where-Object { $_ -like "*$name*" }).Count -ge 1) "About credits $name"
     }
-    Assert-True (@($s.about.layoutProblems).Count -eq 0) "About: nothing clipped: $(@($s.about.layoutProblems) -join '; ')"
+    Assert-True (@($s.about.layoutProblems).Count -eq 0) "About: nothing clipped or overlapping: $(@($s.about.layoutProblems) -join '; ')"
+    # About is drawn about 90 s after start, in PoolWatch's start-up: it judges no figure against the budget before steady
+    # state, which starts 15 minutes after start (DESIGN.md section 3); it says when it will.
+    Assert-True ("$($s.about.overhead)" -like 'Overhead: judged over its steady state, from 15 minutes after PoolWatch starts, once that has lasted 5 minutes *') "About judges nothing in the start-up: $($s.about.overhead)"
 
     # The update notice for a sample release, at the bottom of the main window.
     Assert-True ($s.updateNotice.text -eq "PoolWatch 1.0.1 is available. See what's new") "the update notice reads: $($s.updateNotice.text)"
-    Assert-True (@($s.updateNotice.layoutProblems).Count -eq 0) "the update notice: nothing clipped: $(@($s.updateNotice.layoutProblems) -join '; ')"
+    Assert-True (@($s.updateNotice.layoutProblems).Count -eq 0) "the update notice: nothing clipped or overlapping: $(@($s.updateNotice.layoutProblems) -join '; ')"
 
     # Everything taken off the window is in the tray menu (the clear-task removals show only when there is one to remove).
     $tray = @($s.trayMenu)
@@ -193,6 +217,7 @@ if (Test-Path $smokeFile) {
                       'Export vendor bundle...', 'Copy latest incident summary', 'Remove my clear task...', 'Remove old clear-cache tasks...',
                       'Report an issue...', 'About PoolWatch', 'Exit') {
         Assert-True ($item -in $tray) "tray menu has '$item'"
+        Write-Host 'CHECK-RAN: ui-tray-menu-items'
     }
     # Every window made for the test was closed again.
     Assert-True ((@($s.openForms) -join '|') -eq 'PoolWatch') "only the main window is left open ($(@($s.openForms) -join ', '))"

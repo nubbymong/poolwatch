@@ -114,6 +114,12 @@ $steadyMaxWs = if ($steady.Count -gt 0) { ($steady | Measure-Object workingSetMB
 $steadyWsText = if ($null -ne $steadyMaxWs) { '{0:N1} MB' -f $steadyMaxWs } else { 'n/a (no sample from 15 min)' }
 $overhead = Get-Content "$Out\overhead.json" -Raw | ConvertFrom-Json
 $summary = Get-Content "$Out\summary.json" -Raw | ConvertFrom-Json
+# -Ui: About's own figures (DESIGN.md section 3), which PoolWatch's meter takes over its steady state, from 15 minutes
+# as here: read from smoke.json as the end-of-run walk began (meterBeforeWalk), with the text the About drawn in that
+# walk showed. Missing, they read as $null and the assertions below fail.
+$smoke = if ($Ui -and (Test-Path "$Out\screenshots\smoke.json")) { Get-Content "$Out\screenshots\smoke.json" -Raw | ConvertFrom-Json } else { $null }
+$meter = if ($null -ne $smoke) { $smoke.meterBeforeWalk } else { $null }
+$aboutText = if ($null -ne $smoke) { "$($smoke.about.overhead)" } else { '' }
 $md = New-Object System.Text.StringBuilder
 [void]$md.AppendLine("# Soak under load ($(if ($Ui) { 'UI, window open' } else { 'headless' }), $Minutes min, $ChainsPerMinute chains/min, $FilesPerSecond files/s, $Handles handles held)")
 [void]$md.AppendLine()
@@ -127,6 +133,11 @@ $md = New-Object System.Text.StringBuilder
 $endText = if ($endRows.Count -gt 0) { 'working set max {0:N1} MB, private memory max {1:N1} MB over {2} samples' -f ($endRows | Measure-Object workingSetMB -Maximum).Maximum, ($endRows | Measure-Object privateMB -Maximum).Maximum, $endRows.Count } else { 'no sample' }
 [void]$md.AppendLine(("- End of run (after {0:N1} min: {1}; not judged): {2}" -f ($steadyTo / 60), $(if ($Ui) { "the end-of-run screenshots and checks" } else { "the reports written at exit" }), $endText))
 [void]$md.AppendLine(("- Disk writes {0:N2} MB/h (own meter); ETW events {1}; processes tracked {2}" -f ($overhead.diskWriteBytesPerHour / 1MB), $summary.etwEvents, $summary.processesTracked))
+if ($Ui) {
+    $meterText = if ($null -ne $meter) { "steady state from {0:N0} min over {1:N1} min: CPU {2:N3}% of one core, peak working set {3:N1} MB, disk writes {4:N2} MB/h" -f ([double]$meter.judgedFromSeconds / 60), ([double]$meter.judgedSeconds / 60), [double]$meter.judgedCpuPercentOfOneCore, ([double]$meter.judgedPeakWorkingSetBytes / 1MB), ([double]$meter.judgedDiskWriteBytesPerHour / 1MB) } else { 'n/a (no meterBeforeWalk in smoke.json)' }
+    [void]$md.AppendLine("- About's figures (PoolWatch's own meter, read as the end-of-run walk began): $meterText")
+    [void]$md.AppendLine("- About at the end of the run said: $aboutText")
+}
 [void]$md.AppendLine(("- GC: heap {0} MB, committed {1} MB, allocated {2} MB total, gen0/1/2 {3}/{4}/{5}, server={6}" -f $profile.gc.heapMB, $profile.gc.committedMB, $profile.gc.totalAllocatedMB, $profile.gc.gen0, $profile.gc.gen1, $profile.gc.gen2, $profile.gc.server))
 [void]$md.AppendLine(("- Held: {0}" -f ($profile.held | ConvertTo-Json -Compress)))
 [void]$md.AppendLine()
@@ -157,8 +168,16 @@ if ($Assert) {
     Assert-True ([int]$profile.held.registryRecords -le 20000) "registry bounded ($($profile.held.registryRecords) <= 20000)"
     Assert-True ($handleSlope -lt 50) ("own handles flat: trend {0:N0}/h < 50/h" -f $handleSlope)
     if ($Ui) {
+        # A CHECK-RAN line follows each check the tests pin: CI fails a run that does not print it (ci/expected-checks.txt).
         Assert-True (@($walked | Where-Object { $_ -notin $uiPages }).Count -eq 0) "the UI soak refreshed the Simple view, Pool causes, Services and Tasks and startup apps ($($uiPages -join ', '))"
+        Write-Host 'CHECK-RAN: soak-walked-pages-refreshed'
         Assert-True (@($uiPages | Where-Object { $_ -notin $walked }).Count -eq 0) "no page beyond the Simple view and the three tabs was refreshed ($($uiPages -join ', '))"
+        Write-Host 'CHECK-RAN: soak-no-other-page-refreshed'
+        # About judges steady state only, from 15 minutes; its peak working set is held to the same 100 MB as the steady
+        # maximum sampled from outside above (the CPU and the disk writes are asserted above over the same window).
+        Assert-True ($null -ne $meter -and $meter.judged -eq $true -and [double]$meter.judgedFromSeconds -eq 900) "About's figures are steady state from 15 min: $meterText"
+        Assert-True ($null -ne $meter -and $null -ne $meter.judgedPeakWorkingSetBytes -and [double]$meter.judgedPeakWorkingSetBytes -lt 100MB) "About's peak working set (steady state, own meter) < 100 MB: $meterText"
+        Assert-True ($aboutText -like 'Overhead over * of steady state (from 15 minutes after start): CPU *') "About judged the steady state at the end of the run: $aboutText"
     }
 }
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue

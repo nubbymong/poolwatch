@@ -62,7 +62,7 @@ switch ($Scenario) {
             Assert-True (Test-Path (Join-Path $s.dir 'spawns.csv')) "spawns.csv written"
             $trace = @(Import-Csv (Join-Path $s.dir 'spawns.csv'))
             Assert-True ($trace.Count -ge 100) "spawns.csv has >= 100 rows ($($trace.Count))"
-            Assert-True (@($trace | Where-Object { $_.image -eq 'git.exe' -and $_.git_root -eq $repo -and $_.work_dir_source -eq '-C' }).Count -ge 50) "spawn trace rows carry the git root and '-C' as its source"
+            Assert-True (@($trace | Where-Object { $_.image -eq 'git.exe' -and $_.git_root -eq $repo -and $_.work_dir_source -eq 'git -C' }).Count -ge 50) "spawn trace rows carry the git root and 'git -C' as its source"
             Assert-True ((Get-Content (Join-Path $s.dir 'report.md') -Raw) -match '## Top command-line patterns') "report.md lists the command patterns"
         }
         Assert-True (@($findings | Where-Object { $_.kind -eq 'SpawnStorm' -and $_.severity -eq 'Alert' }).Count -ge 1) "findings.jsonl has the storm alert"
@@ -77,7 +77,7 @@ switch ($Scenario) {
         Assert-True (@($summary.strayGitChecked | Where-Object { $_.where -eq 'a volume root' }).Count -ge 1) "stray .git check covered the fixed volume roots"
     }
     'identity' {
-        # Item 4: node.exe is never just "node.exe". A node bundled in an app folder (like Codex's runtimes\cua_node) runs a
+        # node.exe is never just "node.exe". A node bundled in an app folder (like Codex's runtimes\cua_node) runs a
         # script; another node is started through WMI (WmiPrvSE > cmd > node: the requester is hidden).
         $node = (Get-Command node -ErrorAction Stop).Source
         $vendor = Join-Path $env:LOCALAPPDATA 'PoolWatchTestVendor\runtimes\cua_node'
@@ -191,7 +191,7 @@ switch ($Scenario) {
         }
     }
     'shape' {
-        # Item 8: a File handle leak shows a growing shape in its incident, and the leak shape whenever, against the rates
+        # A File handle leak shows a growing shape in its incident, and the leak shape whenever, against the rates
         # just before it, allocations rose and frees did not; the system-wide counters (commit, limit, available RAM,
         # handles, System's handles by type) are recorded.
         $pw = Start-PoolWatch $Exe @('--headless', '--duration', "$Duration", '--config', "$PSScriptRoot\diag-config.json", '--out', $Out)
@@ -234,8 +234,8 @@ switch ($Scenario) {
         Assert-True (@($sh | Where-Object { $_.type -in 'Process', 'Thread', 'Key', 'File' }).Count -ge 2) "system-handles.csv lists the System process's handles by type"
     }
     'lag' {
-        # Item 9: every core busy at the highest priority makes a 15 ms sleep wake up late; the probe must see it against
-        # its baseline and record the pool size at that moment. C1: the trip's CPU trace is held back while the PC is
+        # Every core busy at the highest priority makes a 15 ms sleep wake up late; the probe must see it against
+        # its baseline and record the pool size at that moment. The trip's CPU trace is held back while the PC is
         # saturated and starts after the burn; the probe pauses during it and for 30 s after, so the run is 60 s longer.
         $pw = Start-PoolWatch $Exe @('--headless', '--duration', "$($Duration + 60)", '--config', "$PSScriptRoot\diag-config.json", '--out', $Out)
         Start-Sleep -Seconds 40   # baseline: 6 probes at 2 s, after start-up
@@ -259,17 +259,17 @@ switch ($Scenario) {
             Assert-True ($lf[0].details[0] -match 'lag starts at about .* of non-paged pool') "the finding says at which pool size lag starts"
         }
         Assert-True (@($lag | Where-Object { $_.file_ms -ne '' }).Count -ge 30) "file round-trips measured"
-        # Addendum 2 C: the lag trip records a CPU-only trace next to the pool size.
+        # The lag trip records a CPU-only trace next to the pool size.
         $cpuCap = @(Get-ChildItem "$Out\incidents\*\report.json" -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json } |
             Where-Object { $_.kind -eq 'Capture' -and $null -ne $_.capture.cpu })
         if ($cpuCap.Count -ge 1) { Write-Host "  lag cpu: $($cpuCap[0].capture.cpu.summary)" }
         Assert-True ($lf.Count -eq 0 -or ($cpuCap.Count -ge 1 -and [int64]$cpuCap[0].capture.cpu.samples -gt 1000 -and [int64]$cpuCap[0].capture.cpu.poolBytes -gt 0)) "the lag trip recorded a CPU trace with the pool size"
     }
     'clearcache' {
-        # Addendum 2; S5 (review round 2): the runner is elevated, as PoolWatch always is, so the clear runs in-process:
+        # The runner is elevated, as PoolWatch always is, so the clear runs in-process:
         # there is no setup and no SYSTEM task any more. Checked: the headless clear (measured), a clear task of your own
         # (found by what it runs, RAMMap -E..., under any name; seen, kept on a no, removed on a yes), and the removal of what an older PoolWatch's setup installed: automatically
-        # at the start (review round 3, item 7), and by --remove-clear-cache (the fallback) once planted again.
+        # at the start, and by --remove-clear-cache (the fallback) once planted again.
         $ramMap = Join-Path $env:ProgramFiles 'Sysinternals\RAMMap64.exe'
         $ramMapCreated = -not (Test-Path $ramMap)
         $oldDir = Join-Path $env:ProgramFiles 'PoolWatch'
@@ -339,7 +339,7 @@ switch ($Scenario) {
             foreach ($c in @($summary.clears)) { Write-Host "  clear: $($c.summary)" }
             Assert-True ($summary.clearHelper.CanPurge -eq $true) "the clear runs in-process (PoolWatch is elevated; no setup)"
             Assert-True ($summary.clearHelper.LegacyTaskPresent -eq $true) "PoolWatch sees your own clear task"
-            # Review round 3 (item 7): the first status read removed the older build's tasks and helper files by itself.
+            # The first status read removed the older build's tasks and helper files by itself.
             Assert-True (@($summary.clearHelper.OldTasks).Count -eq 0) "the older build's two tasks were removed at the start ($(@($summary.clearHelper.OldTasks) -join ', '))"
             Assert-True ((& $oldTasksLeft) -eq 0) "the old tasks are gone from Task Scheduler"
             Assert-True (-not (Test-Path $oldDll) -and -not (Test-Path $oldConfig)) "the old helper files are gone"
@@ -409,7 +409,7 @@ switch ($Scenario) {
         }
     }
     'experiment' {
-        # Item 10: a guided A/B run with 1-minute phases where the "app" is Leaker holding 60,000 File handles. The script
+        # A guided A/B run with 1-minute phases where the "app" is Leaker holding 60,000 File handles. The script
         # plays the user: it starts Leaker at the "start" prompt and closes it (its own child) at the "close" prompt.
         $pw = Start-PoolWatch $Exe @('--headless', '--duration', '260', '--config', "$PSScriptRoot\diag-config.json", '--out', $Out,
             '--experiment', 'Leaker', '--phase-minutes', '1')
@@ -448,7 +448,7 @@ switch ($Scenario) {
         $ev = @(Import-PwCsv "$Out\events.csv" | Where-Object { $_.kind -eq 'Finding' -and $_.detail -like 'Mark: lag*' })
         Assert-True ($ev.Count -eq 1) "the mark is in events.csv"
 
-        # Addendum 2 C: the preset "lag before vs after a clear" (1-minute phases; the runner is elevated, so PoolWatch
+        # The preset "lag before vs after a clear" (1-minute phases; the runner is elevated, so PoolWatch
         # purges in-process at the phase boundary).
         $out2 = "$Out-clearlag"
         $pw = Start-PoolWatch $Exe @('--headless', '--duration', '170', '--config', "$PSScriptRoot\diag-config.json", '--out', $out2,
@@ -463,7 +463,7 @@ switch ($Scenario) {
         Copy-Item -Recurse "$out2\*" (New-Item -ItemType Directory -Force "$Out\clearlag").FullName -ErrorAction SilentlyContinue
     }
     'accumulation' {
-        # Item 12: Leaker starts a long-running cmd.exe every 6 s and never ends them (like cua_node helpers piling up);
+        # Leaker starts a long-running cmd.exe every 6 s and never ends them (like cua_node helpers piling up);
         # censuses every 10 s must flag the group under its owner.
         $cfg = Get-Content "$PSScriptRoot\diag-config.json" -Raw | ConvertFrom-Json
         foreach ($kv in @{ accumulationIntervalSeconds = 10; accumulationWindowPoints = 4; accumulationMinCount = 5; accumulationMinRise = 3 }.GetEnumerator()) {
@@ -490,7 +490,7 @@ switch ($Scenario) {
         Assert-True ([int]$summary.accumulation.censuses -ge 10) "censuses every 10 s ($($summary.accumulation.censuses))"
     }
     'bundle' {
-        # Item 13: two runs in one boot keep one boot summary and one baseline; --export-bundle writes the vendor zip,
+        # Two runs in one boot keep one boot summary and one baseline; --export-bundle writes the vendor zip,
         # redacted by default (no user or machine name in any file).
         $pw = Start-PoolWatch $Exe @('--headless', '--duration', '40', '--config', "$PSScriptRoot\diag-config.json", '--out', $Out)
         Start-Sleep -Seconds 10
@@ -534,7 +534,7 @@ switch ($Scenario) {
         }
     }
     'versions' {
-        # Item 11: a Claude Code version appears between two runs, and a watched app (Leaker, via the config) crashes
+        # A Claude Code version appears between two runs, and a watched app (Leaker, via the config) crashes
         # while PoolWatch is not running; the second run must report both.
         $cfg = Get-Content "$PSScriptRoot\diag-config.json" -Raw | ConvertFrom-Json
         $cfg | Add-Member -NotePropertyName watchedApps -NotePropertyValue @('Leaker') -Force
@@ -589,7 +589,7 @@ switch ($Scenario) {
         }
     }
     'tokenguard' {
-        # Addendum 3: the token-leak guard's logon check with the real hidden helper. A runner may or may not have the
+        # The token-leak guard's logon check with the real hidden helper. A runner may or may not have the
         # leak, so this asserts the code path and prints the numbers, not the verdict.
         Add-Type -Namespace PW -Name Spi -MemberDefinition @'
 [DllImport("user32.dll", SetLastError = true)] public static extern bool SystemParametersInfoW(uint a, uint u, ref uint v, uint w);
@@ -600,7 +600,16 @@ switch ($Scenario) {
         Write-Host "  live ForegroundLockTimeout at start: $original"
         $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
         $build = "$($cv.CurrentBuild).$($cv.UBR)"
-
+        # The guard keeps its verdict, its test marker and its helper's results in the data root's cache folder, also under
+        # --out (whose folder someone else may be able to write). A first run starts with none there.
+        $guardCache = Join-Path $env:ProgramData 'PoolWatch\cache'
+        # The guard's own files there (its verdict, its test marker, and the value it replaced in this sign-in) are set
+        # aside first and put back by the finally at the end, so the scenario leaves the data folder as it found it.
+        $guardFiles = @('token-guard.json', 'token-test-running.json', 'token-guard-setting.json')
+        $kept = "$Out-guard-kept"
+        New-Item -ItemType Directory -Force $kept, $guardCache | Out-Null
+        foreach ($f in $guardFiles) { if (Test-Path "$guardCache\$f") { Move-Item -Force "$guardCache\$f" "$kept\$f" } }
+        try {
         $pw = Start-PoolWatch $Exe @('--headless', '--duration', '150', '--config', "$PSScriptRoot\diag-config.json", '--out', $Out, '--token-guard')
         $code = Wait-PoolWatch $pw 400
         Assert-True ($code -eq 0) "headless exit code 0 (got $code)"
@@ -611,11 +620,20 @@ switch ($Scenario) {
         if ($g.step -eq 'Test') {
             Assert-True ((@($g.numbers).Count -eq 6) -or ($null -ne $g.error)) "the helper ran twice x three ways ($(@($g.numbers) -join ', '); error $($g.error))"
             Write-Host "  helper numbers (n = 100 per way): $(@($g.numbers) -join ', ')"
+            # The real start: the helper is created inside its job, with its own environment and a command line that holds no
+            # path. A start Windows refused, or a helper that could not read its arguments, shows here as an error.
+            Assert-True (-not ("$($g.error)" -like '*could not start*')) "the helper started in its job ($($g.error))"
+            Assert-True (-not ("$($g.error)" -like '*no result*')) "the helper wrote its result ($($g.error))"
+            $guardLog = Get-Content "$Out\poolwatch.log" -Raw -ErrorAction SilentlyContinue
+            Assert-True ("$guardLog" -like "*the logon check's helper is in a job that only PoolWatch ends*") "the logon check's helper ran in its job (poolwatch.log says so)"
             Assert-True ($g.result -in 'leak', 'clean-once', 'unclear') "a verdict was recorded: $($g.result)"
             Assert-True ($g.build -eq $build) "the state carries the build ($($g.build) = $build)"
             if ($g.result -ne 'fixed') { Write-Host "  workaround wanted: $($g.wanted); live now: $($g.liveTimeout)" }
         }
-        Assert-True (Test-Path "$Out\cache\token-guard.json") "the guard's state is saved"
+        Assert-True (Test-Path "$guardCache\token-guard.json") "the guard's state is saved in the data root"
+        Assert-True (-not (Test-Path "$Out\cache\token-guard.json")) "the guard's state does not follow --out"
+        $left = @(Get-ChildItem "$guardCache\token-test-*.json" -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'token-test-running.json' })
+        Assert-True ($left.Count -eq 0) "each helper result was read once and deleted ($($left.Name -join ', '))"
         $tf = @(Read-Findings | Where-Object { $_.kind -eq 'TokenGuard' })
         Assert-True ($tf.Count -ge 1) "a TokenGuard finding on the timeline: $($tf[0].title)"
         Assert-True (@(Read-Findings | Where-Object { $_.kind -eq 'SpawnStorm' -and $_.title -like '*PoolWatch.exe*' }).Count -eq 0) "the guard's own test is not reported as a spawn storm"
@@ -623,8 +641,8 @@ switch ($Scenario) {
         # A known leak: PoolWatch's own state from an earlier logon says this build leaks, so the next logon need not test.
         try {
             $out2 = "$Out-known"
-            New-Item -ItemType Directory -Force "$out2\cache" | Out-Null
-            @{ build = $build; result = 'leak'; tested = '2026-10-20T08:15:00Z'; detail = 'run 1 {1, 0, 2}, run 2 {100, 98, 101}' } | ConvertTo-Json | Set-Content "$out2\cache\token-guard.json"
+            New-Item -ItemType Directory -Force $out2, $guardCache | Out-Null
+            @{ build = $build; result = 'leak'; tested = '2026-10-20T08:15:00Z'; detail = 'run 1 {1, 0, 2}, run 2 {100, 98, 101}' } | ConvertTo-Json | Set-Content "$guardCache\token-guard.json"
             [void][PW.Spi]::SystemParametersInfoW(0x2001, 0, [System.IntPtr]200000, 2)
             Write-Host "  live timeout before the known-leak run: $(Get-FgLock)"
             $pw = Start-PoolWatch $Exe @('--headless', '--duration', '40', '--config', "$PSScriptRoot\diag-config.json", '--out', $out2, '--token-guard')
@@ -635,11 +653,12 @@ switch ($Scenario) {
             Assert-True ($g2.step -in 'TurnOnKnownLeak', 'AlreadyOn') "same build + leak: no new test ($($g2.step))"
             Assert-True (@($g2.numbers).Count -eq 0) "no helper run"
 
-            # M3: a leak test that never finished (PoolWatch killed during it) leaves its marker; the next start turns the
-            # workaround on without testing again, and removes the marker once the outcome is saved.
+            # A leak test that never finished (PoolWatch killed during it) leaves its marker; the next start turns the
+            # workaround on without testing again, saves that a test on this build was cut short, and removes the marker
+            # once the outcome is saved.
             $out3 = "$Out-interrupted"
-            New-Item -ItemType Directory -Force "$out3\cache" | Out-Null
-            Set-Content "$out3\cache\token-test-running.json" '{}'
+            New-Item -ItemType Directory -Force $out3 | Out-Null
+            Set-Content "$guardCache\token-test-running.json" '{}'
             [void][PW.Spi]::SystemParametersInfoW(0x2001, 0, [System.IntPtr]200000, 2)
             $pw = Start-PoolWatch $Exe @('--headless', '--duration', '40', '--config', "$PSScriptRoot\diag-config.json", '--out', $out3, '--token-guard')
             $code = Wait-PoolWatch $pw 200
@@ -648,15 +667,27 @@ switch ($Scenario) {
             Write-Host "  interrupted run: $($g3 | ConvertTo-Json -Compress)"
             Assert-True ($g3.step -in 'TurnOnInterrupted', 'AlreadyOn') "an unfinished test's marker turns the workaround on without testing ($($g3.step))"
             Assert-True (@($g3.numbers).Count -eq 0) "no helper run after an interrupted test"
-            Assert-True (-not (Test-Path "$out3\cache\token-test-running.json")) "the marker is removed once the outcome is saved"
+            Assert-True (-not (Test-Path "$guardCache\token-test-running.json")) "the marker is removed once the outcome is saved"
+            if ($g3.step -eq 'TurnOnInterrupted') {
+                $saved = Get-Content "$guardCache\token-guard.json" -Raw | ConvertFrom-Json
+                Assert-True ($saved.result -eq 'interrupted' -and $saved.build -eq $build) "the cut-short test is saved for this build ($($saved.result) on $($saved.build)): each later logon on it turns the workaround on without testing"
+            }
         }
         finally {
             if ($null -ne $original) { [void][PW.Spi]::SystemParametersInfoW(0x2001, 0, [System.IntPtr]$original, 2) }
             Write-Host "  live timeout restored: $(Get-FgLock)"
         }
+        }
+        finally {
+            # What the runs here wrote goes (the planted verdicts and marker among them); what was there before comes back.
+            foreach ($f in $guardFiles) { Remove-Item "$guardCache\$f" -ErrorAction SilentlyContinue }
+            foreach ($f in $guardFiles) { if (Test-Path "$kept\$f") { Move-Item -Force "$kept\$f" "$guardCache\$f" } }
+            Remove-Item -Recurse -Force $kept -ErrorAction SilentlyContinue
+            Write-Host "  the guard's files in $guardCache are as they were before the scenario"
+        }
     }
     'services' {
-        # Addendum 4: the background-services page. The runner is elevated. Asserts the code path, the gate, and a real
+        # The background-services page. The runner is elevated. Asserts the code path, the gate, and a real
         # change + restore of a harmless catalogue service if one is installed (else just the gate and the dump).
         $dump = "$Out\services.json"
         $pw = Start-Process -FilePath $Exe -ArgumentList @('--services-dump', $dump, '--out', $Out, $script:AnyLocation) -Wait -PassThru -NoNewWindow
@@ -688,7 +719,7 @@ switch ($Scenario) {
             $r = Start-Process -FilePath $Exe -ArgumentList @('--service-off', $candidate, '--out', $Out, $script:AnyLocation) -Wait -PassThru -NoNewWindow -RedirectStandardOutput "$Out\off.txt"
             Write-Host "  off $candidate -> $(Get-Content "$Out\off.txt" -Raw)"
             Assert-True ((Get-Service $candidate).StartType -eq 'Disabled') "$candidate was turned off (disabled)"
-            # The change log is always in the admin-only data root, never under --out (Part 3 review).
+            # The change log is always in the admin-only data root, never under --out.
             $changes = Join-Path $env:ProgramData 'PoolWatch\service-changes.json'
             Assert-True (Test-Path $changes) "the original was saved before the change"
             $saved = Get-Content $changes -Raw | ConvertFrom-Json

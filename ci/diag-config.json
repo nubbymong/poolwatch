@@ -1,5 +1,6 @@
 {
-  // Diagnostics scenarios (spawn storms, ...): the M2 CI cadence; the diagnostics thresholds stay at their defaults.
+  // Diagnostics scenarios (spawn storms, ...): m2-config.json's cadence; the diagnostics thresholds stay at their
+  // defaults.
   "sampleIntervalSeconds": 2,
   "handleIntervalSeconds": 10,
   "tagCsvIntervalSeconds": 10,

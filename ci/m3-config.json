@@ -1,5 +1,5 @@
 {
-  // Scenario 4: the M2 CI thresholds plus a confirmation trace on the first alert.
+  // Scenario 4: m2-config.json's thresholds plus a confirmation trace on the first alert.
   "sampleIntervalSeconds": 2,
   "handleIntervalSeconds": 10,
   "tagCsvIntervalSeconds": 10,
