@@ -286,13 +286,19 @@ function Get-RestartValue([string]$name) {
     if ($null -eq $value) { return }
     return @($value)
 }
+# A path as Windows' list writes it, without what may come before it, as the setup reads it (ListedPath): the ! of a
+# move that may replace a file, the *1 or *2 that recent Windows builds put first (every entry on a Windows 11 25H2 PC
+# has one), and the \??\.
+function Get-ListedPath([string]$item) {
+    return ($item -replace '^!', '' -replace '^\*[12]', '' -replace '^\\\?\?\\', '')
+}
 function Get-RestartWork {
     $work = @()
     foreach ($name in 'PendingFileRenameOperations', 'PendingFileRenameOperations2') {
         $ops = @(Get-RestartValue $name)
         for ($i = 0; $i + 1 -lt $ops.Count; $i += 2) {
-            $from = $ops[$i] -replace '^\\\?\?\\', ''
-            $to = $ops[$i + 1] -replace '^!', '' -replace '^\\\?\?\\', ''
+            $from = Get-ListedPath $ops[$i]
+            $to = Get-ListedPath $ops[$i + 1]
             if ($from.StartsWith($app, [StringComparison]::OrdinalIgnoreCase)) {
                 $work += [pscustomobject]@{ Value = $name; From = $from; To = $to }
             }
@@ -310,8 +316,8 @@ function Complete-RestartWork {
         if ($ops.Count -eq 0) { continue }
         $keep = [System.Collections.Generic.List[string]]::new()
         for ($i = 0; $i + 1 -lt $ops.Count; $i += 2) {
-            $from = $ops[$i] -replace '^\\\?\?\\', ''
-            $to = $ops[$i + 1] -replace '^!', '' -replace '^\\\?\?\\', ''
+            $from = Get-ListedPath $ops[$i]
+            $to = Get-ListedPath $ops[$i + 1]
             if (-not $from.StartsWith($app, [StringComparison]::OrdinalIgnoreCase)) { $keep.Add($ops[$i]); $keep.Add($ops[$i + 1]); continue }
             try {
                 if ($to -eq '') {

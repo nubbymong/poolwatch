@@ -6600,6 +6600,12 @@ public sealed class UninstallerTests
         // (return , $list) is collected as one item, so Windows' restart work read as none and its count as 1.
         Assert.DoesNotMatch(@"return\s*,", ScriptCode.PowerShell(e2e));
         InLf("    if ($null -eq $value) { return }\n    return @($value)\n}");
+        // Each entry of Windows' list is read as the setup reads it (ListedPath): without the !, the *1 or *2 that recent
+        // Windows builds put first, and the \??\ (with only the last stripped, no entry of the install folder was found).
+        InE2e(@"return ($item -replace '^!', '' -replace '^\*[12]', '' -replace '^\\\?\?\\', '')");
+        Assert.Equal(2, Regex.Matches(e2e, Regex.Escape("$from = Get-ListedPath $ops[$i]")).Count);
+        Assert.Equal(2, Regex.Matches(e2e, Regex.Escape("$to = Get-ListedPath $ops[$i + 1]")).Count);
+        Assert.Contains("if (CharAt(Result, 1) = '*') and ((CharAt(Result, 2) = '1') or (CharAt(Result, 2) = '2')) then", Whole("ListedPath"));
         InE2e("foreach ($f in @(Get-ChildItem -LiteralPath $app -Recurse -Force -File -ErrorAction SilentlyContinue)) {");
         InLf("$changed = @($filesBefore.Keys | Where-Object { $filesAfter[$_] -ne $filesBefore[$_] }) + @($filesAfter.Keys | Where-Object { -not $filesBefore.ContainsKey($_) })\n" +
                         "Assert-True ($changed.Count -eq 0) \"the failed upgrade left every file of the version that was there as it was, and no other ($($changed -join ', '))\"");
