@@ -412,28 +412,133 @@ function Start-Holder([string]$path) {
     return $p
 }
 
-# A second process (Windows PowerShell) that waits, polling every few milliseconds, until a file matching $trigger is in
-# the install folder itself (a setup that set the old files aside names each <file>.<run>.old), then opens $path, or with
-# no $path the first file matching $trigger, for reading, shares it as $share says (Read: no program can rename or delete
-# it; ReadWrite: no program can open it to itself; None: no program can rename, delete or read it) and holds it; a file
-# that cannot be opened yet (not there, or being written) is tried again. It writes the path it holds to <name>-held.txt
-# in the output folder. Returns the process, with a handle to it held (for Stop-Held), once it is watching.
+# What a watcher (Start-Watcher) runs. The setup looks at the files it set aside again some 10 ms after it renamed the
+# first, and no loop that looks and sleeps wakes in time (a sleep lasts at least a timer tick, about 15 ms), nor one
+# that waits for Windows' change notices. So it holds a read-handle oplock on the install folder, which Windows breaks
+# as an entry of the folder is created, renamed or deleted, the change waiting until it lets go: it lets go at once and
+# looks at once. Once a file matching the trigger is there, it opens the path it is given (or that file) for reading,
+# shared as asked, again and again until it can (a file not there yet, or being written). Where Windows grants no
+# oplock it looks every millisecond instead.
+$watcherSource = @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Threading;
+using Microsoft.Win32.SafeHandles;
+
+public static class InstallFolderWatch
+{
+    const uint FILE_LIST_DIRECTORY = 0x1, FILE_READ_ATTRIBUTES = 0x80, SYNCHRONIZE = 0x100000;
+    const uint FILE_SHARE_ALL = 7, OPEN_EXISTING = 3;
+    const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000, FILE_FLAG_OVERLAPPED = 0x40000000;
+    const uint FSCTL_REQUEST_OPLOCK = 0x00090240;
+    const uint OPLOCK_LEVEL_CACHE_READ = 1, OPLOCK_LEVEL_CACHE_HANDLE = 2, REQUEST_OPLOCK_INPUT_FLAG_REQUEST = 1;
+    const int ERROR_IO_PENDING = 997;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct RequestInput { public ushort Version, Length; public uint RequestedOplockLevel, Flags; }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(SafeFileHandle h, uint code, ref RequestInput input, int inSize, IntPtr output, int outSize, IntPtr returned, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CancelIoEx(SafeFileHandle h, IntPtr overlapped);
+
+    // Waits until a file matching trigger is in dir, then opens path ('' for that file) for reading, shared as share
+    // says, and returns it (null at the deadline). Writes ready once it watches and the path it holds to held.
+    public static FileStream Hold(string dir, string trigger, string path, FileShare share, int timeoutMs, string ready, string held)
+    {
+        DateTime end = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        bool oplocks = true, marked = false;
+        string found = null;
+        while (found == null && DateTime.UtcNow < end)
+        {
+            found = Directory.EnumerateFiles(dir, trigger).FirstOrDefault();
+            if (found != null) break;
+            if (!oplocks)
+            {
+                if (!marked) { File.WriteAllText(ready, "watching"); marked = true; }
+                Thread.Sleep(1);
+                continue;
+            }
+            IntPtr ov = Marshal.AllocHGlobal(64), output = Marshal.AllocHGlobal(64);
+            ManualResetEvent done = new ManualResetEvent(false);
+            SafeFileHandle h = CreateFileW(dir, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_ALL, IntPtr.Zero,
+                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+            bool pending = false;
+            try
+            {
+                if (h.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(), "open " + dir);
+                for (int i = 0; i < 64; i += 4) { Marshal.WriteInt32(ov, i, 0); Marshal.WriteInt32(output, i, 0); }
+                Marshal.WriteIntPtr(ov, 2 * IntPtr.Size + 8, done.SafeWaitHandle.DangerousGetHandle()); // OVERLAPPED.hEvent
+                RequestInput input = new RequestInput();
+                input.Version = 1;
+                input.Length = (ushort)Marshal.SizeOf(typeof(RequestInput));
+                input.RequestedOplockLevel = OPLOCK_LEVEL_CACHE_READ | OPLOCK_LEVEL_CACHE_HANDLE;
+                input.Flags = REQUEST_OPLOCK_INPUT_FLAG_REQUEST;
+                bool ok = DeviceIoControl(h, FSCTL_REQUEST_OPLOCK, ref input, Marshal.SizeOf(typeof(RequestInput)), output, 64, IntPtr.Zero, ov);
+                int error = ok ? 0 : Marshal.GetLastWin32Error();
+                pending = !ok && error == ERROR_IO_PENDING;
+                if (!pending) { oplocks = false; continue; }
+                // A change between the look above and the oplock: look again before waiting.
+                found = Directory.EnumerateFiles(dir, trigger).FirstOrDefault();
+                if (found != null) break;
+                if (!marked) { File.WriteAllText(ready, "watching"); marked = true; }
+                done.WaitOne((int)Math.Max(0, (end - DateTime.UtcNow).TotalMilliseconds));
+            }
+            finally
+            {
+                // Closing the handle lets go of the oplock, and the change that broke it goes ahead. An oplock not broken
+                // is cancelled first; its request ends before its buffers are freed.
+                if (pending && !done.WaitOne(0)) { CancelIoEx(h, ov); done.WaitOne(1000); }
+                h.Dispose();
+                done.Dispose();
+                Marshal.FreeHGlobal(ov);
+                Marshal.FreeHGlobal(output);
+            }
+            // The change goes ahead now: look again and again for a moment until it shows.
+            DateTime spinEnd = DateTime.UtcNow.AddMilliseconds(50);
+            while (found == null && DateTime.UtcNow < spinEnd) found = Directory.EnumerateFiles(dir, trigger).FirstOrDefault();
+        }
+        if (!marked) File.WriteAllText(ready, "watching");
+        if (found == null) return null;
+        string target = path == "" ? found : path;
+        DateTime spin = DateTime.UtcNow.AddMilliseconds(50);
+        while (DateTime.UtcNow < end)
+        {
+            try
+            {
+                FileStream f = new FileStream(target, FileMode.Open, FileAccess.Read, share);
+                File.WriteAllText(held, target);
+                return f;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            if (DateTime.UtcNow > spin) Thread.Sleep(1);
+        }
+        return null;
+    }
+}
+'@
+
+# A second process (Windows PowerShell) that waits until a file matching $trigger is in the install folder itself (a
+# setup that set the old files aside names each <file>.<run>.old), woken by an oplock on the folder (InstallFolderWatch,
+# above), then opens $path, or with no $path the first file matching $trigger, for reading, shares it as $share says
+# (Read: no program can rename or delete it; ReadWrite: no program can open it to itself; None: no program can rename,
+# delete or read it) and holds it; a file that cannot be opened yet (not there, or being written) is tried again. It
+# writes the path it holds to <name>-held.txt in the output folder. Returns the process, with a handle to it held (for
+# Stop-Held), once it is watching.
 function Start-Watcher([string]$name, [string]$trigger, [string]$path, [string]$share) {
     $ready = "$Out\$name-ready.txt"
     $heldFile = "$Out\$name-held.txt"
+    $source = "$Out\InstallFolderWatch.cs"
+    if (-not (Test-Path -LiteralPath $source)) { Set-Content -LiteralPath $source -Value $watcherSource -Encoding UTF8 }
     $watcher = @"
-Set-Content -LiteralPath '$ready' -Value 'watching'
-`$deadline = (Get-Date).AddMinutes(10)
-`$f = `$null
-while (-not `$f -and (Get-Date) -lt `$deadline) {
-    `$found = @([System.IO.Directory]::GetFiles('$app', '$trigger'))
-    if (`$found.Count -gt 0) {
-        `$target = '$path'
-        if (`$target -eq '') { `$target = `$found[0] }
-        try { `$f = [System.IO.File]::Open(`$target, 'Open', 'Read', '$share'); Set-Content -LiteralPath '$heldFile' -Value `$target } catch { }
-    }
-    if (-not `$f) { Start-Sleep -Milliseconds 5 }
-}
+Add-Type -Path '$source'
+`$f = [InstallFolderWatch]::Hold('$app', '$trigger', '$path', '$share', 600000, '$ready', '$heldFile')
 Start-Sleep -Seconds 1800
 "@
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($watcher))

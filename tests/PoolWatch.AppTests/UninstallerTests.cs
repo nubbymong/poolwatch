@@ -6732,8 +6732,13 @@ public sealed class UninstallerTests
         Assert.Contains("Log('Put back ' + Target + How + Aside + ' is in use' + HoldersOf(Aside) + '.');", Code());
         Assert.Contains("else if CreateHardLinkW(Target, Aside, 0) then How := ' under a second name of the same file: '", Code());
         InE2e("[regex]::Escape(\"Put back $original under a second name of the same file: $watched is in use\")");
-        // The watcher: it opens the file for reading and shares it only as the step says (Read: no rename or delete).
-        InE2e("[System.IO.File]::Open(`$target, 'Open', 'Read', '$share')");
+        // The watcher: it opens the file for reading and shares it only as the step says (Read: no rename or delete), woken
+        // by an oplock on the install folder, which Windows breaks as an entry there is renamed (a loop that sleeps
+        // between looks woke after the setup had looked at the files it set aside again: 15 ms against some 10).
+        InE2e("FileStream f = new FileStream(target, FileMode.Open, FileAccess.Read, share);");
+        InE2e("input.RequestedOplockLevel = OPLOCK_LEVEL_CACHE_READ | OPLOCK_LEVEL_CACHE_HANDLE;");
+        InE2e("bool ok = DeviceIoControl(h, FSCTL_REQUEST_OPLOCK, ref input, Marshal.SizeOf(typeof(RequestInput)), output, 64, IntPtr.Zero, ov);");
+        InE2e("`$f = [InstallFolderWatch]::Hold('$app', '$trigger', '$path', '$share', 600000, '$ready', '$heldFile')");
         InE2e("Start-Watcher 'upgrade-failed-held' 'LICENSE.*.old' $license 'Read'");
         InE2e("Start-Watcher 'upgrade-failed-late' '*.old' $dat 'ReadWrite'");
         InE2e("Start-Watcher 'upgrade-aside-held' '*.old' '' 'None'");
