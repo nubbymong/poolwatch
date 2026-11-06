@@ -3,10 +3,10 @@ using PoolWatch.Core.Incidents;
 namespace PoolWatch.Analysis;
 
 /// <summary>
-/// The sampler tick's step for the held-back capture (C1): the newest request that could not start is started once the
+/// The sampler tick's step for the held-back capture: the newest request that could not start is started once the
 /// governor allows it (the hourly cap, not while saturated or typing, never while another runs), or dropped when it is no
 /// longer wanted. The governor decides; this only acts on its answer, and is its own unit so a test can hold it to that
-/// (review round 2, item 12).
+///.
 /// </summary>
 internal static class PendingCaptures
 {

@@ -4,7 +4,7 @@ using System.Text;
 namespace PoolWatch.Core.Versions;
 
 /// <summary>
-/// Where crash-record reading stopped, per event log (C6, review Part 2). The old reader took the newest 200 records of
+/// Where crash-record reading stopped, per event log. The old reader took the newest 200 records of
 /// each query and then moved cache\last-seen.txt to the query time, so on a log with more than 200 matching records (the
 /// Application query matches every app's Error 1000 and WER 1001 before PoolWatch filters them) the older BlueScreen and
 /// watched-app crash records were skipped for good. Now each log is read oldest first, a bounded page per check, and its

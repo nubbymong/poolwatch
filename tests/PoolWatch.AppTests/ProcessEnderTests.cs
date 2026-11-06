@@ -4,7 +4,7 @@ using PoolWatch.Engine;
 namespace PoolWatch.AppTests;
 
 /// <summary>
-/// S6 (review round 2): End process opens the handle first, checks the create time on that handle, asks, and ends the
+/// End process opens the handle first, checks the create time on that handle, asks, and ends the
 /// process through the same handle. Everything goes through a fake opener: no real process is opened or ended.
 /// </summary>
 public class ProcessEnderTests

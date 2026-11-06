@@ -7,7 +7,7 @@ using PoolWatch.Core.Model;
 namespace PoolWatch.Core.Experiments;
 
 /// <summary>
-/// The A/B preset "lag before vs after a clear" (addendum 2 C): N minutes of lag probes as they are, then PoolWatch
+/// The A/B preset "lag before vs after a clear": N minutes of lag probes as they are, then PoolWatch
 /// clears the standby cache itself (trigger Experiment), then N minutes more. The result compares the median probe
 /// times of the two phases next to the pool: "Lag after a clear: timer wake-up 18 ms -> 2 ms, file create/delete
 /// 40 ms -> 4 ms; pool 12.2 GB -> 7.5 GB (the clear freed 4.7 GB)". Sampler thread only.
@@ -34,17 +34,20 @@ public sealed class ClearLagExperiment
     public DateTime StartedUtc { get; }
     public ExperimentPhase Phase { get; private set; } = ExperimentPhase.Baseline;
     public DateTime PhaseStartUtc { get; private set; }
+    /// <summary>When the phase began on the clock that only goes forward (its first sample's <see cref="Sample.TickMs"/>): the phases are timed on it.</summary>
+    public long PhaseStartMs { get; private set; }
     public bool IsActive => Phase is ExperimentPhase.Baseline or ExperimentPhase.AfterClose;
     public string? Statement { get; private set; }
     public List<string> Notes { get; } = new();
     /// <summary>Set by the caller once it has asked for the clear (its error, when the clear could not start).</summary>
     public string? ClearError { get; set; }
 
-    public string Status(DateTime nowUtc)
+    /// <param name="nowMs">Now on the clock that only goes forward (Environment.TickCount64): the minutes left are timed on it.</param>
+    public string Status(long nowMs)
     {
         if (!IsActive) return Phase == ExperimentPhase.Done ? "Experiment (lag before vs after a clear) finished" : "Experiment (lag before vs after a clear) cancelled";
         if (_poolStart is null) return "Experiment (lag before vs after a clear): waiting for the first sample";
-        var left = PhaseStartUtc + PhaseLength - nowUtc;
+        var left = TimeSpan.FromMilliseconds(PhaseStartMs - nowMs) + PhaseLength;
         string what = Phase == ExperimentPhase.Baseline ? "phase 1 of 2: lag as it is" : "phase 2 of 2: lag after the clear";
         return $"Experiment: {what}, {Math.Max(0, Math.Ceiling(left.TotalMinutes)):0} min left";
     }
@@ -66,12 +69,12 @@ public sealed class ClearLagExperiment
         if (_poolStart is null)
         {
             _poolStart = s.Totals;
-            PhaseStartUtc = s.TimeUtc;
+            (PhaseStartUtc, PhaseStartMs) = (s.TimeUtc, s.TickMs);
             return (Step(s.TimeUtc, ExperimentPhase.Baseline,
                 $"Experiment started: {Span(PhaseLength)} of lag measurements as things are, then PoolWatch clears the standby cache and measures {Span(PhaseLength)} more. Use the PC as usual."), false);
         }
-        if (s.TimeUtc - PhaseStartUtc < PhaseLength) return null;
-        PhaseStartUtc = s.TimeUtc;
+        if (s.TickMs - PhaseStartMs < (long)PhaseLength.TotalMilliseconds) return null; // the phase is timed on the forward clock
+        (PhaseStartUtc, PhaseStartMs) = (s.TimeUtc, s.TickMs);
         if (Phase == ExperimentPhase.Baseline)
         {
             _poolAtClear = s.Totals;

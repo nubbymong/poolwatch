@@ -4,7 +4,7 @@ using PoolWatch.Headless;
 namespace PoolWatch.AppTests;
 
 /// <summary>
-/// S5 (review round 2): Clear cache runs in-process (PoolWatch is always elevated); the SYSTEM-task setup is gone and only
+/// Clear cache runs in-process (PoolWatch is always elevated); the SYSTEM-task setup is gone and only
 /// its removal is left. Nothing here touches Task Scheduler or purges anything: the rule and the parser are pure.
 /// </summary>
 public class ClearCacheTests
@@ -32,7 +32,7 @@ public class ClearCacheTests
     [Fact]
     public void TheOldTasksAreRemovedAutomaticallyOnceAndNoted()
     {
-        // Review round 3 (item 7): the first elevated status read removes them, once per start, and leaves a timeline line.
+        // The first elevated status read removes them, once per start, and leaves a timeline line.
         int removes = 0, queries = 0;
         var old = Elevated(false, CacheHelper.StandbyTask, CacheHelper.LowPriorityTask);
         var cleanup = new CacheHelper.OldTaskCleanup(

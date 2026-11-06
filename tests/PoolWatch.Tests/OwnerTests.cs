@@ -73,6 +73,5 @@ public class OwnerTests
         Assert.Equal("somewhat", OwnerRanking.Moves(0.4));
         Assert.Equal("not", OwnerRanking.Moves(0.1));
         Assert.Equal("3.5 M", OwnerRanking.Count(3_500_000));
-        Assert.Equal("strong", OwnerRanking.Strength(Confidence.StronglyCorrelated));
     }
 }

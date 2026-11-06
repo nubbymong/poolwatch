@@ -109,7 +109,13 @@ internal sealed class ProcessEtwCollector : IDisposable
         {
             Interlocked.Increment(ref _eventsSeen);
             int pid = KernelPid(e);
-            var (create, estimated) = ExactCreateTime(pid, e.TimeStamp.ToUniversalTime().ToFileTimeUtc());
+            // The estimate (KernelStartUtc) is on the system clock now, as the exact create time GetProcessTimes gives is,
+            // when the performance counter measured the delivery wait; otherwise it is TraceEvent's own time, off by as much
+            // as the system clock was set since the session started, and by the two clocks' drift. Windows' create time is
+            // taken when the estimate is within 5 s of it.
+            var (eventQpc, nowQpc, arrivedUtc) = Arrived(e);
+            var (create, estimated) = ExactCreateTime(pid,
+                KernelStartUtc(eventQpc, nowQpc, System.Diagnostics.Stopwatch.Frequency, arrivedUtc, e.TimeStamp.ToUniversalTime()).ToFileTimeUtc());
             string path = DevicePaths.ToDosPath(e.KernelImageFileName);
             string image = !string.IsNullOrEmpty(e.ImageFileName) ? e.ImageFileName : Path.GetFileName(path);
             // Only a full path is a path: some sessions deliver just "node.exe" here, which must not block the enricher's real one.
@@ -124,8 +130,60 @@ internal sealed class ProcessEtwCollector : IDisposable
         Guard(() =>
         {
             Interlocked.Increment(ref _eventsSeen);
-            _registry.OnStop(KernelPid(e), 0, e.ExitStatus, e.TimeStamp.ToUniversalTime());
+            // Dated as it arrives less how long it waited to be delivered (KernelExitUtc); the registry reads that onto the
+            // forward clock.
+            var (eventQpc, nowQpc, arrivedUtc) = Arrived(e);
+            _registry.OnStop(KernelPid(e), 0, e.ExitStatus, KernelExitUtc(eventQpc, nowQpc, System.Diagnostics.Stopwatch.Frequency, arrivedUtc));
         });
+    }
+
+    /// <summary>The longest wait between an event and its delivery that <see cref="DeliveredUtc"/> takes off.</summary>
+    internal static readonly TimeSpan MaxDeliveryWait = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// When a kernel event happened, as a system time read as it arrives: <paramref name="arrivedUtc"/> less how long before
+    /// that the kernel stamped it, measured on the performance counter (<paramref name="eventQpc"/>, the event's stamp, to
+    /// <paramref name="nowQpc"/>, read as it arrived, <paramref name="qpcPerSecond"/> a second), which a system clock set back
+    /// or forward does not move. TraceEvent's own time of an event is reckoned from the system time the session started at,
+    /// so after the system clock was set it is as far off the system time now. Null for a wait under 0 or over
+    /// <see cref="MaxDeliveryWait"/> (a stamp on another counter, or an event delivered that late), or without a counter.
+    /// </summary>
+    internal static DateTime? DeliveredUtc(long eventQpc, long nowQpc, long qpcPerSecond, DateTime arrivedUtc)
+    {
+        if (qpcPerSecond <= 0) return null;
+        double ticks = (nowQpc - eventQpc) * (double)TimeSpan.TicksPerSecond / qpcPerSecond;
+        return ticks >= 0 && ticks <= MaxDeliveryWait.Ticks ? arrivedUtc.AddTicks(-(long)ticks) : null;
+    }
+
+    /// <summary>
+    /// A kernel start's time, for its create-time estimate: <see cref="DeliveredUtc"/>, else TraceEvent's own time of it
+    /// (<paramref name="traceEventUtc"/>). The create time Windows gives is taken only when the estimate is within 5 s of it
+    /// (<see cref="ExactCreateTime"/>): a start delivered more than 30 s late, dated as it arrived, would miss that, while
+    /// TraceEvent's time is off by as much as the system clock was set since the session started, and by the two clocks'
+    /// drift (about 3 s a day, TraceEvent's own documentation of SynchronizeClock says).
+    /// </summary>
+    internal static DateTime KernelStartUtc(long eventQpc, long nowQpc, long qpcPerSecond, DateTime arrivedUtc, DateTime traceEventUtc) =>
+        DeliveredUtc(eventQpc, nowQpc, qpcPerSecond, arrivedUtc) ?? traceEventUtc;
+
+    /// <summary>
+    /// A kernel exit's time: <see cref="DeliveredUtc"/>, else as it arrives (<paramref name="arrivedUtc"/>), so its place on
+    /// the forward clock never rests on a system clock set since the session started.
+    /// </summary>
+    internal static DateTime KernelExitUtc(long eventQpc, long nowQpc, long qpcPerSecond, DateTime arrivedUtc) =>
+        DeliveredUtc(eventQpc, nowQpc, qpcPerSecond, arrivedUtc) ?? arrivedUtc;
+
+    /// <summary>
+    /// The event's stamp on its session's counter, and the performance counter (<see cref="System.Diagnostics.Stopwatch"/>)
+    /// and the system clock read together as it arrives.
+    /// </summary>
+    private static (long EventQpc, long NowQpc, DateTime ArrivedUtc) Arrived(TraceEvent e)
+    {
+        // TraceEvent marks TimeStampQPC "Not Obsolete but Discouraged": its unit is the session's clock's, which need not be
+        // the performance counter. A stamp in another unit gives a wait out of bounds (DeliveredUtc is null).
+#pragma warning disable CS0618
+        long eventQpc = e.TimeStampQPC;
+#pragma warning restore CS0618
+        return (eventQpc, System.Diagnostics.Stopwatch.GetTimestamp(), DateTime.UtcNow);
     }
 
     private void OnManifestEvent(TraceEvent e)
@@ -146,7 +204,8 @@ internal sealed class ProcessEtwCollector : IDisposable
             else if (id == 2)
             {
                 int? exit = e.PayloadByName("ExitCode") is { } x ? ToInt(x) : null;
-                var exitTime = e.PayloadByName("ExitTime") is DateTime dt ? dt.ToUniversalTime() : e.TimeStamp.ToUniversalTime();
+                // The kernel's own exit time when the event carries it (a system time), else the moment it arrives.
+                var exitTime = e.PayloadByName("ExitTime") is DateTime dt ? dt.ToUniversalTime() : DateTime.UtcNow;
                 _registry.OnStop(ToInt(e.PayloadByName("ProcessID")), ToFileTime(e.PayloadByName("CreateTime")), exit, exitTime);
             }
         });

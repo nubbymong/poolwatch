@@ -76,7 +76,25 @@ public class VersionTests
         Assert.Equal(CrashKind.AppCrashReport, rep.Kind);
         Assert.Equal("123456", rep.Bucket);
         Assert.Null(CrashMarkers.Parse(new LogEvent(T0, "Application", CrashMarkers.WerProvider, 1001, null, ["1", "4", "APPCRASH", "", "", "notepad.exe"]), watched));
+        // A watched app matches whatever the letter case: the default list names "claude", and Windows logs "Claude.exe".
+        var claude = CrashMarkers.Parse(new LogEvent(T0, "Application", CrashMarkers.AppErrorProvider, 1000,
+            null, ["Claude.exe", "1.0.0.0", "6700", "ntdll.dll", "10.0.26100.1", "6700", "c0000374", "0000000000104f29"]), ["claude"]);
+        Assert.Equal(CrashKind.AppCrash, claude?.Kind);
+        Assert.Equal(CrashKind.AppCrashReport, CrashMarkers.Parse(new LogEvent(T0, "Application", CrashMarkers.WerProvider, 1001, null, ["7", "4", "APPCRASH", "", "", "CLAUDE.EXE"]), ["claude"])?.Kind);
         Assert.Equal(2, CrashMarkers.Queries(T0.AddDays(-1), T0).Count);
         Assert.Contains("timediff(@SystemTime) <= 86400000", CrashMarkers.Queries(T0.AddDays(-1), T0)[0].xpath);
+    }
+
+    [Fact]
+    public void TheDefaultWatchedAppsSurviveALoadUnchanged()
+    {
+        // A watched app matches without regard to case, so a load keeps one of two names that differ only in case: the
+        // default list holds each name once, and a fresh list and a loaded one are the same.
+        var fresh = new PoolWatch.Core.Settings();
+        Assert.Equal(CrashMarkers.DefaultWatchedApps, fresh.WatchedApps);
+        fresh.Normalize();
+        Assert.Equal(CrashMarkers.DefaultWatchedApps, fresh.WatchedApps);
+        Assert.Equal(CrashMarkers.DefaultWatchedApps, PoolWatch.Core.Settings.Parse("{}").WatchedApps);
+        Assert.Equal(CrashMarkers.DefaultWatchedApps, PoolWatch.Core.Settings.Parse(fresh.ToJson()).WatchedApps);
     }
 }

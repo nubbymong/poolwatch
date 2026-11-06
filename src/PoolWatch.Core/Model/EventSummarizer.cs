@@ -9,7 +9,13 @@ namespace PoolWatch.Core.Model;
 /// ("bash.exe ×90 started 412 × git, grep, sed ..."). Keyed by the parent's image, not its PID: every Claude Code
 /// command is its own bash.exe, so a per-PID key wrote one row per command. A busy PC starts hundreds of processes a minute; writing each one
 /// made events.csv the largest file (16 MB/h on the CI soak). Starts are held for <see cref="LongLived"/> to learn
-/// whether the process is short-lived. Bounded: at most <see cref="MaxPending"/> starts are held. Sampler thread only.
+/// whether the process is short-lived. Bounded: at most <see cref="MaxPending"/> starts are held. How long a process
+/// ran, how long a start is held and the rollup window are timed on the clock that only goes forward: each event's time,
+/// which Windows gives on the system clock, is read onto it as it arrives (<see cref="Moment.MsOf"/>), so setting the
+/// system clock back or forward neither holds a start back nor lists it early. An exit is judged by its start's time as
+/// that start was held (a start listed as long-running has its exit listed); the exit of a start that was not held, or
+/// whose listing was let go (at most <see cref="MaxPending"/> listed starts are kept, the earliest let go first), is judged
+/// by Windows' create time, read onto the forward clock as the exit arrives. Sampler thread only.
 /// </summary>
 public sealed class EventSummarizer
 {
@@ -17,11 +23,29 @@ public sealed class EventSummarizer
     public const int MaxPending = 20_000;
     private const int MaxParents = 1000;
     private readonly TimeSpan _window;
-    private readonly Dictionary<ProcessKey, LifecycleEvent> _pendingStarts = new();
-    // Keyed by the owner's identity key (2e), not its display name: two owners can share a name.
+    /// <summary>The starts held, each with its time on the forward clock (<see cref="Moment.Ms"/>), read as it arrived.</summary>
+    private readonly Dictionary<ProcessKey, (LifecycleEvent Start, long Ms)> _pendingStarts = new();
+    /// <summary>
+    /// The starts held and then listed as long-running, each with its time on the forward clock as it was held, until the
+    /// process exits: its exit is listed too, whatever the system clock did while it ran. At most <see cref="MaxPending"/>
+    /// (past that the earliest is let go, and its exit is judged by the create time, as an exit whose start was not held).
+    /// Each also has a number of its own (<see cref="_listedOrder"/>), so two listed at the same time are two entries of
+    /// <see cref="_listedByTime"/>.
+    /// </summary>
+    private readonly Dictionary<ProcessKey, (long Ms, long Order)> _listedStarts = new();
+    /// <summary>
+    /// The listed starts by their time (<see cref="_listedStarts"/>'s, then its number), so the earliest is found without a
+    /// look at every one: a burst of starts promoted while the list is full costs a step each, not a pass over the 20,000.
+    /// </summary>
+    private readonly SortedSet<(long Ms, long Order, ProcessKey Key)> _listedByTime =
+        new(Comparer<(long Ms, long Order, ProcessKey Key)>.Create((a, b) => a.Ms != b.Ms ? a.Ms.CompareTo(b.Ms) : a.Order.CompareTo(b.Order)));
+    /// <summary>How many starts were listed so far: the next one's number.</summary>
+    private long _listedOrder;
+    // Keyed by the owner's identity key, not its display name: two owners can share a name.
     private readonly Dictionary<(string? ownerKey, string parent, string image), Rollup> _rollups = new();
     private readonly Dictionary<int, Identity.Owner?> _ownerByParent = new(); // per window: one owner lookup per parent PID
-    private DateTime _windowStart = DateTime.MinValue;
+    /// <summary>When the rollup window began (<see cref="Moment.Ms"/>); null before the first call.</summary>
+    private long? _windowStartMs;
     private Func<int, Identity.Owner?>? _owner;
 
     private sealed class Rollup
@@ -45,30 +69,34 @@ public sealed class EventSummarizer
     public TimeSpan RollupWindow => _window;
     public long RolledUp { get; private set; }
     public int Pending => _pendingStarts.Count;
+    /// <summary>The starts listed as long-running whose exit is still to come (at most <see cref="MaxPending"/>).</summary>
+    internal int Listed => _listedStarts.Count;
 
     /// <summary>Feeds this tick's events; returns the events to record (notable ones and closed rollups).</summary>
     /// <param name="parentName">Image name of a parent PID (for rollup labels).</param>
-    /// <param name="owner">Owner of a parent PID (item 4's identity; resolved once per rollup, while the parent is usually still alive).</param>
-    public List<LifecycleEvent> Process(IReadOnlyList<LifecycleEvent> events, DateTime nowUtc, Func<int, string?> parentName, Func<int, Identity.Owner?>? owner = null)
+    /// <param name="owner">Owner of a parent PID (its identity; resolved once per rollup, while the parent is usually still alive).</param>
+    public List<LifecycleEvent> Process(IReadOnlyList<LifecycleEvent> events, Moment now, Func<int, string?> parentName, Func<int, Identity.Owner?>? owner = null)
     {
         _owner = owner;
         var output = new List<LifecycleEvent>();
-        if (_windowStart == DateTime.MinValue) _windowStart = nowUtc;
+        _windowStartMs ??= now.Ms;
+        long longLived = (long)LongLived.TotalMilliseconds;
         foreach (var e in events)
         {
             switch (e.Kind)
             {
                 case LifecycleKind.Start:
                     if (_alwaysNotable?.Invoke(e.CommandLine) == true) { output.Add(e); break; }
-                    if (e.Pid <= 4 || (e.Detail == "seen in snapshot" && nowUtc - e.TimeUtc >= LongLived)) { output.Add(e); break; }
+                    if (e.Pid <= 4 || (e.Detail == "seen in snapshot" && now.Ms - now.MsOf(e.TimeUtc) >= longLived)) { output.Add(e); break; }
                     if (_pendingStarts.Count >= MaxPending) { Count(e, parentName, start: true); break; }
-                    _pendingStarts[e.Key] = e;
+                    _pendingStarts[e.Key] = (e, now.MsOf(e.TimeUtc));
                     break;
                 case LifecycleKind.Exit:
                     if (_alwaysNotable?.Invoke(e.CommandLine) == true) output.Add(e);
-                    else if (_pendingStarts.Remove(e.Key, out var start))
+                    else if (_pendingStarts.Remove(e.Key, out var held))
                     {
-                        if (e.TimeUtc - start.TimeUtc >= LongLived) { output.Add(start); output.Add(e); } // ran long enough: listed
+                        var start = held.Start;
+                        if (now.MsOf(e.TimeUtc) - held.Ms >= longLived) { output.Add(start); output.Add(e); } // ran long enough: listed
                         else
                         {
                             // Started and exited within LongLived: counted, not listed.
@@ -76,7 +104,11 @@ public sealed class EventSummarizer
                             Count(e, parentName, start: false);
                         }
                     }
-                    else if (e.CreateTime > 0 && e.TimeUtc - e.Key.CreateTimeUtc < LongLived) Count(e, parentName, start: false);
+                    // Its start was held and listed as long-running (it ran LongLived on the forward clock): listed.
+                    else if (Unlist(e.Key)) output.Add(e);
+                    // A start not held (PoolWatch started after it, or too many were held): Windows' create time is a system
+                    // time, read onto the forward clock now.
+                    else if (e.CreateTime > 0 && now.MsOf(e.TimeUtc) - now.MsOf(e.Key.CreateTimeUtc) < longLived) Count(e, parentName, start: false);
                     else output.Add(e);
                     break;
                 default:
@@ -88,19 +120,51 @@ public sealed class EventSummarizer
         if (_pendingStarts.Count > 0)
         {
             List<ProcessKey>? due = null;
-            foreach (var (k, s) in _pendingStarts) if (nowUtc - s.TimeUtc >= LongLived) (due ??= new()).Add(k);
+            foreach (var (k, s) in _pendingStarts) if (now.Ms - s.Ms >= longLived) (due ??= new()).Add(k);
             if (due is not null)
-                foreach (var k in due) { output.Add(_pendingStarts[k]); _pendingStarts.Remove(k); }
+                foreach (var k in due)
+                {
+                    var (start, ms) = _pendingStarts[k];
+                    output.Add(start);
+                    _pendingStarts.Remove(k);
+                    List(k, ms);
+                }
         }
-        if (nowUtc - _windowStart >= _window) output.AddRange(Flush(nowUtc));
+        if (now.Ms - _windowStartMs.Value >= (long)_window.TotalMilliseconds) output.AddRange(Flush(now));
         if (output.Count > 1) output.Sort((a, b) => a.TimeUtc.CompareTo(b.TimeUtc)); // promoted starts and rollups arrive late
         return output;
     }
 
-    /// <summary>Closes the current rollup window (also at exit).</summary>
-    public List<LifecycleEvent> Flush(DateTime nowUtc)
+    /// <summary>
+    /// Lists a start held as long-running, held at <paramref name="ms"/> on the forward clock; with
+    /// <see cref="MaxPending"/> listed already, the earliest is let go.
+    /// </summary>
+    private void List(ProcessKey key, long ms)
     {
-        _windowStart = nowUtc;
+        Unlist(key);
+        if (_listedStarts.Count >= MaxPending)
+        {
+            var earliest = _listedByTime.Min;
+            _listedByTime.Remove(earliest);
+            _listedStarts.Remove(earliest.Key);
+        }
+        long order = _listedOrder++;
+        _listedStarts[key] = (ms, order);
+        _listedByTime.Add((ms, order, key));
+    }
+
+    /// <summary>Takes a listed start off the list (its exit came); false when it is not listed.</summary>
+    private bool Unlist(ProcessKey key)
+    {
+        if (!_listedStarts.Remove(key, out var listed)) return false;
+        _listedByTime.Remove((listed.Ms, listed.Order, key));
+        return true;
+    }
+
+    /// <summary>Closes the current rollup window (also at exit).</summary>
+    public List<LifecycleEvent> Flush(Moment now)
+    {
+        _windowStartMs = now.Ms;
         var output = new List<LifecycleEvent>();
         foreach (var ((ownerKey, parent, image), r) in _rollups.OrderBy(kv => kv.Value.First))
         {

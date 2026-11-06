@@ -10,8 +10,17 @@ namespace PoolWatch.Core.Incidents;
 public sealed record TracedProcess(CapturePoolUsage Usage, ProcessIdentity Identity, string? CommandLine, IReadOnlyList<string> Chain,
     DateTime? StartUtc, DateTime? ExitUtc, bool Resolved)
 {
-    /// <summary>Started and exited within <see cref="EventSummarizer.LongLived"/>: a short command.</summary>
-    public bool Short => StartUtc is { } s && ExitUtc is { } e && e - s < EventSummarizer.LongLived;
+    /// <summary>
+    /// How long it ran on the clock that only goes forward, when PoolWatch held its start and exit (the registry's
+    /// <see cref="ProcessRecord.StartMs"/> to <see cref="ProcessRecord.ExitMs"/>); null when it did not.
+    /// </summary>
+    public TimeSpan? Ran { get; init; }
+
+    /// <summary>
+    /// Started and exited within <see cref="EventSummarizer.LongLived"/>: a short command. By <see cref="Ran"/> when PoolWatch
+    /// held both, else by <see cref="StartUtc"/> and <see cref="ExitUtc"/> (the trace's own times, or the create time Windows gives).
+    /// </summary>
+    public bool Short => Ran is { } ran ? ran < EventSummarizer.LongLived : StartUtc is { } s && ExitUtc is { } e && e - s < EventSummarizer.LongLived;
 
     /// <summary>Its identity, or "unknown process (started HH:MM, exited HH:MM)" when neither PoolWatch nor the trace named it.</summary>
     public string Name => Resolved || (Usage.Image.Length > 0 && !Usage.Image.StartsWith("PID ", StringComparison.Ordinal)) ? Identity.Display : UnknownName(StartUtc, ExitUtc);
@@ -52,7 +61,7 @@ public sealed class TraceOwner
 }
 
 /// <summary>
-/// When a confirmation trace exists it outranks correlation (addendum 1, 2a): the answer and the first ranking come from
+/// When a confirmation trace exists it outranks correlation: the answer and the first ranking come from
 /// the trace's net bytes per process instance (PID and create time), rolled up by the owner that started each process.
 /// </summary>
 public static class TraceAttribution
@@ -78,7 +87,8 @@ public static class TraceAttribution
 
     private static TracedProcess ResolveOne(CapturePoolUsage u, CaptureResult cap, ProcessRegistry registry, IReadOnlyDictionary<int, List<ProcessRecord>> byPid)
     {
-        var at = u.FirstAllocUtc == default ? cap.StartUtc : u.FirstAllocUtc;
+        // The instance alive when the row first allocated (else when the trace began), on the clock that only goes forward.
+        long at = u.FirstAllocUtc == default ? cap.StartMs : cap.MsOf(u.FirstAllocUtc);
         var rec = u.Pid is 0 or 4 ? null : ProcessRegistry.Pick(byPid.GetValueOrDefault(u.Pid), u.CreateTime, at);
         List<ProcessRecord> chain;
         if (rec is not null) chain = registry.Ancestry(rec.Key);
@@ -90,7 +100,7 @@ public static class TraceAttribution
             chain = parent is not null ? [.. registry.Ancestry(parent.Key), self] : [self];
         }
         if (chain.Count == 0) chain = [rec!];
-        // A record kept in compact form (2b), or one whose command line could not be read, takes the trace's own: the
+        // A record kept in compact form, or one whose command line could not be read, takes the trace's own: the
         // identity's role (node <script>, bash -c ...) comes from it. A copy: the registry's record is not changed.
         if (rec is not null && rec.CommandLine is null && u.CommandLine is not null && chain.Count > 0 && chain[^1].Key == rec.Key)
             chain = [.. chain.Take(chain.Count - 1), new ProcessRecord
@@ -101,7 +111,10 @@ public static class TraceAttribution
         var id = ProcessIdentities.Of(chain);
         if (u.Pid is 0 or 4) id = id with { Owner = new Owner(OwnerKind.System, "system", "the kernel (System worker threads)") };
         var start = rec?.StartUtc ?? (u.CreateTime > 0 ? DateTime.FromFileTimeUtc(u.CreateTime) : null);
-        return new TracedProcess(u, id, rec?.CommandLine ?? u.CommandLine, chain.Select(r => r.DisplayName).ToList(), start, rec?.ExitUtc ?? u.ExitUtc, rec is not null);
+        return new TracedProcess(u, id, rec?.CommandLine ?? u.CommandLine, chain.Select(r => r.DisplayName).ToList(), start, rec?.ExitUtc ?? u.ExitUtc, rec is not null)
+        {
+            Ran = rec is { ExitMs: { } exitMs } ? TimeSpan.FromMilliseconds(Math.Max(0, exitMs - rec.StartMs)) : null,
+        };
     }
 
     /// <summary>Traced processes grouped by owner, most net bytes first.</summary>
@@ -133,11 +146,28 @@ public static class TraceAttribution
         long total = owners.Sum(o => o.Net);
         if (total <= 0 || owners.Count == 0) return null;
         string what = info.Description.Length > 0 && info.Description.Length <= 60 ? $"{inc.Tag.ToDisplay()} ({info.Description})" : inc.Tag.ToDisplay();
-        string span = Fmt.Duration((inc.EndUtc ?? inc.LastRiseUtc) - inc.OnsetUtc);
-        string held = inc.PeakBytes > 0 && inc.CurrentBytes >= inc.PeakBytes * 9 / 10 ? " and is still held"
-            : inc.PeakBytes > inc.CurrentBytes ? $"; {Fmt.Bytes(inc.PeakBytes - inc.CurrentBytes)} has been freed since" : "";
+        string span = Fmt.Duration(TimeSpan.FromMilliseconds((inc.EndMs ?? inc.LastRiseMs) - inc.OnsetMs)); // on the forward clock
+        // On the tag's own scale: the peak counts back what PoolWatch's own clears freed (their drop is not the growth ending),
+        // so the level it reached and fell from on its own is the peak less that; the clears' part is said as their result.
+        long peak = inc.PeakBytes - inc.ClearedBytes;
+        string? own = inc.OwnClearsFreed;
+        string held;
+        if (own is null)
+            held = peak > 0 && inc.CurrentBytes >= peak * 9 / 10 ? " and is still held"
+                : peak > inc.CurrentBytes ? $"; {Fmt.Bytes(peak - inc.CurrentBytes)} has been freed since" : "";
+        // The clears often empty more of the tag than it grew (a cache that was there before the growth). That says where the
+        // tag's level is, not whose bytes they freed: a leak a purge cannot free can still be held whole. So the level is
+        // said, against where the growth began. Otherwise what is held is decided on the rise: of the growth the clears left,
+        // the part that has not fallen on its own since.
+        else if (inc.ClearedBytes >= inc.Growth)
+            held = $"; {own} of the tag, {(inc.ClearedBytes > inc.Growth ? "more than" : "as much as")} it grew: it is now " +
+                   (inc.CurrentBytes <= 0 ? "empty"
+                       : inc.CurrentBytes == inc.StartBytes ? $"back at the {Fmt.Bytes(inc.StartBytes)} it grew from"
+                       : $"at {Fmt.Bytes(inc.CurrentBytes)}, {(inc.CurrentBytes < inc.StartBytes ? "under" : "over")} the {Fmt.Bytes(inc.StartBytes)} it grew from");
+        else if (peak - inc.CurrentBytes <= (inc.Growth - inc.ClearedBytes) / 10) held = $"; {own} of it, and the rest is still held";
+        else held = $"; {own} of it, and {Fmt.Bytes(peak - inc.CurrentBytes)} more has been freed since";
         var top = owners[0];
-        string trace = Fmt.Duration(cap.EndUtc - cap.StartUtc);
+        string trace = Fmt.Duration(cap.Duration);
         var images = top.Processes.OrderByDescending(p => p.Usage.NetBytes).Select(p => Path.GetFileNameWithoutExtension(p.Identity.Image)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         string who = images.Count > 0 && images.All(i => ShellTools.Contains(i))
             ? $"shell commands ({string.Join(", ", images.Take(4))}{(images.Count > 4 ? ", ..." : "")})"
@@ -150,7 +180,7 @@ public static class TraceAttribution
         string freed = top.Frees == 0 ? ", none freed" : top.Allocs > 0 ? $", {100.0 * top.Frees / top.Allocs:0}% of allocations freed" : "";
         string line = $"{what} grew {Fmt.Bytes(Math.Max(0, inc.Growth))} in {span}{held}. The trace shows {who} allocating it: {string.Join(", and ", parts)}{freed}. " +
                       $"Started by: {top.Owner.Name}" + (owners.Count > 1 && owners[1].Net >= total / 5 ? $" ({Fmt.Bytes(top.Net)}); also {owners[1].Owner.Name} ({Fmt.Bytes(owners[1].Net)})." : ".");
-        // 2e: the per-start figure explains the growth when the owner's starts in the window times it is a real part of the rise.
+        // The per-start figure explains the growth when the owner's starts in the window times it is a real part of the rise.
         long perStart = top.PerShortCommand;
         if (perStart > 0 && top.StartsInWindow >= 3 && (long)top.StartsInWindow * perStart >= Math.Max(1L << 20, inc.Growth / 10))
             line += $" {top.StartsInWindow:N0} short commands x {Fmt.Bytes(perStart)} = {Fmt.Bytes((long)top.StartsInWindow * perStart)}.";
@@ -160,7 +190,7 @@ public static class TraceAttribution
     private static string Count(int n, string noun) => (n switch { 1 => "one", 2 => "two", 3 => "three", 4 => "four", 5 => "five", _ => n.ToString("N0") }) + " " + noun + (n == 1 ? "" : "s");
 
     /// <summary>
-    /// 2a: when a confirmation trace exists the ranking follows it, not correlation. The trace's owners come first, by net
+    /// When a confirmation trace exists the ranking follows it, not correlation. The trace's owners come first, by net
     /// bytes (an owner correlation also found keeps its processes and evidence, with the trace's line on top; one only the
     /// trace saw is added), then every other owner below, marked <see cref="OwnerSuspect.CorrelationOnly"/>. The given
     /// correlation owners are updated in place (the caller built them for this view). Ranks are renumbered.

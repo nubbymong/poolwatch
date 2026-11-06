@@ -11,16 +11,30 @@ namespace PoolWatch.Headless;
 /// </summary>
 internal static class HeadlessRunner
 {
-    public static int Run(CommandLineOptions opt)
+    /// <summary>
+    /// Runs until <paramref name="stop"/> holds or for <paramref name="seconds"/> (none: until stopped), looking every half
+    /// second (<paramref name="wait"/>). The run's length is timed on the clock that only goes forward
+    /// (<paramref name="clock"/>; a test gives its own), so a clock set back or forward neither stretches nor cuts it. True
+    /// when it was stopped.
+    /// </summary>
+    internal static bool RunFor(double? seconds, Func<bool> stop, Action<TimeSpan> wait, Func<Core.Model.Moment>? clock = null) =>
+        Core.Model.Waits.While(() => !stop(), seconds is { } d && d < TimeSpan.MaxValue.TotalSeconds ? TimeSpan.FromSeconds(d) : TimeSpan.MaxValue, TimeSpan.FromMilliseconds(500), clock, wait);
+
+    /// <param name="hold">The proof that this thread holds the one-instance mutex (Program.Main runs a headless run only
+    /// through <see cref="ExitSignal.AsTheOneInstance"/>): its start may move data folders.</param>
+    public static int Run(CommandLineOptions opt, ExitSignal.Hold hold)
     {
-        var paths = new AppPaths(opt.OutDir);
+        var paths = new AppPaths(opt.OutDir, hold);
         var log = paths.OpenLog();
         log.EchoToConsole = true;
-        var settings = LoadSettings(opt, paths, log);
+        var settings = LoadSettings(opt, paths);
         log.Info($"PoolWatch {typeof(HeadlessRunner).Assembly.GetName().Version} headless; out={paths.OutDir ?? paths.DataRoot}; interval={settings.SampleIntervalSeconds}s; duration={opt.DurationSeconds?.ToString() ?? "unbounded"}");
+        LogKnowledgeProblems(log);
 
         using var stopRequested = new ManualResetEventSlim();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; stopRequested.Set(); };
+        // The installer and the uninstaller ask through the exit signal: the same clean stop as Ctrl+C.
+        using var exitSignal = ExitSignal.Listen(stopRequested.Set, log.Info);
         // A "stop" file in the output folder ends the run cleanly (CI and scripts without a console).
         string stopFile = Path.Combine(paths.OutDir ?? paths.DataRoot, "stop");
         if (File.Exists(stopFile)) File.Delete(paths.Guard.CheckReal(stopFile));
@@ -47,9 +61,7 @@ internal static class HeadlessRunner
             });
         }
         Task? guard = opt.TokenGuard ? analysis.Diagnostics.StartTokenGuard(null) : null;
-        // S3 (review round 2): a headless run on the real data root moves the old per-user data too (in the background).
-        if (paths.OutDir is null) paths.StartLegacyMigration(log);
-        // S4 (review round 3): an unsafe logon task is reported (no one to ask headless: nothing is changed).
+        // A logon task that is not safe, or cannot be read, is reported (no one to ask headless: nothing is changed).
         Task.Run(() =>
         {
             try
@@ -59,9 +71,7 @@ internal static class HeadlessRunner
             }
             catch (Exception ex) { log.Info("logon task check failed: " + ex.Message); }
         });
-        var deadline = opt.DurationSeconds is { } d ? DateTime.UtcNow.AddSeconds(d) : DateTime.MaxValue;
-        while (!stopRequested.IsSet && DateTime.UtcNow < deadline && !File.Exists(stopFile))
-            stopRequested.Wait(TimeSpan.FromMilliseconds(500));
+        RunFor(opt.DurationSeconds, () => stopRequested.IsSet || File.Exists(stopFile), t => stopRequested.Wait(t));
         bool etwRunning = engine.EtwRunning;
         if (guard is not null && !guard.IsCompleted) log.Info("token guard: still checking at the end of the run");
         analysis.Diagnostics.StopTokenGuard();
@@ -185,12 +195,16 @@ internal static class HeadlessRunner
         return 0;
     }
 
-    internal static Settings LoadSettings(CommandLineOptions opt, AppPaths paths, Log? log = null)
+    /// <summary>At start-up (headless and the tray app): each knowledge pack left out, and why, once in the log.</summary>
+    internal static void LogKnowledgeProblems(Log log)
     {
-        // Review round 3: the old per-user settings.json is moved (checked and clamped) before the first read, so the first
-        // session after the move is on the owner's settings, not the defaults.
-        if (opt.ConfigFile is null && paths.MigrateLegacySettings() is { } moved) log?.Info(moved);
-        // C1 e (review round 2): an explicit --config is read as written; only the default settings.json is migrated.
+        foreach (var problem in Core.Knowledge.KnowledgeBase.Embedded().Problems) log.Info("knowledge pack left out: " + problem);
+    }
+
+    internal static Settings LoadSettings(CommandLineOptions opt, AppPaths paths)
+    {
+        // An explicit --config is read as written; only the default settings.json of an older format is migrated
+        // (Settings.Load).
         var settings = opt.ConfigFile is not null ? Settings.Load(opt.ConfigFile, explicitConfig: true) : Settings.Load(paths.SettingsFile);
         if (opt.IntervalSeconds is { } i) settings.SampleIntervalSeconds = i;
         settings.Normalize();

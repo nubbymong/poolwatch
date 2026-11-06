@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/PoolWatch.Core/PoolWatch.Core.csproj" />
     <Project Path="src/PoolWatch/PoolWatch.csproj" />
+    <Project Path="src/PoolWatch.Launcher/PoolWatch.Launcher.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/Leaker/Leaker.csproj" />

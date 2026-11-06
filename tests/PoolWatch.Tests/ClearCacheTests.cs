@@ -3,10 +3,11 @@ using PoolWatch.Core.Cache;
 using PoolWatch.Core.Findings;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
+using static PoolWatch.Tests.Clocks;
 
 namespace PoolWatch.Tests;
 
-/// <summary>Addendum 2: a RAMMap "empty standby list" on a busy PC (pool 12.2 -> 7.5 GB, standby 46 GB -> 73 MB) as the reference clear.</summary>
+/// <summary>A RAMMap "empty standby list" on a busy PC (pool 12.2 -> 7.5 GB, standby 46 GB -> 73 MB) as the reference clear.</summary>
 public class ClearCacheTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 8, 30, 0, DateTimeKind.Utc);
@@ -15,7 +16,7 @@ public class ClearCacheTests
 
     private static ClearRecord Clear(ClearMode mode, double freedGb, DateTime t, ClearTrigger trigger = ClearTrigger.Manual) => new()
     {
-        TimeUtc = t, Mode = mode, Trigger = trigger, Before = Pool(6.2, 6.0), After = Pool(6.2 - freedGb / 2, 6.0 - freedGb / 2),
+        TimeUtc = t, TickMs = Clocks.At(t).Ms, Mode = mode, Trigger = trigger, Before = Pool(6.2, 6.0), After = Pool(6.2 - freedGb / 2, 6.0 - freedGb / 2),
         ListsBefore = new MemoryLists(1 * GB, 0, 46 * GB, 300 * MB, 10 * GB), ListsAfter = new MemoryLists(47 * GB, 0, 73 * MB, 300 * MB, 0),
         TagsBefore = [(PoolTag.Parse("Reff"), 722 * MB), (PoolTag.Parse("FMfn"), 737 * MB), (PoolTag.Parse("MmSt"), 1950 * MB)],
         TagsAfter = [(PoolTag.Parse("Reff"), 72 * MB), (PoolTag.Parse("FMfn"), 109 * MB), (PoolTag.Parse("MmSt"), 1496 * MB)],
@@ -31,7 +32,7 @@ public class ClearCacheTests
         var f = r.ToFinding();
         Assert.Equal(FindingKind.CacheClear, f.Kind);
         Assert.InRange((long)f.Data["freedBytes"]!, (long)(4.7 * GB) - (1 << 22), (long)(4.7 * GB) + (1 << 22));
-        Assert.Equal("Clear cache (standby list) failed: the purge returned 0xC0000061", new ClearRecord { TimeUtc = T0, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = Pool(1, 1), Error = "the purge returned 0xC0000061" }.Summary());
+        Assert.Equal("Clear cache (standby list) failed: the purge returned 0xC0000061", new ClearRecord { TimeUtc = T0, TickMs = Clocks.At(T0).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = Pool(1, 1), Error = "the purge returned 0xC0000061" }.Summary());
     }
 
     [Fact]
@@ -48,13 +49,13 @@ public class ClearCacheTests
         var s = new Settings { AutoClearEnabled = true, AutoClearPoolGb = 8, AutoClearEveryHours = 1 };
         s.Normalize();
         var start = T0;
-        Assert.Null(ClearPolicy.Due(new Settings { AutoClearEnabled = false }, Pool(9, 9), T0, null, start)); // off by default
-        Assert.Equal(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, Pool(5, 4), T0, null, start));
-        Assert.Null(ClearPolicy.Due(s, Pool(5, 4), T0.AddMinutes(20), T0, start)); // at most once per 30 min
-        Assert.Equal(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, Pool(5, 4), T0.AddMinutes(31), T0, start));
-        Assert.Null(ClearPolicy.Due(s, Pool(2, 2), T0.AddMinutes(31), T0, start));
-        Assert.Equal(ClearTrigger.Schedule, ClearPolicy.Due(s, Pool(2, 2), T0.AddMinutes(61), T0, start));
-        Assert.Null(ClearPolicy.Due(s, Pool(2, 2), T0.AddMinutes(30), null, start)); // the first scheduled clear waits a period
+        Assert.Null(ClearPolicy.Due(new Settings { AutoClearEnabled = false }, Pool(9, 9), At(T0), Ms(null), At(start).Ms)); // off by default
+        Assert.Equal(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, Pool(5, 4), At(T0), Ms(null), At(start).Ms));
+        Assert.Null(ClearPolicy.Due(s, Pool(5, 4), At(T0.AddMinutes(20)), Ms(T0), At(start).Ms)); // at most once per 30 min
+        Assert.Equal(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, Pool(5, 4), At(T0.AddMinutes(31)), Ms(T0), At(start).Ms));
+        Assert.Null(ClearPolicy.Due(s, Pool(2, 2), At(T0.AddMinutes(31)), Ms(T0), At(start).Ms));
+        Assert.Equal(ClearTrigger.Schedule, ClearPolicy.Due(s, Pool(2, 2), At(T0.AddMinutes(61)), Ms(T0), At(start).Ms));
+        Assert.Null(ClearPolicy.Due(s, Pool(2, 2), At(T0.AddMinutes(30)), Ms(null), At(start).Ms)); // the first scheduled clear waits a period
         var fast = new Settings { AutoClearEnabled = true, AutoClearMinMinutes = 5 };
         fast.Normalize();
         Assert.Equal(30, fast.AutoClearMinMinutes); // never more often than every 30 min
@@ -85,11 +86,11 @@ public class ClearCacheTests
         var s = new Settings { AutoClearEnabled = true, AutoClearPoolGb = 8, AutoClearEveryHours = 0 };
         s.Normalize();
         var weak = Clear(ClearMode.Standby, 0.1, T0, ClearTrigger.PoolOverLimit); // 12.2 GB pool, 100 MB freed: not cache-held
-        Assert.Null(ClearPolicy.Due(s, Pool(6, 6), T0.AddMinutes(31), T0, T0, weak));
-        Assert.Null(ClearPolicy.Due(s, Pool(6, 6), T0.AddHours(5), T0, T0, weak));
-        Assert.Equal(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, Pool(6, 6), T0.AddHours(6.1), T0, T0, weak));
+        Assert.Null(ClearPolicy.Due(s, Pool(6, 6), At(T0.AddMinutes(31)), Ms(T0), At(T0).Ms, weak));
+        Assert.Null(ClearPolicy.Due(s, Pool(6, 6), At(T0.AddHours(5)), Ms(T0), At(T0).Ms, weak));
+        Assert.Equal(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, Pool(6, 6), At(T0.AddHours(6.1)), Ms(T0), At(T0).Ms, weak));
         var good = Clear(ClearMode.Standby, 4.7, T0, ClearTrigger.PoolOverLimit);
-        Assert.Equal(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, Pool(6, 6), T0.AddMinutes(31), T0, T0, good));
+        Assert.Equal(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, Pool(6, 6), At(T0.AddMinutes(31)), Ms(T0), At(T0).Ms, good));
     }
 
     [Fact]

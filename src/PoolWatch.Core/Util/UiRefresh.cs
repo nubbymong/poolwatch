@@ -2,7 +2,7 @@ using PoolWatch.Core.Model;
 
 namespace PoolWatch.Core.Util;
 
-/// <summary>What a periodic refresh does to a read-only text box (C5, review Part 2).</summary>
+/// <summary>What a periodic refresh does to a read-only text box.</summary>
 public enum TextRefreshAction
 {
     /// <summary>Same item, same text: nothing to do.</summary>
@@ -42,7 +42,7 @@ public static class TextRefresh
     }
 }
 
-/// <summary>Which row to keep at the top of a list after a refresh (C5 item 3: the scroll position survives).</summary>
+/// <summary>Which row to keep at the top of a list after a refresh (so the scroll position survives it).</summary>
 public static class ScrollAnchor
 {
     /// <summary>
@@ -62,7 +62,7 @@ public static class ScrollAnchor
     }
 }
 
-/// <summary>Keys for list rows that are matched across refreshes (C5: two rows must never share a key).</summary>
+/// <summary>Keys for list rows that are matched across refreshes (Two rows must never share a key).</summary>
 public static class RowKeys
 {
     /// <summary>An event row's key: everything that identifies the event, including its detail (two app events with the

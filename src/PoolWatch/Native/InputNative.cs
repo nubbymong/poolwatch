@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 namespace PoolWatch.Native;
 
 /// <summary>
-/// The session's last keyboard / mouse input (C1: no automatic trace while the owner is typing). GetLastInputInfo reads
+/// The session's last keyboard / mouse input (No automatic trace while the owner is typing). GetLastInputInfo reads
 /// the input time of the session PoolWatch runs in; nothing is hooked and no input is read.
 /// </summary>
 internal static class InputNative
@@ -21,7 +21,7 @@ internal static class InputNative
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
 
-    /// <summary>The process whose window is in front (addendum 4 C: "no window in front"); 0 when none or unknown.</summary>
+    /// <summary>The process whose window is in front ("no window in front"); 0 when none or unknown.</summary>
     public static int ForegroundPid()
     {
         try

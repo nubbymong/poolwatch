@@ -6,6 +6,12 @@ public enum LifecycleKind { Start, Exit, Orphaned, ServiceChange, Capture, Alert
 public sealed record LifecycleEvent
 {
     public DateTime TimeUtc { get; init; }
+    /// <summary>
+    /// <see cref="TimeUtc"/> on the clock that only goes forward, read onto it when the incident manager took the event
+    /// (<see cref="Incidents.IncidentManager.AddEvents"/>); 0 on an event it has not taken. The events picked for a window
+    /// are picked by it.
+    /// </summary>
+    public long Ms { get; init; }
     public LifecycleKind Kind { get; init; }
     public int Pid { get; init; }
     public long CreateTime { get; init; }
@@ -17,7 +23,7 @@ public sealed record LifecycleEvent
     public string? Detail { get; init; }
     /// <summary>For rollups: who the parent works for (app, service, Claude Code / AICC session), resolved while it was alive.</summary>
     public string? Owner { get; init; }
-    /// <summary>For rollups: that owner's identity key (item 4), which matches it to a trace owner (2e); the name is only for display.</summary>
+    /// <summary>For rollups: that owner's identity key, which matches it to a trace owner; the name is only for display.</summary>
     public string? OwnerKey { get; init; }
     /// <summary>For rollups: how many processes were started.</summary>
     public int Count { get; init; }

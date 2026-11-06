@@ -50,16 +50,19 @@ public sealed class Experiment
     public DateTime StartedUtc { get; }
     public ExperimentPhase Phase { get; private set; } = ExperimentPhase.Baseline;
     public DateTime PhaseStartUtc { get; private set; }
+    /// <summary>When the phase began on the clock that only goes forward (its first sample's <see cref="Sample.TickMs"/>): the phases are timed on it.</summary>
+    public long PhaseStartMs { get; private set; }
     public IReadOnlyList<PhaseSnapshot> Snapshots => _snapshots;
     public ExperimentResult? Result { get; private set; }
     public bool IsActive => Phase is ExperimentPhase.Baseline or ExperimentPhase.AppRunning or ExperimentPhase.AfterClose;
 
     /// <summary>"Phase 2 of 3: start ChatGPT now (6 min left)".</summary>
-    public string Status(DateTime nowUtc)
+    /// <param name="nowMs">Now on the clock that only goes forward (Environment.TickCount64): the minutes left are timed on it.</param>
+    public string Status(long nowMs)
     {
         if (!IsActive) return Phase == ExperimentPhase.Done ? $"Experiment with {App} finished" : $"Experiment with {App} cancelled";
         if (_snapshots.Count == 0) return $"Experiment with {App}: waiting for the first sample";
-        var left = PhaseStartUtc + PhaseLength - nowUtc;
+        var left = TimeSpan.FromMilliseconds(PhaseStartMs - nowMs) + PhaseLength;
         string what = Phase switch
         {
             ExperimentPhase.Baseline => $"phase 1 of 3: baseline, leave {App} closed",
@@ -75,17 +78,17 @@ public sealed class Experiment
         if (!IsActive) return null;
         int app = AppProcessCount(s.Processes);
         if (Phase == ExperimentPhase.AppRunning) _maxAppDuringRun = Math.Max(_maxAppDuringRun, app);
-        if (Phase == ExperimentPhase.AfterClose && s.TimeUtc - PhaseStartUtc >= PhaseLength / 2) _minAppAfterClose = Math.Min(_minAppAfterClose, app);
+        if (Phase == ExperimentPhase.AfterClose && s.TickMs - PhaseStartMs >= (long)(PhaseLength / 2).TotalMilliseconds) _minAppAfterClose = Math.Min(_minAppAfterClose, app);
         if (_snapshots.Count == 0)
         {
             _snapshots.Add(Snap(s, app));
-            PhaseStartUtc = s.TimeUtc;
+            (PhaseStartUtc, PhaseStartMs) = (s.TimeUtc, s.TickMs);
             return Step(s.TimeUtc, ExperimentPhase.Baseline,
                 $"Experiment started: {Span(PhaseLength)} baseline. Leave {App} closed{(app > 0 ? $" ({app} {App} process(es) are running now: close them for a clean baseline)" : "")}.");
         }
-        if (s.TimeUtc - PhaseStartUtc < PhaseLength) return null;
+        if (s.TickMs - PhaseStartMs < (long)PhaseLength.TotalMilliseconds) return null; // the phase is timed on the forward clock
         _snapshots.Add(Snap(s, app));
-        PhaseStartUtc = s.TimeUtc;
+        (PhaseStartUtc, PhaseStartMs) = (s.TimeUtc, s.TickMs);
         switch (Phase)
         {
             case ExperimentPhase.Baseline:
@@ -201,7 +204,7 @@ public sealed record ExperimentResult(string Statement, List<string> Notes, IRea
     public string Markdown(string app, TimeSpan phase)
     {
         var sb = new StringBuilder();
-        sb.AppendLine("## In plain words").AppendLine().AppendLine(FindingReport.Md(Statement)).AppendLine();
+        sb.AppendLine("## In plain words").AppendLine().AppendLine(Util.MdText.Line(Statement)).AppendLine();
         foreach (var n in Notes) sb.AppendLine("- " + FindingReport.Md(n));
         if (Notes.Count > 0) sb.AppendLine();
         sb.AppendLine($"## Per phase ({phase.TotalMinutes:0.#} min each)").AppendLine();
@@ -217,5 +220,5 @@ public sealed record ExperimentResult(string Statement, List<string> Notes, IRea
         return sb.ToString();
     }
 
-    private static string Csv(string s) => s.Contains(',') || s.Contains('"') ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
+    private static string Csv(string s) => Util.Csv.Escape(s);
 }

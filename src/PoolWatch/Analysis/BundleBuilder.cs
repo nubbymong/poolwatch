@@ -13,6 +13,35 @@ internal static class BundleBuilder
 {
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
 
+    /// <summary>
+    /// An incident in the bundle's incidents.md: its growth from start to peak, and, when PoolWatch's own cache clears freed
+    /// part of it (the peak counts that back), its level now and what they freed, said as their result.
+    /// </summary>
+    internal static string IncidentLine(Incident i) =>
+        $"- {i.Kind} on `{i.Tag.ToDisplay()}`: {Fmt.Bytes(i.StartBytes)} -> {Fmt.Bytes(i.PeakBytes)} (+{Fmt.Bytes(i.Growth)}), onset {Fmt.Stamp(i.OnsetUtc)}" +
+        (i.ClosedUtc is { } c ? $", closed {Fmt.Stamp(c)}" : ", open") +
+        (i.OwnClearsFreed is { } own ? $"; now {Fmt.Bytes(i.CurrentBytes)}, after {own} of it" : "");
+
+    /// <summary>A suspect under its incident in incidents.md, its confidence in the words of Pool causes' Confidence column.</summary>
+    internal static string SuspectLine(Core.Correlation.OwnerSuspect o) => $"- Suspect: {o.Summary} ({Core.Util.PlainWords.Confidence(o.Confidence)})";
+
+    /// <summary>
+    /// The bundle's incidents.md: the last 50 incidents, each with its <see cref="IncidentLine"/> and its first three
+    /// meaningful owners (<see cref="SuspectLine"/>).
+    /// </summary>
+    internal static string IncidentsMarkdown(IEnumerable<Incident> incidents)
+    {
+        var inc = new StringBuilder("# Incidents\n\n");
+        foreach (var i in incidents.TakeLast(50))
+        {
+            inc.AppendLine($"## {i.Id}").AppendLine();
+            inc.AppendLine(IncidentLine(i));
+            foreach (var o in (i.Owners ?? []).Where(o => o.Meaningful).Take(3)) inc.AppendLine(SuspectLine(o));
+            inc.AppendLine();
+        }
+        return inc.ToString();
+    }
+
     /// <param name="redaction">Null for an unredacted bundle (the owner opted out).</param>
     public static string Export(MonitorEngine engine, AnalysisPipeline analysis, RedactionInfo? redaction)
     {
@@ -50,17 +79,8 @@ internal static class BundleBuilder
             if (engine.Latest is { } latest)
                 files["tags/now.csv"] = $"# {Iso(latest.TimeUtc)}\n" + VendorBundle.TagCsv(latest.Tags.Select(t => new TagSize(t.Tag.ToDisplay(), (long)t.PagedUsed, (long)t.NonPagedUsed)).Where(t => t.Total > 0));
 
-            var inc = new StringBuilder("# Incidents\n\n");
-            foreach (var i in analysis.Incidents.All.TakeLast(50))
-            {
-                inc.AppendLine($"## {i.Id}").AppendLine();
-                inc.AppendLine($"- {i.Kind} on `{i.Tag.ToDisplay()}`: {Fmt.Bytes(i.StartBytes)} -> {Fmt.Bytes(i.PeakBytes)} (+{Fmt.Bytes(i.Growth)}), onset {Fmt.Stamp(i.OnsetUtc)}" +
-                               (i.ClosedUtc is { } c ? $", closed {Fmt.Stamp(c)}" : ", open"));
-                foreach (var o in (i.Owners ?? []).Where(o => o.Meaningful).Take(3)) inc.AppendLine($"- Suspect: {o.Summary} ({OwnerRankingStrength(o)})");
-                inc.AppendLine();
-            }
-            files["incidents.md"] = inc.ToString();
-            // During growth: the one-minute tag table at each of the last three incidents' peaks. C6: the entry name is the
+            files["incidents.md"] = IncidentsMarkdown(analysis.Incidents.All);
+            // During growth: the one-minute tag table at each of the last three incidents' peaks. The entry name is the
             // file-safe tag (readable form + hex of the raw bytes: Reff and RefF never collide) and the peak's date and minute
             // (the same tag at the same minute is the same table: kept once).
             foreach (var i in analysis.Incidents.All.Where(i => i.Kind != IncidentKind.Release).TakeLast(3))
@@ -79,7 +99,7 @@ internal static class BundleBuilder
                         VendorBundle.TagCsv(x.Snapshots[k].Tags.Select(kv => new TagSize(kv.Key.ToDisplay(), kv.Value.paged, kv.Value.nonPaged)).Where(t => t.Total > 0));
             }
 
-        // Item 13 (Part 3): outside experiments, each watched app's last snapshot before it started and first after it exited.
+        // Outside experiments, each watched app's last snapshot before it started and first after it exited.
         lock (d.AppSnapshots)
             foreach (var s in d.AppSnapshots.Snapshots.OrderBy(s => s.App).ThenBy(s => s.TimeUtc))
                 files[$"tags/{s.Moment}-{s.App}.csv"] = $"# {s.App}: {(s.BeforeLaunch ? "the last snapshot before it started" : "the first snapshot after it exited")}, {Iso(s.TimeUtc)}\n" +
@@ -123,10 +143,9 @@ internal static class BundleBuilder
         files["crashes.md"] = crashes.ToString();
         files["findings.jsonl"] = string.Concat(findings.Select(f => FindingLog.ToJsonLine(f) + "\n"));
 
-        return VendorBundle.Write(engine.Paths.ExportsDir, now, files, redaction, engine.Paths.Guard.CheckReal);
+        return VendorBundle.Write(engine.Paths.ExportsDir, now, files, redaction, engine.Paths.Guard.CheckReal,
+            new Dictionary<string, string> { [AgentsGuide.FileName] = AgentsGuide.Text });
     }
 
     private static string Iso(DateTime utc) => utc.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
-
-    private static string OwnerRankingStrength(Core.Correlation.OwnerSuspect o) => Core.Correlation.OwnerRanking.Strength(o.Confidence);
 }

@@ -1,0 +1,82 @@
+name: Known issue
+description: Something that grows the kernel pool on many PCs, for PoolWatch to recognise and explain.
+title: "Known issue: "
+labels: [known-issue]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        PoolWatch recognises known issues from its knowledge packs, one file per issue in
+        [knowledge/](https://github.com/nubbymong/poolwatch/tree/main/knowledge), described in
+        [docs/knowledge-packs.md](https://github.com/nubbymong/poolwatch/blob/main/docs/knowledge-packs.md). It names an
+        issue only from what it measured (pool tags growing, or what a cache clear freed), so the evidence matters most.
+        A workaround is plain advice or one of PoolWatch's own actions, never a command to run. If you would rather
+        write the file yourself, open a pull request instead.
+
+        **Redact before you post.** PoolWatch's incident folders hold full command lines (which can contain passwords
+        or tokens), your user and machine names, paths and your SID, and this issue is public.
+        - Share evidence only through **Export report** or **Export vendor bundle** with redaction on (the default
+          **Yes**), and read the exported files before you attach them.
+        - Do not attach `capture.etl` traces: they cannot be redacted.
+        - Security problems go to [private vulnerability reporting](https://github.com/nubbymong/poolwatch/security/advisories/new), never here.
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Redaction
+      options:
+        - label: I have removed my user name, machine name, paths, tokens and passwords from everything I paste or attach.
+          required: true
+  - type: input
+    id: name
+    attributes:
+      label: The issue in a few words
+      placeholder: "ReFS file records kept in the kernel pool by the file cache"
+    validations:
+      required: true
+  - type: textarea
+    id: symptoms
+    attributes:
+      label: What you see
+      description: How it shows on the PC and in PoolWatch, how fast it grows, and what brings it back down (a cache clear, closing a program, only a restart).
+    validations:
+      required: true
+  - type: input
+    id: tags
+    attributes:
+      label: Pool tags
+      description: The tags that grow (the Pool causes tab in the Advanced view shows them), paged or non-paged, and how fast.
+      placeholder: "NtFC, non-paged, about 2 GB an hour"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows edition and build
+      description: Type winver in the Start menu to see it. Add other builds where you know it happens, or does not.
+      placeholder: "Windows 11 Pro 24H2, 26100.4061"
+    validations:
+      required: true
+  - type: input
+    id: involved
+    attributes:
+      label: Programs and drives involved
+      description: Programs that must be running for it to happen, and the file system of the drives involved (NTFS, ReFS, Dev Drive), if it matters.
+      placeholder: "Codex desktop (ChatGPT.exe); NTFS"
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence (redacted)
+      description: What shows it is this issue and not something else, from the headline and suspects of a redacted export, what a cache clear freed, what changed after a restart, and anything you ruled out.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What helps
+      description: What stops it or frees the memory, and what it costs (a side effect, a feature you lose). Say so if nothing you know of helps.
+  - type: textarea
+    id: links
+    attributes:
+      label: Links and credit
+      description: Where it is documented or discussed (a vendor's issue, a Microsoft page), and who found it, so the entry can credit them.

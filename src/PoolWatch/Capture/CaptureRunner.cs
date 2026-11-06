@@ -11,7 +11,7 @@ namespace PoolWatch.Capture;
 /// The bounded confirmation trace (DESIGN.md section 8): in-box wpr.exe with a generated profile that records kernel pool
 /// allocations / frees with stacks (filtered to the alerting tags), process / thread / image-load events and, for Capture
 /// now or with DeeperCapture, Microsoft-Windows-Kernel-File. One capture at a time, default 60 s, hard cap 5 minutes. When
-/// a capture may start, and what it records, is the capture governor's call (C1). WPR's temp files and the .etl stay inside
+/// a capture may start, and what it records, is the capture governor's call. WPR's temp files and the .etl stay inside
 /// the incident folder.
 /// </summary>
 internal sealed class CaptureRunner
@@ -21,19 +21,30 @@ internal sealed class CaptureRunner
     private readonly Func<string?>? _symbolPath;
     private int _running;
 
-    /// <summary>What one capture does (WPR + parse); a test passes its own (review round 2: nothing records a real trace there).</summary>
+    /// <summary>What one capture does (WPR + parse); a test passes its own.</summary>
     internal delegate CaptureResult RunCapture(string dir, IReadOnlyCollection<PoolTag> tags, CaptureScope scope, int seconds, CancellationToken stop, int cpuSeconds);
     private readonly RunCapture _run;
+    /// <summary>Both clocks (<see cref="Core.Model.Moment.Now"/>; a test gives its own): a trace's start and end are read on them, its length timed on the forward one.</summary>
+    private readonly Func<Core.Model.Moment> _clock;
+    /// <summary>Runs wpr.exe with these arguments and timeout (seconds); a test passes its own, which starts no program.</summary>
+    private readonly Func<string, int, (int code, string output)>? _runWpr;
+    /// <summary>Reads a recorded trace (an .etl, the tags, its start and end, the symbol folders); a test passes its own.</summary>
+    internal delegate CaptureResult ParseTrace(string etl, IReadOnlyCollection<PoolTag> tags, Core.Model.Moment start, Core.Model.Moment end, string? symbolPath);
+    private readonly ParseTrace _parse;
 
     /// <param name="symbolPath">Local symbol folders for the CPU trace's kernel function names (null: module + offset).</param>
     public CaptureRunner(AppPaths paths, Log log, Func<string?>? symbolPath = null) : this(paths, log, symbolPath, null) { }
 
-    internal CaptureRunner(AppPaths paths, Log log, Func<string?>? symbolPath, RunCapture? run)
+    internal CaptureRunner(AppPaths paths, Log log, Func<string?>? symbolPath, RunCapture? run, Func<Core.Model.Moment>? clock = null,
+        Func<string, int, (int code, string output)>? wpr = null, ParseTrace? parse = null)
     {
         _paths = paths;
         _log = log;
         _symbolPath = symbolPath;
         _run = run ?? Run;
+        _clock = clock ?? Core.Model.Moment.Now;
+        _runWpr = wpr;
+        _parse = parse ?? ((etl, tags, start, end, symbols) => EtlParser.Parse(etl, tags, start, end, _log.Info, symbols, _paths.Guard.CheckReal));
     }
 
     public bool Busy => Volatile.Read(ref _running) != 0;
@@ -41,15 +52,15 @@ internal sealed class CaptureRunner
     private long _lastEndMs, _startedMs;
 
     /// <summary>When the last capture ended (Environment.TickCount64, monotonic); null before the first. The lag probe pauses
-    /// for 30 s after it (C1).</summary>
+    /// for 30 s after it.</summary>
     public TimeSpan? LastEnd => Volatile.Read(ref _lastEndMs) is var ms && ms > 0 ? TimeSpan.FromMilliseconds(ms) : null;
 
-    /// <summary>When the capture running now started (monotonic); null when none runs. C1 b (review round 2): the lag probe's
+    /// <summary>When the capture running now started (monotonic); null when none runs. The lag probe's
     /// pause is capped at 10 min from this, so a hung capture never silences the probe for good.</summary>
     public TimeSpan? BusySince => Busy && Volatile.Read(ref _startedMs) is var ms && ms > 0 ? TimeSpan.FromMilliseconds(ms) : null;
 
     /// <summary>Starts a capture on its own thread; returns false if one is already running.</summary>
-    /// <param name="scope">What to record (C1, <see cref="CaptureGovernor.ScopeFor"/>): the pool events (with Kernel-File or
+    /// <param name="scope">What to record (<see cref="CaptureGovernor.ScopeFor"/>): the pool events (with Kernel-File or
     /// not) and / or the CPU recording.</param>
     /// <param name="cpuSeconds">Length of the CPU recording when <paramref name="scope"/> asks for one: sampling with stacks,
     /// context switches and DPC / ISR, after the pool trace. Its own file, so it never crowds out the pool events.</param>
@@ -63,15 +74,15 @@ internal sealed class CaptureRunner
         {
             try
             {
-                // C1 a (review round 2): the done callback runs whatever happens. It used to be skipped when the capture threw,
+                // The done callback runs whatever happens. It used to be skipped when the capture threw,
                 // so the governor never heard that the trace ended and the incident never said why it had no trace.
-                var startUtc = DateTime.UtcNow;
+                var start = _clock();
                 CaptureResult result;
                 try { result = _run(incidentDir, tags, scope, seconds, stop, cpuSeconds); }
                 catch (Exception ex)
                 {
                     _log.Info("capture failed: " + ex);
-                    result = new CaptureResult { Tags = tags.ToList(), StartUtc = startUtc, EndUtc = DateTime.UtcNow, Error = "capture failed: " + ex.Message };
+                    result = new CaptureResult { Tags = tags.ToList(), Error = "capture failed: " + ex.Message }.Recorded(start, _clock());
                 }
                 try { done(result); }
                 catch (Exception ex) { _log.Info("capture result not applied: " + ex); }
@@ -99,7 +110,7 @@ internal sealed class CaptureRunner
         Wpr($"-cancel -instancename {Instance}", quiet: true);
         try
         {
-            // Review round 2 (S3): CheckReal, not the name test: a wpr-temp reached through a link is never deleted.
+            // CheckReal, not the name test: a wpr-temp reached through a link is never deleted.
             if (Directory.Exists(incidentsDir))
                 foreach (var d in Directory.EnumerateDirectories(incidentsDir, "wpr-temp", SearchOption.AllDirectories))
                     try { Directory.Delete(_paths.Guard.CheckReal(d), true); } catch { }
@@ -115,49 +126,53 @@ internal sealed class CaptureRunner
 
     public CaptureResult Run(string dir, IReadOnlyCollection<PoolTag> tags, CaptureScope scope, int seconds, CancellationToken stop, int cpuSeconds = 0)
     {
-        var r = scope.PoolEvents ? RunPool(dir, tags, seconds, stop, scope.KernelFile) : new CaptureResult { Tags = [], StartUtc = DateTime.UtcNow, EndUtc = DateTime.UtcNow };
+        var now = _clock();
+        var r = scope.PoolEvents ? RunPool(dir, tags, seconds, stop, scope.KernelFile) : new CaptureResult { Tags = [] }.Recorded(now, now);
         r.KernelFileRecorded = scope.PoolEvents && scope.KernelFile;
         if (scope.Cpu && cpuSeconds > 0 && !stop.IsCancellationRequested)
         {
-            var (cpu, error) = RunCpu(dir, Math.Clamp(cpuSeconds, 5, 120), stop);
+            var (cpu, error, cpuStart, cpuEnd) = RunCpu(dir, Math.Clamp(cpuSeconds, 5, 120), stop);
             if (cpu is not null) r.Cpu = cpu;
             else if (error is not null) r.Notes.Add("CPU trace: " + error);
-            if (!scope.PoolEvents && cpu is not null) { r.StartUtc = cpu.StartUtc; r.EndUtc = cpu.EndUtc; }
+            if (!scope.PoolEvents && cpu is not null) r.Recorded(cpuStart, cpuEnd);
         }
         return r;
     }
 
-    /// <summary>The CPU-only recording (cpu.etl), after the pool trace: the two never share one event budget.</summary>
-    private (CpuProfile? cpu, string? error) RunCpu(string dir, int seconds, CancellationToken stop)
+    /// <summary>
+    /// The CPU-only recording (cpu.etl), after the pool trace: the two never share one event budget. With when it started
+    /// and ended (both clocks; its length is timed on the forward one).
+    /// </summary>
+    private (CpuProfile? cpu, string? error, Core.Model.Moment start, Core.Model.Moment end) RunCpu(string dir, int seconds, CancellationToken stop)
     {
         string tempDir = _paths.EnsureDir(Path.Combine(dir, "wpr-temp"));
         string profile = _paths.Guard.CheckReal(Path.Combine(dir, "poolwatch-cpu.wprp"));
         string etl = _paths.Guard.CheckReal(Path.Combine(dir, "cpu.etl"));
         // No Kernel-File here: only the CPU part of cpu.etl is read.
         File.WriteAllText(profile, Profile([], withTagFilter: false, cpu: true, pool: false, kernelFile: false), new UTF8Encoding(false));
-        var start = Wpr($"-start \"{profile}!PoolWatch\" -filemode -recordtempto \"{tempDir}\" -instancename {Instance}");
-        if (start.code != 0) { Cleanup(tempDir); return (null, $"wpr -start failed ({start.code}): {start.output.Trim()}"); }
-        var startUtc = DateTime.UtcNow;
+        var started = Wpr($"-start \"{profile}!PoolWatch\" -filemode -recordtempto \"{tempDir}\" -instancename {Instance}");
+        if (started.code != 0) { var at = _clock(); Cleanup(tempDir); return (null, $"wpr -start failed ({started.code}): {started.output.Trim()}", at, at); }
+        var start = _clock();
         _log.Info($"capture: recording CPU for {seconds} s");
         stop.WaitHandle.WaitOne(TimeSpan.FromSeconds(seconds));
         var stopResult = Wpr($"-stop \"{etl}\" \"PoolWatch CPU trace\" -instancename {Instance} -skipPdbGen", timeoutSeconds: 300);
-        var endUtc = DateTime.UtcNow;
+        var end = _clock();
         if (stopResult.code != 0 || !File.Exists(etl))
         {
             Wpr($"-cancel -instancename {Instance}");
             Cleanup(tempDir);
-            return (null, $"wpr -stop failed ({stopResult.code}): {stopResult.output.Trim()}");
+            return (null, $"wpr -stop failed ({stopResult.code}): {stopResult.output.Trim()}", start, end);
         }
         Cleanup(tempDir);
         try
         {
             string? symbols = null;
             try { symbols = _symbolPath?.Invoke(); } catch (Exception ex) { _log.Info("symbol path not read: " + ex.Message); }
-            var cpu = EtlParser.Parse(etl, [], startUtc, endUtc, _log.Info, symbols, _paths.Guard.CheckReal).Cpu;
-            if (cpu is not null) { cpu.StartUtc = startUtc; cpu.EndUtc = endUtc; }
-            return (cpu, cpu is null ? "no CPU events in the trace" : null);
+            var cpu = _parse(etl, [], start, end, symbols).Cpu;
+            cpu?.Recorded(start, end); // its start and end on both clocks, its length on the forward one
+            return (cpu, cpu is null ? "no CPU events in the trace" : null, start, end);
         }
-        catch (Exception ex) { return (null, "parsing failed: " + ex.Message); }
+        catch (Exception ex) { return (null, "parsing failed: " + ex.Message, start, end); }
     }
 
     private CaptureResult RunPool(string dir, IReadOnlyCollection<PoolTag> tags, int seconds, CancellationToken stop, bool kernelFile)
@@ -170,42 +185,42 @@ internal sealed class CaptureRunner
         string startArgs = $"-start \"{profile}!PoolWatch\" -filemode -recordtempto \"{tempDir}\" -instancename {Instance}";
 
         File.WriteAllText(profile, Profile(tags, withTagFilter: true, kernelFile: kernelFile), new UTF8Encoding(false));
-        var start = Wpr(startArgs);
-        if (start.code != 0 && IsProfileError(start.output))
+        var started = Wpr(startArgs);
+        if (started.code != 0 && IsProfileError(started.output))
         {
             // Older WPR builds reject the pool-tag filter: record all tags (bounded by the duration), filter in the parser.
-            notes.Add($"wpr rejected the pool-tag filter ({start.output.Trim()}); recorded all tags instead.");
+            notes.Add($"wpr rejected the pool-tag filter ({started.output.Trim()}); recorded all tags instead.");
             File.WriteAllText(profile, Profile(tags, withTagFilter: false, kernelFile: kernelFile), new UTF8Encoding(false));
-            start = Wpr(startArgs);
+            started = Wpr(startArgs);
         }
-        if (start.code != 0)
+        if (started.code != 0)
         {
             // Never cancel here: the failure may be another recording that owns the kernel logger.
             Cleanup(tempDir);
-            return new CaptureResult { Tags = tags.ToList(), Error = $"wpr -start failed ({start.code}): {start.output.Trim()}", Notes = notes };
+            return new CaptureResult { Tags = tags.ToList(), Error = $"wpr -start failed ({started.code}): {started.output.Trim()}", Notes = notes };
         }
-        var startUtc = DateTime.UtcNow;
+        var start = _clock();
         _log.Info($"capture: recording {seconds} s for {string.Join(", ", tags.Select(t => t.ToDisplay()))}");
         stop.WaitHandle.WaitOne(TimeSpan.FromSeconds(seconds));
         var stopResult = Wpr($"-stop \"{etl}\" \"PoolWatch confirmation trace\" -instancename {Instance} -skipPdbGen", timeoutSeconds: 300);
-        var endUtc = DateTime.UtcNow;
+        var end = _clock();
         if (stopResult.code != 0 || !File.Exists(etl))
         {
             Wpr($"-cancel -instancename {Instance}"); // our own instance only, and before touching its temp folder
             Cleanup(tempDir);
-            return new CaptureResult { Tags = tags.ToList(), StartUtc = startUtc, EndUtc = endUtc, Error = $"wpr -stop failed ({stopResult.code}): {stopResult.output.Trim()}", Notes = notes };
+            return new CaptureResult { Tags = tags.ToList(), Error = $"wpr -stop failed ({stopResult.code}): {stopResult.output.Trim()}", Notes = notes }.Recorded(start, end);
         }
         Cleanup(tempDir);
         _log.Info($"capture: saved {etl} ({new FileInfo(etl).Length / 1048576.0:0.0} MB)");
         try
         {
-            var r = EtlParser.Parse(etl, tags, startUtc, endUtc, _log.Info, checkWrite: _paths.Guard.CheckReal);
+            var r = _parse(etl, tags, start, end, null);
             r.Notes.InsertRange(0, notes);
             return r;
         }
         catch (Exception ex)
         {
-            return new CaptureResult { Tags = tags.ToList(), StartUtc = startUtc, EndUtc = endUtc, EtlPath = etl, Error = "parsing failed: " + ex.Message, Notes = notes };
+            return new CaptureResult { Tags = tags.ToList(), EtlPath = etl, Error = "parsing failed: " + ex.Message, Notes = notes }.Recorded(start, end);
         }
     }
 
@@ -220,9 +235,9 @@ internal sealed class CaptureRunner
     }
 
     /// <summary>The WPR profile. Pool events need the PERF_POOL group: WPR's "Pool" system keyword plus pool stacks.</summary>
-    /// <param name="cpu">Also CPU sampling with stacks, context switches (with stacks) and DPC / ISR time (addendum 2 C).</param>
+    /// <param name="cpu">Also CPU sampling with stacks, context switches (with stacks) and DPC / ISR time.</param>
     /// <param name="pool">The pool events (false for the CPU-only trace taken when the lag probe trips).</param>
-    /// <param name="kernelFile">Microsoft-Windows-Kernel-File (file creates / deletes per process). C1: automatic captures
+    /// <param name="kernelFile">Microsoft-Windows-Kernel-File (file creates / deletes per process). Automatic captures
     /// leave it out unless DeeperCapture is on; the CPU recording never needs it.</param>
     internal static string Profile(IReadOnlyCollection<PoolTag> tags, bool withTagFilter, bool cpu = false, bool pool = true, bool kernelFile = true)
     {
@@ -267,6 +282,7 @@ internal sealed class CaptureRunner
 
     private (int code, string output) Wpr(string args, int timeoutSeconds = 60, bool quiet = false)
     {
+        if (_runWpr is { } run) return run(args, timeoutSeconds);
         var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "wpr.exe"), args)
         {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,

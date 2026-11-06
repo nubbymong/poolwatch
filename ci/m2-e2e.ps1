@@ -21,7 +21,7 @@ Start-Sleep -Seconds 25   # baseline before the problem starts
 $pidFile = Join-Path $work 'child.pid'
 switch ($Scenario) {
     'handles' { & $Leaker leak-handles --dir $work --count 40000 --ramp 40 --hold 40 }
-    # Longer ramp: the leak is still allocating if its incident has to wait for an earlier (unrelated) capture. C1: a
+    # Longer ramp: the leak is still allocating if its incident has to wait for an earlier (unrelated) capture. A
     # held-back capture starts autoCaptureMinMinutes (1 in m3-config) after the earlier one ENDED, not right after it.
     'capture' { & $Leaker leak-handles --dir $work --count 60000 --ramp 150 --hold 20 }
     'files'   { & $Leaker touch-files --dir $work --count 30000 --ramp 40 --hold 30 }
@@ -66,14 +66,14 @@ switch ($Scenario) {
             Assert-True ($top.image -eq 'Leaker.exe') "File incident: top suspect is Leaker.exe (got $($top.image))"
             Assert-True ($top.direct.present -eq $true) "File incident: direct charge present"
             Assert-True ([int]$top.direct.handlesAfter - [int]$top.direct.handlesBefore -ge 15000) "File incident: File handles grew by >= 15000 ($($top.direct.handlesBefore) -> $($top.direct.handlesAfter))"
-            Assert-True ($top.confidence -eq 'StronglyCorrelated') "File incident: confidence strongly correlated (got $($top.confidence))"
+            Assert-True ($top.confidence -eq 'StronglyCorrelated') "File incident: confidence StronglyCorrelated, strong evidence (got $($top.confidence))"
             Assert-True ($r.headline -match 'Leaker\.exe') "headline names Leaker.exe: $($r.headline)"
             Assert-True ($r.growthBytes -ge 8MB) ("File tag growth >= 8 MB ({0:N1} MB)" -f ($r.growthBytes / 1MB))
             Test-IncidentFiles $r
         }
     }
     'capture' {
-        # Scenario 4: the confirmation trace runs during scenario 1 -> "confirmed by trace" if pool events can be parsed.
+        # Scenario 4: the confirmation trace runs during scenario 1 -> "confirmed by a trace" if pool events can be parsed.
         $file = @($reports | Where-Object { $_.tag -ceq 'File' -and $_.kind -ne 'Release' })
         Assert-True ($file.Count -ge 1) "a growth incident for the File tag"
         foreach ($x in @($reports | Where-Object { $null -ne $_.capture })) {
@@ -110,9 +110,9 @@ switch ($Scenario) {
             Assert-True ($lf.Count -ge 1) "Kernel-File attributes >= 1000 opens to Leaker.exe"
             $top = $r.suspects[0]
             Assert-True ($top.image -eq 'Leaker.exe') "capture incident: top suspect is Leaker.exe (got $($top.image))"
-            Assert-True ($top.confidence -eq 'ConfirmedByTrace') "capture incident: confidence confirmed by trace (got $($top.confidence))"
-            # Addendum 1: the trace outranks correlation (2a), every traced process has its identity (2b), the events cover
-            # the growth (2c), no "?" suspect (2d).
+            Assert-True ($top.confidence -eq 'ConfirmedByTrace') "capture incident: confidence ConfirmedByTrace, confirmed by a trace (got $($top.confidence))"
+            # The trace outranks correlation, every traced process has its identity, the events cover
+            # the growth, no "?" suspect.
             Write-Host "  trace answer: $($r.traceAnswer)"
             foreach ($o in @($r.traceOwners | Select-Object -First 3)) { Write-Host ("  trace owner: {0} ({1}) net {2:N0} B in {3} processes" -f $o.owner, $o.ownerKind, $o.netBytes, $o.processes) }
             Assert-True ($r.traceAnswer -match 'The trace shows .*Leaker' -and $r.traceAnswer -match 'Started by: ') "the answer comes from the trace: $($r.traceAnswer)"
@@ -122,7 +122,7 @@ switch ($Scenario) {
             Assert-True (@($r.suspects | Where-Object { $_.image -eq '?' -or $_.displayName -eq '?' }).Count -eq 0) "no '?' suspect"
             $md = Get-Content (Join-Path $r.dir 'report.md') -Raw
             Assert-True ($md -match '## In plain words\s+\S.*The trace shows') "report.md leads with the trace answer"
-            # 2c: events from the onset minus 2 min, not from when the incident closed.
+            # Events from the onset minus 2 min, not from when the incident closed.
             $evs = @(Import-PwCsv (Join-Path $r.dir 'events.csv'))
             $inv = [cultureinfo]::InvariantCulture
             function ToUtc($x) { if ($x -is [datetime]) { $x.ToUniversalTime() } else { [datetime]::Parse([string]$x, $inv, 'RoundtripKind').ToUniversalTime() } }
@@ -167,10 +167,12 @@ switch ($Scenario) {
         Assert-True ($orph.Count -ge 1) "the child is flagged as an orphan with I/O (lifecycle signal)"
         $topHit = @($reports | Where-Object { $_.suspects.Count -gt 0 -and $_.suspects[0].pid -eq $leakerPid })
         Assert-True ($topHit.Count -ge 1) "the orphaned child is the top suspect of at least one incident"
-        if ($topHit.Count -ge 1) {
-            Assert-True ($topHit[0].headline -match 'orphaned') "headline says orphaned: $($topHit[0].headline)"
-            Test-IncidentFiles $topHit[0]
-        }
+        # A headline says orphaned when its top suspect was one at that incident: an incident from before the parent
+        # exited (a drop seconds after the child started, say) has the child on top, not yet orphaned, and says nothing.
+        $orphanTop = @($topHit | Where-Object { $_.suspects[0].isOrphan -eq $true })
+        $unsaid = @($orphanTop | Where-Object { $_.headline -notmatch 'orphaned' })
+        Assert-True ($orphanTop.Count -ge 1 -and $unsaid.Count -eq 0) "every incident with the orphaned child on top as an orphan says orphaned in its headline ($($orphanTop.Count) incidents; not said: $(@($unsaid | ForEach-Object { $_.headline }) -join ' | '))"
+        if ($orphanTop.Count -ge 1) { Test-IncidentFiles $orphanTop[0] }
     }
 }
 

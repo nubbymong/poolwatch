@@ -3,6 +3,8 @@ using PoolWatch.Core.Detection;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Tags;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
 /// <summary>
@@ -39,7 +41,7 @@ public sealed class ReleaseAttributionTests : IDisposable
     {
         _w.Io(Busy, other: 300); // something else on the PC is always busy
         _w.Sample(("File", _file));
-        _mgr.Process(_w.History, _det, _det.Evaluate(_w.History), _w.Now - _w.Interval);
+        _mgr.Process(_w.History, _det, _det.Evaluate(_w.History), At(_w.Now - _w.Interval));
     }
 
     /// <summary>The CI "files" scenario: create 40 s, hold 30 s idle, then delete and exit at once.</summary>

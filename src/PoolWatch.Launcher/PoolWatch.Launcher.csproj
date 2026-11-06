@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    PoolWatch's launcher: the install folder's PoolWatch.exe (and PoolWatch-selfcontained.exe, the same file under a second name).
+    PoolWatch itself is app\PoolWatch.exe below it. Everything that starts PoolWatch starts the launcher (the logon task,
+    the Start menu entry, Explorer, the setup and the uninstaller, and a task or a shortcut made before 1.0, which named
+    this place), and so does app\PoolWatch.exe opened by itself, which hands its start over to it. It starts PoolWatch
+    with an environment it builds from Windows' own values (the Windows folder, the machine's registry and the account's
+    profile folders) and passes on none of the environment it was started with, so nothing a program running as the user
+    put in the user's environment (.NET's start-up variables among it) reaches PoolWatch.
+
+    It ships compiled ahead of time to native code (NativeAOT, `dotnet publish -p:PublishAot=true`, CI only): it has no
+    .NET runtime to load, so the variables that make a .NET runtime load code (a profiler, a start-up hook, another GC or
+    JIT) do nothing to it; its own compiled-in runtime reads a few DOTNET_ settings of its own (its garbage collector's
+    among them), none of which loads code. A normal build (as here) is for its unit tests only, as PoolWatch.Launcher.exe; the native build is named
+    PoolWatch.exe. PublishAot is passed on the publish command line, not set here: set here, every restore would download
+    the native compiler packages, and the SDK's implicit ILLink package (whose version follows the SDK's patch) would
+    enter the lock file.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>PoolWatch.Launcher</AssemblyName>
+    <!-- The native build takes PoolWatch's own name. Not in the normal build: the app's tests reference both projects,
+         and two assemblies named PoolWatch would collide. -->
+    <AssemblyName Condition="'$(PublishAot)' == 'true'">PoolWatch</AssemblyName>
+    <RootNamespace>PoolWatch.Launcher</RootNamespace>
+    <!-- The name the administrator prompt shows. -->
+    <AssemblyTitle>PoolWatch</AssemblyTitle>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\PoolWatch\Assets\poolwatch.ico</ApplicationIcon>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- What the native build links, pinned here although each is already the default: no start-up hooks, the GC built
+         in (never one loaded from DOTNET_GCName or DOTNET_GCPath), and no EventPipe or diagnostic server (which would
+         read DOTNET_DiagnosticPorts). -->
+    <StartupHookSupport>false</StartupHookSupport>
+    <IlcStandaloneGCSupport>false</IlcStandaloneGCSupport>
+    <EventSourceSupport>false</EventSourceSupport>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The folder rules PoolWatch's program applies to itself, compiled in from the same source, so the launcher judges
+         its own folder, PoolWatch's program and the folders they are in as the program does. -->
+    <Compile Include="..\PoolWatch\Engine\AdminFolderRules.cs" Link="AdminFolderRules.cs" />
+    <!-- Every exit code, also from the same source, so the launcher's own code and the codes it passes on come from one
+         table (a test holds the setup's and the docs' to it). -->
+    <Compile Include="..\PoolWatch\Engine\ExitCodes.cs" Link="ExitCodes.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The native link only (a normal build ignores it): Windows loads the DLLs the launcher imports from System32 only
+         (LOAD_LIBRARY_SEARCH_SYSTEM32), never from the launcher's own folder, so a DLL put next to a copy of it cannot
+         run before its own checks do. CI checks the flag in the built exe. -->
+    <LinkerArg Include="/DEPENDENTLOADFLAG:0x800" />
+    <!-- CI's publish names a map file (LauncherLinkMap): the linker lists in it every library whose code it linked in, and
+         CI prints them and checks them against THIRD-PARTY-NOTICES.md. -->
+    <LinkerArg Include="/MAP:&quot;$(LauncherLinkMap)&quot;" Condition="'$(LauncherLinkMap)' != ''" />
+  </ItemGroup>
+</Project>

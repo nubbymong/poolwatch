@@ -6,7 +6,7 @@ using PoolWatch.Core.Incidents;
 namespace PoolWatch.Analysis;
 
 /// <summary>
-/// The pipeline's capture steps that decide something, as their own units so tests hold them to it (review round 3):
+/// The pipeline's capture steps that decide something, as their own units so tests hold them to it:
 /// which incidents share one trace, what the incidents that did not fit are told (after the governor's decision), and what
 /// happens when a trace ends. The pipeline calls these; the governor (Core) decides whether a trace may start.
 /// </summary>
@@ -26,7 +26,7 @@ internal static class CaptureSteps
     public static List<PoolTag> TagsOf(IEnumerable<Incident> incs, int maxTags) => incs.Select(i => i.Tag).Distinct().Take(maxTags).ToList();
 
     /// <summary>
-    /// C1 c: the growth incidents opened in one tick share ONE trace, up to <paramref name="maxTags"/> tags, the largest alerts
+    /// The growth incidents opened in one tick share ONE trace, up to <paramref name="maxTags"/> tags, the largest alerts
     /// first; a held-back pool-alert request's incidents that are still open join it while there is room (an incident of a tag
     /// already in the trace always fits). Null when nothing opened.
     /// </summary>
@@ -52,7 +52,7 @@ internal static class CaptureSteps
     }
 
     /// <summary>
-    /// Review round 3: what the incidents that did not fit are told, written AFTER the governor decided (it used to be written
+    /// What the incidents that did not fit are told, written AFTER the governor decided (it used to be written
     /// before, as if a trace had started): none when no trace was asked for (the settings), else which trace took their place.
     /// </summary>
     public static string? LeftNote(CaptureDecision d, int maxTags) => d.Verdict switch
@@ -63,7 +63,7 @@ internal static class CaptureSteps
     };
 
     /// <summary>
-    /// C1 a: a trace ended (or failed). The governor hears it FIRST, whatever happens next; every error is on each
+    /// A trace ended (or failed). The governor hears it FIRST, whatever happens next; every error is on each
     /// incident's timeline ("capture failed: ..."); attaching to one incident may fail without stopping the others.
     /// </summary>
     public static void Complete(CaptureGovernor governor, IReadOnlyList<Incident> incs, CaptureResult result,
@@ -80,7 +80,7 @@ internal static class CaptureSteps
 }
 
 /// <summary>
-/// Review round 3: the capture notes ("capture skipped: ...", "no capture: ...", "held-back capture dropped: ...") go on an
+/// The capture notes ("capture skipped: ...", "no capture: ...", "held-back capture dropped: ...") go on an
 /// incident's timeline at most once per reason. The reason is the text before its first bracket, so "... per 60 min (the
 /// last capture ended 20 min ago)" and "(... 21 min ago)" are one reason. An incident a trace started for may be told again.
 /// </summary>

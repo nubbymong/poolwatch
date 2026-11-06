@@ -10,7 +10,7 @@
     <Company>PoolWatch</Company>
     <Product>PoolWatch</Product>
     <InvariantGlobalization>false</InvariantGlobalization>
-    <!-- L3 (supply chain): every project's package graph, transitive packages included, is pinned with its content hash in
+    <!-- Supply chain: every project's package graph, transitive packages included, is pinned with its content hash in
          packages.lock.json. CI (CI=true) restores in locked mode: a changed, added or substituted package fails the build
          instead of being used. After changing a package reference, run `dotnet restore -force-evaluate` and commit the
          lock files. -->

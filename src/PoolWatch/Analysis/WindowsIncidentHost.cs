@@ -34,7 +34,10 @@ internal sealed class WindowsIncidentHost : IIncidentHost
     }
 
     public string IncidentsDir => _engine.Paths.IncidentsDir;
-    public string CheckWrite(string path) => _engine.Paths.Guard.CheckReal(path);
+    // Incident files are written on the sampler thread. The path check, run on each file before it is written or
+    // renamed, throws when an open of that file would have to wait for another program at the time of the check; the
+    // caller logs a report that cannot be written now.
+    public string CheckWrite(string path) => _engine.Paths.CheckRealNoWait(path);
     public void RequestHandleScan() => _engine.RequestHandleScan();
     public string DisplayUser(string user) => ProcessDetails.DisplayUser(user);
 
@@ -44,11 +47,14 @@ internal sealed class WindowsIncidentHost : IIncidentHost
     private int _searchesPending;
 
     /// <summary>Waits (bounded) for running transcript searches, so a final report does not say "in progress".</summary>
-    public void WaitForSearches(TimeSpan timeout)
-    {
-        var deadline = DateTime.UtcNow + timeout;
-        while (Volatile.Read(ref _searchesPending) > 0 && DateTime.UtcNow < deadline) Thread.Sleep(100);
-    }
+    public void WaitForSearches(TimeSpan timeout) => WaitWhilePending(() => Volatile.Read(ref _searchesPending), timeout);
+
+    /// <summary>
+    /// Waits while <paramref name="pending"/> is above 0, for at most <paramref name="timeout"/> on the clock that only goes
+    /// forward (<paramref name="clock"/>; a test gives its own, and its own <paramref name="sleep"/>).
+    /// </summary>
+    internal static bool WaitWhilePending(Func<int> pending, TimeSpan timeout, Func<Core.Model.Moment>? clock = null, Action<TimeSpan>? sleep = null) =>
+        Core.Model.Waits.While(() => pending() > 0, timeout, TimeSpan.FromMilliseconds(100), clock, sleep);
     /// <summary>Raised (on a pool thread) when a transcript search for a suspect finished.</summary>
     public event Action<ProcessKey>? SessionResolved;
 
@@ -107,7 +113,7 @@ internal sealed class WindowsIncidentHost : IIncidentHost
             {
                 var profiles = Path.Combine(root, "account-profiles");
                 if (!Directory.Exists(profiles)) continue;
-                // N11: the root comes from another process's environment, so an elevated enumeration here skips reparse
+                // The root comes from another process's environment, so an elevated enumeration here skips reparse
                 // points (a planted junction could redirect the walk), as TranscriptSearch does for the transcripts below.
                 var opts = new EnumerationOptions { IgnoreInaccessible = true, RecurseSubdirectories = false, AttributesToSkip = FileAttributes.ReparsePoint };
                 foreach (var p in Directory.EnumerateDirectories(profiles, "*", opts).Take(50))
@@ -171,7 +177,7 @@ internal sealed class WindowsIncidentHost : IIncidentHost
             Machine = Environment.MachineName,
             OsDescription = string.Join(" ", new[] { product, display }.Where(s => s.Length > 0)) is { Length: > 0 } d ? d : Environment.OSVersion.VersionString,
             OsBuild = build,
-            RamBytes = (long)GC.GetGCMemoryInfo().TotalAvailableMemoryBytes,
+            RamBytes = Native.MemoryNative.TotalPhysical(),
             LogicalCpus = Environment.ProcessorCount,
             BootUtc = DateTime.UtcNow - TimeSpan.FromMilliseconds(Environment.TickCount64),
             Volumes = _engine.Volumes.ToList(),

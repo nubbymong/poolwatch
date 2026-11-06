@@ -1,0 +1,97 @@
+using PoolWatch.Core;
+
+namespace PoolWatch.Engine;
+
+/// <summary>
+/// Settings that take effect at once: the setup guide, a suggestion, Settings and Undo turn the automatic clear, the
+/// token-leak guard and update notices on or off while PoolWatch runs, or the "Next cache clear" line would be wrong until
+/// the next start.
+/// <see cref="Apply"/> changes settings.json and the running engine's settings object (the sampler reads the automatic
+/// clear's values once per sample; a bool or double write is atomic on x64), then raises <see cref="Applied"/> so an
+/// open Settings form's copy follows. Every other setting still applies at the next start.
+/// </summary>
+internal sealed class LiveSettings
+{
+    private readonly AppPaths _paths;
+    private readonly bool _persist;
+    private readonly Log _log;
+    private readonly object _lock = new();
+
+    /// <param name="running">The running engine's settings object (changed in place).</param>
+    /// <param name="persist">Write settings.json too; false with <c>--config</c>, which is read-only.</param>
+    public LiveSettings(AppPaths paths, Settings running, bool persist, Log log)
+    {
+        _paths = paths;
+        Running = running;
+        _persist = persist;
+        _log = log;
+    }
+
+    public Settings Running { get; }
+
+    /// <summary>Raised on the caller's thread after each <see cref="Apply"/>, with the change that was applied.</summary>
+    public event Action<Action<Settings>>? Applied;
+
+    /// <summary>
+    /// What the next start reads: settings.json as saved, with any change saved there for the next start. Null with
+    /// <c>--config</c> (that file is never written, so the running settings are what the next start reads) or when the
+    /// file cannot be read.
+    /// </summary>
+    public Settings? Saved()
+    {
+        if (!_persist) return null;
+        lock (_lock)
+        {
+            try { return Settings.Load(_paths.SettingsFile); }
+            catch (Exception ex) { _log.Info("settings.json not read: " + ex.Message); return null; }
+        }
+    }
+
+    /// <summary>
+    /// Any thread. The file is changed first (loaded, changed, normalized, written to a temporary file and moved over the
+    /// old one), so a failed write throws and changes nothing; the other saved values stay as they are. The running
+    /// settings are normalized the same way, so the engine runs with the values the file holds.
+    /// </summary>
+    public void Apply(string what, Action<Settings> change)
+    {
+        lock (_lock)
+        {
+            if (_persist)
+            {
+                string file = _paths.SettingsFile;
+                var saved = Settings.Load(file);
+                change(saved);
+                saved.Normalize();
+                saved.Save(_paths.Guard.CheckReal(file + ".tmp"));
+                File.Move(_paths.Guard.CheckReal(file + ".tmp"), _paths.Guard.CheckReal(file), overwrite: true);
+            }
+            change(Running);
+            Running.Normalize();
+        }
+        _log.Info("settings applied now: " + what);
+        Applied?.Invoke(change);
+    }
+
+    /// <summary>
+    /// Settings' Save: <paramref name="edited"/> becomes what the next start reads, written as <see cref="Apply"/> writes
+    /// it, with the service profiles as settings.json holds them now (the Services tab owns them and writes every change
+    /// of them through <see cref="Apply"/>, so an older copy never puts back a profile list or a profile at start that was
+    /// changed since). With <c>--config</c>, which is read-only, nothing is written: that file's settings, its service
+    /// profiles and the one it would apply at start included, never become PoolWatch's own. False when nothing was
+    /// written. Throws when settings.json cannot be read or written (nothing changes then).
+    /// </summary>
+    public bool SaveForNextStart(Settings edited)
+    {
+        if (!_persist) return false;
+        lock (_lock)
+        {
+            string file = _paths.SettingsFile;
+            edited.ServiceProfiles = Settings.Load(file).ServiceProfiles;
+            edited.Normalize();
+            edited.Save(_paths.Guard.CheckReal(file + ".tmp"));
+            File.Move(_paths.Guard.CheckReal(file + ".tmp"), _paths.Guard.CheckReal(file), overwrite: true);
+        }
+        _log.Info("settings saved for the next start (Settings)");
+        return true;
+    }
+}

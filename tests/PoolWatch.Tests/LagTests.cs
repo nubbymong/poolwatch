@@ -9,14 +9,17 @@ public class LagTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 8, 0, 0, DateTimeKind.Utc);
     private static LagProbe P(int i, double timer, double file = 1, double? clip = 0.3, long nonPagedMb = 2000) =>
-        new(T0.AddSeconds(10 * i), timer, clip, file, 0, new PoolTotals(1_000L << 20, (ulong)nonPagedMb << 20, 0, 0));
+        new(T0.AddSeconds(10 * i), timer, clip, file, 0, new PoolTotals(1_000L << 20, (ulong)nonPagedMb << 20, 0, 0)) { TickMs = Tick0 + 10_000L * i };
+
+    /// <summary>Windows' clock at the first probe (milliseconds since it started), which the probes' TickMs follow.</summary>
+    private const long Tick0 = 7_200_000;
 
     [Fact]
     public void RecentHoldsTheLastHourWhateverTheProbeInterval()
     {
         var m = new LagMonitor(new Settings { LagBaselineSamples = 5 });
         for (int i = 0; i < 3600; i++) // one probe every 2 s for two hours
-            m.Add(new LagProbe(T0.AddSeconds(2 * i), 15.6, 0.3, 1, 0, default));
+            m.Add(new LagProbe(T0.AddSeconds(2 * i), 15.6, 0.3, 1, 0, default) { TickMs = Tick0 + 2_000L * i });
         var recent = m.Recent.ToList();
         Assert.InRange((recent[^1].TimeUtc - recent[0].TimeUtc).TotalMinutes, 59.9, 60);
     }
@@ -63,9 +66,43 @@ public class LagTests
         Assert.Null(m.Baseline);
         Assert.StartsWith("Lag: learning the baseline (1 of 30", m.Summary());
     }
+
+    [Fact]
+    public void TheProbesIntervalsAreTimedOnTheClockThatOnlyGoesForward()
+    {
+        // Probes every 10 s on Windows' clock, while the system clock is set back an hour, then forward a day. Whether the
+        // probe trips (fresh for 30 s), how soon a finding repeats (30 minutes) and the last hour kept are timed on the
+        // probes' TickMs, so neither change moves them.
+        var m = new LagMonitor(new Settings { LagBaselineSamples = 3, LagAlertRatio = 5 });
+        LagProbe At(int i, double timer, TimeSpan wall) => P(i, timer) with { TimeUtc = T0.AddSeconds(10 * i) + wall };
+        var back = -TimeSpan.FromHours(1);
+        int i = 0;
+        for (; i < 3; i++) Assert.Null(m.Add(At(i, 15.6, TimeSpan.Zero)));
+        Assert.Null(m.Add(At(i++, 200, back)));
+        Assert.NotNull(m.Add(At(i++, 220, back))); // two in a row: lagging, the first finding
+        long last = Tick0 + 10_000L * (i - 1);
+        Assert.True(m.Tripping(last + 5_000, TimeSpan.FromSeconds(30)));
+        Assert.False(m.Tripping(last + 31_000, TimeSpan.FromSeconds(30)));
+        // Back to normal, then lagging again 10 minutes on, with the system clock a day ahead: no second finding yet.
+        for (int k = 0; k < 3; k++) Assert.Null(m.Add(At(i++, 15.6, back)));
+        var ahead = TimeSpan.FromDays(1);
+        i += 60;
+        Assert.Null(m.Add(At(i++, 200, ahead)));
+        Assert.Null(m.Add(At(i++, 220, ahead)));
+        // And 31 minutes after the first, on Windows' clock, it is raised again.
+        for (int k = 0; k < 3; k++) Assert.Null(m.Add(At(i++, 15.6, ahead)));
+        i = 5 + 186;
+        Assert.Null(m.Add(At(i++, 200, back)));
+        Assert.NotNull(m.Add(At(i++, 220, back)));
+        // The last hour kept is an hour of Windows' clock, whatever the system clock said.
+        var recent = m.Recent.ToList();
+        Assert.True(recent[^1].TickMs - recent[0].TickMs <= 3_600_000);
+        Assert.Equal(Tick0, recent[0].TickMs); // all 33 minutes of it: the first probe too, a day "before" the ones after the jump
+        Assert.Contains(recent, p => p.TimeUtc > T0.AddHours(12)); // probes stamped a day ahead are still among them
+    }
 }
 
-/// <summary>C3 (review round 2): a suspend / resume gap is seen on either clock, so the compositor's counter is re-based.</summary>
+/// <summary>A suspend / resume gap is seen on either clock, so the compositor's counter is re-based.</summary>
 public class ResumeGapTests
 {
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(10);

@@ -2,7 +2,7 @@ using PoolWatch.Core.TokenGuard;
 
 namespace PoolWatch.Tests;
 
-/// <summary>Addendum 3: the token-leak guard's decision table and the leak test's verdict.</summary>
+/// <summary>The token-leak guard's decision table and the leak test's verdict.</summary>
 public class TokenGuardTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 7, 0, 0, DateTimeKind.Utc);
@@ -60,22 +60,52 @@ public class TokenGuardTests
     [Fact]
     public void ALeakTestThatNeverFinishedTurnsTheWorkaroundOnWithoutTesting()
     {
-        // M3: the marker of an unfinished test (PoolWatch killed during it) wins over "test first" and over a known leak.
+        // The marker of an unfinished test (PoolWatch killed during it) wins over "test first" and over a known leak.
         Assert.Equal(GuardStep.TurnOnInterrupted, GuardPolicy.First(S(GuardResult.CleanOnce), Build, 200000, interrupted: true));
         Assert.Equal(GuardStep.TurnOnInterrupted, GuardPolicy.First(S(GuardResult.Fixed), Build, 200000, interrupted: true));
         Assert.Equal(GuardStep.TurnOnInterrupted, GuardPolicy.First(null, Build, null, interrupted: true));
         Assert.Equal(GuardStep.AlreadyOn, GuardPolicy.First(null, Build, 0, interrupted: true)); // already protected
         var o = GuardPolicy.Without(GuardStep.TurnOnInterrupted, S(GuardResult.Fixed), Build, T0);
         Assert.True(o.TurnOn);
-        Assert.Equal(GuardResult.Unclear, o.State.Result);
+        Assert.Equal(GuardResult.Interrupted, o.State.Result);
+        Assert.Equal(Build, o.State.Build);
         Assert.Contains("did not finish", o.Message);
-        Assert.Equal(GuardStep.Test, GuardPolicy.First(o.State, Build, 200000)); // the logon after tests again
+        Assert.Contains("ON at each logon on this build", o.Message);
+    }
+
+    [Fact]
+    public void AfterATestWasCutShortEveryLogonOnThatBuildIsProtectedUntilATestFinishes()
+    {
+        // The logon after a cut-short test does not test again (a test needs the workaround off, and another cut-short test
+        // would leave that logon without it): each logon on this build turns the workaround on without testing.
+        var interrupted = GuardPolicy.Without(GuardStep.TurnOnInterrupted, S(GuardResult.CleanOnce), Build, T0).State;
+        for (int logon = 0; logon < 3; logon++)
+        {
+            var step = GuardPolicy.First(interrupted, Build, 200000);
+            Assert.Equal(GuardStep.TurnOnInterrupted, step);
+            var o = GuardPolicy.Without(step, interrupted, Build, T0.AddDays(logon + 1));
+            Assert.True(o.TurnOn);
+            Assert.Equal(interrupted, o.State); // kept as it was: when, and why
+            interrupted = o.State;
+        }
+        Assert.Equal(GuardStep.TurnOnInterrupted, GuardPolicy.First(interrupted, Build, null)); // also when the timeout is not reported
+        Assert.Equal(GuardResult.Interrupted, GuardPolicy.Without(GuardStep.AlreadyOn, interrupted, Build, T0).State.Result);
+        // A new build is tested again.
+        Assert.Equal(GuardStep.Test, GuardPolicy.First(interrupted, "26220.9999", 200000));
+        // A test that finishes (a check while the workaround is off) saves a verdict, and from it the logon decides again.
+        var clean = GuardPolicy.AfterTest(LeakVerdict.Clean, interrupted, Build, T0, "run 1 {0, 0, 1}").State;
+        Assert.Equal(GuardResult.CleanOnce, clean.Result);
+        Assert.Equal(GuardStep.Test, GuardPolicy.First(clean, Build, 200000));
+        Assert.Equal(GuardResult.Leak, GuardPolicy.AfterTest(LeakVerdict.Leak, interrupted, Build, T0, "x").State.Result);
+        // Saved and read back.
+        Assert.Equal(GuardResult.Interrupted, GuardState.Parse(interrupted.ToJson())!.Result);
+        Assert.Equal("interrupted", GuardState.ResultText(GuardResult.Interrupted));
     }
 
     [Fact]
     public void AnOrphanedHelperPromptsWhenItsParentDiedMidTest()
     {
-        // M3 (review S2): if PoolWatch is killed during the test (the window in which the workaround is off), the surviving
+        // If PoolWatch is killed during the test (the window in which the workaround is off), the surviving
         // helper must offer the one click that protects this logon — the only way from the background. It prompts only when
         // the parent went away AND the timeout is not already 0.
         Assert.True(GuardPolicy.HelperShouldPrompt(parentExitedDuringTest: true, liveTimeout: 200000));
@@ -121,7 +151,7 @@ public class TokenGuardTests
         Assert.Contains("looks FIXED", fixedNow.Message);
         Assert.Contains("will test again next logon", fixedNow.Message);
 
-        // C4 (review): a build already judged Fixed that tests clean AGAIN stays Fixed (off), never flips back to
+        // A build already judged Fixed that tests clean AGAIN stays Fixed (off), never flips back to
         // clean-once (which turned the workaround on, then off, alternating every logon).
         var stillFixed = GuardPolicy.AfterTest(LeakVerdict.Clean, S(GuardResult.Fixed), Build, T0, "x");
         Assert.False(stillFixed.TurnOn);
@@ -131,7 +161,7 @@ public class TokenGuardTests
     [Fact]
     public void AlreadyOnANewBuildDoesNotInheritTheOldVerdict()
     {
-        // C4 (review): already-on at logon on a NEW build must record Unclear (not yet tested on this build), never
+        // Already-on at logon on a NEW build must record Unclear (not yet tested on this build), never
         // carry the previous build's leak/fixed result forward (which would skip ever testing the new build).
         var o = GuardPolicy.Without(GuardStep.AlreadyOn, S(GuardResult.Fixed, "26220.900"), Build, T0);
         Assert.False(o.TurnOn);

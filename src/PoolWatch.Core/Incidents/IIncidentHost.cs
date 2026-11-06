@@ -12,7 +12,7 @@ public interface IIncidentHost
 {
     string IncidentsDir { get; }
     /// <summary>Returns the path if the write policy allows it, otherwise throws. The Windows host resolves links
-    /// (PathGuard.CheckReal): never a write or delete through a junction or symlink (review round 2, S3).</summary>
+    /// (PathGuard.CheckReal): never a write or delete through a junction or symlink.</summary>
     string CheckWrite(string path);
     FileDetails? DescribeFile(string? path);
     SystemInfo GetSystemInfo();

@@ -8,5 +8,7 @@
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Services\services-catalogue.json" LogicalName="services-catalogue.json" />
+    <!-- The known-issue packs (docs/knowledge-packs.md); the schema is for editors and the tests, not the app. -->
+    <EmbeddedResource Include="..\..\knowledge\*.json" Exclude="..\..\knowledge\schema.json" LogicalName="knowledge/%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

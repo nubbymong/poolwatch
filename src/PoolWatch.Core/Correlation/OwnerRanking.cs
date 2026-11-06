@@ -3,6 +3,7 @@ using PoolWatch.Core.Detection;
 using PoolWatch.Core.Identity;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
+using PoolWatch.Core.Util;
 
 namespace PoolWatch.Core.Correlation;
 
@@ -28,18 +29,47 @@ public sealed class OwnerSuspect
     public int Rank { get; set; }
     /// <summary>Plain-language evidence lines ("file activity: 3.5 M operations (25% of all)").</summary>
     public List<string> Plain { get; } = [];
-    /// <summary>The confirmation trace's figures for this owner, when a trace exists (2a): the ranking comes from them.</summary>
+    /// <summary>The confirmation trace's figures for this owner, when a trace exists: the ranking comes from them.</summary>
     public Incidents.TraceOwner? Trace { get; set; }
-    /// <summary>Ranked below the trace's owners on correlation alone (2a).</summary>
+    /// <summary>Ranked below the trace's owners on correlation alone.</summary>
     public bool CorrelationOnly { get; set; }
 
     public string Name => Owner.Name;
+
+    private int? _memberCount;
+    private string? _summary;
+
+    /// <summary>How many processes this owner groups (after <see cref="Trim"/>, <see cref="Members"/> holds only the first of them).</summary>
+    public int MemberCount => _memberCount ?? Members.Count;
+
+    /// <summary>
+    /// Keeps the first <paramref name="members"/> members and their identities, plus the first member with a command line
+    /// when none of those has one (the details show it). <see cref="MemberCount"/> and <see cref="Summary"/> still describe all.
+    /// </summary>
+    public void Trim(int members)
+    {
+        _summary = Summary;
+        _memberCount = MemberCount;
+        if (Members.Count <= members) return;
+        int withCommandLine = Members.FindIndex(m => m.CommandLine is not null);
+        if (withCommandLine >= members)
+        {
+            Members[members] = Members[withCommandLine];
+            Identities[members] = Identities[withCommandLine];
+            members++;
+        }
+        Members.RemoveRange(members, Members.Count - members);
+        Identities.RemoveRange(members, Identities.Count - members);
+        Members.TrimExcess();
+        Identities.TrimExcess();
+    }
 
     /// <summary>"Codex (2 processes: node.exe · Codex cua_node, codex.exe)"; an owner only the trace saw: "... 412 traced processes (...)".</summary>
     public string Summary
     {
         get
         {
+            if (_summary is not null) return _summary;
             if (Members.Count == 0)
             {
                 if (Trace is not { } t) return Name;
@@ -62,8 +92,8 @@ public static class OwnerRanking
     public static List<OwnerSuspect> Rank(History.History h, IReadOnlyList<Suspect> suspects, PoolTag tag, CorrelationWindow w, long growth,
         Func<Suspect, ProcessIdentity> identity)
     {
-        int from = h.IndexAtOrAfter(w.FromUtc);
-        int to = Math.Min(h.Count - 1, Math.Max(from, h.IndexAtOrAfter(w.ToUtc.AddTicks(1)) - 1));
+        int from = w.FromIndex(h);
+        int to = Math.Min(h.Count - 1, Math.Max(from, w.AfterIndex(h) - 1));
         var series = to - from >= 2 ? h.TagSeries(tag, from) : [];
         int n = Math.Min(series.Length, to - from + 1);
         var tagDeltas = new double[Math.Max(0, n - 1)];
@@ -90,9 +120,9 @@ public static class OwnerRanking
                 var ops = new double[tagDeltas.Length];
                 foreach (var m in g.Members)
                 {
-                    var pts = h.ProcessSeries(m.Key, from);
-                    for (int i = 0; i < ops.Length && i + 1 < pts.Length; i++)
-                        if (pts[i] is { } a && pts[i + 1] is { } b) ops[i] += Math.Max(0, b.TotalOps - a.TotalOps);
+                    var pts = h.Points(m.Key);
+                    for (int i = Math.Max(0, pts.First - from); i < ops.Length && from + i + 1 <= pts.Last; i++)
+                        ops[i] += Math.Max(0, pts[from + i + 1].TotalOps - pts[from + i].TotalOps);
                 }
                 g.Correlation = Stats.Spearman(tagDeltas, ops);
                 if (g.Confidence < Confidence.Correlated && g.Correlation >= Correlator.MinSpearman && g.IoShare >= Correlator.MinIoShare)
@@ -108,6 +138,21 @@ public static class OwnerRanking
         var ranked = groups.Values.OrderByDescending(g => g.Meaningful).ThenByDescending(g => g.Score).ThenByDescending(g => g.IoShare).ToList();
         for (int i = 0; i < ranked.Count; i++) ranked[i].Rank = i + 1;
         return ranked;
+    }
+
+    /// <summary>Members kept per owner once a ranking is final: the most any report or page lists (20).</summary>
+    public const int KeptMembers = 20;
+
+    /// <summary>
+    /// What a finished ranking keeps (it was built from up to 2,000 suspects): its meaningful owners in order, at most
+    /// <paramref name="maxOwners"/>, each trimmed to <see cref="KeptMembers"/> members. Every reader looks only at meaningful
+    /// owners and the answer line sums all of them, so an incident keeps them all and a Pool causes row the few it shows.
+    /// </summary>
+    public static List<OwnerSuspect> Keep(IEnumerable<OwnerSuspect> ranked, int maxOwners = int.MaxValue)
+    {
+        var kept = ranked.Where(o => o.Meaningful).Take(maxOwners).ToList();
+        foreach (var o in kept) o.Trim(KeptMembers);
+        return kept;
     }
 
     /// <summary>Bytes a suspect's own evidence accounts for: the larger of its handle-share estimate, its quota rise and its traced net.</summary>
@@ -126,14 +171,6 @@ public static class OwnerRanking
     private static bool Meaningful(Suspect s, long growth) =>
         s.Direct.Present || s.Activity.Present || s.Lifecycle.Present || s.Activity.IoShare >= 0.01 || s.TraceNetBytes > 0 ||
         Explained(s, growth) >= Math.Max(64 * 1024, growth / 100);
-
-    public static string Strength(Confidence c) => c switch
-    {
-        Confidence.ConfirmedByTrace => "confirmed by trace",
-        Confidence.StronglyCorrelated => "strong",
-        Confidence.Correlated => "some",
-        _ => "weak",
-    };
 
     /// <summary>"strongly" / "somewhat" / "not" for a correlation.</summary>
     public static string Moves(double r) => double.IsNaN(r) ? "unknown" : r >= 0.6 ? "strongly" : r >= 0.3 ? "somewhat" : "not";
@@ -167,8 +204,9 @@ public static class OwnerRanking
         : n >= 10_000 ? (n / 1e3).ToString("0", CultureInfo.InvariantCulture) + " k" : n.ToString("N0", CultureInfo.InvariantCulture);
 
     /// <summary>
-    /// "File objects (non-paged) grew 1.2 GB in the last hour. Most likely cause: Codex (strong). Next: Stream Deck (some)."
-    /// or "No clear cause yet: the suspects below account for 0.6 MB of a 300 MB rise."
+    /// "File objects (non-paged) grew 1.2 GB in the last hour. Most likely cause: Codex (strong evidence). Next: Stream Deck
+    /// (some evidence)." or "No clear cause yet: the suspects below account for 0.6 MB of a 300 MB rise." A confidence is
+    /// in the words of Pool causes' Confidence column (<see cref="PlainWords.Confidence"/>).
     /// </summary>
     public static TagAnswer Answer(TagInfo info, PoolTag tag, long pagedBytes, long nonPagedBytes, long growth, string window, IReadOnlyList<OwnerSuspect> owners)
     {
@@ -178,13 +216,13 @@ public static class OwnerRanking
         string head = growth > 0 ? $"{what} grew {Fmt.Bytes(growth)} in {window}." : growth < 0 ? $"{what} fell {Fmt.Bytes(-growth)} in {window}." : $"{what} is flat over {window}.";
         var top = owners.Where(o => o.Meaningful).ToList();
         if (growth <= 0) return new TagAnswer(head, owners, growth, explained);
-        // A cause is named only when the top owner itself is at least "some", or its own evidence covers a tenth of the rise.
+        // A cause is named only when the top owner itself has at least some evidence, or its own evidence covers a tenth of the rise.
         bool named = top.Count > 0 && (top[0].Confidence >= Confidence.Correlated || top[0].ExplainedBytes >= growth / 10);
         bool explains = explained >= growth / 10 || (top.Count > 0 && top[0].Confidence >= Confidence.StronglyCorrelated);
         if (!named)
             return new TagAnswer($"{head} No clear cause yet: the suspects below account for {Fmt.Bytes(explained)} of a {Fmt.Bytes(growth)} rise.", owners, growth, explained);
-        string line = $"{head} Most likely cause: {top[0].Name} ({Strength(top[0].Confidence)}).";
-        if (top.Count > 1 && top[1].Confidence >= Confidence.Correlated) line += $" Next: {top[1].Name} ({Strength(top[1].Confidence)}).";
+        string line = $"{head} Most likely cause: {top[0].Name} ({PlainWords.Confidence(top[0].Confidence)}).";
+        if (top.Count > 1 && top[1].Confidence >= Confidence.Correlated) line += $" Next: {top[1].Name} ({PlainWords.Confidence(top[1].Confidence)}).";
         if (!explains) line += $" The evidence accounts for {Fmt.Bytes(explained)} of the {Fmt.Bytes(growth)} rise.";
         return new TagAnswer(line, owners, growth, explained);
     }

@@ -13,7 +13,7 @@ public class RankingTests
     private static readonly PoolTag A = PoolTag.Parse("Reff"), B = PoolTag.Parse("File"), C = PoolTag.Parse("MmSt");
 
     private static PoolTag? Next(PoolTag[] wanted, PoolTag? selected, Dictionary<PoolTag, DateTime> built, TimeSpan sinceLast) =>
-        RankPlan.Next(wanted, selected, built, Now - sinceLast, Now);
+        RankPlan.Next(wanted, selected, built.ToDictionary(kv => kv.Key, kv => AppClocks.Ms(kv.Value)), AppClocks.Ms(Now - sinceLast), AppClocks.Ms(Now));
 
     [Fact]
     public void TheSelectedRowIsRankedAtOnceWhenItHasNoRanking()
@@ -47,7 +47,7 @@ public class RankingTests
     [Fact]
     public void TheRunnerRanksOffTheCallingThreadOneAtATime()
     {
-        var rankings = new TagRankings(() => Now);
+        var rankings = new TagRankings(() => AppClocks.At(Now));
         int caller = Environment.CurrentManagedThreadId, ranker = -1;
         using var release = new ManualResetEventSlim();
         using var done = new ManualResetEventSlim();
@@ -71,7 +71,7 @@ public class RankingTests
     [Fact]
     public void AFailedRankingCountsAsTriedAndDoesNotLoop()
     {
-        var rankings = new TagRankings(() => Now);
+        var rankings = new TagRankings(() => AppClocks.At(Now));
         using var done = new ManualResetEventSlim();
         Assert.Equal(A, rankings.Pump(_ => throw new InvalidOperationException("boom"), [A], null, done.Set));
         Assert.True(done.Wait(TimeSpan.FromSeconds(10)));

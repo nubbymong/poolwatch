@@ -7,7 +7,7 @@ using PoolWatch.Core.Util;
 namespace PoolWatch.Tests;
 
 /// <summary>
-/// M1 (security review): evidence packs are attached to public bug reports. The incident folder is written as recorded
+/// Evidence packs are attached to public bug reports. The incident folder is written as recorded
 /// (with a notice saying so), and every redacted export, vendor bundle and redacted copy also scrubs values that look like
 /// secrets out of command lines and transcript text, which the identity redaction never touched.
 /// </summary>
@@ -33,7 +33,7 @@ public class SecretScrubTests
     [Fact]
     public void WellKnownTokenShapesAreScrubbed()
     {
-        // N4: the token shapes are built here at run time (not written as literals), so GitHub secret-scanning does not
+        // The token shapes are built here at run time (not written as literals), so GitHub secret-scanning does not
         // flag this test file on the public repo. They are synthetic, not real keys.
         foreach (var (token, before, after) in new[]
         {
@@ -49,8 +49,8 @@ public class SecretScrubTests
     }
 
     [Theory]
-    [InlineData("Token leak guard: workaround ON (foreground lock timeout 0: any app may take the focus)")]
-    [InlineData("Token leak guard: last test: clean-once on 26100.1000; Toke outstanding 1,234 (5 MB).")]
+    [InlineData("Token-leak guard: workaround ON (foreground lock timeout 0: any app may take the focus)")]
+    [InlineData("Token-leak guard: last test: clean-once on 26100.1000; Toke outstanding 1,234 (5 MB).")]
     [InlineData("the token-leak guard's test started 600 children")]
     [InlineData(@"git -C D:\repo status --porcelain")]
     [InlineData("find / -maxdepth 6 -type d -name release-notes-*")]
@@ -92,7 +92,7 @@ public class SecretScrubTests
     [Fact]
     public void AReportMdCodeSpanKeepsItsClosingBacktick()
     {
-        // S1: report.md writes a command line inside a `code span` (MdCode turns any backtick in it into '). The scrub must
+        // Report.md writes a command line inside a `code span` (MdCode turns any backtick in it into '). The scrub must
         // stop before the closing backtick, or GitHub renders an unbalanced span and drops the <SECRET> as an unknown tag.
         Assert.Equal("- Command line: `x.exe --password <SECRET>`", SecretScrubber.Scrub("- Command line: `x.exe --password hunter2`"));
         Assert.Equal("| `svc.exe --token <SECRET>` |", SecretScrubber.Scrub("| `svc.exe --token abc123` |"));
@@ -121,12 +121,12 @@ public class SecretScrubTests
     [Fact]
     public void AJsonValueEndingInABackslashStaysValid()
     {
-        // N1: a relaxed-encoder JSON string whose value ends in a backslash. The \"...\" form must NOT eat the string's own
+        // A relaxed-encoder JSON string whose value ends in a backslash. The \"...\" form must NOT eat the string's own
         // closing quote (the old pattern did, producing invalid JSON). After the fix the file still parses; this odd value
         // (an unterminated quote then a backslash) is left as recorded rather than mangled — best-effort, never corrupting.
         string json = JsonSerializer.Serialize(new { cmd = "x --token \"ab\\" }, new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
         string scrubbed = SecretScrubber.Scrub(json, structured: true);
-        using var doc = JsonDocument.Parse(scrubbed); // still valid JSON (the N1 fix)
+        using var doc = JsonDocument.Parse(scrubbed); // still valid JSON
         Assert.Equal("x --token \"ab\\", doc.RootElement.GetProperty("cmd").GetString());
     }
 

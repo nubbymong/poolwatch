@@ -113,9 +113,137 @@ public class PathGuardTests
     }
 
     [Fact]
+    public void CheckRealRefusesAPathInADataRootThatMustBeThereAndIsNot()
+    {
+        // The Windows app's data root is made only by its start's checks: once it is gone (renamed or deleted while
+        // PoolWatch runs), or a link or a file stands in its place, no write in it is allowed, so none makes it again.
+        var data = Path.Combine(Path.GetTempPath(), "pwtest-must-" + Guid.NewGuid().ToString("N"));
+        var outside = Path.Combine(Path.GetTempPath(), "pwtest-must-target-" + Guid.NewGuid().ToString("N"));
+        var outRoot = Path.Combine(Path.GetTempPath(), "pwtest-must-out-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(data);
+        Directory.CreateDirectory(outside);
+        bool linkGone = true;
+        try
+        {
+            var g = new PathGuard(data, null, dataRootMustExist: true);
+            g.AllowRoot(outRoot);
+            var file = Path.Combine(data, "cache", "x.json");
+            Assert.Equal(file, g.CheckReal(file));
+            Assert.Equal(data, g.CheckReal(data));
+            Directory.Delete(data);
+            Assert.Throws<UnauthorizedAccessException>(() => g.CheckReal(file));
+            Assert.Throws<UnauthorizedAccessException>(() => g.CheckReal(data));
+            Assert.Equal(Path.Combine(outRoot, "x.csv"), g.CheckReal(Path.Combine(outRoot, "x.csv"))); // an --out folder is not the data root
+            File.WriteAllText(data, "x");
+            Assert.Throws<UnauthorizedAccessException>(() => g.CheckReal(file));
+            File.Delete(data);
+            LinkHelper.MakeDirectoryLink(data, outside);
+            linkGone = false;
+            Assert.Throws<UnauthorizedAccessException>(() => g.CheckReal(file));
+            linkGone = LinkHelper.DeleteLinkOnly(data);
+            // Without the rule (tests, the Linux build), a missing data root is allowed: the caller makes it.
+            Assert.Equal(file, new PathGuard(data, null).CheckReal(file));
+        }
+        finally
+        {
+            if (!linkGone) linkGone = LinkHelper.DeleteLinkOnly(data);
+            if (linkGone) try { Directory.Delete(data, recursive: true); } catch { }
+            try { Directory.Delete(outside, recursive: true); } catch { }
+        }
+        Assert.True(linkGone);
+    }
+
+    [Fact]
+    public void CheckRealHoldsTheDataRootBeforeItLooksWhichFolderIsThereAndTriesAgainUntilItIsHeld()
+    {
+        // The hold (the Windows app: open so that no one can rename or delete the folder) is asked for the folder the start
+        // checked, by the identity read for it, as the guard is made; until it is held, each check asks again before it
+        // looks which folder is at the name, so once a write's check passes, that name names the folder checked.
+        var data = Path.Combine(Path.GetTempPath(), "pwtest-hold-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(data);
+        try
+        {
+            var steps = new List<string>();
+            bool refuse = true;
+            var g = new PathGuard(data, null, dataRootMustExist: true, dataRootIdentity: _ => { steps.Add("look"); return "folder 1"; },
+                holdDataRoot: (root, identity) => { steps.Add($"hold {identity}"); return refuse ? null : new MemoryStream(); });
+            Assert.Equal(["look", "hold folder 1"], steps);
+            Assert.False(g.DataRootHeld);
+            var file = Path.Combine(data, "x.json");
+            steps.Clear();
+            g.CheckReal(file);
+            Assert.Equal(["hold folder 1", "look"], steps);
+            refuse = false;
+            steps.Clear();
+            g.CheckReal(file);
+            Assert.Equal(["hold folder 1", "look"], steps);
+            Assert.True(g.DataRootHeld);
+            steps.Clear();
+            g.CheckReal(file);
+            Assert.Equal(["look"], steps); // held for good: not asked again
+            // A hold that throws is a hold not had; nothing is held for a root whose identity could not be read, or
+            // without the must-exist rule.
+            var throwing = new PathGuard(data, null, dataRootMustExist: true, dataRootIdentity: _ => "folder 1", holdDataRoot: (_, _) => throw new IOException("x"));
+            Assert.False(throwing.DataRootHeld);
+            Assert.Equal(file, throwing.CheckReal(file));
+            int asked = 0;
+            _ = new PathGuard(data, null, dataRootMustExist: true, dataRootIdentity: _ => null, holdDataRoot: (_, _) => { asked++; return new MemoryStream(); });
+            _ = new PathGuard(data, null, dataRootIdentity: _ => "folder 1", holdDataRoot: (_, _) => { asked++; return new MemoryStream(); }).CheckReal(file);
+            Assert.Equal(0, asked);
+        }
+        finally { try { Directory.Delete(data, recursive: true); } catch { } }
+    }
+
+    [Fact]
+    public void CheckRealRefusesAPathInADataRootThatIsNotTheFolderTheStartChecked()
+    {
+        // Which folder the data root is (the Windows app: its file ID) is read once, when the guard is made for the folder the
+        // start has just checked. A folder made at that name later, by anyone, is another one: no path in it is allowed.
+        var data = Path.Combine(Path.GetTempPath(), "pwtest-pin-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(data);
+        try
+        {
+            string? now = "folder 1";
+            var g = new PathGuard(data, null, dataRootMustExist: true, dataRootIdentity: _ => now);
+            Assert.True(g.DataRootPinned);
+            var file = Path.Combine(data, "x.json");
+            Assert.Equal(file, g.CheckReal(file));
+            now = "folder 2";
+            var ex = Assert.Throws<UnauthorizedAccessException>(() => g.CheckReal(file));
+            Assert.Contains("is not the data folder this PoolWatch checked at its start", ex.Message);
+            now = null; // cannot be read now: refused too, and the message says that, not that it is another folder
+            Assert.Equal($"PoolWatch write policy: which folder is at '{Path.GetFullPath(data)}' could not be read now, so nothing is written there",
+                Assert.Throws<UnauthorizedAccessException>(() => g.CheckReal(file)).Message);
+            now = "folder 1";
+            Assert.Equal(file, g.CheckReal(file));
+            // A step that throws counts as one that could not read it.
+            bool throwing = false;
+            var t = new PathGuard(data, null, dataRootMustExist: true, dataRootIdentity: _ => throwing ? throw new IOException("x") : "folder 1");
+            throwing = true;
+            Assert.Throws<UnauthorizedAccessException>(() => t.CheckReal(file));
+            // Not readable when the guard is made: nothing in the data root is ever allowed.
+            var unpinned = new PathGuard(data, null, dataRootMustExist: true, dataRootIdentity: _ => null);
+            Assert.False(unpinned.DataRootPinned);
+            Assert.Equal($"PoolWatch write policy: which folder its data folder '{Path.GetFullPath(data)}' is could not be read at its start",
+                Assert.Throws<UnauthorizedAccessException>(() => unpinned.CheckReal(file)).Message);
+            // Without the must-exist rule the identity is not used.
+            Assert.True(new PathGuard(data, null, dataRootIdentity: _ => null).DataRootPinned);
+            Assert.Equal(file, new PathGuard(data, null, dataRootIdentity: _ => null).CheckReal(file));
+            // An --out folder is not the data root.
+            var outRoot = Path.Combine(Path.GetTempPath(), "pwtest-pin-out-" + Guid.NewGuid().ToString("N"));
+            unpinned.AllowRoot(outRoot);
+            Assert.Equal(Path.Combine(outRoot, "x.csv"), unpinned.CheckReal(Path.Combine(outRoot, "x.csv")));
+        }
+        finally
+        {
+            try { Directory.Delete(data, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void CheckRealRefusesALinkInTheDataRoot()
     {
-        // S3: an unelevated user could plant a junction/symlink inside the data root pointing elsewhere; an elevated
+        // An unelevated user could plant a junction/symlink inside the data root pointing elsewhere; an elevated
         // PoolWatch must never delete or write THROUGH it. Check() (string policy) still allows the name — CheckReal
         // resolves what it points at and refuses. On Windows the test plants a directory JUNCTION: it needs no
         // privilege (a symlink needs SeCreateSymbolicLinkPrivilege, which a standard account lacks), so it is exactly
@@ -163,7 +291,7 @@ public class PathGuardTests
     [Fact]
     public void FirstLinkBelowFindsAJunctionOnTheWayToAPathOutsideTheDataRoot()
     {
-        // Review round 2 (S3): the old token guard's Startup shortcut lives outside the data root; the elevated app deletes
+        // The old token guard's Startup shortcut lives outside the data root; the elevated app deletes
         // it only when nothing between the user profile and the shortcut is a link.
         var home = Path.Combine(Path.GetTempPath(), "pwtest-home-" + Guid.NewGuid().ToString("N"));
         var outside = Path.Combine(Path.GetTempPath(), "pwtest-target-" + Guid.NewGuid().ToString("N"));

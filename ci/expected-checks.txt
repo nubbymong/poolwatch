@@ -1,0 +1,67 @@
+# The checks of the CI scripts that the tests pin, one "<script> <check-id>" per line. Each script prints
+# "CHECK-RAN: <check-id>" in the check's own block as the statement right after the check, or right after the last check
+# of the run of checks it is in, or as the statement right after the try statement (with a finally and no catch) whose
+# body holds the check. In the workflow files (.github/workflows), each step that runs one of these scripts as
+# ./ci/<script> saves its output, and the step right after it fails the job when the output lacks one of its lines here
+# or the line Complete-Assertions prints when no check failed. The soak runs its pinned checks only on its ui leg, so
+# that step runs on that leg alone; on its other leg, a later step fails the job when the output lacks that line.
+# CheckMarkerTests holds the scripts, this list and the workflows to each other, and fails on a step other than these
+# (the run, its check, and the soak's check of its other leg) that names one of these scripts by its file name.
+installer-e2e.ps1 installer-welcome-page-fits
+installer-e2e.ps1 installer-ready-page-fits
+installer-e2e.ps1 installer-every-icon-shown
+installer-e2e.ps1 installer-helper-runs-in-a-job
+installer-e2e.ps1 installer-uninstall-entry-logs
+installer-e2e.ps1 installer-checked-after-uninstall
+installer-e2e.ps1 installer-checked-after-upgrade
+installer-e2e.ps1 installer-finishes-at-restart-log
+installer-e2e.ps1 installer-finishes-at-restart-moves
+installer-e2e.ps1 installer-finishes-at-restart
+installer-e2e.ps1 installer-kill-pw-below-launcher
+installer-e2e.ps1 installer-kill-launcher-ended
+installer-e2e.ps1 installer-helper-ends-with-kill
+installer-e2e.ps1 installer-task-pw-stopped
+installer-e2e.ps1 installer-task-helper-ends
+installer-e2e.ps1 upgrade-beta1-failed-held-before-restart
+installer-e2e.ps1 upgrade-beta1-failed-held
+installer-e2e.ps1 upgrade-beta1-has-msg
+installer-e2e.ps1 upgrade-beta1-held-upgrade-fails
+installer-e2e.ps1 upgrade-beta1-msg-aside-set-aside
+installer-e2e.ps1 upgrade-beta1-msg-aside
+installer-e2e.ps1 upgrade-beta1-exe-aside-set-aside
+installer-e2e.ps1 upgrade-beta1-exe-aside
+installer-e2e.ps1 upgrade-beta1-uninstaller-held
+installer-e2e.ps1 upgrade-beta1-held-after-restart
+installer-e2e.ps1 upgrade-beta1-stopped-by-signal
+installer-e2e.ps1 installer-summary-lists-service
+installer-e2e.ps1 uninstall-1-choice
+installer-e2e.ps1 upgrade-file-held
+installer-e2e.ps1 upgrade-file-held-moves
+installer-e2e.ps1 upgrade-file-held-after-restart
+installer-e2e.ps1 upgrade-uninstaller-held
+installer-e2e.ps1 uninstall-2-choice
+installer-e2e.ps1 reinstall-change-still-off
+installer-e2e.ps1 upgrade-failed-files-as-they-were
+installer-e2e.ps1 upgrade-failed
+installer-e2e.ps1 upgrade-failed-held-before-restart
+installer-e2e.ps1 upgrade-failed-held
+installer-e2e.ps1 upgrade-failed-late-entry-put-back
+installer-e2e.ps1 upgrade-failed-late-entry-as-it-was
+installer-e2e.ps1 upgrade-failed-late
+installer-e2e.ps1 upgrade-aside-held-before-restart
+installer-e2e.ps1 upgrade-aside-held-files-as-they-were
+installer-e2e.ps1 upgrade-aside-held-one-version
+installer-e2e.ps1 upgrade-aside-held
+installer-e2e.ps1 uninstall-blocked
+installer-e2e.ps1 uninstall-3
+installer-e2e.ps1 reinstall-before-restart
+installer-e2e.ps1 reinstall-before-restart-after-restart
+installer-e2e.ps1 reinstall-0b
+installer-e2e.ps1 installer-installed-each-file
+m4-ui.ps1 ui-screenshots-taken
+m4-ui.ps1 ui-three-tabs
+m4-ui.ps1 ui-hidden-window-holds-nothing
+m4-ui.ps1 ui-setup-close-button
+m4-ui.ps1 ui-tray-menu-items
+soak.ps1 soak-walked-pages-refreshed
+soak.ps1 soak-no-other-page-refreshed

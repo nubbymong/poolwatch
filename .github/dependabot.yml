@@ -1,4 +1,4 @@
-# L3 (supply chain): weekly update pull requests for the NuGet packages (with their packages.lock.json) and for the
+# Supply chain: weekly update pull requests for the NuGet packages (with their packages.lock.json) and for the
 # GitHub Actions, which the workflow pins by full commit SHA with the version in a comment.
 version: 2
 updates:

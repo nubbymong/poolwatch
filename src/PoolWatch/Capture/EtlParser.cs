@@ -37,8 +37,8 @@ internal static class EtlParser
 
     /// <param name="symbolPath">Local symbol folders for naming kernel functions in the CPU part (never a server); null: module + offset.</param>
     /// <param name="checkWrite">The write policy (PathGuard.CheckReal) for the .etlx TraceEvent writes next to the trace and
-    /// PoolWatch deletes after (review round 2, S3); null only where nothing is elevated (none in the app).</param>
-    public static CaptureResult Parse(string etlPath, IReadOnlyCollection<PoolTag> tags, DateTime startUtc, DateTime endUtc, Action<string> log, string? symbolPath = null,
+    /// PoolWatch deletes after; null only where nothing is elevated (none in the app).</param>
+    public static CaptureResult Parse(string etlPath, IReadOnlyCollection<PoolTag> tags, Core.Model.Moment start, Core.Model.Moment end, Action<string> log, string? symbolPath = null,
         Func<string, string>? checkWrite = null)
     {
         checkWrite ??= p => p;
@@ -129,8 +129,8 @@ internal static class EtlParser
                     if (parent is not null && fa.Parents.Count < 50_000) fa.Parents[parent] = fa.Parents.GetValueOrDefault(parent) + 1;
                 }
             }
-            // While the trace log is open: its code addresses name the kernel functions (addendum 2 C).
-            cpuProfile = cpu.Result(endUtc - startUtc, traceLog, symbolPath);
+            // While the trace log is open: its code addresses name the kernel functions.
+            cpuProfile = cpu.Result(traceLog, symbolPath); // its length is recorded by the caller that read its start and end
         }
         }
         finally { try { File.Delete(checkWrite(etlx)); } catch { } } // can be large; never left behind (and never through a link)
@@ -160,14 +160,14 @@ internal static class EtlParser
         log($"capture parsed: {poolEvents} pool events ({stacked} with stacks), {fileEvents} file events");
         return new CaptureResult
         {
-            StartUtc = startUtc, EndUtc = endUtc, EtlPath = etlPath, Tags = tags.ToList(), PoolEventsParsed = parsed,
+            EtlPath = etlPath, Tags = tags.ToList(), PoolEventsParsed = parsed,
             Library = "Microsoft.Diagnostics.Tracing.TraceEvent (TraceLog, raw PoolGuid events)",
             PoolEvents = poolEvents, StackedPoolEvents = stacked, FileEvents = fileEvents, Pool = usage, Files = activity, Notes = notes, Cpu = cpuProfile,
-        };
+        }.Recorded(start, end);
     }
 
     /// <summary>
-    /// CPU sampling, DPC / ISR and context switches, by kernel module (addendum 2 C). Addresses are resolved to modules
+    /// CPU sampling, DPC / ISR and context switches, by kernel module. Addresses are resolved to modules
     /// after the pass (the kernel's image rundown comes at the end of a file-mode trace). Bounded dictionaries.
     /// </summary>
     private sealed class CpuAgg
@@ -176,7 +176,7 @@ internal static class EtlParser
         private readonly Dictionary<ulong, double> _dpc = new();
         private readonly Dictionary<int, double> _out = new();
         private readonly Dictionary<string, (double ms, long n)> _wait = new(StringComparer.OrdinalIgnoreCase);
-        // Addendum 2 C, functions: kernel-mode samples and wait time by code address (named after the pass, with symbols when local ones exist).
+        // Kernel functions: kernel-mode samples and wait time by code address (named after the pass, with symbols when local ones exist).
         private readonly Dictionary<CodeAddressIndex, long> _kernelIp = new();
         private readonly Dictionary<CodeAddressIndex, double> _waitAt = new();
         private readonly List<(ulong start, ulong end, string name)> _modules = new();
@@ -229,7 +229,7 @@ internal static class EtlParser
         }
 
         /// <summary>
-        /// Kernel functions by CPU and by wait (addendum 2 C). With a local symbol folder the top modules' symbols are
+        /// Kernel functions by CPU and by wait. With a local symbol folder the top modules' symbols are
         /// looked up (cache only: the reader never contacts a server) and functions are named; otherwise, or for a module
         /// with no symbols there, a function is module + offset and the note says so.
         /// </summary>
@@ -289,7 +289,7 @@ internal static class EtlParser
             return false;
         }
 
-        public CpuProfile? Result(TimeSpan span, TraceLog log, string? symbolPath)
+        public CpuProfile? Result(TraceLog log, string? symbolPath)
         {
             if (_samples == 0 && _switches == 0) return null;
             List<CpuFunction> functions = [], waitFunctions = [];
@@ -320,7 +320,7 @@ internal static class EtlParser
             var wait = _wait.OrderByDescending(kv => kv.Value.ms).Take(15).Select(kv => new WaitModule(kv.Key, kv.Value.ms, kv.Value.n)).ToList();
             return new CpuProfile
             {
-                Seconds = span.TotalSeconds, Samples = _samples, Processors = _cpus, TopCpu = top, TopDpcIsr = dpc, TopWait = wait, ContextSwitches = _switches,
+                Samples = _samples, Processors = _cpus, TopCpu = top, TopDpcIsr = dpc, TopWait = wait, ContextSwitches = _switches,
                 TopFunctions = functions, TopWaitFunctions = waitFunctions, FunctionsNote = note,
             };
         }

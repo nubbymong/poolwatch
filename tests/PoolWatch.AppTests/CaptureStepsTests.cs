@@ -6,7 +6,7 @@ using PoolWatch.Core.Incidents;
 namespace PoolWatch.AppTests;
 
 /// <summary>
-/// Review round 3: the pipeline's capture steps. Which incidents share one trace (and the held-back ones joining it), what
+/// The pipeline's capture steps. Which incidents share one trace (and the held-back ones joining it), what
 /// the ones left out are told and when, each note at most once per reason, and the governor hearing the end of a trace
 /// whatever happens while it is attached. No trace is recorded.
 /// </summary>
@@ -20,7 +20,7 @@ public class CaptureStepsTests
         new() { Id = id, Dir = id, Tag = PoolTag.Parse(tag), Kind = IncidentKind.Growth, OpenedUtc = T0, ClosedUtc = open ? null : T0 };
 
     private static (Incident, Alert) Opened(Incident inc, long mb) =>
-        (inc, new Alert(AlertKind.Growth, inc.Tag, T0, "grew > 200 MB in 10 min", mb * MB, TimeSpan.FromMinutes(10), T0));
+        (inc, new Alert(AlertKind.Growth, inc.Tag, T0, "grew > 200 MB in 10 min", mb * MB, TimeSpan.FromMinutes(10), T0) { Ms = AppClocks.Ms(T0), OnsetMs = AppClocks.Ms(T0) });
 
     private static CaptureRequest Held(params Incident[] incs) =>
         new(CaptureSource.PoolAlert, T0.AddMinutes(-5), Now - TimeSpan.FromMinutes(5), "earlier") { Context = incs.ToList() };

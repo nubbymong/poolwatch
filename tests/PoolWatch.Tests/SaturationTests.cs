@@ -2,17 +2,57 @@ using PoolWatch.Core.Services;
 
 namespace PoolWatch.Tests;
 
-/// <summary>Addendum 4 A: the "PC is saturated" detector and its answer line.</summary>
+/// <summary>The "PC is saturated" detector and its answer line.</summary>
 public class SaturationTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 11, 19, 0, DateTimeKind.Utc);
-    private static LoadPoint P(double sec, double? runQueue, bool probe = false, double cpu = 1.0, int cores = 24) =>
-        new(T0.AddSeconds(sec), cpu, runQueue, cores, probe);
+    private const long Tick0 = 7_000_000; // milliseconds since Windows started, at that time
+
+    /// <summary>A moment <paramref name="sec"/> seconds in, on both clocks (the system clock moved by <paramref name="wallJump"/> since).</summary>
+    private static LoadPoint P(double sec, double? runQueue, bool probe = false, double cpu = 1.0, int cores = 24, TimeSpan wallJump = default) =>
+        new(T0.AddSeconds(sec) + wallJump, Tick0 + (long)(sec * 1000), cpu, runQueue, cores, probe);
+
+    /// <summary>
+    /// No load point is made without the time "PC is saturated" times load on: LoadPoint is a record class whose one public
+    /// constructor takes the system time and then TickMs, neither with a default, and it has no constructor without
+    /// parameters, so an object initializer with the system time alone does not compile (a struct would, with TickMs 0),
+    /// nor does Activator.CreateInstance make one with no arguments (what this pins: RuntimeHelpers.GetUninitializedObject,
+    /// which runs no constructor at all, can still make one).
+    /// </summary>
+    [Fact]
+    public void ALoadPointIsMadeOnlyWithItsTickTime()
+    {
+        Assert.False(typeof(LoadPoint).IsValueType);
+        var made = Assert.Single(typeof(LoadPoint).GetConstructors());
+        var first = made.GetParameters().Take(2).ToList();
+        Assert.Equal([("TimeUtc", typeof(DateTime), false), ("TickMs", typeof(long), false)],
+            first.Select(p => (p.Name, p.ParameterType, p.HasDefaultValue)));
+        Assert.Throws<MissingMethodException>(() => Activator.CreateInstance(typeof(LoadPoint)));
+    }
+
+    /// <summary>
+    /// How long load has lasted is timed on the clock that only goes forward: setting the system clock back an hour in the
+    /// middle of an episode neither holds the answer back, nor does setting it forward a day give it early.
+    /// </summary>
+    [Fact]
+    public void AnEpisodeIsTimedOnTheClockThatOnlyGoesForward()
+    {
+        var back = new SaturationDetector();
+        Assert.Null(back.Observe(P(0, 33), Esrv));
+        Assert.Null(back.Observe(P(30, 33, wallJump: TimeSpan.FromHours(-1)), Esrv));
+        Assert.NotNull(back.Observe(P(61, 33, wallJump: TimeSpan.FromHours(-1)), Esrv)); // over a minute, by the clock that only goes forward
+
+        var forward = new SaturationDetector();
+        Assert.Null(forward.Observe(P(0, 33), Esrv));
+        Assert.Null(forward.Observe(P(1, 33, wallJump: TimeSpan.FromDays(1)), Esrv)); // one second in, whatever the system clock says
+        Assert.Null(forward.Observe(P(59, 33, wallJump: TimeSpan.FromDays(1)), Esrv));
+        Assert.NotNull(forward.Observe(P(61, 33, wallJump: TimeSpan.FromDays(1)), Esrv));
+    }
 
     [Fact]
     public void WithoutPdhTheRunQueueRuleIsOffAndCpuAbove85PercentCounts()
     {
-        // C2 (review round 2): no PDH means no run queue. The sum of the processes' cores used to stand in for it and could
+        // No PDH means no run queue. The sum of the processes' cores used to stand in for it and could
         // never exceed the core count, so the rule never tripped; now CPU above 85% takes its place and the answer says so.
         Assert.False(SaturationDetector.UnderLoad(P(0, null, cpu: 0.85)));  // at 85%: not above
         Assert.True(SaturationDetector.UnderLoad(P(0, null, cpu: 0.86)));

@@ -4,11 +4,11 @@ using PoolWatch.Core.Cache;
 namespace PoolWatch.Native;
 
 /// <summary>
-/// The memory lists (free, zeroed, standby by priority, modified) and the standby purge (addendum 2). Reading uses
+/// The memory lists (free, zeroed, standby by priority, modified) and the standby purge. Reading uses
 /// NtQuerySystemInformation(SystemMemoryListInformation), falling back to the in-box "Memory" performance counters
 /// (PDH, no WMI) when that class is refused unelevated. Both the query and the purge (NtSetSystemInformation) need
 /// SeProfileSingleProcessPrivilege, which PoolWatch (always elevated) enables in its own token; unelevated the purge is
-/// refused (S5, review round 2: there is no SYSTEM helper any more).
+/// refused (there is no SYSTEM helper any more).
 /// </summary>
 internal static unsafe class MemoryNative
 {
@@ -22,6 +22,25 @@ internal static unsafe class MemoryNative
         public fixed ulong PageCountByPriority[8];
         public fixed ulong RepurposedPagesByPriority[8];
         public nuint ModifiedPageCountPageFile;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MEMORYSTATUSEX
+    {
+        public uint dwLength, dwMemoryLoad;
+        public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile, ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX buffer);
+
+    /// <summary>
+    /// The PC's physical RAM (GlobalMemoryStatusEx), or 0 when it cannot be read. Not the GC's own limit, which a job
+    /// object or a heap limit makes smaller than the PC's RAM.
+    /// </summary>
+    public static long TotalPhysical()
+    {
+        var status = new MEMORYSTATUSEX { dwLength = (uint)sizeof(MEMORYSTATUSEX) };
+        return GlobalMemoryStatusEx(ref status) ? (long)Math.Min(status.ullTotalPhys, long.MaxValue) : 0;
     }
 
     [DllImport("ntdll.dll")] private static extern int NtQuerySystemInformation(int infoClass, void* buffer, int length, out int returnLength);

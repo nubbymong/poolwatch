@@ -20,8 +20,8 @@ internal sealed class AnalysisPipeline
 {
     private readonly MonitorEngine _engine;
     private readonly CancellationTokenSource _stopCapture = new();
-    private DateTime _lastLabels = DateTime.MinValue;
-    private Dictionary<ProcessKey, long> _lastReads = new();
+    /// <summary>The worker labels are set again every 60 s, on the clock that only goes forward.</summary>
+    private readonly WorkerReads _workerReads = new();
 
     public AnalysisPipeline(MonitorEngine engine)
     {
@@ -31,19 +31,20 @@ internal sealed class AnalysisPipeline
         Host = new WindowsIncidentHost(engine, Knowledge);
         History = History.ForInterval(engine.Settings.SampleIntervalSeconds, engine.Settings.RawHistoryMinutes);
         Detector = new Detector(engine.Settings);
+        Growth = new Core.Growth.GrowthLedger(CacheClearer.MeasureAfter, TimeSpan.FromSeconds(engine.Settings.SampleIntervalSeconds));
         Incidents = new IncidentManager(engine.Settings, Knowledge, Host, engine.Registry);
-        // Addendum 2 C: kernel functions in CPU traces are named from local, admin-only symbol folders only (SymbolPath, else
-        // <data root>\symbols); never a symbol server, a share, a network drive or _NT_SYMBOL_PATH (Part 3 review).
+        // Kernel functions in CPU traces are named from local, admin-only symbol folders only (SymbolPath, else
+        // <data root>\symbols); never a symbol server, a share, a network drive or _NT_SYMBOL_PATH.
         Captures = new CaptureRunner(paths, engine.Log,
             () => Core.Util.SymbolPaths.Resolve(engine.Settings.SymbolPath, Path.Combine(paths.DataRoot, "symbols"), Engine.Interop.UsableSymbolFolder));
-        // C1 d (review round 2): the governor runs on a monotonic clock, never the wall clock.
+        // The governor runs on a monotonic clock, never the wall clock.
         Governor = new CaptureGovernor(engine.Settings, () => TimeSpan.FromMilliseconds(Environment.TickCount64));
-        Incidents.CaptureRunning = () => Captures.Busy; // 2b: start records stay while a trace runs (Part 3 review)
+        Incidents.CaptureRunning = () => Captures.Busy; // Start records stay while a trace runs
         Captures.CleanupStale(paths.IncidentsDir);
         AppDomain.CurrentDomain.ProcessExit += (_, _) => Captures.CancelIfRunning();
         Incidents.Opened += OnIncidentOpened;
         Host.SessionResolved += key => { lock (History.SyncRoot) Incidents.Touch(key); };
-        engine.Notable += events => { lock (History.SyncRoot) using (Profiler.Stage("analysis.events")) Incidents.AddEvents(events); };
+        engine.Notable += events => { lock (History.SyncRoot) using (Profiler.Stage("analysis.events")) Incidents.AddEvents(events, Core.Model.Moment.Now()); };
         engine.HandlesScanned += OnHandles;
         engine.Sampled += OnSample;
         Diagnostics = new Diagnostics(engine, this);
@@ -57,6 +58,8 @@ internal sealed class AnalysisPipeline
     public WindowsIncidentHost Host { get; }
     public History History { get; }
     public Detector Detector { get; }
+    /// <summary>What the pool and its tags grew, cleared and fell, by the minute for 25 hours (the growth and clear stats). History lock.</summary>
+    public Core.Growth.GrowthLedger Growth { get; }
     public IncidentManager Incidents { get; }
     public long AlertsRaised { get; private set; }
     public CaptureRunner Captures { get; }
@@ -67,40 +70,43 @@ internal sealed class AnalysisPipeline
         var byProcess = new Dictionary<ProcessKey, Dictionary<string, int>>();
         foreach (var pid in snap.Counts.Pids)
             if (snap.KeyOf(pid) is { } key) byProcess[key] = snap.ByTypeName(pid);
-        lock (History.SyncRoot) using (Profiler.Stage("analysis.handles")) History.AddHandles(new TypedHandles(snap.TimeUtc, byProcess));
+        lock (History.SyncRoot) using (Profiler.Stage("analysis.handles")) History.AddHandles(new TypedHandles(snap.TimeUtc, byProcess) { Ms = snap.Ms });
     }
 
     private void OnSample(Sample s)
     {
+        // PoolWatch's own cache clears are its own impact, not the pool's: the detector measures across them. Read before
+        // the history lock, as the other readers of both do. The clearer measures a clear at this same sample, after the
+        // detector, from this sample's totals. Diagnostics is null only while the constructor runs: this handler is
+        // subscribed before Diagnostics is made.
+        var clears = Diagnostics is { } d ? d.Cache.History() : null;
         lock (History.SyncRoot)
         {
             using (Profiler.Stage("analysis.history")) History.Add(s);
-            // C6: every incident since PoolWatch started (Closed keeps only the last 6 hours). In memory only: the files are
+            using (Profiler.Stage("analysis.growth"))
+                Growth.Observe(Core.Model.Moment.Of(s), (long)(s.Totals.CommittedPaged + s.Totals.CommittedNonPaged), s.Tags, clears ?? (IReadOnlyList<Core.Cache.ClearRecord>)[]);
+            // Every incident since PoolWatch started (Closed keeps only the last 6 hours). In memory only: the files are
             // written by Boots.Flush below, outside the history lock.
             try { using (Profiler.Stage("analysis.boots")) Boots.Observe(s, TimeSpan.FromMilliseconds(Environment.TickCount64), Incidents.CreatedCount); }
             catch (Exception ex) { _engine.Log.Info("boot summary failed: " + ex.Message); }
-            if (s.TimeUtc - _lastLabels >= TimeSpan.FromSeconds(60))
+            if (_workerReads.At(s) is { } reads)
             {
-                _lastLabels = s.TimeUtc;
-                // Rank workers on reads in the last interval, not since start (a restarted worker must not lose).
-                var reads = s.Processes.ToDictionary(p => p.Key, p => p.ReadOperationCount);
                 using var _ = Profiler.Stage("analysis.labels");
-                ProcessLabels.Apply(_engine.Registry, reads.ToDictionary(kv => kv.Key, kv => kv.Value - _lastReads.GetValueOrDefault(kv.Key)));
-                _lastReads = reads;
+                ProcessLabels.Apply(_engine.Registry, reads); // reads in the last interval, not since start
             }
             List<Alert> alerts;
-            using (Profiler.Stage("analysis.detector")) alerts = Detector.Evaluate(History);
+            using (Profiler.Stage("analysis.detector")) alerts = Detect(Detector, History, clears);
             AlertsRaised += alerts.Count;
-            using (Profiler.Stage("analysis.incidents")) Incidents.Process(History, Detector, alerts, s.TimeUtc);
+            using (Profiler.Stage("analysis.incidents")) Incidents.Process(History, Detector, alerts, Core.Model.Moment.Of(s));
             try { RequestPoolCaptures(); }
             catch (Exception ex) { _engine.Log.Info("alert capture failed: " + ex.Message); }
             try { StartPendingCapture(); }
             catch (Exception ex) { _engine.Log.Info("held-back capture failed: " + ex.Message); }
         }
-        // C6: the boot files are written here, outside the history lock (a baseline is hundreds of KB of JSON); a failed
+        // The boot files are written here, outside the history lock (a baseline is hundreds of KB of JSON); a failed
         // baseline write is retried after 5 minutes, not rebuilt on every sample. Logged once per distinct failure.
         string? bootError;
-        using (Profiler.Stage("analysis.bootfiles")) bootError = Boots.Flush(s.TimeUtc);
+        using (Profiler.Stage("analysis.bootfiles")) bootError = Boots.Flush(s.TickMs);
         if (bootError != _lastBootError)
         {
             _lastBootError = bootError;
@@ -110,10 +116,18 @@ internal sealed class AnalysisPipeline
 
     private string? _lastBootError;
 
+    /// <summary>
+    /// The detector on the newest sample, with PoolWatch's own cache clears as the clearer holds them (null: none yet),
+    /// each measured <see cref="CacheClearer.MeasureAfter"/> after it ran, as the clearer measures it. The caller holds the
+    /// history lock.
+    /// </summary>
+    internal static List<Alert> Detect(Detector detector, History history, IReadOnlyList<Core.Cache.ClearRecord>? clears) =>
+        detector.Evaluate(history, clears is null ? OwnClears.None : new OwnClears(clears, CacheClearer.MeasureAfter));
+
     private void OnIncidentOpened(Incident inc, Alert a)
     {
-        // C1: an automatic capture, through the governor (CaptureOnAlert; at most one per hour; not while saturated or typing).
-        // C1 c (review round 2): collected for the tick, so the incidents that open together share one trace.
+        // An automatic capture, through the governor (CaptureOnAlert; at most one per hour; not while saturated or typing).
+        // Collected for the tick, so the incidents that open together share one trace.
         if (inc.Kind is IncidentKind.Growth or IncidentKind.NonPagedTotal) _openedThisTick.Add((inc, a));
         _engine.RecordEvents([new LifecycleEvent
         {
@@ -123,7 +137,7 @@ internal sealed class AnalysisPipeline
     }
 
     /// <summary>
-    /// C1 (review): the one gate for every trace: at most one automatic capture per <see cref="Settings.AutoCaptureMinMinutes"/>,
+    /// The one gate for every trace: at most one automatic capture per <see cref="Settings.AutoCaptureMinMinutes"/>,
     /// never back to back, never while the PC is saturated or in use, pool events only unless DeeperCapture. History lock.
     /// </summary>
     public CaptureGovernor Governor { get; }
@@ -190,7 +204,7 @@ internal sealed class AnalysisPipeline
 
     private static List<PoolTag> TagsOf(IEnumerable<Incident> incs) => CaptureSteps.TagsOf(incs, MaxTagsPerTrace);
 
-    /// <summary>Review round 3: each capture note at most once per incident and reason (no "capture skipped" every tick).</summary>
+    /// <summary>Each capture note at most once per incident and reason (no "capture skipped" every tick).</summary>
     private readonly CaptureNotes _captureNotes = new();
 
     private void NoteOnce(Incident inc, DateTime timeUtc, string text)
@@ -205,9 +219,9 @@ internal sealed class AnalysisPipeline
     }
 
     /// <summary>
-    /// C1 c (review round 2): the incidents that opened in this tick share ONE trace, up to <see cref="MaxTagsPerTrace"/> tags
+    /// The incidents that opened in this tick share ONE trace, up to <see cref="MaxTagsPerTrace"/> tags
     /// (<see cref="CaptureSteps.Plan"/>; a held-back pool-alert trace whose incidents are still open joins it). The governor
-    /// still decides; review round 3: the incidents that did not fit are told only after that decision. History lock.
+    /// still decides; the incidents that did not fit are told only after that decision. History lock.
     /// </summary>
     private void RequestPoolCaptures()
     {
@@ -270,17 +284,17 @@ internal sealed class AnalysisPipeline
         int cpuSeconds = scope.Cpu ? _engine.Settings.CpuTraceSeconds : 0;
         bool started = Captures.TryStart(incs[0].Dir, tags, scope, _engine.Settings.CaptureSeconds, result =>
         {
-            // The runner calls this whatever happened (C1 a, review round 2: also when the capture threw).
-            result.Notes.Insert(0, "Recorded: " + d.Summary + "."); // what this trace holds, and why (C1)
+            // The runner calls this whatever happened (also when the capture threw).
+            result.Notes.Insert(0, "Recorded: " + d.Summary + "."); // what this trace holds, and why
             lock (History.SyncRoot)
             {
                 // The governor first (it knows the trace ended, whatever happens next), then each incident (CaptureSteps.Complete).
                 var now = DateTime.UtcNow;
                 CaptureSteps.Complete(Governor, incs, result, (inc, text) => Incidents.Note(inc, now, text),
-                    inc => Incidents.ApplyCapture(History, inc, result, now), _engine.Log.Info);
-                Incidents.Suppress(EtwBuffers, now.AddMinutes(2)); // the buffers drain after the stop
+                    inc => Incidents.ApplyCapture(History, inc, result), _engine.Log.Info);
+                Incidents.Suppress(EtwBuffers, Environment.TickCount64 + 120_000); // the buffers drain after the stop
             }
-            // C1: no queue. A held-back request starts from the sampler tick (StartPendingCapture) once the governor allows.
+            // No queue. A held-back request starts from the sampler tick (StartPendingCapture) once the governor allows.
         }, _stopCapture.Token, cpuSeconds);
         if (!started) return false;
         // The callback above needs the history lock, which the caller holds: Finished cannot run before Started.
@@ -292,7 +306,7 @@ internal sealed class AnalysisPipeline
         }
         CapturesStarted++;
         _engine.Log.Info($"capture started: {d.Summary}{(tags.Count > 0 ? " for " + string.Join(", ", tags.Select(t => t.ToDisplay())) : "")}");
-        Incidents.Suppress(EtwBuffers, DateTime.UtcNow.AddSeconds((scope.PoolEvents ? _engine.Settings.CaptureSeconds : 0) + cpuSeconds + 120));
+        Incidents.Suppress(EtwBuffers, Environment.TickCount64 + (long)(((scope.PoolEvents ? _engine.Settings.CaptureSeconds : 0) + cpuSeconds + 120) * 1000));
         _engine.RequestHandleScan();
         return true;
     }
@@ -323,6 +337,16 @@ internal sealed class AnalysisPipeline
             });
     }
 
+    /// <summary>How long <see cref="Finish"/> waits for a capture to save and parse, at most.</summary>
+    internal static readonly TimeSpan FinishCaptureWait = TimeSpan.FromMinutes(6);
+
+    /// <summary>
+    /// Waits while a capture is <paramref name="busy"/>, for at most <see cref="FinishCaptureWait"/> on the clock that only
+    /// goes forward (<paramref name="clock"/>; a test gives its own, and its own <paramref name="sleep"/>).
+    /// </summary>
+    internal static bool WaitForCaptures(Func<bool> busy, Func<Core.Model.Moment>? clock = null, Action<TimeSpan>? sleep = null) =>
+        Core.Model.Waits.While(busy, FinishCaptureWait, TimeSpan.FromMilliseconds(200), clock, sleep);
+
     /// <summary>Closes open incidents and writes the since-boot report. Call after the engine has stopped.</summary>
     public void Finish(string outRoot)
     {
@@ -330,8 +354,7 @@ internal sealed class AnalysisPipeline
         _stopCapture.Cancel();
         Host.WaitForSearches(TimeSpan.FromSeconds(10));
         Diagnostics.Finish();
-        var deadline = DateTime.UtcNow.AddMinutes(6);
-        while (Captures.Busy && DateTime.UtcNow < deadline) Thread.Sleep(200);
+        WaitForCaptures(() => Captures.Busy);
         lock (History.SyncRoot)
         {
             var now = History.Count > 0 ? History.Times[^1] : DateTime.UtcNow;
@@ -339,7 +362,7 @@ internal sealed class AnalysisPipeline
             WriteSinceBoot(outRoot);
             try
             {
-                Boots.Save(now, ended: true);
+                Boots.Save(ended: true);
                 WriteAtomic(Path.Combine(outRoot, "boots.md"), Core.Boot.BootTracker.Table(Boots.All()));
             }
             catch (Exception ex) { _engine.Log.Info("boot summary not saved: " + ex.Message); }
@@ -370,9 +393,29 @@ internal sealed class AnalysisPipeline
 
     private void WriteAtomic(string path, string content)
     {
-        string tmp = _engine.Paths.Guard.CheckReal(path + ".tmp");
-        File.WriteAllText(tmp, content);
-        File.Move(tmp, _engine.Paths.Guard.CheckReal(path), overwrite: true);
+        DurableFile.Replace(_engine.Paths.Guard, path, content);
         Core.Util.Profiler.Wrote(path, content.Length);
+    }
+}
+
+/// <summary>
+/// What the worker labels are set from: each process's reads since the last time, every 60 s on the clock that only goes
+/// forward (each sample's own moment), so setting the system clock back never holds the labels back, nor does setting it
+/// forward bring them early. Sampler thread only.
+/// </summary>
+internal sealed class WorkerReads
+{
+    private readonly Core.Model.Every _every = new(TimeSpan.FromSeconds(60));
+    private Dictionary<ProcessKey, long> _last = new();
+
+    /// <summary>Each process's reads since the last time, when the labels are due at <paramref name="s"/>; null when they are not.</summary>
+    public Dictionary<ProcessKey, long>? At(Sample s)
+    {
+        if (!_every.DueAt(s)) return null;
+        // Reads in the last interval, not since start: a restarted worker must not lose.
+        var reads = s.Processes.ToDictionary(p => p.Key, p => p.ReadOperationCount);
+        var since = reads.ToDictionary(kv => kv.Key, kv => kv.Value - _last.GetValueOrDefault(kv.Key));
+        _last = reads;
+        return since;
     }
 }

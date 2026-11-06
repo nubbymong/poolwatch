@@ -5,11 +5,28 @@ param([Parameter(Mandatory)] [string]$Exe, [Parameter(Mandatory)] [string]$Out)
 New-Item -ItemType Directory -Force $Out | Out-Null
 $pw = Start-PoolWatch $Exe @('--headless', '--duration', '90', '--interval', '5', '--out', $Out)
 
-# Reference values from an independent source while PoolWatch runs.
+# Reference values from an independent source while PoolWatch runs: PDH (PoolWatch reads GetPerformanceInfo). One read
+# can land on a paged-pool spike shorter than a sample interval (a runner once read 299 MB from PDH while PoolWatch's
+# samples 2 s before and 3 s after it read 188 and 190 MB), so there are three reads, each paired below with the
+# totals.csv row nearest to it in time. Timeline, in seconds after PoolWatch starts (it samples every 5 s from about
+# 0.5 s and stops at about 91):
+#   about 21-23  read 1 (the first Get-Counter of a session takes 1-3 s)
+#   then 33 s    the child below
+#   about 55-58  read 2, once the child has exited
+#   about 66-69  read 3, about 11 s later: over 20 s before PoolWatch stops
+# The reads are over 10 s apart, so each pairs with a different sample, and a spike shorter than a sample interval, in
+# a read or in a sample, spoils at most one of the three pairs.
+function Read-Pdh {
+    $c = Get-Counter '\Memory\Pool Paged Bytes', '\Memory\Pool Nonpaged Bytes'
+    # Timed as Get-Counter returns: it reports its last read, taken after its 1 s sample interval, just before.
+    [pscustomobject]@{
+        At = [DateTime]::UtcNow
+        Paged = ($c.CounterSamples | Where-Object Path -like '*pool paged bytes').CookedValue
+        NonPaged = ($c.CounterSamples | Where-Object Path -like '*pool nonpaged bytes').CookedValue
+    }
+}
 Start-Sleep -Seconds 20
-$counters = Get-Counter '\Memory\Pool Paged Bytes', '\Memory\Pool Nonpaged Bytes'
-$refPaged = ($counters.CounterSamples | Where-Object Path -like '*pool paged bytes').CookedValue
-$refNonPaged = ($counters.CounterSamples | Where-Object Path -like '*pool nonpaged bytes').CookedValue
+$reads = @(Read-Pdh)
 
 # A child the ETW collector must see (start, command line, exit code). It runs 33 s: processes that live under 30 s
 # are rolled up per parent and image in events.csv (overhead fix, 2026-10-26), longer ones are listed individually.
@@ -17,15 +34,41 @@ $child = Start-Process cmd.exe -ArgumentList '/c', 'ping -n 34 127.0.0.1 >nul & 
 $child.WaitForExit()
 $childPid = $child.Id
 
+$reads += Read-Pdh
+Start-Sleep -Seconds 10
+$reads += Read-Pdh
+
 $code = Wait-PoolWatch $pw 180
 Assert-True ($code -eq 0) "headless exit code 0 (got $code)"
 
 $totals = Import-PwCsv "$Out\totals.csv"
 Assert-True ($totals.Count -ge 10) "totals.csv has >= 10 samples ($($totals.Count))"
+# Each PDH read against the totals.csv row nearest to it in time, both in UTC: totals.csv writes ISO 8601 times with a
+# Z, which DateTimeOffset parses to the same instant whatever the runner's time zone or culture.
+$inv = [Globalization.CultureInfo]::InvariantCulture
+$rows = @($totals | ForEach-Object {
+    [pscustomobject]@{ At = [DateTimeOffset]::Parse($_.time, $inv).UtcDateTime; Paged = [double]$_.committed_paged_bytes; NonPaged = [double]$_.committed_nonpaged_bytes }
+})
+$pairs = @(foreach ($r in $reads) {
+    $near = $rows | Sort-Object { [math]::Abs(($_.At - $r.At).TotalSeconds) } | Select-Object -First 1
+    [pscustomobject]@{ Read = $r; Row = $near; Gap = [math]::Abs(($near.At - $r.At).TotalSeconds) }
+})
+# Paged and nonpaged are judged separately, and each needs two pairs within 25%: one spike, in a read or in a sample,
+# spoils one pair only, while a real disagreement shows in every pair. A pair whose nearest row is more than 10 s from
+# the read (samples missed, or the read after PoolWatch stopped) does not count.
+foreach ($kind in 'Paged', 'NonPaged') {
+    $agree = 0
+    $notes = foreach ($p in $pairs) {
+        $ref = $p.Read.$kind; $got = $p.Row.$kind
+        $ok = $p.Gap -le 10 -and [math]::Abs($got - $ref) / $ref -lt 0.25
+        if ($ok) { $agree++ }
+        $verdict = if ($p.Gap -gt 10) { 'too far, not counted' } elseif ($ok) { 'agrees' } else { 'off' }
+        '{0:N0} MB vs PDH {1:N0} MB at {2:HH:mm:ss}Z, {3:N1} s apart ({4})' -f ($got / 1MB), ($ref / 1MB), $p.Read.At, $p.Gap, $verdict
+    }
+    Assert-True ($agree -ge 2) ("committed $($kind.ToLower()) within 25% of PDH in $agree of $($pairs.Count) reads (2 needed): " + ($notes -join '; '))
+}
 $mid = $totals[[int]($totals.Count / 2)]
 $paged = [double]$mid.committed_paged_bytes; $nonPaged = [double]$mid.committed_nonpaged_bytes
-Assert-True ([math]::Abs($paged - $refPaged) / $refPaged -lt 0.25) ("committed paged {0:N0} MB within 25% of PDH {1:N0} MB" -f ($paged / 1MB), ($refPaged / 1MB))
-Assert-True ([math]::Abs($nonPaged - $refNonPaged) / $refNonPaged -lt 0.25) ("committed nonpaged {0:N0} MB within 25% of PDH {1:N0} MB" -f ($nonPaged / 1MB), ($refNonPaged / 1MB))
 $tsP = [double]$mid.tagsum_paged_bytes; $tsN = [double]$mid.tagsum_nonpaged_bytes
 Assert-True ($tsP -gt 0.2 * $paged -and $tsP -lt 1.5 * $paged) ("tag-sum paged {0:N0} MB plausible vs committed" -f ($tsP / 1MB))
 Assert-True ($tsN -gt 0.2 * $nonPaged -and $tsN -lt 1.5 * $nonPaged) ("tag-sum nonpaged {0:N0} MB plausible vs committed" -f ($tsN / 1MB))

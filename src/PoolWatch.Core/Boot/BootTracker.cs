@@ -42,11 +42,11 @@ public sealed record BootSummary
 }
 
 /// <summary>
-/// Boot baseline and per-boot summaries kept across reboots (item 13), under <c>boots\&lt;boot id&gt;\</c>: baseline.json
+/// Boot baseline and per-boot summaries kept across reboots, under <c>boots\&lt;boot id&gt;\</c>: baseline.json
 /// once per boot, summary.json rewritten every <see cref="SaveInterval"/> and at exit. The boot id is the boot time to
 /// the minute (from the uptime, stable across PoolWatch restarts). <see cref="Table"/> renders the last boots side by side,
 /// so a daily climb shows across a week. At most <see cref="KeepBoots"/> boots are kept. Sampler thread only.
-/// C6 (review): <see cref="Observe"/> runs under the history lock and only updates memory; the files (a baseline can be
+/// <see cref="Observe"/> runs under the history lock and only updates memory; the files (a baseline can be
 /// hundreds of KB of JSON) are written by <see cref="Flush"/>, called after the lock is released. A failed baseline write
 /// is retried after <see cref="RetryAfterFailure"/>, not rebuilt on every sample.
 /// </summary>
@@ -58,11 +58,15 @@ public sealed class BootTracker
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
     private readonly string _dir;
     private readonly Func<string, string> _checkWrite;
-    private DateTime _lastSave = DateTime.MinValue;
+    /// <summary>When the summary was last due, on the clock that only goes forward; null: not yet.</summary>
+    private long? _lastSaveMs;
     private int _incidentsBefore; // incidents of earlier PoolWatch runs in this boot
     private List<BootSummary>? _all;
     private BootBaseline? _baselineToWrite;   // taken, not yet on disk
-    private DateTime _baselineRetryUtc = DateTime.MinValue;
+    /// <summary>The uptime at the last sample: a boot is the same one while it has not gone back.</summary>
+    private TimeSpan _lastUptime;
+    /// <summary>When a failed baseline write may be tried again, on the clock that only goes forward.</summary>
+    private long _baselineRetryMs = long.MinValue;
     private bool _summaryDue, _pruneDue;
 
     public BootTracker(string bootsDir, Func<string, string> checkWrite)
@@ -89,8 +93,11 @@ public sealed class BootTracker
         if (s.Tags.Count == 0) return;
         var bootUtc = BootTimeOf(s.TimeUtc, uptime);
         string id = IdOf(bootUtc);
-        // Uptime is read separately from the sample time: a minute of jitter must not look like a new boot.
-        if (Current is { } c && c.BootId != id && Math.Abs((c.BootUtc - bootUtc).TotalMinutes) <= 2) id = c.BootId;
+        // Uptime is read separately from the sample time: a minute of jitter must not look like a new boot. Nor does a
+        // system clock set back or forward, which moves the boot time worked out from it: within one run the boot is the
+        // same one for as long as the uptime (the clock that only goes forward) has not gone back.
+        if (Current is { } c && c.BootId != id && (Math.Abs((c.BootUtc - bootUtc).TotalMinutes) <= 2 || uptime >= _lastUptime)) id = c.BootId;
+        _lastUptime = uptime;
         // The same after a PoolWatch restart: a boot time next to a minute boundary (or a clock correction) must not
         // become a second boot folder.
         if (Current is null && NearbyBoot(bootUtc) is { } existing) id = existing;
@@ -104,7 +111,7 @@ public sealed class BootTracker
         if (pg > cur.PeakPaged) { cur.PeakPaged = pg; cur.PeakPagedUtc = s.TimeUtc; }
         if (s.System.CommitBytes > cur.PeakCommitBytes) cur.PeakCommitBytes = s.System.CommitBytes;
         if (s.System.Handles > cur.PeakHandles) cur.PeakHandles = s.System.Handles;
-        if (s.TimeUtc - _lastSave >= SaveInterval) { _lastSave = s.TimeUtc; _summaryDue = true; } // written by Flush
+        if (_lastSaveMs is not { } saved || s.TickMs - saved >= (long)SaveInterval.TotalMilliseconds) { _lastSaveMs = s.TickMs; _summaryDue = true; } // written by Flush; timed on the forward clock
     }
 
     /// <summary>
@@ -112,15 +119,16 @@ public sealed class BootTracker
     /// <see cref="RetryAfterFailure"/>), the summary every <see cref="SaveInterval"/>, and the pruning of old boots. Call it
     /// outside the history lock (sampler thread). Never throws: returns the failure, if any, for the log.
     /// </summary>
-    public string? Flush(DateTime nowUtc)
+    /// <param name="nowMs">Now on the clock that only goes forward (the sample's <see cref="Sample.TickMs"/>): the retry is timed on it.</param>
+    public string? Flush(long nowMs)
     {
         string? error = null;
-        if (_baselineToWrite is { } b && nowUtc >= _baselineRetryUtc)
+        if (_baselineToWrite is { } b && nowMs >= _baselineRetryMs)
         {
             try { WriteBaseline(b); }
             catch (Exception ex)
             {
-                _baselineRetryUtc = nowUtc + RetryAfterFailure;
+                _baselineRetryMs = nowMs + (long)RetryAfterFailure.TotalMilliseconds;
                 error = $"boot baseline not written (retry in {RetryAfterFailure.TotalMinutes:0} min): {ex.Message}";
             }
         }
@@ -155,7 +163,7 @@ public sealed class BootTracker
         string baseFile = Path.Combine(dir, "baseline.json"), sumFile = Path.Combine(dir, "summary.json");
         Baseline = TryRead<BootBaseline>(baseFile);
         _baselineToWrite = null;
-        _baselineRetryUtc = DateTime.MinValue;
+        _baselineRetryMs = long.MinValue;
         if (Baseline is null)
         {
             // Taken now and kept in memory even if its file cannot be written: Start runs once per boot, never per sample.
@@ -171,7 +179,7 @@ public sealed class BootTracker
         };
         Current.Ended = false;
         _incidentsBefore = Current.Incidents;
-        _lastSave = DateTime.MinValue;
+        _lastSaveMs = null;
         _pruneDue = true; // directory work is done by Flush, outside the history lock
         _all = null;
     }
@@ -195,9 +203,8 @@ public sealed class BootTracker
 
     /// <summary>Writes the summary now (and a baseline still waiting for its file), synchronously; throws on failure.</summary>
     /// <param name="ended">PoolWatch is exiting (logoff / shutdown, or the owner closed it).</param>
-    public void Save(DateTime nowUtc, bool ended = false)
+    public void Save(bool ended = false)
     {
-        _lastSave = nowUtc;
         _summaryDue = false;
         if (_baselineToWrite is { } b) WriteBaseline(b);
         if (Current is null) return;

@@ -7,7 +7,7 @@ using PoolWatch.Core.Model;
 namespace PoolWatch.Collectors;
 
 /// <summary>
-/// The responsiveness probe (item 9): every few seconds, on its own normal-priority thread, without starting any
+/// The responsiveness probe: every few seconds, on its own normal-priority thread, without starting any
 /// process: how late a 15 ms sleep wakes up, a window-message round trip through win32k (PostThreadMessage to the probe
 /// thread's own queue, then PeekMessage), creating and deleting a 16-byte file under PoolWatch's own folder, and the
 /// compositor's missed / dropped frames. Probes are queued; the sampler thread consumes them.
@@ -28,7 +28,12 @@ internal sealed class LagProber : IDisposable
     private readonly ConcurrentQueue<LagProbe> _queue = new();
     private Thread? _thread;
     private long? _lastDwm;
-    private DateTime _dwmRetry = DateTime.MinValue;
+    /// <summary>When the compositor is asked again after it did not answer, on the clock that only goes forward.</summary>
+    private Deadline _dwmRetry = new(long.MinValue);
+    /// <summary>The last probe's time on the forward clock (the gap to the next tells a sleep); null before the first.</summary>
+    private long? _lastProbeMs;
+    private readonly Func<Moment> _clock;
+    private readonly Func<long?> _dwmFrames;
     private bool _dwmEverWorked;
     private bool _queueReady;
     private const uint WmProbe = 0x8000 + 0x50; // WM_APP + 0x50, only ever posted to this thread
@@ -37,10 +42,15 @@ internal sealed class LagProber : IDisposable
     private readonly Func<bool>? _paused;
     private readonly Func<string, string> _checkWrite;
 
-    /// <param name="paused">C1: true while PoolWatch's own trace or cache clear runs and for 30 s after; no probe is taken then.</param>
-    /// <param name="checkWrite">Review round 2 (S3): the write policy (PathGuard.CheckReal) before each probe file write and delete.</param>
-    public LagProber(TimeSpan interval, string probeFile, Func<PoolTotals> pool, Func<bool>? paused = null, Func<string, string>? checkWrite = null)
+    /// <param name="paused">True while PoolWatch's own trace or cache clear runs and for 30 s after; no probe is taken then.</param>
+    /// <param name="checkWrite">The write policy (PathGuard.CheckReal) before each probe file write and delete.</param>
+    /// <param name="clock">Reads the two clocks (<see cref="Moment.Now"/>; a test gives its own).</param>
+    /// <param name="dwmFrames">The compositor's missed and dropped frames so far, null when it does not answer (DwmGetCompositionTimingInfo; a test gives its own).</param>
+    public LagProber(TimeSpan interval, string probeFile, Func<PoolTotals> pool, Func<bool>? paused = null, Func<string, string>? checkWrite = null,
+        Func<Moment>? clock = null, Func<long?>? dwmFrames = null)
     {
+        _clock = clock ?? Moment.Now;
+        _dwmFrames = dwmFrames ?? DwmFrames;
         _interval = interval;
         _probeFile = probeFile;
         _pool = pool;
@@ -49,7 +59,7 @@ internal sealed class LagProber : IDisposable
     }
 
     public bool DwmAvailable { get; private set; }
-    /// <summary>Whether the last scheduled probe was skipped because PoolWatch's own work was running (C1).</summary>
+    /// <summary>Whether the last scheduled probe was skipped because PoolWatch's own work was running.</summary>
     public bool Paused { get; private set; }
     /// <summary>Probes skipped for PoolWatch's own work since start.</summary>
     public long PausedProbes => Interlocked.Read(ref _pausedProbes);
@@ -70,13 +80,13 @@ internal sealed class LagProber : IDisposable
 
     private void Loop()
     {
-        // C3 (review): schedule and measure lateness on a monotonic clock (Stopwatch), not the wall clock. The wall
+        // Schedule and measure lateness on a monotonic clock (Stopwatch), not the wall clock. The wall
         // clock jumps on an NTP step, a DST change or (far larger) a sleep/resume, each of which looked like a huge
-        // wake-up lateness and raised a false lag alert. The monotonic clock may pause with the machine, and the gap check
-        // below (Core.Lag.ResumeGap: monotonic lateness or wall time) catches a resume either way.
+        // wake-up lateness and raised a false lag alert. The Stopwatch may pause with the machine, and the gap check
+        // (Resumed: the Stopwatch's lateness, or the gap since the last probe on Environment.TickCount64, which goes on
+        // while the PC sleeps and which no clock setting moves) catches a resume either way.
         var clock = Stopwatch.StartNew();
         TimeSpan next = _interval;
-        DateTime? lastWall = null;
         while (!_stop.Wait(Max(TimeSpan.Zero, next - clock.Elapsed)))
         {
             // How late this wake-up itself was: on a starved PC the probe thread does not run at all until the load
@@ -84,17 +94,14 @@ internal sealed class LagProber : IDisposable
             TimeSpan nowElapsed = clock.Elapsed;
             double late = (nowElapsed - next).TotalMilliseconds;
             next = nowElapsed + _interval;
-            var wallNow = DateTime.UtcNow;
-            bool resumed = ResumeGap.Detected(TimeSpan.FromMilliseconds(late), wallNow - lastWall, _interval);
-            lastWall = wallNow;
-            if (resumed)
+            if (Resumed(late))
             {
-                // Resumed from sleep: the gap is not lag, and (C3, review round 2) neither are the frames the compositor
+                // Resumed from sleep: the gap is not lag, and neither are the frames the compositor
                 // counted as missed while the PC slept: the next DWM read re-bases its counter instead of adding them up.
                 late = 0;
                 _lastDwm = null;
             }
-            // C1: PoolWatch's own trace or cache clear (and 30 s after): lag it causes itself is not a pool lag onset.
+            // PoolWatch's own trace or cache clear (and 30 s after): lag it causes itself is not a pool lag onset.
             bool paused = false;
             try { paused = _paused?.Invoke() == true; } catch { }
             Paused = paused;
@@ -111,6 +118,19 @@ internal sealed class LagProber : IDisposable
     }
 
     private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
+
+    /// <summary>
+    /// Whether this wake-up, <paramref name="lateMs"/> late on the Stopwatch, came back from a sleep (<see cref="ResumeGap"/>):
+    /// the gap since the last probe is timed on the clock that only goes forward, which a system clock set back or forward
+    /// does not move, so a clock step is never taken for a resume.
+    /// </summary>
+    internal bool Resumed(double lateMs)
+    {
+        long now = _clock().Ms;
+        bool resumed = ResumeGap.Detected(TimeSpan.FromMilliseconds(lateMs), _lastProbeMs is { } last ? TimeSpan.FromMilliseconds(now - last) : null, _interval);
+        _lastProbeMs = now;
+        return resumed;
+    }
 
     /// <param name="lateMs">How late the probe's own wake-up was (one 15.6 ms timer tick of it is normal).</param>
     public LagProbe Probe(double lateMs = 0)
@@ -141,13 +161,11 @@ internal sealed class LagProber : IDisposable
         double file = probeFile is null ? 0 : sw.Elapsed.TotalMilliseconds;
 
         long? missed = null;
-        var now = DateTime.UtcNow;
-        if (now >= _dwmRetry)
+        var at = _clock();
+        if (_dwmRetry.Passed(at))
         {
-            var info = new DWM_TIMING_INFO { cbSize = (uint)Marshal.SizeOf<DWM_TIMING_INFO>() };
-            if (DwmGetCompositionTimingInfo(IntPtr.Zero, ref info) == 0)
+            if (_dwmFrames() is { } total)
             {
-                long total = (long)(info.cFramesMissed + info.cFramesDropped);
                 if (_lastDwm is { } last) missed = Math.Max(0, total - last);
                 _lastDwm = total;
                 DwmAvailable = _dwmEverWorked = true;
@@ -158,10 +176,17 @@ internal sealed class LagProber : IDisposable
                 // No compositor at all (service session, Server Core) reports unavailable from the first probe on.
                 DwmAvailable = _dwmEverWorked;
                 _lastDwm = null;
-                _dwmRetry = now + DwmRetry;
+                _dwmRetry = Deadline.After(at, DwmRetry); // on the clock that only goes forward
             }
         }
-        return new LagProbe(now, timer, message, file, missed, _pool());
+        return new LagProbe(at.Utc, timer, message, file, missed, _pool()) { TickMs = at.Ms };
+    }
+
+    /// <summary>The compositor's missed and dropped frames so far; null when it does not answer.</summary>
+    private static long? DwmFrames()
+    {
+        var info = new DWM_TIMING_INFO { cbSize = (uint)Marshal.SizeOf<DWM_TIMING_INFO>() };
+        return DwmGetCompositionTimingInfo(IntPtr.Zero, ref info) == 0 ? (long)(info.cFramesMissed + info.cFramesDropped) : null;
     }
 
     public void Dispose()

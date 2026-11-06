@@ -47,6 +47,8 @@ public sealed class Suspect
     public string? User { get; init; }
     public DateTime StartUtc { get; init; }
     public DateTime? ExitUtc { get; init; }
+    /// <summary><see cref="ExitUtc"/> on the clock that only goes forward (<see cref="ProcessRecord.ExitMs"/>): whether it exited before a trace began is timed on it.</summary>
+    public long? ExitMs { get; init; }
     public int? ExitCode { get; init; }
     public bool IsOrphan { get; init; }
     public DateTime? OrphanedUtc { get; init; }
@@ -66,7 +68,61 @@ public sealed class Suspect
 }
 
 /// <summary>The time range the correlation looks at: a baseline before onset, the growth episode, and its end.</summary>
-public sealed record CorrelationWindow(DateTime FromUtc, DateTime OnsetUtc, DateTime? EndUtc, DateTime ToUtc);
+public sealed record CorrelationWindow(DateTime FromUtc, DateTime OnsetUtc, DateTime? EndUtc, DateTime ToUtc)
+{
+    // The same window on the clock that only goes forward (the samples' History.Ms). Every window PoolWatch makes is made
+    // from samples (an incident's ranking, Of, Recent) and carries these: its samples are then found by them, so a system
+    // clock set back or forward inside the window moves none of them. A window given only as times of day (a test's) is
+    // found by those.
+    public long? FromMs { get; init; }
+    public long? OnsetMs { get; init; }
+    public long? EndMs { get; init; }
+    public long? ToMs { get; init; }
+
+    /// <summary>The window over samples [<paramref name="from"/>, <paramref name="to"/>] of <paramref name="h"/>, with its onset and end at those samples, on both clocks.</summary>
+    public static CorrelationWindow Of(History.History h, int from, int onset, int? end, int to) =>
+        new(h.Times[from], h.Times[onset], end is { } e ? h.Times[e] : null, h.Times[to])
+        {
+            FromMs = h.Ms[from], OnsetMs = h.Ms[onset], EndMs = end is { } e2 ? h.Ms[e2] : null, ToMs = h.Ms[to],
+        };
+
+    /// <summary>
+    /// The last <paramref name="span"/> of <paramref name="h"/> up to its newest sample, timed on the clock that only goes
+    /// forward (all of it when it holds less), with the onset and end of <paramref name="tag"/>'s growth in it: the window a
+    /// tag's live view ranks over. The history holds at least one sample; the caller holds its lock.
+    /// </summary>
+    public static RecentWindow Recent(History.History h, PoolTag tag, TimeSpan span)
+    {
+        int last = h.Count - 1;
+        long sinceMs = Math.Max(h.Ms[0], h.Ms[last] - (long)span.TotalMilliseconds);
+        int from = h.IndexAtOrAfterMs(sinceMs);
+        var series = h.TagSeries(tag, from);
+        var cp = Detector.FindChangePoints(series);
+        var w = Of(h, from, Math.Min(last, from + cp.OnsetIndex), cp.EndIndex is { } e ? Math.Min(last, from + e) : null, last);
+        return new RecentWindow(w, from, series, cp) { SinceMs = sinceMs };
+    }
+
+    /// <summary>The first sample of the window in <paramref name="h"/>.</summary>
+    public int FromIndex(History.History h) => FromMs is { } m ? h.IndexAtOrAfterMs(m) : h.IndexAtOrAfter(FromUtc);
+    /// <summary>The first sample after the window's end <paramref name="toUtc"/> / <paramref name="toMs"/> (its own when null).</summary>
+    public int AfterIndex(History.History h, DateTime? toUtc = null, long? toMs = null) =>
+        (toMs ?? (toUtc is null ? ToMs : null)) is { } m ? h.IndexAtOrAfterMs(m + 1) : h.IndexAtOrAfter((toUtc ?? ToUtc).AddTicks(1));
+    /// <summary>The window's onset sample.</summary>
+    public int OnsetIndex(History.History h) => OnsetMs is { } m ? h.IndexAtOrAfterMs(m) : h.IndexAtOrAfter(OnsetUtc);
+    /// <summary>The window's end sample; null when the growth has not ended.</summary>
+    public int? EndIndex(History.History h) => EndUtc is not { } e ? null : EndMs is { } m ? h.IndexAtOrAfterMs(m) : h.IndexAtOrAfter(e);
+}
+
+/// <summary>A tag's recent window (<see cref="CorrelationWindow.Recent"/>): the window, its first sample, the tag's series from it and the change points in it.</summary>
+public sealed record RecentWindow(CorrelationWindow Window, int From, long[] Series, ChangePoints ChangePoints)
+{
+    /// <summary>
+    /// Where the span begins on the clock that only goes forward: the newest sample's time less the span, or the first
+    /// sample's when the history holds less (the window's first sample is the first at or after it). The events of the span
+    /// are read from here, and its length is said from here.
+    /// </summary>
+    public long SinceMs { get; init; }
+}
 
 /// <summary>
 /// Ranks processes as suspects for one tag's growth, using every signal of DESIGN.md section 7. Works on the raw
@@ -86,11 +142,11 @@ public static class Correlator
 
     public static List<Suspect> Rank(History.History h, ProcessRegistry registry, PoolTag tag, CorrelationWindow w, int maxSuspects = 10)
     {
-        int from = h.IndexAtOrAfter(w.FromUtc);
-        int to = Math.Min(h.Count - 1, Math.Max(from, h.IndexAtOrAfter(w.ToUtc.AddTicks(1)) - 1));
+        int from = w.FromIndex(h);
+        int to = Math.Min(h.Count - 1, Math.Max(from, w.AfterIndex(h) - 1));
         if (h.Count < 3 || to - from < 2) return [];
-        int onset = Math.Clamp(h.IndexAtOrAfter(w.OnsetUtc), from, to);
-        int end = w.EndUtc is { } e ? Math.Clamp(h.IndexAtOrAfter(e), onset, to) : to;
+        int onset = Math.Clamp(w.OnsetIndex(h), from, to);
+        int end = w.EndIndex(h) is { } e ? Math.Clamp(e, onset, to) : to;
         if (end <= onset) end = Math.Min(to, onset + 1);
 
         var series = h.TagSeries(tag, from);
@@ -102,18 +158,21 @@ public static class Correlator
         // Direct-charge inputs: handle type(s) for the tag and the handle scans around the episode.
         BuiltinTags.HandleTypes.TryGetValue(tag, out var handleTypes);
         string? handleType = handleTypes?.FirstOrDefault();
-        var scanBefore = h.HandlesAtOrBefore(h.Times[onset]);
-        var scanAfter = h.HandlesAtOrBefore(h.Times[end]) is { } sa && scanBefore is not null && sa.TimeUtc > scanBefore.TimeUtc ? sa : h.LatestHandles;
-        bool haveScans = handleType is not null && scanBefore is not null && scanAfter is not null && scanAfter.TimeUtc > scanBefore.TimeUtc;
+        // The scans beside the onset and the end, on the clock that only goes forward.
+        var scanBefore = h.HandlesAtOrBeforeMs(h.Ms[onset]);
+        var scanAfter = h.HandlesAtOrBeforeMs(h.Ms[end]) is { } sa && scanBefore is not null && sa.Ms > scanBefore.Ms ? sa : h.LatestHandles;
+        bool haveScans = handleType is not null && scanBefore is not null && scanAfter is not null && scanAfter.Ms > scanBefore.Ms;
 
+        // Every process of the window is read in place: on a busy PC most are short commands seen once, which the filter
+        // below drops before anything is copied or correlated for them.
         var keys = h.ProcessesSince(from);
-        var rows = new List<(ProcessKey key, ProcPoint?[] pts, long ops, long quota, int hBefore, int hAfter)>();
+        var rows = new List<(ProcessKey key, ProcessPoints pts, long ops, long quota, int hBefore, int hAfter)>();
         long totalOps = 0, totalQuotaUp = 0, totalHandleUp = 0;
         foreach (var key in keys)
         {
-            var pts = h.ProcessSeries(key, from);
-            long ops = OpsDelta(pts, onset - from, end - from);
-            long quota = QuotaDelta(pts, onset - from, end - from);
+            var pts = h.Points(key);
+            long ops = OpsDelta(pts, onset, end);
+            long quota = QuotaDelta(pts, onset, end);
             int hb = 0, ha = 0;
             if (haveScans)
             {
@@ -127,10 +186,12 @@ public static class Correlator
         }
 
         var suspects = new List<Suspect>();
+        var tagRanks = new TagRanks(tagDeltas);
+        var deltas = new double[tagDeltas.Length]; // one counter's deltas, reused for every process and counter
         foreach (var (key, pts, ops, quota, hb, ha) in rows)
         {
-            var rec = registry.Get(key);
             if (key.Pid == 0) continue; // Idle
+            var rec = registry.Get(key);
             double ioShare = totalOps > 0 ? Math.Max(0, ops) / (double)totalOps : 0;
             double hShare = totalHandleUp > 0 ? Math.Max(0, ha - hb) / (double)totalHandleUp : 0;
             double qShare = totalQuotaUp > 0 ? Math.Max(0, quota) / (double)totalQuotaUp : 0;
@@ -139,12 +200,12 @@ public static class Correlator
             bool directQuota = growth > 0 && quota >= Math.Max(1L << 20, growth / 10) && qShare >= 0.5;
             var direct = new DirectSignal(haveScans ? handleType : null, hb, ha, hShare, quota, qShare, directHandles || directQuota);
 
-            var activity = Activity(tagDeltas, pts, ops, ioShare);
             // Start / exit timing only means something for a process that did something in the episode.
             bool active = ioShare >= 0.01 || ha - hb >= MinHandleDelta || quota >= 64 * 1024;
             var lifecycle = Lifecycle(rec, h, from, onset, end, to, ioShare, active);
 
             if (!direct.Present && !lifecycle.Present && ops <= 0 && ha - hb <= 0) continue;
+            var activity = Activity(tagRanks, pts, from, ops, ioShare, deltas);
 
             var chain = registry.Ancestry(key);
             bool viaWmi = chain.Take(chain.Count - 1).Any(a => a.Image.Equals("WmiPrvSE.exe", StringComparison.OrdinalIgnoreCase));
@@ -152,13 +213,14 @@ public static class Correlator
             {
                 Key = key,
                 Image = rec?.Image ?? "unknown process",
-                // 2d: never "?": a process PoolWatch no longer holds is named by when it ran (from its history points).
-                DisplayName = rec?.DisplayName ?? Incidents.TracedProcess.UnknownName(key.CreateTime > 0 ? key.CreateTimeUtc : null, LastSeen(h, pts, from)),
+                // Never "?": a process PoolWatch no longer holds is named by when it ran (from its history points).
+                DisplayName = rec?.DisplayName ?? Incidents.TracedProcess.UnknownName(key.CreateTime > 0 ? key.CreateTimeUtc : null, LastSeen(h, pts)),
                 CommandLine = rec?.CommandLine,
                 ImagePath = rec?.ImagePath,
                 User = rec?.User,
                 StartUtc = key.CreateTimeUtc,
                 ExitUtc = rec?.ExitUtc,
+                ExitMs = rec?.ExitMs,
                 ExitCode = rec?.ExitCode,
                 IsOrphan = rec?.IsOrphan ?? false,
                 OrphanedUtc = rec?.OrphanedUtc,
@@ -189,12 +251,8 @@ public static class Correlator
     public const int IdentityTop = 50;
 
     /// <summary>The last sample a process was seen in (its exit, roughly), or null while it is still in the latest sample.</summary>
-    private static DateTime? LastSeen(History.History h, ProcPoint?[] pts, int from)
-    {
-        for (int i = pts.Length - 1; i >= 0; i--)
-            if (pts[i] is not null) return from + i >= h.Count - 1 ? null : h.Times[from + i];
-        return null;
-    }
+    private static DateTime? LastSeen(History.History h, ProcessPoints pts) =>
+        pts.Last < pts.First || pts.Last >= h.Count - 1 ? null : h.Times[pts.Last];
 
     public static double Score(Suspect s)
     {
@@ -217,23 +275,28 @@ public static class Correlator
         return corroborating == 1 ? Confidence.Correlated : Confidence.Weak;
     }
 
-    private static ActivitySignal Activity(double[] tagDeltas, ProcPoint?[] pts, long ops, double ioShare)
+    private static readonly string[] Counters = ["total", "other", "read"];
+
+    /// <param name="from">The raw sample index of the window's first sample (the tag deltas start there).</param>
+    /// <param name="d">A buffer as long as the tag deltas, overwritten.</param>
+    private static ActivitySignal Activity(TagRanks tag, ProcessPoints pts, int from, long ops, double ioShare, double[] d)
     {
         ActivitySignal? best = null;
-        foreach (var counter in new[] { "total", "other", "read" })
+        foreach (var counter in Counters)
         {
-            var d = new double[tagDeltas.Length];
             for (int i = 0; i < d.Length; i++)
             {
-                if (pts[i] is not { } a || pts[i + 1] is not { } b) continue;
+                int at = from + i;
+                if (!pts.Has(at) || !pts.Has(at + 1)) { d[i] = 0; continue; }
+                ProcPoint a = pts[at], b = pts[at + 1];
                 long v = counter switch { "other" => b.OtherOps - a.OtherOps, "read" => b.ReadOps - a.ReadOps, _ => b.TotalOps - a.TotalOps };
                 d[i] = Math.Max(0, v);
             }
-            double r = Stats.Spearman(tagDeltas, d);
+            double r = tag.Spearman(d, 0);
             double bestLagged = double.NaN; int bestLag = 0;
             for (int lag = 1; lag <= MaxLag; lag++)
             {
-                double rl = Stats.SpearmanLagged(tagDeltas, d, lag);
+                double rl = tag.Spearman(d, lag);
                 if (!double.IsNaN(rl) && (double.IsNaN(bestLagged) || rl > bestLagged)) { bestLagged = rl; bestLag = lag; }
             }
             var cand = new ActivitySignal(counter, r, bestLag, bestLagged, ioShare, ops, false);
@@ -247,29 +310,87 @@ public static class Correlator
 
     private static bool Better(double a, double b) => !double.IsNaN(a) && (double.IsNaN(b) || a > b);
 
+    /// <summary>
+    /// Spearman of the tag's growth deltas against one process counter at each lag, as Stats.Spearman (lag 0) and
+    /// Stats.SpearmanLagged compute it, without their allocations: the tag's series is ranked once per ranking, and each
+    /// counter is ranked into reused buffers. A rank depends only on the values (ties share their mean rank), so sorting
+    /// in place gives the same ranks, and Stats.Pearson the same result.
+    /// </summary>
+    internal sealed class TagRanks
+    {
+        private readonly double[]?[] _tag = new double[]?[MaxLag + 1];
+        private readonly double[]?[] _counter = new double[]?[MaxLag + 1];
+        private readonly double[] _keys;
+        private readonly int[] _order;
+
+        public TagRanks(double[] tagDeltas)
+        {
+            int n = tagDeltas.Length;
+            _keys = new double[n];
+            _order = new int[n];
+            for (int lag = 0; lag <= MaxLag && n - lag >= 4; lag++)
+            {
+                Rank(tagDeltas.AsSpan(lag), _tag[lag] = new double[n - lag]);
+                _counter[lag] = new double[n - lag];
+            }
+        }
+
+        /// <summary>The tag's deltas against <paramref name="d"/> lagged by <paramref name="lag"/> samples; NaN when too short.</summary>
+        public double Spearman(double[] d, int lag)
+        {
+            if (_tag[lag] is not { } rx) return double.NaN;
+            var ry = _counter[lag]!;
+            Rank(d.AsSpan(0, ry.Length), ry);
+            return Stats.Pearson(rx, ry);
+        }
+
+        /// <summary>Stats.Ranks into <paramref name="ranks"/>: 1-based, ties sharing their mean rank.</summary>
+        private void Rank(ReadOnlySpan<double> values, double[] ranks)
+        {
+            int n = values.Length;
+            var keys = _keys.AsSpan(0, n);
+            var order = _order.AsSpan(0, n);
+            values.CopyTo(keys);
+            for (int i = 0; i < n; i++) order[i] = i;
+            keys.Sort(order);
+            for (int k = 0; k < n;)
+            {
+                int j = k;
+                while (j + 1 < n && keys[j + 1] == keys[k]) j++;
+                double r = (k + j) / 2.0 + 1;
+                for (int m = k; m <= j; m++) ranks[order[m]] = r;
+                k = j + 1;
+            }
+        }
+    }
+
+    /// <summary>
+    /// A process's start, exit and orphaning beside the growth's onset and end. Timed on the clock that only goes forward:
+    /// the samples' <see cref="History.History.Ms"/> and the record's <see cref="ProcessRecord.StartMs"/>,
+    /// <see cref="ProcessRecord.ExitMs"/> and <see cref="ProcessRecord.OrphanedMs"/>; the times of day are only said.
+    /// </summary>
     private static LifecycleSignal Lifecycle(ProcessRecord? rec, History.History h, int from, int onset, int end, int to, double ioShare, bool active)
     {
         var notes = new List<string>();
         if (rec is null) return new LifecycleSignal(false, false, false, notes);
-        DateTime onsetT = h.Times[onset], endT = h.Times[end];
+        long onsetMs = h.Ms[onset], endMs = h.Ms[end];
         // Tolerances scale with the sample interval so a 2 s CI run and a 10 s default both work.
-        var interval = TimeSpan.FromTicks(Math.Max(TimeSpan.TicksPerSecond, (h.Times[to] - h.Times[from]).Ticks / Math.Max(1, to - from)));
-        var startSlack = TimeSpan.FromTicks(Math.Max(TimeSpan.FromMinutes(3).Ticks, interval.Ticks * 6));
-        var nearSlack = TimeSpan.FromTicks(Math.Max(TimeSpan.FromSeconds(30).Ticks, interval.Ticks * 3));
+        long interval = Math.Max(1000, (h.Ms[to] - h.Ms[from]) / Math.Max(1, to - from));
+        long startSlack = Math.Max(180_000, interval * 6), nearSlack = Math.Max(30_000, interval * 3);
 
-        bool started = active && rec.Key.CreateTime > 0 && rec.StartUtc >= onsetT - startSlack && rec.StartUtc <= onsetT + nearSlack;
-        if (started) notes.Add($"started {Fmt.Clock(rec.StartUtc)}, {Fmt.Relative(rec.StartUtc - onsetT)} growth onset");
+        bool started = active && rec.Key.CreateTime > 0 && rec.StartMs >= onsetMs - startSlack && rec.StartMs <= onsetMs + nearSlack;
+        if (started) notes.Add($"started {Fmt.Clock(rec.StartUtc)}, {Fmt.Relative(TimeSpan.FromMilliseconds(rec.StartMs - onsetMs))} growth onset");
 
         // Only when the growth really ended inside the window (end < to): "still climbing" has no end to coincide with.
-        bool ended = active && rec.ExitUtc is { } x && end < to && Math.Abs((x - endT).Ticks) <= nearSlack.Ticks;
+        bool ended = active && rec.ExitMs is { } x && end < to && Math.Abs(x - endMs) <= nearSlack;
         if (ended) notes.Add($"exited {Fmt.Clock(rec.ExitUtc!.Value)}{(rec.ExitCode is { } c ? $" (exit code {c})" : "")}, when growth stopped");
 
         // Orphans that keep working are top suspects (the find.exe case): alive and busy during the episode.
-        bool aliveDuring = rec.OrphanedUtc is { } o && o <= endT && (rec.ExitUtc is null || rec.ExitUtc > onsetT);
+        bool aliveDuring = rec.OrphanedMs is { } o && o <= endMs && (rec.ExitMs is not { } exit || exit > onsetMs);
         bool orphanActive = aliveDuring && ioShare >= MinIoShare;
         if (rec.IsOrphan)
         {
-            var running = (rec.ExitUtc ?? h.Times[to]) - rec.StartUtc;
+            var running = TimeSpan.FromMilliseconds((rec.ExitMs ?? h.Ms[to]) - rec.StartMs);
             notes.Add($"orphaned{(rec.OrphanedUtc is { } ou ? " at " + Fmt.Clock(ou) : "")} (parent PID {rec.ParentPid} gone), running {Fmt.Duration(running)}" +
                       (orphanActive ? $" with {ioShare:P0} of all I/O" : ""));
         }
@@ -297,29 +418,17 @@ public static class Correlator
         if (s.ViaWmi) s.Evidence.Add($"launched via WMI (WmiPrvSE.exe in its parent chain: the real requester is hidden); command line: {s.CommandLine ?? "unknown"}");
     }
 
-    private static long OpsDelta(ProcPoint?[] pts, int a, int b)
-    {
-        var first = FirstAtOrAfter(pts, a, b);
-        var last = LastAtOrBefore(pts, b, a);
-        return first is { } f && last is { } l ? l.TotalOps - f.TotalOps : 0;
-    }
+    /// <summary>I/O operations between the process's first and last points within raw samples [a, b].</summary>
+    private static long OpsDelta(ProcessPoints pts, int a, int b) =>
+        Within(pts, a, b) is (int f, int l) ? pts[l].TotalOps - pts[f].TotalOps : 0;
 
-    private static long QuotaDelta(ProcPoint?[] pts, int a, int b)
-    {
-        var first = FirstAtOrAfter(pts, a, b);
-        var last = LastAtOrBefore(pts, b, a);
-        return first is { } f && last is { } l ? (l.QuotaPaged + l.QuotaNonPaged) - (f.QuotaPaged + f.QuotaNonPaged) : 0;
-    }
+    private static long QuotaDelta(ProcessPoints pts, int a, int b) =>
+        Within(pts, a, b) is (int f, int l) ? (pts[l].QuotaPaged + pts[l].QuotaNonPaged) - (pts[f].QuotaPaged + pts[f].QuotaNonPaged) : 0;
 
-    private static ProcPoint? FirstAtOrAfter(ProcPoint?[] pts, int a, int limit)
+    /// <summary>The indexes of the process's first and last points within [a, b] (its points are contiguous), or null.</summary>
+    private static (int first, int last)? Within(ProcessPoints pts, int a, int b)
     {
-        for (int i = Math.Max(0, a); i <= limit && i < pts.Length; i++) if (pts[i] is { } p) return p;
-        return null;
-    }
-
-    private static ProcPoint? LastAtOrBefore(ProcPoint?[] pts, int b, int limit)
-    {
-        for (int i = Math.Min(b, pts.Length - 1); i >= limit && i >= 0; i--) if (pts[i] is { } p) return p;
-        return null;
+        int first = Math.Max(a, pts.First), last = Math.Min(b, pts.Last);
+        return first <= last ? (first, last) : null;
     }
 }

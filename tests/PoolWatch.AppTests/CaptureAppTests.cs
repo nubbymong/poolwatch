@@ -7,7 +7,7 @@ using PoolWatch.Engine;
 namespace PoolWatch.AppTests;
 
 /// <summary>
-/// C1 (review round 2) in the app layer: the held-back capture starts only when the governor says so, and a capture that
+///  in the app layer: the held-back capture starts only when the governor says so, and a capture that
 /// throws still reports back. No trace is recorded: the runner's capture step is a test function, and the data root is a
 /// TEMP folder (no ACL is touched).
 /// </summary>
@@ -68,7 +68,7 @@ public sealed class CaptureAppTests : IDisposable
     [Fact]
     public void ACaptureThatThrowsStillReportsBackAndEnds()
     {
-        // C1 a (review round 2): the done callback (the governor's Finished, the incident's "capture failed") used to be
+        // The done callback (the governor's Finished, the incident's "capture failed") used to be
         // skipped when the capture threw.
         var paths = new AppPaths(Path.Combine(_root, "data"), null, secure: false);
         var log = new Log(Path.Combine(_root, "data", "test.log"));
@@ -102,7 +102,7 @@ public sealed class CaptureAppTests : IDisposable
             _ => throw new InvalidOperationException("attach failed"), CancellationToken.None));
         Assert.True(running.Wait(TimeSpan.FromSeconds(10)));
         Assert.True(runner.Busy);
-        Assert.NotNull(runner.BusySince); // what caps the lag probe's pause (C1 b)
+        Assert.NotNull(runner.BusySince); // what caps the lag probe's pause
         Assert.False(runner.TryStart(Path.Combine(paths.DataRoot, "incidents", "z"), [], new CaptureScope(false, false, true), 60, _ => { }, CancellationToken.None)); // one at a time
         release.Set();
         Assert.True(SpinWait.SpinUntil(() => !runner.Busy, TimeSpan.FromSeconds(10)));

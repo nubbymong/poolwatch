@@ -10,7 +10,9 @@ internal enum SignatureKind { None, Embedded, Catalog, Untrusted }
 /// <param name="Signer">The signing certificate's simple name (from the verified signature; for <see cref="SignatureKind.Untrusted"/>
 /// the name the signature claims, when Windows could read it), or null.</param>
 /// <param name="Organization">The signing certificate's O= attribute (".NET" binaries: CN=.NET, O=Microsoft Corporation), or null.</param>
-internal sealed record SignatureInfo(SignatureKind Kind, string? Signer, uint Result, string? Organization = null);
+/// <param name="Subject">The signing certificate's whole subject (every attribute, as X.500 text), or null.</param>
+/// <param name="RootThumbprint">The SHA-256 of the root certificate the signature's chain ends in, as WinVerifyTrust built it, or null.</param>
+internal sealed record SignatureInfo(SignatureKind Kind, string? Signer, uint Result, string? Organization = null, string? Subject = null, string? RootThumbprint = null);
 
 /// <summary>
 /// Authenticode check with WinVerifyTrust: the embedded signature, else the system catalog that lists the file's hash
@@ -119,15 +121,34 @@ internal static class FileSignature
     /// <summary>Verifies the embedded signature, else the catalog signature. Never throws for an unsigned file.</summary>
     public static SignatureInfo Verify(string path)
     {
-        var (result, signer, org) = VerifyEmbedded(path);
-        if (result == 0) return new SignatureInfo(SignatureKind.Embedded, signer, 0, org);
+        var (result, who) = VerifyEmbedded(path);
+        if (result == 0) return new SignatureInfo(SignatureKind.Embedded, who.Name, 0, who.Org, who.Subject, who.Root);
         bool noEmbedded = result is TRUST_E_NOSIGNATURE or TRUST_E_SUBJECT_FORM_UNKNOWN or TRUST_E_PROVIDER_UNKNOWN;
         foreach (var alg in new[] { "SHA256", null }) // null: the SHA-1 catalogs of older binaries
             if (VerifyCatalog(path, alg) is { } cat) return cat;
-        return noEmbedded ? new SignatureInfo(SignatureKind.None, null, result) : new SignatureInfo(SignatureKind.Untrusted, signer, result, org);
+        return noEmbedded ? new SignatureInfo(SignatureKind.None, null, result) : new SignatureInfo(SignatureKind.Untrusted, who.Name, result, who.Org);
     }
 
-    private static (uint result, string? signer, string? org) VerifyEmbedded(string path)
+    /// <summary>
+    /// Pure: whether <paramref name="candidate"/> is signed by the same publisher as <paramref name="reference"/>, through
+    /// the same certificate authority: both valid embedded signatures, the same whole subject on the signing certificate
+    /// (every attribute, not only the name) and chains that end in the same root certificate. A certificate someone made
+    /// with that subject under a root of their own (one added to their own certificate store, say) ends in another root;
+    /// a renewed certificate of the same publisher from the same authority still matches. Nothing names the publisher.
+    /// </summary>
+    internal static bool SamePublisher(SignatureInfo? candidate, SignatureInfo? reference) =>
+        candidate is { Kind: SignatureKind.Embedded, Subject: { Length: > 0 } subject, RootThumbprint: { Length: > 0 } root } &&
+        CanBeMatched(reference) && string.Equals(subject, reference!.Subject, StringComparison.Ordinal) &&
+        string.Equals(root, reference.RootThumbprint, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether any signature could be <see cref="SamePublisher"/> as <paramref name="reference"/>: only a valid embedded one
+    /// whose subject and root were read (an unsigned development build of PoolWatch has none, so nothing matches it).
+    /// </summary>
+    internal static bool CanBeMatched(SignatureInfo? reference) =>
+        reference is { Kind: SignatureKind.Embedded, Subject.Length: > 0, RootThumbprint.Length: > 0 };
+
+    private static (uint result, Who who) VerifyEmbedded(string path)
     {
         var fileInfo = new WINTRUST_FILE_INFO { cbStruct = (uint)Marshal.SizeOf<WINTRUST_FILE_INFO>(), pcwszFilePath = path };
         IntPtr pFile = Marshal.AllocHGlobal(Marshal.SizeOf<WINTRUST_FILE_INFO>());
@@ -175,8 +196,8 @@ internal static class FileSignature
                 Marshal.StructureToPtr(info, pCat, false);
                 try
                 {
-                    var (result, signer, org) = Run(WTD_CHOICE_CATALOG, pCat);
-                    return result == 0 ? new SignatureInfo(SignatureKind.Catalog, signer, 0, org) : new SignatureInfo(SignatureKind.Untrusted, signer, result, org);
+                    var (result, who) = Run(WTD_CHOICE_CATALOG, pCat);
+                    return result == 0 ? new SignatureInfo(SignatureKind.Catalog, who.Name, 0, who.Org) : new SignatureInfo(SignatureKind.Untrusted, who.Name, result, who.Org);
                 }
                 finally { Marshal.DestroyStructure<WINTRUST_CATALOG_INFO>(pCat); }
             }
@@ -195,7 +216,7 @@ internal static class FileSignature
     }
 
     /// <summary>One WinVerifyTrust verify + close, reading the signer from the trust state in between.</summary>
-    private static (uint result, string? signer, string? org) Run(uint choice, IntPtr pInfo)
+    private static (uint result, Who who) Run(uint choice, IntPtr pInfo)
     {
         var data = new WINTRUST_DATA
         {
@@ -205,35 +226,64 @@ internal static class FileSignature
         };
         var action = GenericVerifyV2;
         uint result = WinVerifyTrust(IntPtr.Zero, ref action, ref data);
-        string? signer = null, org = null;
-        try { (signer, org) = SignerNames(data.hWVTStateData); }
+        Who who = new(null, null, null, null);
+        try { who = Signer(data.hWVTStateData); }
         finally
         {
             data.dwStateAction = WTD_STATEACTION_CLOSE;
             WinVerifyTrust(IntPtr.Zero, ref action, ref data);
         }
-        return (result, signer, org);
+        return (result, who);
     }
 
-    /// <summary>The first signer's certificate name and organization (O=) from WinVerifyTrust's state, or nulls.</summary>
-    private static (string? name, string? org) SignerNames(IntPtr state)
+    /// <summary>The first signer's certificate: its simple name, organization (O=) and whole subject, and the SHA-256 of the root its chain ends in.</summary>
+    private sealed record Who(string? Name, string? Org, string? Subject, string? Root);
+
+    /// <summary>The first signer, from WinVerifyTrust's state (each part null when it cannot be read).</summary>
+    private static Who Signer(IntPtr state)
     {
-        if (state == IntPtr.Zero) return (null, null);
+        var none = new Who(null, null, null, null);
+        if (state == IntPtr.Zero) return none;
         IntPtr prov = WTHelperProvDataFromStateData(state);
-        if (prov == IntPtr.Zero) return (null, null);
+        if (prov == IntPtr.Zero) return none;
         IntPtr sgnr = WTHelperGetProvSignerFromChain(prov, 0, false, 0);
-        if (sgnr == IntPtr.Zero) return (null, null);
-        IntPtr provCert = WTHelperGetProvCertFromChain(sgnr, 0);
-        if (provCert == IntPtr.Zero) return (null, null);
-        IntPtr cert = Marshal.ReadIntPtr(provCert, IntPtr.Size); // CRYPT_PROVIDER_CERT { DWORD cbStruct; PCCERT_CONTEXT pCert; ... }
-        if (cert == IntPtr.Zero) return (null, null);
+        if (sgnr == IntPtr.Zero) return none;
+        IntPtr cert = CertOf(WTHelperGetProvCertFromChain(sgnr, 0));
+        if (cert == IntPtr.Zero) return none;
         string? name = NameString(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, IntPtr.Zero);
+        string? org, subject;
         IntPtr oid = Marshal.StringToHGlobalAnsi(OrganizationOid);
-        try { return (name, NameString(cert, CERT_NAME_ATTR_TYPE, oid)); }
+        try { org = NameString(cert, CERT_NAME_ATTR_TYPE, oid); }
         finally { Marshal.FreeHGlobal(oid); }
+        IntPtr x500 = Marshal.AllocHGlobal(sizeof(uint));
+        try
+        {
+            Marshal.WriteInt32(x500, CERT_X500_NAME_STR);
+            subject = NameString(cert, CERT_NAME_RDN_TYPE, x500);
+        }
+        finally { Marshal.FreeHGlobal(x500); }
+        // CRYPT_PROVIDER_SGNR { DWORD cbStruct; FILETIME sftVerifyAsOf; DWORD csCertChain; ... }: the chain's length, then its last (the root).
+        int chain = Marshal.ReadInt32(sgnr, 12);
+        string? root = chain > 0 && chain < 32 && CertOf(WTHelperGetProvCertFromChain(sgnr, (uint)(chain - 1))) is var top && top != IntPtr.Zero ? Thumbprint(top) : null;
+        return new Who(name, org, subject, root);
     }
 
-    private const uint CERT_NAME_ATTR_TYPE = 3;
+    /// <summary>CRYPT_PROVIDER_CERT { DWORD cbStruct; PCCERT_CONTEXT pCert; ... }: its certificate, or zero.</summary>
+    private static IntPtr CertOf(IntPtr providerCert) => providerCert == IntPtr.Zero ? IntPtr.Zero : Marshal.ReadIntPtr(providerCert, IntPtr.Size);
+
+    /// <summary>CERT_CONTEXT { DWORD dwCertEncodingType; BYTE* pbCertEncoded; DWORD cbCertEncoded; ... }: the SHA-256 of the encoded certificate, or null.</summary>
+    private static string? Thumbprint(IntPtr cert)
+    {
+        IntPtr bytes = Marshal.ReadIntPtr(cert, IntPtr.Size);
+        int length = Marshal.ReadInt32(cert, 2 * IntPtr.Size);
+        if (bytes == IntPtr.Zero || length is <= 0 or > 64 * 1024) return null;
+        var encoded = new byte[length];
+        Marshal.Copy(bytes, encoded, 0, length);
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(encoded));
+    }
+
+    private const uint CERT_NAME_ATTR_TYPE = 3, CERT_NAME_RDN_TYPE = 2;
+    private const int CERT_X500_NAME_STR = 3;
     private const string OrganizationOid = "2.5.4.10"; // szOID_ORGANIZATION_NAME
 
     private static string? NameString(IntPtr cert, uint type, IntPtr para)

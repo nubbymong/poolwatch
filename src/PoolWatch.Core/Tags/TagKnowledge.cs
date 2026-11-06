@@ -10,7 +10,7 @@ namespace PoolWatch.Core.Tags;
 public sealed class TagKnowledge
 {
     /// <summary>
-    /// L4: the most of pooltag.txt that is read. Microsoft's file is well under 2 MB; a path setting that points at anything
+    /// The most of pooltag.txt that is read. Microsoft's file is well under 2 MB; a path setting that points at anything
     /// bigger is not a pooltag.txt, and the elevated app must not read or parse an unbounded file.
     /// </summary>
     public const long MaxPoolTagTxtBytes = 8L * 1024 * 1024;
@@ -21,8 +21,8 @@ public sealed class TagKnowledge
     private readonly string? _cacheFile;
     private readonly Func<string, string> _checkWrite;
 
-    /// <param name="checkWrite">The write policy for the cache file (the app passes PathGuard.CheckReal: review round 2, S3).</param>
-    /// <param name="maxPoolTagTxtBytes">L4: pooltag.txt is not used when it is larger than this.</param>
+    /// <param name="checkWrite">The write policy for the cache file (the app passes PathGuard.CheckReal).</param>
+    /// <param name="maxPoolTagTxtBytes">Pooltag.txt is not used when it is larger than this.</param>
     public TagKnowledge(string? poolTagTxtPath, string? cacheFile, Func<string, string>? checkWrite = null, long maxPoolTagTxtBytes = MaxPoolTagTxtBytes)
     {
         try { _poolTagTxt = poolTagTxtPath is not null && File.Exists(poolTagTxtPath) ? PoolTagTxt.ReadBounded(poolTagTxtPath, maxPoolTagTxtBytes) : new(); }
@@ -97,7 +97,7 @@ public sealed class TagKnowledge
 public static class PoolTagTxt
 {
     /// <summary>
-    /// L4: reads at most <paramref name="maxBytes"/> of the file into one buffer and parses that. A file that is, or grows
+    /// Reads at most <paramref name="maxBytes"/> of the file into one buffer and parses that. A file that is, or grows
     /// while it is read, larger than that is not used (empty result), and so is anything that is not a plain file: a link
     /// (a symbolic link could lead to a device or a pipe) or a stream that cannot seek.
     /// </summary>

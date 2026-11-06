@@ -9,7 +9,15 @@ namespace PoolWatch.Core.Lag;
 /// <param name="MessageMs">Post + peek of a message to the probe thread's own queue (win32k round trip; null when it failed).</param>
 /// <param name="FileMs">Create, write and delete a small file under PoolWatch's own folder.</param>
 /// <param name="DwmMissed">Frames missed or dropped by the compositor since the previous probe (null without DWM).</param>
-public sealed record LagProbe(DateTime TimeUtc, double TimerMs, double? MessageMs, double FileMs, long? DwmMissed, PoolTotals Pool);
+public sealed record LagProbe(DateTime TimeUtc, double TimerMs, double? MessageMs, double FileMs, long? DwmMissed, PoolTotals Pool)
+{
+    /// <summary>
+    /// When the probe ran on the clock that only goes forward (milliseconds since Windows started,
+    /// Environment.TickCount64): its freshness, the last hour kept and how often a finding repeats are timed on it, so
+    /// setting the system clock back or forward changes none of them. Required: no probe is made without it.
+    /// </summary>
+    public required long TickMs { get; init; }
+}
 
 /// <summary>A probe compared with the baseline: the worst ratio and which measure it came from.</summary>
 public sealed record LagStatus(LagProbe Probe, double Ratio, string Worst, bool Lagging)
@@ -30,7 +38,8 @@ public sealed class LagMonitor
     private readonly Queue<LagProbe> _recent = new();
     private int _consecutive;
     private bool _lagging;
-    private DateTime _lastFinding = DateTime.MinValue;
+    /// <summary>When the last finding was raised (<see cref="LagProbe.TickMs"/>; null: none yet).</summary>
+    private long? _lastFindingMs;
 
     /// <summary>Absolute floors (ms): below these a ratio means nothing.</summary>
     public const double TimerFloorMs = 50, MessageFloorMs = 20, FileFloorMs = 50;
@@ -47,7 +56,7 @@ public sealed class LagMonitor
     public Finding? Add(LagProbe p)
     {
         _recent.Enqueue(p);
-        while (_recent.Count > 0 && (p.TimeUtc - _recent.Peek().TimeUtc > TimeSpan.FromHours(1) || _recent.Count > 2000)) _recent.Dequeue(); // the last hour
+        while (_recent.Count > 0 && (p.TickMs - _recent.Peek().TickMs > (long)TimeSpan.FromHours(1).TotalMilliseconds || _recent.Count > 2000)) _recent.Dequeue(); // the last hour
         if (Baseline is null)
         {
             _baselineProbes.Add(p);
@@ -76,9 +85,9 @@ public sealed class LagMonitor
         {
             _lagging = true;
             LagOnset = p;
-            if (p.TimeUtc - _lastFinding >= TimeSpan.FromMinutes(30))
+            if (_lastFindingMs is not { } lastMs || p.TickMs - lastMs >= (long)TimeSpan.FromMinutes(30).TotalMilliseconds)
             {
-                _lastFinding = p.TimeUtc;
+                _lastFindingMs = p.TickMs;
                 finding = new Finding
                 {
                     TimeUtc = p.TimeUtc, Kind = FindingKind.Lag, Severity = FindingSeverity.Alert,
@@ -104,10 +113,11 @@ public sealed class LagMonitor
     }
 
     /// <summary>
-    /// Whether the probe trips now (addendum 4 A: the saturation alert's second condition): the latest probe is lagging and
-    /// is recent. A stale "lagging" (the probe paused for PoolWatch's own trace, or stopped) does not count.
+    /// Whether the probe trips now (the saturation alert's second condition): the latest probe is lagging and
+    /// is recent: no older than <paramref name="maxAge"/> at <paramref name="nowMs"/>, on the clock that only goes forward
+    /// (<see cref="LagProbe.TickMs"/>). A stale "lagging" (the probe paused for PoolWatch's own trace, or stopped) does not count.
     /// </summary>
-    public bool Tripping(DateTime nowUtc, TimeSpan maxAge) => Latest is { Lagging: true } l && nowUtc - l.Probe.TimeUtc <= maxAge;
+    public bool Tripping(long nowMs, TimeSpan maxAge) => Latest is { Lagging: true } l && nowMs - l.Probe.TickMs <= (long)maxAge.TotalMilliseconds;
 
     /// <summary>The Overview line.</summary>
     public string Summary()

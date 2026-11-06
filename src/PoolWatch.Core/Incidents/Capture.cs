@@ -32,20 +32,21 @@ public sealed record CpuModule(string Module, double Ms, double Share);
 public sealed record WaitModule(string Module, double WaitMs, long Switches);
 
 /// <summary>
-/// A kernel function in the CPU trace (addendum 2 C): "refs.sys!RefsLookupFcb" when symbols named it, else "refs.sys+0x1a2b0"
+/// A kernel function in the CPU trace: "refs.sys!RefsLookupFcb" when symbols named it, else "refs.sys+0x1a2b0"
 /// (module + offset, which can be looked up later with the module's symbols). <paramref name="Ms"/> is CPU or wait time.
 /// </summary>
 public sealed record CpuFunction(string Name, double Ms, double Share, bool Symbolized);
 
 /// <summary>
-/// The CPU part of a trace (addendum 2 C): where the processors spent the time (sampled, by module and by kernel function),
+/// The CPU part of a trace: where the processors spent the time (sampled, by module and by kernel function),
 /// DPC / ISR time by module, and where threads waited (context switches with stacks, by module and function). Function names
-/// need symbols from a local folder (<see cref="Settings.SymbolPath"/> or the local part of _NT_SYMBOL_PATH; a symbol server
-/// is never contacted); without them functions are module + offset and <see cref="FunctionsNote"/> says so.
+/// need symbols from a local, admin-only folder (<see cref="Settings.SymbolPath"/>, judged by <see cref="Util.SymbolPaths"/>;
+/// a symbol server is never contacted); without them functions are module + offset and <see cref="FunctionsNote"/> says so.
 /// </summary>
 public sealed class CpuProfile
 {
-    public double Seconds { get; init; }
+    /// <summary>How long the CPU recording ran, on the clock that only goes forward (<see cref="Recorded"/>).</summary>
+    public double Seconds { get; set; }
     public long Samples { get; init; }
     public int Processors { get; init; }
     public List<CpuModule> TopCpu { get; init; } = [];
@@ -58,9 +59,16 @@ public sealed class CpuProfile
     /// <summary>Where the function names came from, or why they are module + offset.</summary>
     public string FunctionsNote { get; init; } = "";
     public long ContextSwitches { get; init; }
-    /// <summary>When the CPU recording ran (its own trace, after the pool trace).</summary>
+    /// <summary>When the CPU recording ran (its own trace, after the pool trace), as times of day.</summary>
     public DateTime StartUtc { get; set; }
     public DateTime EndUtc { get; set; }
+    /// <summary>The CPU recording's start and end, on both clocks: its times of day, and its length on the forward clock.</summary>
+    public CpuProfile Recorded(Model.Moment start, Model.Moment end)
+    {
+        (StartUtc, EndUtc, Seconds) = (start.Utc, end.Utc, Math.Max(0, end.Since(start)) / 1000.0);
+        return this;
+    }
+
     /// <summary>Paged + non-paged pool when the trace was taken (set by the caller).</summary>
     public long PoolBytes { get; set; }
 
@@ -72,7 +80,7 @@ public sealed class CpuProfile
         var kernel = TopCpu.Where(m => m.Module is not ("user mode" or "idle")).Take(3).Select(m => $"{m.Module} ({Pct(m.Share)})");
         var waits = TopWait.Take(3).Select(w => $"{w.Module} {(w.WaitMs / 1000).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} s");
         return $"CPU {Pct(total > 0 ? busy / total : 0)} busy over {Seconds.ToString("0", System.Globalization.CultureInfo.InvariantCulture)} s; kernel time mostly in {string.Join(", ", kernel)}" +
-               // Only named functions: without symbols the rows are single instruction addresses, not functions (Part 3 review).
+               // Only named functions: without symbols the rows are single instruction addresses, not functions.
                (TopFunctions.Any(f => f.Symbolized) ? $"; top kernel functions {string.Join(", ", TopFunctions.Where(f => f.Symbolized).Take(3).Select(f => $"{f.Name} ({Pct(f.Share)})"))}" : "") +
                (TopDpcIsr.Count > 0 ? $"; DPC / ISR: {string.Join(", ", TopDpcIsr.Take(2).Select(d => $"{d.Module} {d.Ms.ToString("0", System.Globalization.CultureInfo.InvariantCulture)} ms"))}" : "") +
                (TopWait.Count > 0 ? $"; waits: {string.Join(", ", waits)}" : "") + (PoolBytes > 0 ? $" (pool {Detection.Fmt.Bytes(PoolBytes)} then)" : "");
@@ -107,6 +115,30 @@ public sealed class CaptureResult
 {
     public DateTime StartUtc { get; set; }
     public DateTime EndUtc { get; set; }
+    /// <summary><see cref="StartUtc"/> on the clock that only goes forward, read with it as the recording started.</summary>
+    public long StartMs { get; set; }
+    /// <summary><see cref="EndUtc"/> on the clock that only goes forward, read with it as the recording ended.</summary>
+    public long EndMs { get; set; }
+    /// <summary>How long the trace recorded, on the forward clock (0 when it never started).</summary>
+    public TimeSpan Duration => TimeSpan.FromMilliseconds(Math.Max(0, EndMs - StartMs));
+
+    /// <summary>
+    /// A time the trace gives (<see cref="CapturePoolUsage.FirstAllocUtc"/>) on the clock that only goes forward:
+    /// <see cref="StartMs"/> plus how long after <see cref="StartUtc"/> it is. The trace's times are system times reckoned
+    /// from the system time its session started at and on from there by the session's clock (TraceEvent), so a system
+    /// clock set after the trace does not move them. PoolWatch's recording profile sets no clock type, so that clock is the
+    /// one an ETW session has by default, which Windows documents as the performance counter, not moved by a change to the
+    /// system clock (WNODE_HEADER's ClientContext): so a system clock set during the trace does not move them either. Only
+    /// a recording on a real PC shows that; no test here does.
+    /// </summary>
+    public long MsOf(DateTime traceUtc) => StartMs + (long)(traceUtc - StartUtc).TotalMilliseconds;
+
+    /// <summary>The recording's start and end, on both clocks.</summary>
+    public CaptureResult Recorded(Model.Moment start, Model.Moment end)
+    {
+        (StartUtc, StartMs, EndUtc, EndMs) = (start.Utc, start.Ms, end.Utc, end.Ms);
+        return this;
+    }
     public string? EtlPath { get; init; }
     public List<PoolTag> Tags { get; init; } = [];
     /// <summary>True when kernel pool allocation events were read from the .etl.</summary>
@@ -115,13 +147,12 @@ public sealed class CaptureResult
     public long PoolEvents { get; init; }
     public long StackedPoolEvents { get; init; }
     public long FileEvents { get; init; }
-    /// <summary>Whether Kernel-File was recorded (C1: automatic captures record pool events only unless DeeperCapture is on).</summary>
+    /// <summary>Whether Kernel-File was recorded (Automatic captures record pool events only unless DeeperCapture is on).</summary>
     public bool KernelFileRecorded { get; set; } = true;
     public List<CapturePoolUsage> Pool { get; init; } = [];
     public List<CaptureFileActivity> Files { get; init; } = [];
     public List<string> Notes { get; init; } = [];
     public string? Error { get; init; }
-    /// <summary>The CPU part, when the trace recorded it.</summary>
     /// <summary>From the separate CPU recording (cpu.etl) that follows the pool trace, when one was asked for.</summary>
     public CpuProfile? Cpu { get; set; }
 }
@@ -129,7 +160,7 @@ public sealed class CaptureResult
 /// <summary>How a capture changes the ranking: a suspect that holds a large share of the traced net bytes is confirmed.</summary>
 public static class CaptureAttribution
 {
-    /// <summary>Share of the tag's traced net growth a process must hold to count as "confirmed by trace".</summary>
+    /// <summary>Share of the tag's traced net growth a process must hold to count as "confirmed by a trace".</summary>
     public const double ConfirmShare = 0.3;
     /// <summary>
     /// Also confirmed: at least this share of the traced growth, when the process's net also covers at least
@@ -153,16 +184,17 @@ public static class CaptureAttribution
         foreach (var s in inc.Suspects)
         {
             // The same process instance: PID and (when the trace knows it) create time; a reused PID is another process.
-            // A row without a create time (alive when the trace began) is the instance alive then, not a dead one with the same PID.
+            // A row without a create time (alive when the trace began) is the instance alive then, not a dead one with the same PID:
+            // whether a suspect exited before the trace began is timed on the clock that only goes forward.
             var mine = usage.Where(u => u.Pid == s.Key.Pid && (u.CreateTime != 0 && s.Key.CreateTime != 0
                 ? Math.Abs(u.CreateTime - s.Key.CreateTime) < 2 * TimeSpan.TicksPerSecond
-                : s.ExitUtc is not { } x || x >= capture.StartUtc)).ToList();
+                : s.ExitMs is not { } x || x >= capture.StartMs)).ToList();
             long net = mine.Sum(u => u.NetBytes);
             if (net <= 0) continue;
             double share = net / (double)total;
             s.TraceNetBytes = net;
             string frames = string.Join(", ", mine.SelectMany(u => u.TopFrames).OrderByDescending(f => f.Bytes).Take(3).Select(f => f.Frame));
-            s.Evidence.Insert(0, $"trace: {Fmt.SignedBytes(net)} net {inc.Tag.ToDisplay()} in {Fmt.Duration(capture.EndUtc - capture.StartUtc)} " +
+            s.Evidence.Insert(0, $"trace: {Fmt.SignedBytes(net)} net {inc.Tag.ToDisplay()} in {Fmt.Duration(capture.Duration)} " +
                                  $"({share:P0} of the traced growth, {mine.Sum(u => u.Allocs):N0} allocations){(frames.Length > 0 ? $"; top frames {frames}" : "")}");
             if (share >= ConfirmShare || (share >= ConfirmShareWithBytes && net >= floor))
             {

@@ -1,20 +1,21 @@
 using System.Security.Principal;
+using System.Text.RegularExpressions;
 using PoolWatch.Core.Cache;
 using PoolWatch.Native;
 
 namespace PoolWatch.Engine;
 
 /// <summary>
-/// "Clear cache" (addendum 2). The standby purge needs SeProfileSingleProcessPrivilege (administrators), and PoolWatch
-/// always runs elevated (its manifest asks for it), so it purges in-process: Clear cache now, the automatic rule and the
-/// "lag before / after a clear" experiment alike.
+/// "Clear cache". The standby purge needs SeProfileSingleProcessPrivilege (administrators), and PoolWatch
+/// always runs elevated (it starts as administrator through its launcher), so it purges in-process: Clear cache now, the
+/// automatic rule and the "lag before / after a clear" experiment alike.
 /// <para>
-/// S5 (review round 2, decision reversed): the SYSTEM-task route is removed. It existed for an unelevated PoolWatch, which
+/// The SYSTEM-task route is removed. It existed for an unelevated PoolWatch, which
 /// never runs: a one-time setup wrote a helper DLL into %ProgramFiles%\PoolWatch and registered two on-demand SYSTEM tasks
-/// in \PoolWatch\ that a named standard user could start. Both review rounds recommended removing it (less attack surface:
-/// a SYSTEM payload startable by a non-administrator, plus the setup that wrote it). Nothing creates those tasks any more;
+/// in \PoolWatch\ that a named standard user could start. It was removed for less attack surface:
+/// a SYSTEM payload startable by a non-administrator, plus the setup that wrote it. Nothing creates those tasks any more;
 /// <see cref="RemoveOldTasks"/> removes what a previous build installed: automatically on the first elevated start that finds
-/// it (review round 3, <see cref="OldTaskCleanup"/>), else <c>--remove-clear-cache</c> or the tray menu item that appears when
+/// it, else <c>--remove-clear-cache</c> or the tray menu item that appears when
 /// they are found.
 /// A clear task of your own (a task in the Task Scheduler root that runs Sysinternals RAMMap with one of its -E "empty"
 /// options as SYSTEM or with highest privileges, under any name: <see cref="IsOwnClearAction"/>) is shown, and removed only
@@ -82,7 +83,7 @@ internal static class CacheHelper
     public static readonly IReadOnlyList<string> OldTaskNames = [StandbyTask, LowPriorityTask];
 
     /// <summary>
-    /// Review round 3 (item 7): on an elevated start that finds an older build's two tasks, they are removed automatically
+    /// On an elevated start that finds an older build's two tasks, they are removed automatically
     /// (no longer used: the purge is in-process), with a line for the timeline; the tray menu item stays as the fallback.
     /// Null when there was nothing to do. <paramref name="remove"/> is <see cref="RemoveOldTasks"/> (a fake in tests).
     /// </summary>
@@ -192,12 +193,15 @@ internal static class CacheHelper
     // ---------------------------------------------------------------- a clear task of your own (elevated)
 
     /// <summary>Sysinternals RAMMap's file names (x64, x86 and Arm64 builds).</summary>
-    private static readonly System.Text.RegularExpressions.Regex RamMapExe =
-        new(@"^RAMMap(64a?)?\.exe$", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    private static readonly Regex RamMapExe =
+        new(@"^RAMMap(64a?)?\.exe$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     /// <summary>RAMMap's "empty" options: -Ew working sets, -Es system working set, -Em modified list, -Et standby list, -E0 priority-0 standby.</summary>
-    private static readonly System.Text.RegularExpressions.Regex EmptyOption =
-        new(@"(?<![\w-])[-/]E[wsmt0](?!\w)", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    internal const string EmptyOptionPattern = "[-/]E[wsmt0]";
+
+    /// <summary>One of <see cref="EmptyOptionPattern"/> anywhere in a task's arguments, as a word of its own.</summary>
+    private static readonly Regex EmptyOption =
+        new($@"(?<![\w-]){EmptyOptionPattern}(?!\w)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     /// <summary>
     /// Pure: a task action that clears memory lists the way PoolWatch's own clear does: the program is Sysinternals RAMMap
@@ -212,11 +216,21 @@ internal static class CacheHelper
         return RamMapExe.IsMatch(cut >= 0 ? p[(cut + 1)..] : p) && EmptyOption.IsMatch(arguments ?? "");
     }
 
-    /// <summary>A clear task of your own as you would recognise it: where, as whom, what it runs, when.</summary>
+    /// <summary>
+    /// A clear task of your own as you would recognise it: where, as whom, what it runs, when; and what Undo needs to put
+    /// it back after it is removed: its definition, its logon type (TASK_LOGON_*) and its account, as Task Scheduler
+    /// gave them (null when they could not be read).
+    /// </summary>
     public sealed record LegacyTaskInfo(string Path, string RunsAs, string Runs, string When, bool Enabled)
     {
         public string Text => $"{Path}: runs {Runs} as {RunsAs}, {When}, {(Enabled ? "enabled" : "disabled")}";
+        public string? Xml { get; init; }
+        public int? LogonType { get; init; }
+        public string? UserId { get; init; }
     }
+
+    /// <summary>The names Task Scheduler and Windows give the SYSTEM account.</summary>
+    public static bool IsSystemAccount(string? user) => user is "S-1-5-18" or "SYSTEM" or "NT AUTHORITY\\SYSTEM" or "LocalSystem";
 
     /// <summary>At most this many tasks of your own are reported (the root folder is read once an hour).</summary>
     private const int MaxOwnTasks = 20;
@@ -264,13 +278,17 @@ internal static class CacheHelper
         catch { return null; }
         if (!clears) return null;
         string runsAs = "?";
+        string? userId = null;
+        int? logonType = null;
         bool highest = false;
         try
         {
             dynamic principal = com.Track(def.Principal)!;
             string u = (string)(principal.UserId ?? "");
-            runsAs = u is "S-1-5-18" or "SYSTEM" or "NT AUTHORITY\\SYSTEM" or "LocalSystem" ? "SYSTEM" : u;
+            runsAs = IsSystemAccount(u) ? "SYSTEM" : u;
+            userId = u.Length > 0 ? u : null;
             highest = (int)principal.RunLevel == 1; // TASK_RUNLEVEL_HIGHEST
+            logonType = (int)principal.LogonType;
         }
         catch { }
         if (runsAs != "SYSTEM" && !highest) return null; // it could not clear anything
@@ -285,14 +303,18 @@ internal static class CacheHelper
         catch { }
         string taskPath;
         try { taskPath = (string)t.Path; } catch { return null; }
-        return new LegacyTaskInfo(taskPath, runsAs, string.Join("; ", acts), when, enabled);
+        string? xml = null;
+        try { xml = (string)t.Xml; } catch { }
+        return new LegacyTaskInfo(taskPath, runsAs, string.Join("; ", acts), when, enabled) { Xml = xml, LogonType = logonType, UserId = userId };
     }
 
     /// <summary>
     /// Deletes only the task (not what it runs: RAMMap stays where it is), and only when it is still a clear task of your
-    /// own (checked again by name right before the delete). Elevated.
+    /// own whose definition can be read (both checked again by name right before the delete). Elevated. Returns the task
+    /// as it was read right before the delete (its definition, logon type and account), for the record Undo puts it back
+    /// from; null when nothing was removed.
     /// </summary>
-    public static void DeleteLegacy(LegacyTaskInfo task)
+    public static LegacyTaskInfo? DeleteLegacy(LegacyTaskInfo task)
     {
         if (!IsElevated) throw new UnauthorizedAccessException("removing the task must run elevated");
         string name = task.Path.TrimStart('\\');
@@ -302,26 +324,100 @@ internal static class CacheHelper
         service.Connect();
         dynamic root = com.Track(service.GetFolder(@"\"))!;
         object? t = com.Track(TryGet(root, name));
-        if (t is null || Describe(com, t) is null) return; // gone, or no longer a clear task
+        if (t is null || Describe(com, t) is not { Xml: not null } now) return null; // gone, no longer a clear task, or unreadable
         root.DeleteTask(name, 0);
+        return now;
+    }
+
+    /// <summary>Whether a task of this name is in the Task Scheduler root folder now. Elevated (a SYSTEM task is visible only then).</summary>
+    public static bool RootTaskExists(string name)
+    {
+        using var com = new ComScope();
+        dynamic service = com.Track(Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service")!)!)!;
+        service.Connect();
+        return com.Track(TryGet(com.Track(service.GetFolder(@"\"))!, name)) is not null;
+    }
+
+    /// <summary>TASK_CREATE: registering fails when a task of that name exists (nothing is ever replaced).</summary>
+    private const int TaskCreate = 2;
+
+    /// <summary>
+    /// Pure: a task name for the Task Scheduler root folder itself, with no folder in it: neither separator ("\" or "/",
+    /// which Windows reads as one in a path too), and not "." or "..".
+    /// </summary>
+    internal static bool IsRootTaskName(string name) => name.Length > 0 && name.IndexOfAny(['\\', '/']) < 0 && name is not ("." or "..");
+
+    /// <summary>
+    /// Puts a removed clear task of your own back into the Task Scheduler root folder from its saved definition, signed in
+    /// as <paramref name="userId"/> (always an account: never left to the definition or to the caller) with
+    /// <paramref name="logonType"/> (TASK_LOGON_*; never a password). The caller has checked the definition
+    /// (ClearTaskReplacer). Elevated. Null, or why it was not registered.
+    /// </summary>
+    public static string? RegisterOwnTask(string name, string xml, int logonType, string userId)
+    {
+        if (!IsRootTaskName(name)) return "only a task in the Task Scheduler root folder is put back";
+        if (string.IsNullOrWhiteSpace(userId)) return "a task is put back only with the account it ran as";
+        if (!IsElevated) return "putting a task back needs PoolWatch to run as administrator";
+        try
+        {
+            using var com = new ComScope();
+            dynamic service = com.Track(Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service")!)!)!;
+            service.Connect();
+            dynamic root = com.Track(service.GetFolder(@"\"))!;
+            com.Track(root.RegisterTask(name, xml, TaskCreate, userId, null, logonType, null));
+            return null;
+        }
+        catch (Exception ex) { return ex.Message; }
     }
 
     public enum LegacyOutcome { None, Removed, Kept }
 
     /// <summary>
     /// The step behind "turn on the automatic clear" (and "Remove my clear task"): finds every clear task of your own,
-    /// shows them, and deletes them only when <paramref name="ask"/> says yes, so they and the built-in rule never both
-    /// run. <see cref="LegacyOutcome.Kept"/>: the caller leaves the automatic clear off.
+    /// shows them, and removes them only when <paramref name="ask"/> says yes, so they and the built-in rule never both
+    /// run. Every definition is saved in <paramref name="records"/>, and read back, before the first task is removed
+    /// (ClearTaskReplacer.RemoveAll), so Undo can put each one back. <see cref="LegacyOutcome.Removed"/>: the tasks are
+    /// the ones removed; any other you were asked about was gone, or no longer a clear task, by its turn.
+    /// <see cref="LegacyOutcome.Kept"/>: the caller leaves the automatic clear off, the tasks are the ones PoolWatch did
+    /// not remove, and the note says why when it was not your No: a definition PoolWatch could not read (nothing is asked
+    /// then) or save, a delete that failed, a task still there after its delete removed nothing (it could not be read at
+    /// its turn, or it changed meanwhile), one PoolWatch could not check, or another set up meanwhile.
+    /// <see cref="LegacyOutcome.None"/>: no clear task of your own is there.
     /// </summary>
-    public static (LegacyOutcome Outcome, IReadOnlyList<LegacyTaskInfo> Tasks) ResolveLegacy(Func<IReadOnlyList<LegacyTaskInfo>, bool> ask)
+    /// <param name="via">Where the removal was asked for, in plain words: "the tray menu", "Settings", "the command line".</param>
+    public static (LegacyOutcome Outcome, IReadOnlyList<LegacyTaskInfo> Tasks, string? Note) ResolveLegacy(
+        Func<IReadOnlyList<LegacyTaskInfo>, bool> ask, Changes.ChangeRecords records, string via)
     {
         if (!IsElevated) throw new UnauthorizedAccessException("a clear task usually runs as SYSTEM: finding it must run elevated");
-        var tasks = FindLegacy();
-        if (tasks.Count == 0) return (LegacyOutcome.None, tasks);
-        if (!ask(tasks)) return (LegacyOutcome.Kept, tasks);
-        foreach (var t in tasks) DeleteLegacy(t);
-        return (LegacyOutcome.Removed, tasks);
+        return ResolveLegacy(ask, records, via, new Changes.WindowsClearTaskStore());
     }
+
+    /// <summary>The step above over <paramref name="store"/> (tests pass a fake).</summary>
+    internal static (LegacyOutcome Outcome, IReadOnlyList<LegacyTaskInfo> Tasks, string? Note) ResolveLegacy(
+        Func<IReadOnlyList<LegacyTaskInfo>, bool> ask, Changes.ChangeRecords records, string via, Changes.IClearTaskStore store)
+    {
+        var tasks = store.Find();
+        if (tasks.Count == 0) return (LegacyOutcome.None, tasks, null);
+        if (LegacyKeptReason(tasks) is { } unread) return (LegacyOutcome.Kept, tasks, unread);
+        if (!ask(tasks)) return (LegacyOutcome.Kept, tasks, null);
+        var (removed, error) = Changes.ClearTaskReplacer.RemoveAll(tasks, records, via, store);
+        if (error is not null) return (LegacyOutcome.Kept, tasks.Where(t => !removed.Any(r => r.Path == t.Path)).ToList(), error);
+        if (removed.Count > 0) return (LegacyOutcome.Removed, removed, null);
+        // Nothing removed after the yes: each was gone, or no longer a clear task, by its turn (RemoveAll checked), so a
+        // clear task of your own found now was set up meanwhile under another name.
+        var left = store.Find();
+        if (left.Count == 0) return (LegacyOutcome.None, left, null);
+        return (LegacyOutcome.Kept, left, LegacyKeptReason(left)
+            ?? $"Another clear task of your own, \"{left[0].Path.TrimStart('\\')}\", was set up while PoolWatch was removing yours, so it was left in place.");
+    }
+
+    /// <summary>
+    /// Why the step kept the tasks without asking (one whose definition PoolWatch could not read, so Undo could not put it
+    /// back), for the caller to show; null when none is unreadable.
+    /// </summary>
+    public static string? LegacyKeptReason(IReadOnlyList<LegacyTaskInfo> tasks) => tasks.FirstOrDefault(t => t.Xml is null) is { } unread
+        ? $"PoolWatch could not read how your clear task \"{unread.Path.TrimStart('\\')}\" is set up, so it could not save it for putting back later and left it in place."
+        : null;
 
     /// <summary>The question the step shows.</summary>
     public static string LegacyQuestion(IReadOnlyList<LegacyTaskInfo> tasks) =>
@@ -354,7 +450,7 @@ internal sealed class ComScope : IDisposable
     }
 
     /// <summary>
-    /// C6 (review round 2): enumerates a COM collection and tracks every item AND the enumerator behind the
+    /// Enumerates a COM collection and tracks every item AND the enumerator behind the
     /// <c>foreach</c> (the collection's IEnumVARIANT, wrapped by the runtime), which a plain <c>foreach (dynamic x in c)</c>
     /// left to the finalizer.
     /// </summary>

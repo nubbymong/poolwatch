@@ -5,13 +5,13 @@ using System.Text.RegularExpressions;
 namespace PoolWatch.Core.Incidents;
 
 /// <summary>What the redaction pass replaces (DESIGN.md section 10): user name, home paths, machine name (and the user's SID).</summary>
-/// <param name="TempPaths">The TEMP / TMP folders (long and 8.3 forms), replaced by <c>&lt;TEMP&gt;</c>. C6: they used to be
+/// <param name="TempPaths">The TEMP / TMP folders (long and 8.3 forms), replaced by <c>&lt;TEMP&gt;</c>. They used to be
 /// listed as home paths, so <c>...\Temp\x</c> came out as <c>&lt;HOME&gt;\x</c>; the longer TEMP path wins over the home path.</param>
 public sealed record RedactionInfo(string UserName, string MachineName, IReadOnlyList<string> HomePaths, string? Domain = null, string? UserSid = null,
     IReadOnlyList<string>? TempPaths = null);
 
 /// <summary>
-/// M1: a best-effort scrub of secrets that sit inside command lines and transcript text, which evidence packs hold: the
+/// A best-effort scrub of secrets that sit inside command lines and transcript text, which evidence packs hold: the
 /// value after a password / token / API-key option or key (<c>--password x</c>, <c>/token:x</c>, <c>API_KEY=x</c>,
 /// <c>pwd=x</c> in a connection string, <c>sig=x</c> in a SAS URL), an Authorization header or a Bearer token, the
 /// user:password part of a URL, a PEM private key, and tokens with a well-known shape (OpenAI / Anthropic <c>sk-</c>,
@@ -28,7 +28,7 @@ public static class SecretScrubber
                                  @"aws[-_]?secret[-_]?access[-_]?key|credentials?|sas[-_]?token|sig";
 
     // Quoted value forms, shared by every grammar below. The JSON-escaped form (\"...\") consumes escape pairs, so it can
-    // never eat the JSON string's own closing quote and leave report.json invalid (N1). None can hold a raw double quote, so
+    // never eat the JSON string's own closing quote and leave report.json invalid. None can hold a raw double quote, so
     // in JSON / CSV text a match never runs past the string or field it began in.
     private static string Quoted(bool structured)
     {
@@ -39,7 +39,7 @@ public static class SecretScrubber
     // A bare (unquoted) value.
     //  - optionForm (--password x, /token:x): in plain text (a report.md `code span`, a copied line) it stops ONLY at
     //    whitespace, a quote and a backtick, so the WHOLE secret goes even when it holds & ; | < > ) ] } , or a backslash
-    //    (S2), while the closing backtick of the code span survives (S1; MdCode turns any backtick in the value into ').
+    //   , while the closing backtick of the code span survives (MdCode turns any backtick in the value into ').
     //    In JSON / CSV it also stops at a comma, the one separator that can sit unquoted next to a value (an unquoted CSV
     //    field), so a value never swallows the field separator and the following field; other data bytes (& ; | < >) are
     //    still taken, because inside a JSON string or a quoted CSV field they are part of the value.
@@ -65,7 +65,7 @@ public static class SecretScrubber
             // Authorization: Bearer x, Proxy-Authorization: Basic x
             $@"(?<k>(?<![\w-])(?:proxy-)?authorization[ \t]*[:=][ \t]*(?:(?:bearer|basic|token|digest|negotiate|ntlm)[ \t]+)?)(?<v>{opt})",
             @"(?<k>(?<![\w-])bearer[ \t]+)(?<v>[A-Za-z0-9\-._~+/]{8,}=*)",
-            // scheme://user:password@host (a lookbehind, not \b, so a long run does not restart the match at every boundary — N2).
+            // scheme://user:password@host (a lookbehind, not \b, so a long run does not restart the match at every boundary).
             @"(?<k>(?<![a-z0-9+.\-])[a-z][a-z0-9+.\-]*://)(?<v>[^\s/:@""'\\]+:[^\s/@""'\\]+)(?=@)",
             // Well-known token shapes.
             @"(?<v>\bsk-(?:ant-|proj-)?[A-Za-z0-9_\-]{16,})",
@@ -93,7 +93,7 @@ public static class SecretScrubber
 /// Redacts identifying strings from text evidence in one pass (so a placeholder is never re-matched), case-insensitively,
 /// longest match first, with boundaries: a home path must end at a separator, quote or the end; names must be whole
 /// words. Each value is also matched in its JSON-escaped forms (\\ for backslashes, \uXXXX for non-ASCII). Secrets inside
-/// command lines are scrubbed first (<see cref="SecretScrubber"/>, M1).
+/// command lines are scrubbed first (<see cref="SecretScrubber"/>).
 /// </summary>
 public static class Redactor
 {
@@ -159,7 +159,7 @@ public static class Exporter
     private static readonly HashSet<string> TextExtensions = new(StringComparer.OrdinalIgnoreCase) { ".md", ".json", ".jsonl", ".csv", ".txt", ".log", ".wprp", ".xml" };
 
     /// <summary>
-    /// M1: the first thing in every report PoolWatch writes on disk (report.md, and the <c>notice</c> field of report.json):
+    /// The first thing in every report PoolWatch writes on disk (report.md, and the <c>notice</c> field of report.json):
     /// the incident folder itself is for you, not for posting. Plain ASCII with nothing JSON escapes, so the same text can be
     /// found and swapped in both files (<see cref="RedactText"/>).
     /// </summary>
@@ -182,7 +182,10 @@ public static class Exporter
     public static bool IsStructured(string fileName) => StructuredExtensions.Contains(Path.GetExtension(fileName));
 
     /// <param name="checkWrite">The write policy (returns the path or throws).</param>
-    public static string Export(string incidentDir, string exportsDir, RedactionInfo? redaction, Func<string, string> checkWrite)
+    /// <param name="extraFiles">Text files added at the root of the zip as they are, never redacted (the guide for AI
+    /// assistants, which holds nothing about this PC), by file name. A file of the same name in the folder is left out.</param>
+    public static string Export(string incidentDir, string exportsDir, RedactionInfo? redaction, Func<string, string> checkWrite,
+        IReadOnlyDictionary<string, string>? extraFiles = null)
     {
         Directory.CreateDirectory(checkWrite(exportsDir));
         string name = Path.GetFileName(incidentDir.TrimEnd('\\', '/')) + (redaction is not null ? "-redacted" : "") + ".zip";
@@ -192,10 +195,16 @@ public static class Exporter
         {
         using (var zip = ZipFile.Open(tmp, ZipArchiveMode.Create))
         {
+            foreach (var (extra, content) in extraFiles ?? new Dictionary<string, string>())
+            {
+                using var s = zip.CreateEntry(extra, CompressionLevel.Optimal).Open();
+                s.Write(new UTF8Encoding(false).GetBytes(content));
+            }
             foreach (var file in Directory.EnumerateFiles(incidentDir, "*", SearchOption.AllDirectories))
             {
                 string rel = Path.GetRelativePath(incidentDir, file).Replace('\\', '/');
                 if (rel.StartsWith("wpr-temp/", StringComparison.OrdinalIgnoreCase)) continue; // a running capture's buffers
+                if (extraFiles?.ContainsKey(rel) == true) continue;
                 string ext = Path.GetExtension(file);
                 if (ext.Equals(".tmp", StringComparison.OrdinalIgnoreCase) || ext.Equals(".etlx", StringComparison.OrdinalIgnoreCase)) continue;
                 if (redaction is not null && TextExtensions.Contains(ext))

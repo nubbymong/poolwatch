@@ -73,14 +73,15 @@ public static class SinceBootReport
         sb.AppendLine("| Tag | Owner | Description | Now | Observed |");
         sb.AppendLine("|---|---|---|---|---|");
         foreach (var t in tags)
-            sb.AppendLine($"| `{t.Tag.ToDisplay()}` | {t.Owner} | {t.Description.Replace("|", "\\|")} | {Fmt.Bytes(t.BytesNow)} | {Fmt.SignedBytes(t.GrowthObserved)} |");
+            sb.AppendLine($"| `{t.Tag.ToDisplay()}` | {Util.MdText.Text(t.Owner)} | {Util.MdText.Text(t.Description)} | {Fmt.Bytes(t.BytesNow)} | {Fmt.SignedBytes(t.GrowthObserved)} |");
         sb.AppendLine();
         foreach (var t in tags.Where(t => t.Hours.Any(x => x.Growth > 0)))
         {
             sb.AppendLine($"## `{t.Tag.ToDisplay()}` hour by hour").AppendLine();
             foreach (var hr in t.Hours.Where(x => x.Growth != 0))
             {
-                string who = hr.Attribution.Count == 0 ? "" : ": " + string.Join(", ", hr.Attribution.Select(a => $"{a.Process} (PID {a.Pid}) {a.Share:P0} ~{Fmt.Bytes(a.Bytes)}"));
+                // A process's name carries a label from its own command line (a script's name): text, never Markdown.
+                string who = hr.Attribution.Count == 0 ? "" : ": " + string.Join(", ", hr.Attribution.Select(a => $"{Util.MdText.Text(a.Process)} (PID {a.Pid}) {a.Share:P0} ~{Fmt.Bytes(a.Bytes)}"));
                 sb.AppendLine($"- {hr.HourUtc.ToLocalTime():HH:00} {Fmt.SignedBytes(hr.Growth)}{who}");
             }
             sb.AppendLine();

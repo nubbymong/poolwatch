@@ -2,6 +2,7 @@ using PoolWatch.Core;
 using PoolWatch.Core.Experiments;
 using PoolWatch.Core.Findings;
 using PoolWatch.Core.Model;
+using static PoolWatch.Tests.Clocks;
 
 namespace PoolWatch.Tests;
 
@@ -22,7 +23,7 @@ public class ExperimentTests
         var procs = new List<ProcessSample> { new() { Pid = 4, ImageName = "System" } };
         if (app) procs.Add(new ProcessSample { Pid = 900, ParentPid = 4, ImageName = "ChatGPT.exe" });
         ulong np = (ulong)((200 + fileMb) * MB), pg = (ulong)((300 + tokeMb) * MB);
-        return new Sample(T0.AddMinutes(min), new PoolTotals(pg, np, pg, np), tags, procs) { System = new SystemCounters(commitMb * (ulong)MB, 32000 * (ulong)MB, 0, 0, 90000, 200) };
+        return new Sample(T0.AddMinutes(min), new PoolTotals(pg, np, pg, np), tags, procs) { TickMs = Clocks.At(T0.AddMinutes(min)).Ms, System = new SystemCounters(commitMb * (ulong)MB, 32000 * (ulong)MB, 0, 0, 90000, 200) };
     }
 
     private static List<ExperimentStep> Run(Experiment e, IEnumerable<Sample> samples) => samples.Select(e.Observe).OfType<ExperimentStep>().ToList();
@@ -79,7 +80,7 @@ public class ExperimentTests
     {
         var e = new Experiment("ChatGPT", TimeSpan.FromMinutes(10), T0);
         e.Observe(S(0, 100, 50, false));
-        Assert.Equal("Experiment: phase 1 of 3: baseline, leave ChatGPT closed, 6 min left", e.Status(T0.AddMinutes(4)));
+        Assert.Equal("Experiment: phase 1 of 3: baseline, leave ChatGPT closed, 6 min left", e.Status(At(T0.AddMinutes(4)).Ms));
         var f = e.Cancel(T0.AddMinutes(5));
         Assert.Equal("Experiment with ChatGPT cancelled", f!.Title);
         Assert.Null(e.Observe(S(11, 100, 50, false)));

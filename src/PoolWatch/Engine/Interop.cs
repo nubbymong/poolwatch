@@ -8,14 +8,20 @@ namespace PoolWatch.Engine;
 internal static class Interop
 {
     /// <summary>
-    /// S3 (review rounds 2 and 3): the data root's security descriptor, so an elevated PoolWatch's files are out of reach
-    /// of an unelevated process. Administrators (owner) and SYSTEM get full control; nobody else may write. The data holds
-    /// command lines, so it is not readable by all local Users: only the account PoolWatch runs as (<paramref name="reader"/>,
-    /// the owner) keeps read + execute, because there is an unelevated reader: PoolWatch opens incident, report and export
-    /// folders in the shell (Explorer and the apps it starts run unelevated). Protected: nothing inherited from %ProgramData%.
-    /// Applied at creation, or once when a check finds it changed (<see cref="DataRootGuard"/>). Pure: built in memory
-    /// (unit-tested). The reader is granted only when it is one account: a group (Users, Authenticated Users, Everyone),
-    /// Administrators or SYSTEM is never added as a reader.
+    /// The data root's security descriptor, so an elevated PoolWatch's files are out of reach of an unelevated process.
+    /// Administrators (owner) and SYSTEM get full control; nobody else may write. The data holds command lines, so it
+    /// is not readable by all local Users: only the account PoolWatch runs as (<paramref name="reader"/>, the owner)
+    /// keeps read + execute, inherited by every folder and file in it, because it has unelevated readers. They are: the
+    /// folder windows PoolWatch opens, as Explorer, which shows them, runs unelevated as the signed-in account
+    /// (<c>UiActions.OpenFolder</c> and <c>UiActions.ShowFile</c>: the About window's data folder, an incident's folder
+    /// or the incidents folder, the exports folder after a report or a vendor bundle is exported or an issue text is
+    /// saved, and the reports folder after the since-boot report); the apps the user opens those files with from there,
+    /// which run unelevated too; and the user reading <c>poolwatch.log</c>, the daily CSV files and the incidents
+    /// without elevation (SECURITY.md says the folder is readable by their account). Without this grant each of those
+    /// fails to open, so it stays (<c>DataRootAclTests</c> holds this list and the grant). Protected: nothing inherited
+    /// from %ProgramData%. Applied at creation, or once when a check finds it changed (<see cref="DataRootGuard"/>).
+    /// Pure: built in memory (unit-tested). The reader is granted only when it is one account: a group (Users,
+    /// Authenticated Users, Everyone), Administrators or SYSTEM is never added as a reader.
     /// </summary>
     [SupportedOSPlatform("windows")]
     public static DirectorySecurity DataRootSecurity(SecurityIdentifier? reader)
@@ -59,7 +65,7 @@ internal static class Interop
     }
 
     /// <summary>
-    /// Addendum 2 C / Part 3 review: a symbol folder an elevated PoolWatch may read PDBs from: it exists, is on a local drive
+    /// A symbol folder an elevated PoolWatch may read PDBs from: it exists, is on a local drive
     /// (not a mapped network drive) and is admin-only by its ACL (read only: nothing is changed). Any failure counts as no.
     /// </summary>
     public static bool UsableSymbolFolder(string dir)

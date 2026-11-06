@@ -22,7 +22,7 @@ public enum FindingKind
     TokenGuard,
     ServiceChange,
     Saturation,
-    /// <summary>PoolWatch's own setup (review round 3): its data folder moved aside or repaired, a logon task that starts it
+    /// <summary>PoolWatch's own setup: its data folder moved aside or repaired, a logon task that starts it
     /// from outside Program Files, an older build's clear-cache tasks removed.</summary>
     Setup,
 }

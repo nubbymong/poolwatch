@@ -6,7 +6,7 @@ using PoolWatch.Core.Incidents;
 namespace PoolWatch.Core.Boot;
 
 /// <summary>
-/// "Export vendor bundle" (item 13): one zip in the shape the public report asked maintainers to request: app
+/// "Export vendor bundle": one zip in the shape the public report asked maintainers to request: app
 /// packages and the Windows build; the clean-boot baseline; timestamped samples (commit, paged / non-paged, handles,
 /// process counts); tag snapshots before launch, during growth, after exit and after reboot; the filter list and
 /// container state; git roots and the spawn trace; crash metadata. Every file is text and is redacted by default
@@ -17,6 +17,7 @@ public static class VendorBundle
     /// <summary>What each part is, in the order the README lists them (file name, description).</summary>
     public static readonly IReadOnlyList<(string file, string what)> Parts =
     [
+        ("AGENTS.md", "a guide for an AI assistant you ask for help: what each file holds and how to read it (added as written, not redacted: it says nothing about this PC)"),
         ("system.json", "Windows edition and build, PoolWatch version, uptime, RAM, app package / Claude Code / AICC versions"),
         ("boot-baseline.json", "the first full tag snapshot after this boot (and how long after boot it was taken)"),
         ("boots.md", "every boot PoolWatch saw: peak paged / non-paged, commit, top tags at the peak, hours it ran"),
@@ -36,6 +37,7 @@ public static class VendorBundle
     {
         var sb = new StringBuilder("# PoolWatch vendor bundle\n\n");
         sb.AppendLine($"- Made {Detection.Fmt.Stamp(nowUtc)} by PoolWatch {poolWatchVersion}. Read-only data from this PC; nothing was sent anywhere.");
+        sb.AppendLine("- Asking an AI assistant to help read it? Point it at `AGENTS.md` first.");
         sb.AppendLine(redacted
             ? "- Redacted: user name, machine name, home folder and TEMP folder paths, domain and SID are replaced by <USER>, <MACHINE>, <HOME>, <TEMP>, <DOMAIN>, <SID>, " +
               "and values that look like secrets (a password, token or API key on a command line) by <SECRET>. Redaction is best-effort: read the files before you post them."
@@ -46,7 +48,7 @@ public static class VendorBundle
     }
 
     /// <summary>
-    /// C6: the bundle entry for a tag's table at an incident's peak. Raw tag names collided on case-only differences (Reff
+    /// The bundle entry for a tag's table at an incident's peak. Raw tag names collided on case-only differences (Reff
     /// and RefF are one file once extracted on Windows) and broke on characters Windows forbids; the name is now the
     /// readable tag with anything but letters and digits replaced, plus the hex of its 4 raw bytes
     /// (<see cref="PoolTag.ToFileSafe"/>), and the peak's local date and minute.
@@ -112,7 +114,10 @@ public static class VendorBundle
     }
 
     /// <summary>Writes the zip (text files only; redacted unless <paramref name="redaction"/> is null). Returns its path.</summary>
-    public static string Write(string exportsDir, DateTime nowUtc, IReadOnlyDictionary<string, string> files, RedactionInfo? redaction, Func<string, string> checkWrite)
+    /// <param name="extraFiles">Text files added as they are, never redacted (the guide for AI assistants), as in
+    /// <see cref="Exporter.Export"/>.</param>
+    public static string Write(string exportsDir, DateTime nowUtc, IReadOnlyDictionary<string, string> files, RedactionInfo? redaction, Func<string, string> checkWrite,
+        IReadOnlyDictionary<string, string>? extraFiles = null)
     {
         Directory.CreateDirectory(checkWrite(exportsDir));
         string name = $"vendor-bundle-{nowUtc.ToLocalTime():yyyyMMdd-HHmmss}{(redaction is not null ? "-redacted" : "")}.zip";
@@ -122,12 +127,12 @@ public static class VendorBundle
         {
             var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             using (var zip = ZipFile.Open(tmp, ZipArchiveMode.Create))
+            {
+                foreach (var (path, content) in extraFiles ?? new Dictionary<string, string>())
+                    Add(zip, EntryName(path, used), content);
                 foreach (var (path, content) in files.OrderBy(kv => kv.Key, StringComparer.Ordinal))
-                {
-                    var entry = zip.CreateEntry(EntryName(path, used), CompressionLevel.Optimal);
-                    using var s = entry.Open();
-                    s.Write(new UTF8Encoding(false).GetBytes(redaction is null ? content : Exporter.RedactText(content, redaction, Exporter.IsStructured(path))));
-                }
+                    Add(zip, EntryName(path, used), redaction is null ? content : Exporter.RedactText(content, redaction, Exporter.IsStructured(path)));
+            }
             File.Move(tmp, zipPath, overwrite: true);
         }
         catch
@@ -136,5 +141,11 @@ public static class VendorBundle
             throw;
         }
         return zipPath;
+    }
+
+    private static void Add(ZipArchive zip, string entryName, string content)
+    {
+        using var s = zip.CreateEntry(entryName, CompressionLevel.Optimal).Open();
+        s.Write(new UTF8Encoding(false).GetBytes(content));
     }
 }

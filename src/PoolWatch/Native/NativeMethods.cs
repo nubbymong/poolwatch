@@ -113,8 +113,12 @@ internal static unsafe class NativeMethods
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool ReadProcessMemory(IntPtr process, IntPtr address, void* buffer, nint size, out nint read);
 
+    /// <summary>
+    /// <paramref name="processMachine"/> is 0 (IMAGE_FILE_MACHINE_UNKNOWN) unless the process runs under WOW64;
+    /// <paramref name="nativeMachine"/> is the architecture of Windows itself.
+    /// </summary>
     [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool IsWow64Process(IntPtr process, out bool wow64);
+    public static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
 
     [DllImport("psapi.dll", SetLastError = true)]
     public static extern bool GetPerformanceInfo(out PERFORMANCE_INFORMATION info, int size);

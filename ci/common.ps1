@@ -18,8 +18,8 @@ function Complete-Assertions([string]$name) {
     exit 0 # not the exit code of the last native command (e.g. an fltmc load of a filter the runner lacks)
 }
 
-# The CI runs PoolWatch elevated from the build output, which is not an administrator-only folder: S4 refuses that
-# unless asked explicitly (review round 2). Every PoolWatch.exe started by the CI scripts passes this.
+# The CI runs PoolWatch elevated from the build output, which is not an administrator-only folder: PoolWatch refuses to
+# run from such a folder unless asked explicitly. Every PoolWatch.exe started by the CI scripts passes this.
 $script:AnyLocation = '--allow-any-location'
 
 # Starts PoolWatch.exe (a WinExe) and returns the process. -NoNewWindow keeps it attached to this console.

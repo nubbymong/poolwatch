@@ -2,6 +2,8 @@ using PoolWatch.Core;
 using PoolWatch.Core.Aicc;
 using PoolWatch.Core.Model;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
 public class AiccTests
@@ -158,15 +160,15 @@ public class AiccTests
             w.AddProcess(60, 4, "find.exe");
             long tag = 20 * Settings.MB;
             var rnd = new Random(5);
-            for (int i = 0; i < 10; i++) { w.Sample(("RefF", tag)); mgr.Process(w.History, det, det.Evaluate(w.History), w.Now - w.Interval); }
-            for (int i = 0; i < 20; i++) { int ops = 2000 + rnd.Next(2000); w.Io(60, other: ops); tag += ops * 300; w.Sample(("RefF", tag)); mgr.Process(w.History, det, det.Evaluate(w.History), w.Now - w.Interval); }
+            for (int i = 0; i < 10; i++) { w.Sample(("RefF", tag)); mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval)); }
+            for (int i = 0; i < 20; i++) { int ops = 2000 + rnd.Next(2000); w.Io(60, other: ops); tag += ops * 300; w.Sample(("RefF", tag)); mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval)); }
             mgr.Finish(w.History, w.Now);
             var inc = mgr.All.Single(i => i.Tag == PoolTag.Parse("RefF"));
             var md = File.ReadAllText(Path.Combine(inc.Dir, "report.md"));
-            // M1: the report as written says it is not redacted, in report.md and in report.json.
+            // The report as written says it is not redacted, in report.md and in report.json.
             Assert.Contains(PoolWatch.Core.Incidents.Exporter.UnredactedNotice, md);
             Assert.Contains(PoolWatch.Core.Incidents.Exporter.UnredactedNotice, File.ReadAllText(Path.Combine(inc.Dir, "report.json")));
-            Assert.Contains("by Claude Code session 00000000 / workflow wf_00000001", md);
+            Assert.Contains(@"by Claude Code session `00000000` / workflow wf\_00000001", md); // a hash-like word: in a code span, so GitHub links no commit; an underscore escaped
             Assert.Contains("- AICC / Claude Code: AICC › D:\\sample-app (profile-7c1d) › claude › bash › find.exe", md);
             Assert.Contains("Issued by Claude Code session `00000000-0000-4000-8000-000000000001` in project `D--sample-app`, workflow `wf_00000001`, sub-agent `agent-0001`", md);
         }

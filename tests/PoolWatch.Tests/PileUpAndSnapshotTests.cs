@@ -5,9 +5,11 @@ using PoolWatch.Core.Identity;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Spawn;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
-/// <summary>Review Part 3: item 12 (slow pile-ups still trip) and item 13 (before-launch / after-exit snapshots outside experiments).</summary>
+/// <summary>Slow pile-ups still trip, and before-launch / after-exit snapshots are kept outside experiments.</summary>
 public class PileUpAndSnapshotTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 9, 0, 0, DateTimeKind.Utc);
@@ -29,7 +31,7 @@ public class PileUpAndSnapshotTests
         for (int m = 0; m <= 8 * 60; m += 5)
         {
             int n = 2 + m / 90;
-            found.AddRange(acc.Observe(Cua(n), Id, T0.AddMinutes(m)));
+            found.AddRange(acc.Observe(Cua(n), Id, At(T0.AddMinutes(m))));
         }
         var f = found[0];
         Assert.Equal(T0.AddHours(4.5), f.TimeUtc); // 2 -> 5 over four and a half hours
@@ -48,7 +50,7 @@ public class PileUpAndSnapshotTests
         var acc = new ChildAccumulation(S());
         var found = new List<Finding>();
         int[] hourly = [2, 4, 6, 3, 5, 7, 4, 6, 8, 5];
-        for (int m = 0; m < hourly.Length * 60; m += 5) found.AddRange(acc.Observe(Cua(hourly[m / 60]), Id, T0.AddMinutes(m)));
+        for (int m = 0; m < hourly.Length * 60; m += 5) found.AddRange(acc.Observe(Cua(hourly[m / 60]), Id, At(T0.AddMinutes(m))));
         Assert.Empty(found);
     }
 
@@ -57,13 +59,13 @@ public class PileUpAndSnapshotTests
     {
         var acc = new ChildAccumulation(S());
         var g = new AccumulationGroup { OwnerName = "Codex", What = "node.exe" };
-        foreach (var (h, n) in new[] { (0, 2), (1, 4), (2, 6) }) { g.Hourly.Add(new(T0.AddHours(h), n)); g.Points.Add(new(T0.AddHours(h), n)); }
+        foreach (var (h, n) in new[] { (0, 2), (1, 4), (2, 6) }) { g.Hourly.Add(new(At(T0.AddHours(h)), n)); g.Points.Add(new(At(T0.AddHours(h)), n)); }
         Assert.False(acc.GrowingSlowly(g, out _, out _, out _)); // two hours of points: not yet three
-        g.Hourly.Add(new(T0.AddHours(3), 7)); g.Points.Add(new(T0.AddHours(3), 7));
+        g.Hourly.Add(new(At(T0.AddHours(3)), 7)); g.Points.Add(new(At(T0.AddHours(3)), 7));
         Assert.True(acc.GrowingSlowly(g, out int from, out int to, out var span));
         Assert.Equal((2, 7), (from, to));
         Assert.Equal(TimeSpan.FromHours(3), span);
-        g.Points.Add(new(T0.AddHours(3.5), 4)); // the count fell back since the last hourly point
+        g.Points.Add(new(At(T0.AddHours(3.5)), 4)); // the count fell back since the last hourly point
         Assert.False(acc.GrowingSlowly(g, out _, out _, out _));
     }
 

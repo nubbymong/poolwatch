@@ -25,11 +25,19 @@ public sealed record SystemInfo
     public string? PoolWatchCost { get; init; }
 }
 
-/// <summary>What happened when a tag dropped sharply: that explains what was holding the memory.</summary>
+/// <summary>
+/// What happened when a tag dropped sharply: that explains what was holding the memory. <see cref="FromBytes"/> and
+/// <see cref="ToBytes"/> are the tag's real levels; PoolWatch's own cache clears in between freed
+/// <see cref="ClearedBytes"/> of it, and <see cref="Dropped"/> is what fell on its own (the clears' drop is their result).
+/// </summary>
 public sealed record ReleaseRecord(DateTime TimeUtc, DateTime FromUtc, long FromBytes, long ToBytes, List<string> Exits, List<string> ActiveProcesses,
     string? WorktreeNote = null)
 {
-    public long Dropped => FromBytes - ToBytes;
+    /// <summary>What PoolWatch's own cache clears between <see cref="FromUtc"/> and <see cref="TimeUtc"/> freed of the tag (0 when none did).</summary>
+    public long ClearedBytes { get; init; }
+    /// <summary>When the one own clear that freed part of it ran; null when none did or several did.</summary>
+    public DateTime? ClearedAtUtc { get; init; }
+    public long Dropped => FromBytes - ToBytes - ClearedBytes;
 }
 
 /// <summary>AICC / Claude Code context of a suspect (DESIGN.md section 9).</summary>
@@ -41,13 +49,15 @@ public sealed record RetentionRecord(DateTime TimeUtc, DateTime ActivityStoppedU
 /// <summary>
 /// A rule that keeps firing (a growth rule fires on every sample while it holds): its alerts after the first are counted on
 /// the first one's timeline entry ("...; fired 37 more times to 06:54:10, latest +612 MB"), so every alert is on the
-/// timeline without one line per sample (2f).
+/// timeline without one line per sample.
 /// </summary>
 public sealed class AlertRun
 {
     public DateTime EntryTimeUtc { get; init; }
     public required string EntryText { get; init; }
     public DateTime LastUtc { get; set; }
+    /// <summary>The run's last alert on the clock that only goes forward (<see cref="Alert.Ms"/>): the gap that starts a new run is timed on it.</summary>
+    public long LastMs { get; set; }
     public int More { get; set; }
     /// <summary>The growth the entry was written with: 25% more starts a new entry.</summary>
     public long EntryBytes { get; init; }
@@ -66,13 +76,33 @@ public sealed class Incident
     /// <summary>Last time an alert saw the tag above its previous high: the quiet period counts from here, so a
     /// plateau (where the window rule keeps firing) still closes the incident.</summary>
     public DateTime LastRiseUtc { get; set; }
+    /// <summary>
+    /// The measurement of PoolWatch's own cache clear that ran while the incident was rising: its quiet period counts from
+    /// here when that is later than <see cref="LastRiseUtc"/> (the clear's interval hid the rise; it did not stop), while
+    /// <see cref="LastRiseUtc"/> stays the last rise seen. Null when no such clear ran this episode.
+    /// </summary>
+    public DateTime? QuietFromUtc { get; set; }
+    /// <summary>When the quiet period counts from: the later of <see cref="LastRiseUtc"/> and <see cref="QuietFromUtc"/>.</summary>
+    public DateTime QuietSinceUtc => QuietFromUtc is { } q && q > LastRiseUtc ? q : LastRiseUtc;
     public long HighestSeenBytes { get; set; }
     public DateTime? ClosedUtc { get; set; }
     public DateTime OnsetUtc { get; set; }
     public DateTime? EndUtc { get; set; }
+    /// <summary>The tag's level at the onset.</summary>
     public long StartBytes { get; set; }
+    /// <summary>
+    /// The start plus the growth's highest point: the level the tag reached, or, when PoolWatch's own cache clears freed part
+    /// of it meanwhile, would have reached had they freed nothing (their drop is not the growth ending).
+    /// </summary>
     public long PeakBytes { get; set; }
+    /// <summary>The tag's level at the last sample ranked.</summary>
     public long CurrentBytes { get; set; }
+    /// <summary>What PoolWatch's own cache clears freed of the tag since the onset (0 when none did).</summary>
+    public long ClearedBytes { get; set; }
+    /// <summary>When the one own clear that freed part of it since the onset ran; null when none did or several did.</summary>
+    public DateTime? ClearedAtUtc { get; set; }
+    /// <summary>"PoolWatch's own cache clear at 06:20:01 freed 413.3 MB" when its own clears freed part of the tag since the onset, else null.</summary>
+    public string? OwnClearsFreed => ClearedBytes > 0 ? Fmt.OwnClearsFreed(ClearedBytes, ClearedAtUtc) : null;
     public long Growth => PeakBytes - StartBytes;
     public List<Alert> Alerts { get; } = [];
     public List<Suspect> Suspects { get; set; } = [];
@@ -93,7 +123,7 @@ public sealed class Incident
     public List<LifecycleEvent> Events { get; set; } = [];
     /// <summary>Every alert and re-open, in order (one incident per tag per episode keeps them all; capped at 500).</summary>
     public List<(DateTime TimeUtc, string Text)> Timeline { get; } = [];
-    /// <summary>Per rule (kind + window): the timeline entry its current run of alerts is counted on (2f).</summary>
+    /// <summary>Per rule (kind + window): the timeline entry its current run of alerts is counted on.</summary>
     public Dictionary<(AlertKind Kind, TimeSpan Window), AlertRun> AlertRuns { get; } = new();
     public DateTime LastWriteUtc { get; set; }
     public DateTime LastRankUtc { get; set; }
@@ -102,14 +132,48 @@ public sealed class Incident
     public long WrittenGrowth { get; set; }
     public bool Dirty { get; set; } = true;
     /// <summary>
-    /// 2f (review round 2): an alert was counted on an existing timeline entry of a CLOSED incident. Not a material change
+    /// An alert was counted on an existing timeline entry of a CLOSED incident. Not a material change
     /// (a closed incident is not rewritten on every sample for it), but its folder is rewritten within
     /// <see cref="IncidentManager.MaxRewriteInterval"/> so the count reaches the report too.
     /// </summary>
     public bool CountPending { get; set; }
+
+    // The same moments on the clock that only goes forward (milliseconds since Windows started, the samples'
+    // Sample.TickMs): the quiet period, the maximum duration, the re-rank and rewrite intervals, the protected window, the 6
+    // hours a closed incident is kept, a re-open's hour, the alert runs, the durations a report says and the events and
+    // samples picked for its windows are timed on these, so setting the system clock back or forward neither holds them
+    // back nor brings them early. The times of day beside them are shown and written.
+
+    /// <summary><see cref="OpenedUtc"/> on the forward clock.</summary>
+    public long OpenedMs { get; init; }
+    /// <summary><see cref="LastRiseUtc"/> on the forward clock.</summary>
+    public long LastRiseMs { get; set; }
+    /// <summary><see cref="QuietFromUtc"/> on the forward clock.</summary>
+    public long? QuietFromMs { get; set; }
+    /// <summary><see cref="QuietSinceUtc"/> on the forward clock: the later of <see cref="LastRiseMs"/> and <see cref="QuietFromMs"/>.</summary>
+    public long QuietSinceMs => QuietFromMs is { } q && q > LastRiseMs ? q : LastRiseMs;
+    /// <summary><see cref="ClosedUtc"/> on the forward clock (null while it is open).</summary>
+    public long? ClosedMs { get; set; }
+    /// <summary><see cref="OnsetUtc"/> on the forward clock.</summary>
+    public long OnsetMs { get; set; }
+    /// <summary><see cref="EndUtc"/> on the forward clock (null while the growth has not ended).</summary>
+    public long? EndMs { get; set; }
+    /// <summary><see cref="LastAlertUtc"/> on the forward clock.</summary>
+    public long LastAlertMs { get; set; }
+    /// <summary><see cref="EpisodeStartUtc"/> on the forward clock; null = <see cref="OpenedMs"/>.</summary>
+    public long? EpisodeStartMs { get; set; }
+    /// <summary><see cref="LastWriteUtc"/> on the forward clock.</summary>
+    public long LastWriteMs { get; set; }
+    /// <summary><see cref="LastRankUtc"/> on the forward clock.</summary>
+    public long LastRankMs { get; set; }
     /// <summary>Window the last ranking used (for timeline.csv / processes.csv).</summary>
     public CorrelationWindow? Window { get; set; }
     public bool IsOpen => ClosedUtc is null;
+    /// <summary>
+    /// How long the growth went on, on the forward clock: from its onset to its end, else to the close, else to the last
+    /// alert (the "grew 1.2 GB in 40 min" of the headline and the report).
+    /// </summary>
+    public TimeSpan GrowthSpan => TimeSpan.FromMilliseconds((EndMs ?? ClosedMs ?? LastAlertMs) - OnsetMs);
     /// <summary>How many times the tag grew again within an hour of closing and re-opened this incident.</summary>
     public int Reopened { get; set; }
 }

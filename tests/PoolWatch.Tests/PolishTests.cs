@@ -2,6 +2,8 @@ using PoolWatch.Core;
 using PoolWatch.Core.Correlation;
 using PoolWatch.Core.Model;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
 public class PolishTests
@@ -59,8 +61,8 @@ public class MarkdownEscapeTests
             w.AddProcess(4, 0, "System");
             w.AddProcess(100, 4, "leaker.exe");
             long file = 50 * Settings.MB;
-            for (int i = 0; i < 10; i++) { w.Sample(("File", file)); mgr.Process(w.History, det, det.Evaluate(w.History), w.Now - w.Interval); }
-            for (int i = 0; i < 10; i++) { w.Io(100, other: 2000); file += 800_000; w.Sample(("File", file)); mgr.Process(w.History, det, det.Evaluate(w.History), w.Now - w.Interval); }
+            for (int i = 0; i < 10; i++) { w.Sample(("File", file)); mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval)); }
+            for (int i = 0; i < 10; i++) { w.Io(100, other: 2000); file += 800_000; w.Sample(("File", file)); mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval)); }
             mgr.Finish(w.History, w.Now);
             var inc = mgr.All.Single(i => i.Tag == PoolTag.Parse("File"));
             var md = File.ReadAllText(Path.Combine(inc.Dir, "report.md"));
