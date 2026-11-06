@@ -257,7 +257,8 @@ public sealed class LauncherTests
     /// The launcher's own CreateProcessW call (Native.Run), with the block built from this PC's values: a cmd.exe child
     /// writes the environment it got. It gets exactly that block (and the PROMPT cmd.exe sets for itself), none of this
     /// test process's own variables, which a child inherits when no block is passed or when Windows does not read it as
-    /// one (CREATE_UNICODE_ENVIRONMENT).
+    /// one (CREATE_UNICODE_ENVIRONMENT). One value may differ, and only when this test process runs under emulation (an
+    /// x64 test run on an ARM64 PC): PROCESSOR_ARCHITECTURE, which Windows then sets to the one it gives this process.
     /// </summary>
     [Fact]
     public void ARealChildGetsExactlyTheBlockAndNothingOfItsParent()
@@ -284,8 +285,14 @@ public sealed class LauncherTests
             Assert.True(extra.Count == 0, "the child got variables the launcher did not give it: " + string.Join(", ", extra));
             var missing = expected.Keys.Where(n => !got.ContainsKey(n)).ToList();
             Assert.True(missing.Count == 0, "the child lacks variables the launcher gave it: " + string.Join(", ", missing));
-            var changed = expected.Where(e => got[e.Key] != e.Value).Select(e => e.Key).ToList();
-            Assert.True(changed.Count == 0, "the child got other values for: " + string.Join(", ", changed));
+            // Under emulation Windows gives the child the PROCESSOR_ARCHITECTURE it gives this process, not the machine's.
+            const string arch = "PROCESSOR_ARCHITECTURE";
+            bool emulated = RuntimeInformation.OSArchitecture != RuntimeInformation.ProcessArchitecture;
+            string? ours = Environment.GetEnvironmentVariable(arch);
+            var changed = expected.Where(e => got[e.Key] != e.Value && !(emulated && e.Key.Equals(arch, StringComparison.OrdinalIgnoreCase) && got[e.Key] == ours))
+                .Select(e => e.Key).ToList();
+            Assert.True(changed.Count == 0, "the child got other values for: " + string.Join(", ", changed) +
+                $" ({arch}: given {expected.GetValueOrDefault(arch)}, got {got.GetValueOrDefault(arch)}, this process {ours}, emulated {emulated})");
             Assert.Equal("1", got[EnvironmentBlock.Marker]);
             Assert.DoesNotContain(got.Keys, EnvironmentBlock.IsKnob);
         }
@@ -728,6 +735,11 @@ public sealed class LauncherTests
         var header = new Regex(Regex.Match(ci, @"\$symbols = \$line -match '(?<p>[^']+)'; continue").Groups["p"].Value, RegexOptions.IgnoreCase);
         var symbol = new Regex(Regex.Match(ci, @"if \(\$line -match '(?<p>\^\\s\*\[0-9A-Fa-f\][^']+)'\) \{").Groups["p"].Value, RegexOptions.IgnoreCase);
         Assert.Contains("if (-not $symbols) { throw", ci);
+        // PowerShell sets $Matches anew at every -match that succeeds, so the loop takes both captures before it tests
+        // either (a -match on the object first left $Matches.obj empty and stopped the build).
+        Assert.Contains("$lib = ($Matches.lib -replace '\\.lib$', '').ToLowerInvariant(); $obj = $Matches.obj.ToLowerInvariant()\n" +
+                        "              if ($obj.EndsWith('.dll')) { $imports[$obj] = $true } else { $static[$lib] = $true }", ci);
+        Assert.DoesNotMatch(@"\$Matches\.\w+ -match", ci);
         const string map = """
              PoolWatch
 

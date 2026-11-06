@@ -121,8 +121,9 @@ jobs:
           foreach ($line in Get-Content -LiteralPath $map) {
             if (-not $symbols) { $symbols = $line -match '^\s*Address\s+Publics by Value\s'; continue }
             if ($line -match '^\s*[0-9A-Fa-f]{4}:[0-9A-Fa-f]{8}\s.*\s(?<lib>[A-Za-z][^\s:]+):(?<obj>\S+)\s*$') {
-              $lib = ($Matches.lib -replace '\.lib$', '').ToLowerInvariant()
-              if ($Matches.obj -match '\.dll$') { $imports[$Matches.obj.ToLowerInvariant()] = $true } else { $static[$lib] = $true }
+              # Both captures are taken before anything else is matched: a later -match sets $Matches anew.
+              $lib = ($Matches.lib -replace '\.lib$', '').ToLowerInvariant(); $obj = $Matches.obj.ToLowerInvariant()
+              if ($obj.EndsWith('.dll')) { $imports[$obj] = $true } else { $static[$lib] = $true }
             }
           }
           if (-not $symbols) { throw 'the launcher''s link map has no "Publics by Value" list: the map is not read as expected' }
