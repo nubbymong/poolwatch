@@ -45,7 +45,7 @@ internal sealed class TasksTabView
         Segments.Margin = Px(0, 3, 12, 3);
         Search.Width = S(170);
         Search.Margin = Px(0, 4, 12, 3);
-        Search.PlaceholderText = "Find";
+        Search.Cue = "Find";
         Search.AccessibleName = "Find a startup app or task";
         ShowNotRunning.Margin = ShowMicrosoft.Margin = Px(0, 7, 12, 0);
         tips.SetToolTip(ShowNotRunning, "Also list the startup apps and scheduled tasks whose program is not running now.");
@@ -93,7 +93,7 @@ internal sealed class TasksTabView
     public TabPage Page { get; }
     public FlowLayoutPanel Toolbar { get; }
     public FlowLayoutPanel Segments { get; } = new() { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, AccessibleName = "Show" };
-    public TextBox Search { get; } = new();
+    public CueTextBox Search { get; } = new();
     public CheckBox ShowNotRunning { get; } = new() { Text = "Show not running", AutoSize = true };
     public CheckBox ShowMicrosoft { get; } = new() { Text = "Show Microsoft", AutoSize = true };
     public Button Refresh { get; }

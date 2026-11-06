@@ -256,9 +256,10 @@ internal sealed class SetupWizardView : ContainerControl
     internal bool Scrolls => Page.Height > _content.Height;
 
     /// <summary>
-    /// A control outside the one around it (sideways anywhere; up and down except in the scrolling page), a text, button,
-    /// meter or field smaller than its content, the rail's steps not fitting, or the footer's parts on each other. Judged
-    /// from the layout itself, so it holds before the window is shown (the tests, the CI UI test).
+    /// A control outside the one around it (sideways anywhere; up and down except in the scrolling page) or on a sibling
+    /// (<see cref="MainForm.OverlappingSiblings"/>), a text, button, meter or field smaller than its content, the rail's
+    /// steps not fitting, or the footer's parts on each other. Judged from the layout itself, so it holds before the window
+    /// is shown (the tests, the CI UI test).
     /// </summary>
     internal List<string> LayoutProblems()
     {
@@ -278,6 +279,7 @@ internal sealed class SetupWizardView : ContainerControl
     internal static void Check(Control parent, List<string> problems)
     {
         bool scrolls = parent is ScrollableControl { AutoScroll: true };
+        MainForm.OverlappingSiblings(parent, problems, c => c.Visible);
         foreach (Control c in parent.Controls)
         {
             if (!c.Visible) continue;

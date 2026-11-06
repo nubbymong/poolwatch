@@ -52,6 +52,9 @@ internal sealed class HowItWorksForm : Form
         Controls.Add(_view);
         AcceptButton = _view.CloseButton;
         CancelButton = _view.CloseButton;
+        // It opens with the focus on Close, where Enter goes: on the first link (the first in the tab order) Enter opened
+        // that page, and the link drew itself as the focus there.
+        ActiveControl = _view.CloseButton;
         ClientSize = Preferred;
         ResumeLayout(true);
         oldFonts?.Dispose();
@@ -83,7 +86,7 @@ internal sealed class HowItWorksForm : Form
         FitTo(Screen.FromRectangle(suggested).WorkingArea, suggested);
     }
 
-    /// <summary>CI: its words, its links and whether each opens, and anything clipped.</summary>
+    /// <summary>CI: its words, its links and whether each opens, and anything clipped or overlapping.</summary>
     internal object SmokeStats()
     {
         var area = Screen.FromControl(this).WorkingArea;
@@ -232,18 +235,18 @@ internal sealed class HowPage : StepPage
         y = bottom + S(8);
         Line(Inset, Inset + room, y);
         y += S(12);
-        // "Read more:" and the links on one line, wrapping where they do not fit.
-        int lx = Inset, lineH = Fonts.Small.Height;
-        var items = new List<TextBlock> { _readMore };
-        items.AddRange(_links);
-        foreach (var t in items)
+        // "Read more:" and the links on one line; a link that does not fit starts a new line under the first link, so the
+        // links keep one left edge beside "Read more:" (they wrapped back under "Read more:" itself).
+        int indent = Inset + Math.Min(room / 2, _readMore.OneLine + S(6)), lx = indent, linkRoom = Inset + room - indent;
+        int lineBottom = Wrap(_readMore, Inset, y, room);
+        foreach (var t in _links)
         {
-            int w = Math.Min(room, t.OneLine);
-            if (lx > Inset && lx + w > Inset + room) { lx = Inset; y += lineH + S(6); }
-            Wrap(t, lx, y, room - (lx - Inset));
-            lx += w + S(t == _readMore ? 6 : 22);
+            int w = Math.Min(linkRoom, t is LinkText l ? l.OneLine : t.OneLine);
+            if (lx > indent && lx + w > Inset + room) { lx = indent; y = lineBottom + S(6); }
+            lineBottom = Math.Max(lineBottom, Wrap(t, lx, y, Inset + room - lx));
+            lx += w + S(22);
         }
-        return y + lineH + S(10);
+        return lineBottom + S(10);
     }
 }
 

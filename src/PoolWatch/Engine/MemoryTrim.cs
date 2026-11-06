@@ -55,7 +55,8 @@ internal sealed class MemoryTrim
     private readonly Func<long> _heap;
     private readonly Action _empty;
     private readonly Action<TimeSpan, Action>? _after;
-    private System.Threading.Timer? _judgeTimer;
+    private readonly TimeProvider _time;
+    private ITimer? _judgeTimer;
     private readonly Queue<Floor> _floors = new();
     private int _early;
     private TimeSpan _next = Early[0];
@@ -72,11 +73,12 @@ internal sealed class MemoryTrim
     /// <summary>
     /// PoolWatch's own process, except what a test gives: the time since start, the working set (null when it cannot be
     /// read; the sampler passes the reading its meter took this sample), the heap the last collection left, the empty,
-    /// what runs an action once after a delay (a timer; a test runs it on its own clock), and the working set read at that
-    /// moment (the judge of an empty, <see cref="JudgeAfter"/> after it).
+    /// what runs an action once after a delay (a test runs it on its own clock), the working set read at that moment (the
+    /// judge of an empty, <see cref="JudgeAfter"/> after it), and, when nothing runs the action, the clock of the timer
+    /// that does (the system's; a test gives one that shows how the timer is set).
     /// </summary>
     internal MemoryTrim(Func<TimeSpan>? clock, Func<long?>? workingSet, Func<long>? heap, Action? empty,
-        Action<TimeSpan, Action>? after = null, Func<long?>? workingSetNow = null)
+        Action<TimeSpan, Action>? after = null, Func<long?>? workingSetNow = null, TimeProvider? time = null)
     {
         var since = Stopwatch.StartNew();
         _clock = clock ?? (() => since.Elapsed);
@@ -85,6 +87,7 @@ internal sealed class MemoryTrim
         _heap = heap ?? (() => GC.GetGCMemoryInfo(GCKind.Any).HeapSizeBytes);
         _empty = empty ?? (() => EmptyWorkingSet(GetCurrentProcess())); // the pseudo-handle: nothing to close
         _after = after;
+        _time = time ?? TimeProvider.System;
     }
 
     /// <summary>
@@ -195,11 +198,14 @@ internal sealed class MemoryTrim
             Record(t, GC.GetGCMemoryInfo(GCKind.FullBlocking).HeapSizeBytes, NativeMethods.GetOwnMemory(out _, out long priv) ? priv : null);
     }
 
-    /// <summary>Reads the working set <see cref="JudgeAfter"/> from now (a timer, off the sampler thread), for the next sample to judge the empty by.</summary>
+    /// <summary>
+    /// Reads the working set <see cref="JudgeAfter"/> from now (a timer, off the sampler thread), for the next sample to
+    /// judge the empty by: one timer, made once and set again for each empty, which fires once each time.
+    /// </summary>
     private void JudgeLater()
     {
         if (_after is { } after) after(JudgeAfter, Judge);
-        else (_judgeTimer ??= new System.Threading.Timer(_ => Judge())).Change(JudgeAfter, Timeout.InfiniteTimeSpan);
+        else (_judgeTimer ??= _time.CreateTimer(_ => Judge(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan)).Change(JudgeAfter, Timeout.InfiniteTimeSpan);
     }
 
     private void Judge()

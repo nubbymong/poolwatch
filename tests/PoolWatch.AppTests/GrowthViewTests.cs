@@ -210,6 +210,47 @@ public class GrowthViewTests
         Assert.True(Paint(chart).SpanBox.IsEmpty);
     }
 
+    /// <summary>
+    /// What the window sets on the graph when it arranges a view (its span, the 1 h / 6 h / 24 h choice, Show RAM, and
+    /// whether the choice and Show RAM are offered) raises neither of the graph's two changes, the span picked and Show RAM
+    /// turned: the window reads itself again on each, so a switch of view would be read twice. The owner's own tick of
+    /// Show RAM still raises its change, once.
+    /// </summary>
+    [Fact]
+    public void WhatTheWindowSetsOnTheGraphRaisesNoChange()
+    {
+        using var host = new Form();
+        var chart = new PoolChart { Size = new Size(806, 215) };
+        host.Controls.Add(chart);
+        var raised = new List<string>();
+        chart.SpanPicked += w => raised.Add($"span {w.Name}");
+        chart.ShowRamChanged += on => raised.Add($"Show RAM {on}");
+        for (int round = 0; round < 2; round++)
+        {
+            // For the Advanced view, the window's sets of the graph's span, choice, two offers and Show RAM, in its order
+            // (here for a view on 24 h with Show RAM on); for the Simple view, its sets of the span and the two offers. The
+            // Simple half also sets the choice to 1 h and Show RAM off, which the window does not, so that the next round's
+            // Advanced half changes each of them again.
+            chart.Span = TimeSpan.FromHours(24);
+            chart.SpanBox.SelectedIndex = 2;
+            chart.SpanOption = true;
+            chart.RamOption = true;
+            chart.ShowRam = true;
+            Assert.True(chart.RamBox.Checked);
+            chart.Span = PoolChart.SimpleSpan;
+            chart.SpanOption = false;
+            chart.RamOption = false;
+            chart.SpanBox.SelectedIndex = 0;
+            chart.ShowRam = false;
+            Assert.False(chart.RamBox.Checked);
+        }
+        Assert.Empty(raised);
+        chart.RamOption = true;
+        chart.RamBox.Checked = true; // the owner ticks Show RAM
+        Assert.Equal(["Show RAM True"], raised);
+        Assert.True(chart.ShowRam);
+    }
+
     [Fact]
     public void TheLinesBreakWherePoolWatchWasNotSampling()
     {
@@ -524,5 +565,73 @@ public class GrowthViewTests
         Assert.Equal(GrowthText.PerHourTip, view.Tiles.TipAt(new Point(20, 20)));
         Assert.Equal("", view.Tiles.TipAt(new Point(view.Tiles.Width - 20, 20)));
         Assert.Empty(view.LayoutProblems());
+    }
+
+    // ------------------------------------------------------------------ what the hidden window holds
+
+    /// <summary>
+    /// The window hid: the graph drops the pool's points, the clears, the RAM columns and the pointing targets placed from
+    /// them (<see cref="PoolChart.Release"/>), and takes them again from the window's first refresh after it shows, the
+    /// same points included (a repaint is skipped only for data it still holds).
+    /// </summary>
+    [Fact]
+    public void TheGraphDropsItsDataWhenTheWindowHidesAndTakesItAgain()
+    {
+        using var host = new Form();
+        var chart = new PoolChart { Size = new Size(776, 215), Span = TimeSpan.FromHours(24), RamOption = true, ShowRam = true };
+        host.Controls.Add(chart);
+        var points = Day();
+        var clears = new List<ChartClear> { new(End.AddHours(-2), 900L << 20, Automatic: true, Light: false, Done: true) };
+        var columns = Quarters();
+        chart.SetData(points);
+        chart.SetClears(clears);
+        chart.SetRam(columns, 127 * GB);
+        Paint(chart); // places the clear's mark and the columns' pointing targets
+        Assert.Equal(points.Count, chart.PointCount);
+        var held = chart.Held;
+        Assert.True(held.Clears == 1 && held.Ram == columns.Count && held.Targets > 1, $"held before the hide: {held}");
+
+        chart.Release();
+        Assert.Equal((0, (0, 0, 0)), (chart.PointCount, chart.Held));
+
+        chart.SetData(points);
+        chart.SetClears(clears);
+        chart.SetRam(columns, 127 * GB);
+        Assert.Equal((points.Count, 1, columns.Count), (chart.PointCount, chart.Held.Clears, chart.Held.Ram));
+    }
+
+    /// <summary>
+    /// Hiding the window drops every page's data its first refresh after showing works out again (DESIGN.md section 3):
+    /// the graph's (both views draw it), with the header and graph read again then even without a new sample, the Tasks
+    /// and startup apps rows, the list's own rows and the detail panel's text (TasksTabTests holds that on a real tab),
+    /// and the Pool causes data. It dropped only the Pool causes data. The CI UI test reads the same from a hidden window,
+    /// and fails when a count is missing. Read from the sources, as the window needs the whole app to build.
+    /// </summary>
+    [Fact]
+    public void HidingTheWindowDropsEveryPagesDataItsNextRefreshRebuilds()
+    {
+        string root = TrayIconsTests.RepoRoot(), ui = Path.Combine(root, "src", "PoolWatch", "Ui");
+        static List<string> Lines(string block) => block.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
+        string form = File.ReadAllText(Path.Combine(ui, "MainForm.cs"));
+        var release = Lines(MainWindowLayoutTests.Block(form, "private void ReleaseWhileHidden()"));
+        Assert.Equal(["_chart.Release();", "_statusSamples = -1;", "_tasksTab.Release();", "_rankings.Clear();", "_causeRows = [];"], release.Take(5));
+        Assert.Contains("_causesSamples = -1;", release);
+        Assert.Contains("if (_engine.SampleCount != _statusSamples || force) // the chart and the header change only with a new sample",
+            Lines(MainWindowLayoutTests.Block(form, "private void RefreshVisible(bool force)")));
+        var hidden = Lines(MainWindowLayoutTests.Block(form, "VisibleChanged += (_, _) =>"));
+        Assert.Contains("else ReleaseWhileHidden();", hidden);
+
+        // What TasksTab.Release drops, and that its next refresh fills it again, is held by TasksTabTests on a real tab.
+
+        string ci = File.ReadAllText(Path.Combine(root, "ci", "m4-ui.ps1"));
+        Assert.Contains("$hiddenFields = @('chartPointsWhileHidden', 'taskRowsWhileHidden', 'taskListRowsWhileHidden')", ci, StringComparison.Ordinal);
+        const string hiddenCounts = "$missingHidden.Count -eq 0 -and [int]$f.chartPointsWhileHidden -eq 0 -and [int]$f.taskRowsWhileHidden -eq 0 -and [int]$f.taskListRowsWhileHidden -eq 0";
+        Assert.Contains(hiddenCounts, ci, StringComparison.Ordinal);
+        Assert.Empty(UninstallerTests.ChecksWithoutAMarker(ci, [hiddenCounts])); // CI shows that it ran
+        var stats = Lines(MainWindowLayoutTests.Block(form, "public object SmokeStats()"));
+        int hide = stats.LastIndexOf("Hide();");
+        Assert.Equal("int chartPoints = _chart.PointCount; // read again since the hide: the graph is drawn from them", stats[hide - 1]);
+        Assert.StartsWith("int chartPointsWhileHidden = _chart.PointCount, taskRowsWhileHidden = _tasksTab.Rows.Count, taskListRowsWhileHidden = _tasksTab.View.List.Items.Count;",
+            stats[hide + 1], StringComparison.Ordinal);
     }
 }

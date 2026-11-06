@@ -31,7 +31,7 @@ internal sealed class ServicesTabView
         // The toolbar.
         Search.Width = S(190);
         Search.Margin = Px(0, 3, 12, 3);
-        Search.PlaceholderText = "Find a service";
+        Search.Cue = "Find a service";
         Search.AccessibleName = "Find a service";
         var profileLabel = new Label { Text = "Profile", AutoSize = true, Margin = Px(0, 7, 4, 0) };
         Profile.Width = S(190);
@@ -130,7 +130,7 @@ internal sealed class ServicesTabView
 
     public TabPage Page { get; }
     public FlowLayoutPanel Toolbar { get; }
-    public TextBox Search { get; } = new();
+    public CueTextBox Search { get; } = new();
     public ComboBox Profile { get; } = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     public Button SaveProfile { get; }
     public Button RenameProfile { get; }

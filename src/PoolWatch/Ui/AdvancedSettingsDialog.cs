@@ -2,14 +2,21 @@ namespace PoolWatch.Ui;
 
 /// <summary>
 /// Settings, Advanced: the settings in the property grid, as the old Settings tab showed it, with the same Save. Three are
-/// hidden from the grid, as other controls set them (<see cref="Core.Settings"/>: the graph's Show RAM switch, the Start at
-/// logon checkbox and the Services tab's profiles). It edits the same settings as the plain form
-/// (<see cref="SettingsEditor"/>). Created on first use, reused while Settings is open, and disposed with it.
+/// hidden from the grid (<see cref="Core.Settings"/>): two that other controls set, the graph's Show RAM switch and the
+/// Services tab's profiles, and the file's format version, which is no choice. Every setting it shows has a short
+/// description, which the box under the grid shows for the selected one, the first included: the box shows two lines,
+/// and at the dialog's own size each description fits in them (the user can drag the box taller). It edits the same
+/// settings as the plain form (<see cref="SettingsEditor"/>). The growth alerts' list opens in its own editor, which shows
+/// the description of each alert's two values the same way (<see cref="GrowthRulesEditor"/>). Created on first use, reused
+/// while Settings is open, and disposed with it.
 /// </summary>
 internal sealed class AdvancedSettingsDialog : Form
 {
     private readonly SettingsEditor _editor;
     private readonly PropertyGrid _grid = new() { Dock = DockStyle.Fill, ToolbarVisible = false };
+
+    /// <summary>The growth alerts' list opens in an editor that shows each value's description (<see cref="GrowthRulesEditor"/>).</summary>
+    static AdvancedSettingsDialog() => GrowthRulesEditor.Register();
 
     public AdvancedSettingsDialog(SettingsEditor editor)
     {

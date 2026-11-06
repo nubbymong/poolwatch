@@ -222,6 +222,66 @@ public class MemoryTrimTests
     private static int InHour(List<TimeSpan> empties, int hour) =>
         empties.Skip(3).Count(t => t > TimeSpan.FromHours(hour) && t <= TimeSpan.FromHours(hour + 1));
 
+    /// <summary>The clock of the trim's own timer (the system's in the app): it shows how each timer it made is set, and fires one when told.</summary>
+    private sealed class TimerClock : TimeProvider
+    {
+        public readonly List<Timer> Timers = [];
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new Timer(() => callback(state), (dueTime, period));
+            Timers.Add(timer);
+            return timer;
+        }
+
+        public sealed class Timer(Action fire, (TimeSpan Due, TimeSpan Period) made) : ITimer
+        {
+            /// <summary>When it was set to fire and how often: as made, then at each change.</summary>
+            public readonly List<(TimeSpan Due, TimeSpan Period)> Set = [made];
+            public void Fire() => fire();
+            public bool Change(TimeSpan dueTime, TimeSpan period) { Set.Add((dueTime, period)); return true; }
+            public void Dispose() { }
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
+    /// <summary>
+    /// The app gives the trim no timer of its own, so the judge runs on the trim's timer: made once, idle, and set for each
+    /// empty between the checks to fire once, 10 s after it, never at once and never again by itself. Nothing is read
+    /// before it fires; when it fires the working set is read then, and the next sample judges the empty by that reading.
+    /// </summary>
+    [Fact]
+    public void WithNoTimerGivenTheJudgeRunsOnceOnATimerSetForTenSecondsAfterEachEmpty()
+    {
+        var clock = new Clock();
+        var time = new TimerClock();
+        int reads = 0;
+        var trim = new MemoryTrim(() => clock.Now, () => 80 * MB, () => 10 * MB, () => { }, after: null, workingSetNow: () => { reads++; return 90 * MB; }, time: time);
+        foreach (int s in new[] { 30, 90, 180 }) // start-up's empties: not judged
+        {
+            clock.To(TimeSpan.FromSeconds(s));
+            trim.MaybeRun();
+        }
+        Assert.Empty(time.Timers);
+        clock.To(TimeSpan.FromSeconds(300)); // full, 2 minutes after the last empty: an empty between the checks
+        trim.MaybeRun();
+        var timer = Assert.Single(time.Timers);
+        var never = Timeout.InfiniteTimeSpan;
+        Assert.Equal([(never, never), (TimeSpan.FromSeconds(10), never)], timer.Set);
+        Assert.Equal(0, reads);
+        timer.Fire(); // 10 s later
+        Assert.Equal(1, reads);
+        clock.To(TimeSpan.FromSeconds(310));
+        trim.MaybeRun(); // judged by the reading the timer took: back over EmptyAt, so the wait doubles
+        Assert.Equal(TimeSpan.FromMinutes(4), trim.Gap);
+        Assert.Equal(1, trim.EmptiesNotHeld);
+        clock.To(TimeSpan.FromSeconds(300 + 4 * 60)); // the next empty: the same timer, set again
+        trim.MaybeRun();
+        Assert.Same(timer, Assert.Single(time.Timers));
+        Assert.Equal([(never, never), (TimeSpan.FromSeconds(10), never), (TimeSpan.FromSeconds(10), never)], timer.Set);
+        Assert.Equal(1, reads);
+    }
+
     [Fact]
     public void TheProfileCountsTheEmptiesThatDidNotHold()
     {

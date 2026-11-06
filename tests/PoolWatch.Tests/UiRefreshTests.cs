@@ -4,7 +4,7 @@ using PoolWatch.Core.Util;
 
 namespace PoolWatch.Tests;
 
-/// <summary>C5 (review Part 2): the decisions behind the window's refresh, kept in Core so they are unit-tested.</summary>
+/// <summary>The decisions behind the window's refresh, kept in Core so they are unit-tested.</summary>
 public class UiRefreshTests
 {
     [Fact]

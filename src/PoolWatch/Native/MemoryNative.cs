@@ -4,11 +4,11 @@ using PoolWatch.Core.Cache;
 namespace PoolWatch.Native;
 
 /// <summary>
-/// The memory lists (free, zeroed, standby by priority, modified) and the standby purge (addendum 2). Reading uses
+/// The memory lists (free, zeroed, standby by priority, modified) and the standby purge. Reading uses
 /// NtQuerySystemInformation(SystemMemoryListInformation), falling back to the in-box "Memory" performance counters
 /// (PDH, no WMI) when that class is refused unelevated. Both the query and the purge (NtSetSystemInformation) need
 /// SeProfileSingleProcessPrivilege, which PoolWatch (always elevated) enables in its own token; unelevated the purge is
-/// refused (S5, review round 2: there is no SYSTEM helper any more).
+/// refused (there is no SYSTEM helper any more).
 /// </summary>
 internal static unsafe class MemoryNative
 {

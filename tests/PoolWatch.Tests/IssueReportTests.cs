@@ -158,15 +158,22 @@ public class IssueReportTests
         Assert.Equal("Incident 20261028-091200-Reff-66666552 (release): `Reff` (refs.sys FCB_DATA) dropped 1.2 GB at 09:12:00.", digest);
     }
 
-    /// <summary>The digest names every kind of incident in words (the Pool causes details use the same words), and one it does not know as an incident.</summary>
+    /// <summary>
+    /// The digest names every kind of incident in words, and one it does not know as an incident. The Pool causes details
+    /// use the same words for each kind but a non-paged pool incident, which they name as the row above them and the tray's
+    /// notice do ("non-paged pool over the limit"), and show a kind they do not know as written.
+    /// </summary>
     [Theory]
-    [InlineData("Growth", "growth")]
-    [InlineData("NonPagedTotal", "non-paged pool over its limit")]
-    [InlineData("Release", "release")]
-    [InlineData("Capture", "capture")]
-    [InlineData("Later", "incident")]
-    public void TheDigestNamesTheKindInWords(string kind, string words) =>
+    [InlineData("Growth", "growth", "growth")]
+    [InlineData("NonPagedTotal", "non-paged pool over its limit", "non-paged pool over the limit")]
+    [InlineData("Release", "release", "release")]
+    [InlineData("Capture", "capture", "capture")]
+    [InlineData("Later", "incident", null)]
+    public void TheDigestNamesTheKindInWords(string kind, string words, string? inTheDetails)
+    {
         Assert.StartsWith($"Incident 20261028-091200-Reff-66666552 ({words}): `Reff` grew 1.0 GB.", IssueReport.IncidentDigest(Report(kind, "`Reff` grew 1.0 GB", null)));
+        Assert.Equal(inTheDetails, PoolWatch.Core.Util.PlainWords.IncidentKindInTheWindow(kind));
+    }
 
     [Theory]
     [InlineData("")]

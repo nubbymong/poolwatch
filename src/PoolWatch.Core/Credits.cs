@@ -14,8 +14,19 @@ public static class Credits
     public const string RepoUrl = "https://github.com/nubbymong/poolwatch";
     public const string NoticesUrl = RepoUrl + "/blob/main/THIRD-PARTY-NOTICES.md";
 
+    /// <summary>
+    /// In About's order: first the people whose findings PoolWatch's fixes build on (the token leak, the Codex shader cache),
+    /// which About's list shows without scrolling; then what a release ships; then what PoolWatch only reads or recognises,
+    /// and the test tools.
+    /// </summary>
     public static IReadOnlyList<Credit> All { get; } =
     [
+        new("bentoner/windows-token-leak", "Documented the Windows 11 token leak: the builds it affects and its cause.", "MIT",
+            "https://github.com/bentoner/windows-token-leak", false),
+        new("gunrgbcr/windows-token-leak-logon-fix", "The idea behind the token-leak guard, which PoolWatch re-implemented; no code was copied.",
+            "No licence declared", "https://github.com/gunrgbcr/windows-token-leak-logon-fix", false),
+        new("Faarfarin, openai/codex issue 31212", "Traced the Codex app's shader-cache file storm and the workaround the Codex shortcut uses.",
+            "Credit only", "https://github.com/openai/codex/issues/31212#issuecomment-5635622083", false),
         new("TraceEvent", "Reads Windows' event traces: process starts and the confirmation trace.", "MIT", "https://github.com/microsoft/perfview", true),
         new("KernelTraceControl and msdia140", "TraceEvent's native DLLs: they read a trace's stacks.", "Microsoft redistributable",
             "https://github.com/microsoft/perfview", true),
@@ -25,12 +36,6 @@ public static class Credits
         new(".NET and the Windows Desktop runtime", "Run PoolWatch; the installer and the self-contained download include them.", "MIT",
             "https://github.com/dotnet/runtime", true),
         new("Inno Setup", "Builds the installer and the uninstaller.", "Inno Setup License", "https://jrsoftware.org/isinfo.php", true),
-        new("bentoner/windows-token-leak", "Documented the Windows 11 token leak: the builds it affects and its cause.", "MIT",
-            "https://github.com/bentoner/windows-token-leak", false),
-        new("gunrgbcr/windows-token-leak-logon-fix", "The idea behind the token-leak guard, which PoolWatch re-implemented; no code was copied.",
-            "No licence declared", "https://github.com/gunrgbcr/windows-token-leak-logon-fix", false),
-        new("Faarfarin, openai/codex issue 31212", "Traced the Codex app's shader-cache file storm and the workaround the Codex shortcut uses.",
-            "Credit only", "https://github.com/openai/codex/issues/31212#issuecomment-5635622083", false),
         new("Sysinternals RAMMap", "PoolWatch only recognises a clear task of yours that runs it.", "Not redistributed",
             "https://learn.microsoft.com/sysinternals/downloads/rammap", false),
         new("pooltag.txt, Debugging Tools for Windows", "Names pool tags when the Debugging Tools are installed.", "Not redistributed",

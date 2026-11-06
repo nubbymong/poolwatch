@@ -331,4 +331,119 @@ public class TasksTabTests
         using var whole = new Bitmap(list.Width, list.Height);
         list.DrawToBitmap(whole, new Rectangle(Point.Empty, list.Size));
     }
+
+    // ---------------------------------------------------------------- what the tab holds while the window is hidden
+
+    /// <summary>Takes this thread's messages, as the app's message loop does, until <paramref name="done"/>.</summary>
+    private static void PumpUntil(Func<bool> done)
+    {
+        var limit = System.Diagnostics.Stopwatch.StartNew();
+        while (!done())
+        {
+            Assert.True(limit.Elapsed < TimeSpan.FromSeconds(30), "nothing came back to the window's thread");
+            Application.DoEvents();
+            Thread.Sleep(1);
+        }
+    }
+
+    /// <summary>
+    /// The tab on a window that is made but never shown, with its list and panel made as showing makes them: the
+    /// entries come from <paramref name="read"/> (on a worker thread, as Task Scheduler's), and each runs now.
+    /// </summary>
+    private sealed class Rig : IDisposable
+    {
+        private readonly ToolTip _tips = new();
+
+        public Rig(Func<List<TaskEntry>> read)
+        {
+            _ = Owner.Handle;
+            Tab = new TasksTab(Owner, _tips, read, entries => { WorkedOut++; return entries.Select(e => new TaskRow(e, Running(0.2, 0, DeckKey))).ToList(); });
+            var tabs = new TabControl { Size = new Size(1000, 640) };
+            tabs.TabPages.Add(Tab.Page);
+            Owner.Controls.Add(tabs);
+            Owner.ClientSize = new Size(1000, 640);
+            Owner.CreateControl();
+            _ = Tab.View.List.Handle;
+        }
+
+        public Form Owner { get; } = new() { Font = new Font("Segoe UI", 9f) };
+        public TasksTab Tab { get; }
+        public int WorkedOut { get; private set; }
+
+        public void Dispose()
+        {
+            Owner.Dispose();
+            _tips.Dispose();
+        }
+    }
+
+    private static List<TaskEntry> ThreeApps() => [Entry("Example Deck"), Entry("Quiet Helper"), Entry("Night Sync")];
+
+    /// <summary>
+    /// Hiding the window drops what the tab's next refresh works out again: its rows with what each costs, and the list's
+    /// own rows (each with its cost cell) and the detail panel's text, as the Pool causes list is dropped. That refresh,
+    /// before the tab shows again, fills them again from the tasks and startup apps as read, which stay: nothing is read
+    /// again. The list kept its rows while the window was hidden.
+    /// </summary>
+    [Fact]
+    public void HidingTheWindowDropsTheRowsTheListAndTheDetailsAndTheNextRefreshFillsThemAgain()
+    {
+        int reads = 0;
+        using var rig = new Rig(() => { Interlocked.Increment(ref reads); return ThreeApps(); });
+        var tab = rig.Tab;
+        tab.Refresh(); // the first refresh reads them
+        PumpUntil(() => tab.Loaded && tab.View.Refresh.Enabled);
+        Assert.Equal((3, 3), (tab.Rows.Count, tab.View.List.Items.Count));
+        tab.SelectFirst();
+        Assert.NotNull(tab.View.Detail.Shown);
+
+        tab.Release(); // the window hid
+        Assert.Empty(tab.Rows);
+        Assert.Empty(tab.View.List.Items);
+        Assert.Null(tab.View.Detail.Shown);
+        Assert.Equal("Select a row", tab.View.Detail.Title.Text);
+
+        int workedOut = rig.WorkedOut;
+        tab.Refresh(); // shown again: the rows worked out from what was read
+        Assert.Equal(workedOut + 1, rig.WorkedOut);
+        Assert.Equal((3, 3), (tab.Rows.Count, tab.View.List.Items.Count));
+        Assert.Equal(1, reads);
+    }
+
+    /// <summary>
+    /// A read still running when the window hid (Refresh, a switch or the 5-minute read, then the window closed to the
+    /// tray) keeps only what it read: no row is worked out while the window is hidden, and the list stays empty. The next
+    /// refresh, before the tab shows, works the rows out from that read. It worked them out at once and held them, with
+    /// their costs, for as long as the window stayed hidden.
+    /// </summary>
+    [Fact]
+    public void AReadThatEndsWhileTheWindowIsHiddenWorksOutNoRow()
+    {
+        using var gate = new ManualResetEventSlim();
+        using var rig = new Rig(() => { gate.Wait(); return ThreeApps(); });
+        var tab = rig.Tab;
+        tab.Refresh(); // the read starts, and waits
+        tab.Release(); // the window hides meanwhile
+        gate.Set();
+        PumpUntil(() => tab.Loaded && tab.View.Refresh.Enabled);
+        Assert.Equal(0, rig.WorkedOut);
+        Assert.Empty(tab.Rows);
+        Assert.Empty(tab.View.List.Items);
+
+        tab.Refresh(); // shown again
+        Assert.Equal(1, rig.WorkedOut);
+        Assert.Equal((3, 3), (tab.Rows.Count, tab.View.List.Items.Count));
+
+        // Hidden again, and shown when a read is due (a change made elsewhere): the rows are worked out first, from what
+        // was read, so they show while the new read runs.
+        tab.Release();
+        gate.Reset();
+        tab.ReadAgain();
+        tab.Refresh();
+        Assert.False(tab.View.Refresh.Enabled); // the read runs
+        Assert.Equal((3, 3), (tab.Rows.Count, tab.View.List.Items.Count));
+        gate.Set();
+        PumpUntil(() => tab.View.Refresh.Enabled);
+        Assert.Equal(3, tab.Rows.Count);
+    }
 }

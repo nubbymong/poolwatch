@@ -21,8 +21,8 @@ internal sealed class AboutDialog : Form
     /// <summary>Each column's width (logical pixels): the three side by side fit a 1024-wide screen.</summary>
     public const int ColumnWidth = 300;
 
-    /// <summary>Start-up (JIT, first scans, tag scan) is not steady state: overhead is judged only after this long.</summary>
-    private const int SteadySeconds = 300;
+    /// <summary>The overhead is judged once steady state has lasted this long (<see cref="OverheadText"/>).</summary>
+    private const int SteadySeconds = (int)(SelfMeter.MinJudgedMinutes * 60);
 
     /// <summary>What PoolWatch changes (SECURITY.md has every action).</summary>
     private const string Changes =
@@ -44,6 +44,8 @@ internal sealed class AboutDialog : Form
     /// <summary>The credits' list: it scrolls when it is longer than the other two columns.</summary>
     private readonly Panel _creditsList;
     private readonly Font _bold, _title; // the labels never dispose the fonts they are given: the window does, after them
+    /// <summary>What it says about PoolWatch's own cost (CI reads it: judged only in steady state).</summary>
+    private readonly string _overhead;
 
     public AboutDialog(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions) : this(FactsOf(engine, analysis), actions) { }
 
@@ -51,6 +53,7 @@ internal sealed class AboutDialog : Form
     internal AboutDialog(AboutFacts facts, UiActions? actions)
     {
         Text = "About PoolWatch";
+        _overhead = facts.Overhead;
         Icon = TrayIcons.App;
         Font = new Font("Segoe UI", 9f);
         StartPosition = FormStartPosition.CenterScreen;
@@ -172,22 +175,37 @@ internal sealed class AboutDialog : Form
         $"pooltag.txt {(analysis.Knowledge.PoolTagTxtLoaded ? "loaded" : "not found (built-in tag table and driver scan)")}.",
         Overhead(engine), engine.Paths.DataRoot);
 
-    /// <summary>The overhead since start-up against its budget, then the last 10 minutes.</summary>
-    private static string Overhead(MonitorEngine engine)
+    /// <summary>The overhead in steady state against its budget, then the last 10 minutes.</summary>
+    private static string Overhead(MonitorEngine engine) => OverheadText(engine.Meter.Report(), engine.Meter.OwnCostLine);
+
+    /// <summary>
+    /// What About says about PoolWatch's own cost. The budget is for steady state (DESIGN.md section 3), which starts 15
+    /// minutes after PoolWatch starts, as the soak judges it (<see cref="SelfMeter.SteadyFrom"/>). Once steady state has
+    /// lasted <see cref="SteadySeconds"/>: its CPU, its highest working set and its disk writes, each against its budget,
+    /// then the rolling line (<paramref name="ownCost"/>). Before that, nothing is judged: it says when it will be, and the
+    /// budget. Judged from the 30 s warm-up, About held the rest of the start-up against the budget: in the CI UI test it
+    /// is drawn about 90 s after start, right after the test built every window, drew each to a picture and saved it, and
+    /// before its next trim, so it read CPU 12.38% and 138 MB as over budget. A warm-up longer than 5 minutes (a sample
+    /// interval over 100 s) also put it in the judged branch before any steady figure, with a peak of 0 B.
+    /// </summary>
+    internal static string OverheadText(OverheadReport o, Func<string> ownCost)
     {
-        var o = engine.Meter.Report();
-        string over = o.SteadyStateSeconds >= SteadySeconds
-            ? $"steady state over {Fmt.Duration(TimeSpan.FromSeconds(o.SteadyStateSeconds))}"
-            : "still warming up, so the numbers include start-up";
-        return $"Overhead, {over}: CPU {o.CpuPercentOfOneCore:0.00}% of one core (budget {SelfMeter.CpuBudgetPercent.ToString(CultureInfo.InvariantCulture)}%), " +
-               $"peak working set {Fmt.Bytes(o.PeakWorkingSetBytes)} (budget {SelfMeter.RamBudgetBytes >> 20} MB), disk writes " +
-               $"{Fmt.Bytes(o.DiskWriteBytesPerHour)}/h (budget {SelfMeter.DiskBudgetBytesPerHour >> 20} MB/h).\n{engine.Meter.OwnCostLine()}";
+        string budget = $"under {SelfMeter.CpuBudgetPercent.ToString(CultureInfo.InvariantCulture)}% of one core, {SelfMeter.RamBudgetBytes >> 20} MB of working set " +
+                        $"and {SelfMeter.DiskBudgetBytesPerHour >> 20} MB of disk writes an hour";
+        string from = SelfMeter.SteadyFromWords(TimeSpan.FromSeconds(o.JudgedFromSeconds));
+        if (o.JudgedSeconds < SteadySeconds) // 0 until steady state starts
+            return $"Overhead: judged over its steady state, from {from} after PoolWatch starts, once that has lasted {SteadySeconds / 60} minutes " +
+                   $"(PoolWatch has run {(int)(Math.Max(0, o.WallSeconds) / 60)} min), against its budget: {budget}.";
+        return $"Overhead over {Fmt.Duration(TimeSpan.FromSeconds(o.JudgedSeconds))} of steady state (from {from} after start): CPU {o.JudgedCpuPercentOfOneCore:0.00}% " +
+               $"of one core (budget {SelfMeter.CpuBudgetPercent.ToString(CultureInfo.InvariantCulture)}%), peak working set {Fmt.Bytes(o.JudgedPeakWorkingSetBytes)} " +
+               $"(budget {SelfMeter.RamBudgetBytes >> 20} MB), disk writes {Fmt.Bytes(o.JudgedDiskWriteBytesPerHour)}/h (budget {SelfMeter.DiskBudgetBytesPerHour >> 20} MB/h)." +
+               $"\n{ownCost()}";
     }
 
-    /// <summary>THIRD-PARTY-NOTICES.md next to the exe (the installer puts it there), shown in Explorer; else its page on GitHub.</summary>
+    /// <summary>THIRD-PARTY-NOTICES.md in the install folder (the installer and both zips put it there), shown in Explorer; else its page on GitHub.</summary>
     private static void ShowLicences()
     {
-        string notices = Path.Combine(AppContext.BaseDirectory, "THIRD-PARTY-NOTICES.md");
+        string notices = Path.Combine(Engine.LaunchGate.InstallFolder(), "THIRD-PARTY-NOTICES.md");
         if (File.Exists(notices)) UiActions.ShowFile(notices);
         else UiActions.OpenWebPage(Credits.NoticesUrl);
     }
@@ -202,12 +220,15 @@ internal sealed class AboutDialog : Form
         if (ScreenFit.ToWorkingArea(this)) CenterToScreen();
     }
 
-    /// <summary>CI: the credits as shown (each link's name) and anything clipped or outside its parent.</summary>
+    /// <summary>The credits' list, which scrolls, and its links in order (tests).</summary>
+    internal (Panel List, IReadOnlyList<LinkLabel> Links) CreditsShown => (_creditsList, _credits);
+
+    /// <summary>CI: the credits as shown (each link's name), what it says about PoolWatch's own cost, and anything clipped, outside its parent or on a sibling.</summary>
     internal object SmokeStats()
     {
         var problems = new List<string>();
         MainForm.ClippedControls(this, problems);
-        return new { credits = _credits.Select(l => l.Text[..l.LinkArea.Length]).ToList(), layoutProblems = problems, size = new { width = Width, height = Height, dpi = DeviceDpi } };
+        return new { credits = _credits.Select(l => l.Text[..l.LinkArea.Length]).ToList(), overhead = _overhead, layoutProblems = problems, size = new { width = Width, height = Height, dpi = DeviceDpi } };
     }
 
     protected override void Dispose(bool disposing)

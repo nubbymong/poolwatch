@@ -565,7 +565,7 @@ public sealed class ServicesTabLayoutTests(ITestOutputHelper output)
     {
         using var w = new Window(new Size(1100, 750));
         Assert.Equal(["Pool causes", "Services", "Tasks and startup apps"], w.Tabs.TabPages.Cast<TabPage>().Select(p => p.Text));
-        Assert.Equal(("Find a service", "Show not running", "Show protected"), (w.Services.Search.PlaceholderText, w.Services.ShowNotRunning.Text, w.Services.ShowProtected.Text));
+        Assert.Equal(("Find a service", "Show not running", "Show protected"), (w.Services.Search.Cue, w.Services.ShowNotRunning.Text, w.Services.ShowProtected.Text));
         Assert.False(w.Services.ShowNotRunning.Checked || w.Services.ShowProtected.Checked); // both off at first
         Assert.Equal(("Decide with your AI agent", "Import answer"), (w.Services.Agent.Text, w.Services.ImportAnswer.Text));
         Assert.Equal("Anything you turn off can be put back from Active changes.", w.Services.Note.Text);
@@ -573,7 +573,7 @@ public sealed class ServicesTabLayoutTests(ITestOutputHelper output)
         Assert.Equal(["Put back the selected service", "Set the selected service to its Windows default", "Put all back"],
             w.Services.PutBackMenu.Items.OfType<ToolStripMenuItem>().Select(i => i.Text));
         Assert.Equal(["All", "Startup apps", "Scheduled tasks", "Busy in the background"], w.Tasks.Segments.Controls.Cast<Control>().Select(c => c.Text));
-        Assert.Equal(("Find", "Show not running", "Show Microsoft"), (w.Tasks.Search.PlaceholderText, w.Tasks.ShowNotRunning.Text, w.Tasks.ShowMicrosoft.Text));
+        Assert.Equal(("Find", "Show not running", "Show Microsoft"), (w.Tasks.Search.Cue, w.Tasks.ShowNotRunning.Text, w.Tasks.ShowMicrosoft.Text));
         Assert.False(w.Tasks.ShowNotRunning.Checked || w.Tasks.ShowMicrosoft.Checked);
         Assert.Equal(TaskSegment.All, w.Tasks.Segment);
         Assert.Equal("Anything you switch off can be put back from Active changes.", w.Tasks.Note.Text);
@@ -677,4 +677,47 @@ public sealed class ServicesTabLayoutTests(ITestOutputHelper output)
 
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+    /// <summary>
+    /// Each Find box's cue ("Find a service", "Find") is sent to Windows as the edit control's own cue banner
+    /// (EM_SETCUEBANNER), with the flag that keeps it shown while the box has the keyboard focus (wParam 1), when the
+    /// box's window is made, made again and when the cue changes; WinForms' PlaceholderText is left empty. What this test
+    /// checks is the cues and that message. That the banner shows in a drawing of the window, as the CI screenshots are
+    /// made, while WinForms' PlaceholderText (drawn by WinForms on a paint of the screen only, and only without the
+    /// focus) does not, was measured outside the kept tests, with visual styles on (this test host has them off).
+    /// </summary>
+    [Fact]
+    public void EachFindBoxSendsWindowsItsCueBannerToShowWithTheFocus()
+    {
+        using var w = new Window(new Size(1100, 750));
+        foreach (var (box, cue) in new[] { (w.Services.Search, "Find a service"), (w.Tasks.Search, "Find") })
+        {
+            Assert.Equal(cue, box.Cue);
+            Assert.Equal("", box.PlaceholderText); // WinForms' own cue would be drawn too, and hidden with the focus
+        }
+
+        using var form = new Form();
+        var sent = new SentCues { Cue = "Find a service" };
+        form.Controls.Add(sent);
+        Assert.Empty(sent.Sent); // no window yet
+        _ = sent.Handle;
+        Assert.Equal([((nint)1, "Find a service")], sent.Sent);
+        sent.Cue = "Find";
+        Assert.Equal(((nint)1, "Find"), sent.Sent[^1]);
+        typeof(Control).GetMethod("RecreateHandle", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(sent, null);
+        Assert.Equal(3, sent.Sent.Count);
+        Assert.Equal(((nint)1, "Find"), sent.Sent[^1]); // its window made again keeps the cue
+    }
+
+    /// <summary>A Find box that records each cue banner sent to its window, and how.</summary>
+    private sealed class SentCues : CueTextBox
+    {
+        public readonly List<(nint WParam, string Text)> Sent = [];
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == EmSetCueBanner) Sent.Add((m.WParam, Marshal.PtrToStringUni(m.LParam) ?? ""));
+            base.WndProc(ref m);
+        }
+    }
 }
