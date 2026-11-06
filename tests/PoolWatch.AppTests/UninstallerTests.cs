@@ -6596,6 +6596,10 @@ public sealed class UninstallerTests
         InLf("            if ($add) { $acl.AddAccessRule($rule) } else { [void]$acl.RemoveAccessRule($rule) }\n            $key.SetAccessControl($acl)");
         InE2e("[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)");
         Assert.DoesNotContain("Set-Acl", ScriptCode.PowerShell(e2e)); // in its code: its comment says why
+        // Its functions write their items one by one, as its callers collect them with @(...): a list written whole
+        // (return , $list) is collected as one item, so Windows' restart work read as none and its count as 1.
+        Assert.DoesNotMatch(@"return\s*,", ScriptCode.PowerShell(e2e));
+        InLf("    if ($null -eq $value) { return }\n    return @($value)\n}");
         InE2e("foreach ($f in @(Get-ChildItem -LiteralPath $app -Recurse -Force -File -ErrorAction SilentlyContinue)) {");
         InLf("$changed = @($filesBefore.Keys | Where-Object { $filesAfter[$_] -ne $filesBefore[$_] }) + @($filesAfter.Keys | Where-Object { -not $filesBefore.ContainsKey($_) })\n" +
                         "Assert-True ($changed.Count -eq 0) \"the failed upgrade left every file of the version that was there as it was, and no other ($($changed -join ', '))\"");

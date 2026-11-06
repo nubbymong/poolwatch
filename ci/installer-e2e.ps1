@@ -279,10 +279,12 @@ public static class HeldExe
 # for paths in the install folder, each with its value, the path it moves (From) and where to (To; '' to delete).
 $sessionManager = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
 # One of those two values as its strings in order (a delete's empty target kept), or none when the value is not there.
+# Each function here writes its items one by one and each caller collects them with @(...): an array written whole
+# (return , $list) would be collected as one item, and the count would be 1 whatever the list held.
 function Get-RestartValue([string]$name) {
     $value = (Get-ItemProperty -LiteralPath $sessionManager -Name $name -ErrorAction SilentlyContinue).$name
-    if ($null -eq $value) { return , @() }
-    return , @($value)
+    if ($null -eq $value) { return }
+    return @($value)
 }
 function Get-RestartWork {
     $work = @()
@@ -296,7 +298,7 @@ function Get-RestartWork {
             }
         }
     }
-    return , $work
+    return $work
 }
 
 # What Windows does at its next restart with that work, in its order: each file moved over its target, or deleted, and
