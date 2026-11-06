@@ -127,13 +127,13 @@ after PoolWatch starts, so no cache clear has run yet and the trend and the grow
 ### 1. It looks at your PC and sets it up with you
 
 At first start, **Set up PoolWatch** opens on its own, before the main window: seven short steps, about 3 minutes. It
-reads your PC and shows, for each known cause of a growing kernel pool, how much it affects this PC (none, low, medium
-or high) and, for a cause setup has a fix for, the step with that fix. Then you choose when PoolWatch empties the
-standby cache (on a schedule, at a pool size, whichever comes first, or decide later) and the fixes that fit this PC:
-start PoolWatch when you sign in, the token-leak guard if this Windows build has the leak, and, if the Codex app is
-installed, a Codex shortcut without its shader cache. For Microsoft Defender on a Dev Drive it shows you where the
-setting is; PoolWatch never changes Defender. Setup changes no services: it shows where to trim them later, in the
-app. Nothing changes until you press **Next** on the step where you chose it
+reads your PC and lists each known cause of a growing kernel pool with how much it affects this PC, the highest first
+(high, medium, low, not known where it could not check, then none), and, for a cause setup has a fix for, the step with
+that fix. Then you choose when PoolWatch empties the standby cache (on a schedule, at a pool size, whichever comes
+first, or decide later) and the fixes that fit this PC: start PoolWatch when you sign in, the token-leak guard if this
+Windows build has the leak, and, if the Codex app is installed, a Codex shortcut without its shader cache. For Microsoft
+Defender on a Dev Drive it shows you where the setting is; PoolWatch never changes Defender. Setup changes no services:
+it shows where to trim them later, in the app. Nothing changes until you press **Next** on the step where you chose it
 ([setup in the user guide](docs/USER-GUIDE.md#at-first-start-set-up-poolwatch)).
 
 <p align="center">
@@ -178,8 +178,9 @@ every time one program starts another, and coding assistants start thousands of 
 stops it, but Windows resets it at each sign-in, so the guard sets it again each time PoolWatch starts. What you will
 notice: another program can bring its window to the front by itself, even while you type somewhere else, and your
 typing then goes into that window. Most people find that rare and easy to live with. To stop it, turn it off in Active
-changes; the setting itself lasts until you sign out. A restart frees what has already leaked. When setup did not find
-the leak, PoolWatch keeps watching for it, checks again after a Windows update, and offers the guard if it appears.
+changes, which also puts back the setting it changed when Windows allows it (one it found already changed lasts until
+you sign out). A restart frees what has already leaked. When setup did not find the leak, PoolWatch keeps watching for
+it, checks again after a Windows update, and offers the guard if it appears.
 
 The known issues live in [`knowledge/`](knowledge), one file each, built into every release; PoolWatch does not
 download them. A file holds only text, pool tags, program names, numbers and links: nothing PoolWatch would run. Know
@@ -220,19 +221,24 @@ Nothing changes without your OK. Every change PoolWatch made to your PC that is 
 the Codex shortcut), each with **Turn off** (the shortcut: **Remove**), and what PoolWatch turned off (services,
 scheduled tasks, startup apps, and a RAMMap clear task of yours it replaced), each with **Put back**, and any other
 change it made (a service set to its Windows default, a task or startup app turned on), also with **Put back**.
-**Put all back** does them all, after one question. A few things cannot fully come back, and the list says which: for
-example, the token-leak guard's Windows setting lasts until you sign out. Programs you ended are not listed: start them
-again. Uninstalling puts back everything it can by default, and says what it put back and what it could not
+**Put all back** does them all, after one question. A few things cannot fully come back, and the list says which.
+Programs you ended are not listed: start them again. Uninstalling puts back everything it can by default, and says what
+it put back and what it could not
 ([Active changes in the user guide](docs/USER-GUIDE.md#active-changes)).
 
 **Why it asks for administrator rights.** Reading the kernel pool by tag, seeing every program that starts, recording a
 trace and clearing the standby cache all need them. Watching happens on its own. Every change to your PC waits for your
 click or a setting you turned on, apart from creating PoolWatch's own data folder and tidying up after an older
 PoolWatch (SECURITY.md lists each). It never installs a driver, runs only from inside Program Files and refuses a copy
-there that you could change without administrator rights, and never writes through a file-system link (a junction or
-symbolic link). [What it does with those rights](docs/TECHNICAL.md#why-it-needs-administrator-rights); how each
-action is checked: [SECURITY.md](SECURITY.md), which also lists the [known limitations](SECURITY.md#known-limitations),
-one of them with no defence yet in 1.0.0.
+there that you could change without administrator rights, starts as administrator only through its launcher (the
+install folder's `PoolWatch.exe`, also there as `PoolWatch-selfcontained.exe` in a copy unpacked from a zip, which
+everything that starts PoolWatch starts), with an environment the launcher
+builds from Windows' own values (so nothing a program running as you put in your environment reaches it;
+SECURITY.md's known limitations say what PoolWatch's inner program, `app\PoolWatch.exe`, still gets when an
+administrator starts it as administrator by hand), and never writes through a file-system link (a junction or
+symbolic link).
+[What it does with those rights](docs/TECHNICAL.md#why-it-needs-administrator-rights); how each action is checked:
+[SECURITY.md](SECURITY.md), which also lists the [known limitations](SECURITY.md#known-limitations).
 
 **Signed and checkable.** Every PoolWatch program, the setup and its uninstaller are signed, with a timestamp, and each
 release lists the SHA-256 of the setup and both zips in `SHA256SUMS.txt`
@@ -288,15 +294,20 @@ an export before you post it.
 3. Click **Next**, then **Install**. Setup installs PoolWatch in `C:\Program Files\PoolWatch`, with .NET included, and
    adds it to the Start menu. Leave **Start PoolWatch now** ticked and click **Finish**.
 
-**Set up PoolWatch** opens next, on its own. The first time, it cannot be skipped, and the main window waits until you
-finish it; if PoolWatch stops before then, setup opens again at its next start. Its icon stays in the notification
+**Set up PoolWatch** opens next, on its own. The first time, it cannot be skipped: the main window waits until you
+finish it. Closing setup asks first; if you close it, PoolWatch keeps running in the tray, and setup opens again when
+you open PoolWatch and at its next start, as it does if PoolWatch stops before then. Its icon stays in the notification
 area by the clock (if you do not see it, click the **^** arrow there): closing the window keeps it running. To stop
 PoolWatch, right-click the icon and choose **Exit**. If it starts when you sign in, it starts again at your next
 sign-in, until you turn off "Start PoolWatch when you sign in" in Active changes. **Run setup again...** in the tray
 menu opens setup later.
 
 To update, run the new version's setup: it asks the running PoolWatch to exit first, and keeps your settings, reports
-and Active changes.
+and Active changes. If another program still has one of PoolWatch's files in use, the update finishes the next time
+Windows restarts, and the setup says so and names each file in use and the program that has it open. Its last page
+also says what starts PoolWatch until then: the version you had, unless an earlier setup that did not finish, an
+earlier uninstall or a file another program holds leaves less in place until that restart. The
+setup never restarts Windows itself, also when you run it again before that restart.
 
 > [!NOTE]
 > **Warnings for a new app.** Releases are signed, but Windows and your browser still warn about a program few people
@@ -333,7 +344,8 @@ settings: the default keeps them
 - [Technical details](docs/TECHNICAL.md): why it needs administrator rights, how it decides, where it stores data, the
   command line, verifying a release and building from source.
 - [Design](docs/DESIGN.md) · [Security](SECURITY.md) · [Known-issue files](docs/knowledge-packs.md) ·
-  [An example incident report](docs/example-incident/report.md), from CI · [Changelog](CHANGELOG.md)
+  [An example incident report](docs/example-incident/report.md), from a CI run of an earlier version (with the older
+  confidence words) · [Changelog](CHANGELOG.md)
 
 ## Credits
 

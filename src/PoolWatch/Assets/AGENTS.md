@@ -43,15 +43,16 @@ In the data folder:
 |---|---|
 | `AGENTS.md` | this guide |
 | `settings.json` | PoolWatch's settings, and the service profiles: the services each keeps off, and the one applied when PoolWatch starts |
-| `poolwatch.log` | what PoolWatch did, one line each (moved to `poolwatch.log.1` at 2 MB) |
+| `poolwatch.log` | what PoolWatch did, one line each (moved to `poolwatch.log.1` at 2 MB by the tray app, a headless run or the uninstall cleanup); a run during which another program kept refusing its appends goes on in `poolwatch-<date>-<time>-<process id>-<n>.log`, whose first line says why; it cannot be opened while that run writes it, except in the moment it rolls over at 2 MB, or tries to (its own `.1`, made then, can), and the newest five are kept, and any of another PoolWatch still running |
 | `since-boot.md`, `since-boot.json`, `boots.md` | written when PoolWatch exits: what grew since boot, and the last boots side by side |
-| `data\<yyyyMMdd>\` | one folder per day, kept 7 days by default: the CSV files below and `findings.jsonl` |
+| `data\<yyyyMMdd>\` | one folder per day: the CSV files below and `findings.jsonl`. Deleted once nothing in it was written for 7 days (by default) of time the PC was awake, so a PC that sleeps keeps more calendar days |
 | `incidents\<id>\` | one folder per incident (section 3). `<id>` is `<yyyyMMdd-HHmmss>-<tag>-<tag in hex>` |
 | `incidents\<yyyyMMdd-HHmmss>-<kind>-<subject>\` | a report on one alert finding (such as `Experiment`, `Crash`, `SpawnStorm`): its `report.json` is that finding (time, kind, title, details, data), not an incident |
 | `cache\clears.json` | the last 100 finished cache clears: when, how and why, the pool (and its paged part) and the standby list before and after, and any error; for a measured clear, the tags it freed (up to 12, each at least 1 MB, with the bytes before and after). Every tag that dropped is in the `CacheClear` findings |
 | `cache\token-guard.json` | the last token-leak test: the Windows build, the result and when it ran |
+| `cache\token-guard-setting.json` | the Windows setting the token-leak guard replaced (the live foreground lock timeout from before it set 0), one value per sign-in with the sign-in it belongs to, so turning the guard off or uninstalling in that sign-in puts it back when Windows allows it (one the guard found already changed is not recorded, and stays until you sign out) |
 | `cache\tagscan.json` | which driver each pool tag belongs to, from PoolWatch's scan of the drivers |
-| `cache\environment.json` | the last look at the PC: Windows version and build, memory, drives and their file systems, the AI tools found and what is set up. No user names, and no paths except drive roots |
+| `cache\environment.json` | the last look at the PC: Windows version and build, memory, drives and their file systems, the AI tools found and what is set up, and which of the drives, installed apps and running services it could not read. No user names, and no paths except drive roots |
 | `cache\profile.json` | PoolWatch's own cost, written every hour: its processor time, memory and heap, what it holds in memory, and what it wrote to each file |
 | `cache\update-check.json` | the last check for a new version: when it ran, its result, and the newest release seen |
 | `service-changes.json` | every background service PoolWatch changed, with its original start type (Put back needs it, on the Services tab and in Active changes) |
@@ -59,7 +60,7 @@ In the data folder:
 | `removed-tasks\<name>.xml` | only when a clear task of the owner's that PoolWatch removed could not be put back by itself: its definition, to import in Task Scheduler |
 | `setup.json` | when setup was completed, the suggestions the owner hid (each shows again after 30 days), and the feature cards of the Simple view the owner hid (for good) |
 | `ui-state.json` | which view the main window opens in: Simple or Advanced |
-| `uninstall-summary.txt` | written by the uninstaller: each change it put back, and any it could not put back (and why) or kept |
+| `uninstall-summary.txt` | written by the uninstaller: each change it put back (or put back only in part, and what was not done), and any it could not put back (and why) or kept |
 | `uninstall-list.json` | only while the uninstaller runs: the list of changes it asked PoolWatch for, deleted again once read |
 | `boots\` | one folder per boot: `baseline.json` (the first full tag snapshot) and `summary.json` (the peaks) |
 | `reports\` | the Since boot reports |
@@ -71,7 +72,17 @@ the Services tab: `poolwatch-services.md`, the prompt PoolWatch made for their A
 and startup apps on the PC, with its own instructions), and `poolwatch-services-answer.json`, the agent's answer,
 which PoolWatch reads only when the person imports it, and then shows every change before making any.
 
-The daily CSV files have a header row. `totals.csv` has a row every 10 seconds; the others as noted.
+The daily CSV files have a header row. `totals.csv` has a row every 10 seconds; the others as noted. A day's rows of
+one file can go on in a numbered file next to it (`totals-2.csv`, then `totals-3.csv`, and so on): when an update
+changed its columns, or when another program refused its open or write. Read them together and order the rows by
+their time: when PoolWatch starts again the same day, it can write to the first file again.
+Every CSV file PoolWatch writes, here and in incident folders and exports, protects spreadsheets the same way: a text
+value that starts with `=`, `+`, `-`, `@` (or their full-width forms), a tab or a line break is written with one leading
+apostrophe (`'=...`), so a spreadsheet shows it rather than running it as a formula. Drop that one apostrophe to get
+the value. A spreadsheet that splits lines at semicolons can start a cell after a semicolon, and a row after a line
+break, inside a value whose quotes are not at the start of a cell as it splits the line, so a part of a text value
+after a semicolon or a line break that starts the same way, or with a quote, gets an apostrophe too (`a;'=b`), and that
+one stays in the value. Numbers never have it (a pid of -1 is written `-1`).
 
 | File | Columns |
 |---|---|
