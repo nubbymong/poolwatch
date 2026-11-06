@@ -3961,6 +3961,8 @@ public sealed class UninstallerTests
             function ListedPath(const Item: String): String;
             begin
               Result := Item;
+              if (CharAt(Result, 1) = '*') and ((CharAt(Result, 2) = '1') or (CharAt(Result, 2) = '2')) then
+                Result := Copy(Result, 3, Length(Result));
               if CharAt(Result, 1) = '!' then
                 Result := Copy(Result, 2, Length(Result));
               if (CharAt(Result, 1) = '*') and ((CharAt(Result, 2) = '1') or (CharAt(Result, 2) = '2')) then
@@ -4838,6 +4840,7 @@ public sealed class UninstallerTests
     /// <summary>A copy of the script's ListedPath.</summary>
     private static string ScriptListedPath(string item)
     {
+        if (item.Length >= 2 && item[0] == '*' && (item[1] == '1' || item[1] == '2')) item = item[2..];
         if (item.StartsWith('!')) item = item[1..];
         if (item.Length >= 2 && item[0] == '*' && (item[1] == '1' || item[1] == '2')) item = item[2..];
         if (item.StartsWith(@"\??\", StringComparison.Ordinal)) item = item[4..];
@@ -4945,7 +4948,8 @@ public sealed class UninstallerTests
                         "N := N + 1; Froms[N - 1] := Item; Tos[N - 1] := ''; end; IsTo := not IsTo; end; end; end; SetArrayLength(Froms, N); SetArrayLength(Tos, N); end;", read);
         Assert.DoesNotContain("Work := Copy(", read);
         Assert.Contains("for V := 1 to 2 do begin if V = 1 then ValueName := 'PendingFileRenameOperations' else ValueName := 'PendingFileRenameOperations2';", read);
-        Assert.Contains("if CharAt(Result, 1) = '!' then Result := Copy(Result, 2, Length(Result)); if (CharAt(Result, 1) = '*') and ((CharAt(Result, 2) = '1') or " +
+        Assert.Contains("if (CharAt(Result, 1) = '*') and ((CharAt(Result, 2) = '1') or (CharAt(Result, 2) = '2')) then Result := Copy(Result, 3, Length(Result)); " +
+                        "if CharAt(Result, 1) = '!' then Result := Copy(Result, 2, Length(Result)); if (CharAt(Result, 1) = '*') and ((CharAt(Result, 2) = '1') or " +
                         "(CharAt(Result, 2) = '2')) then Result := Copy(Result, 3, Length(Result)); if Copy(Result, 1, 4) = '\\??\\' then Result := Copy(Result, 5, Length(Result));",
             Whole("ListedPath"));
         const string app = @"C:\Program Files\PoolWatch";
@@ -4972,6 +4976,15 @@ public sealed class UninstallerTests
             ScriptRestartWork(moveTo + delete + @"*1\??\C:\x.tmp" + "\0" + @"!*2\??\C:\y.tmp" + "\0\0"));
         Assert.Equal([(staged.ToLowerInvariant(), ""), (app.ToLowerInvariant(), "")], ScriptRestartWork(@"\??\" + staged + "\0\0\0", @"\??\" + app + "\0\0\0"));
         Assert.Empty(ScriptRestartWork("", "\0\0"));
+        // As recent Windows builds write every entry (seen on a CI runner): *1 or *2 first, before a move target's !. The
+        // move into the launcher's place is read with its target, so FilledAtRestart and KeepLauncherOut find it.
+        string moveTo25H2 = @"*1\??\" + staged + "\0" + @"*1!\??\" + launcher + "\0";
+        Assert.Equal([(staged.ToLowerInvariant(), launcher.ToLowerInvariant()), (launcher.ToLowerInvariant(), "")],
+            ScriptRestartWork(moveTo25H2 + @"*2\??\" + launcher + "\0\0"));
+        Assert.True(ScriptDeletedAtRestart(moveTo25H2 + @"*2\??\" + launcher + "\0\0", launcher));
+        Assert.False(ScriptDeletedAtRestart(moveTo25H2, launcher));
+        Assert.Equal(staged.ToLowerInvariant(), ScriptFilledAtRestart(moveTo25H2, launcher, app + @"\at-restart\20261104120001000",
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { staged }));
         // The uninstall that leaves work for the restart gives Windows the install folder itself to delete.
         Assert.Contains("if DirExists(App) then DeleteAtRestart(App, '');", Whole("RemoveRest"));
         Assert.Contains("DeleteOneAtRestart(Dir, '', '');", Whole("DeleteAtRestart"));
@@ -6600,9 +6613,10 @@ public sealed class UninstallerTests
         // (return , $list) is collected as one item, so Windows' restart work read as none and its count as 1.
         Assert.DoesNotMatch(@"return\s*,", ScriptCode.PowerShell(e2e));
         InLf("    if ($null -eq $value) { return }\n    return @($value)\n}");
-        // Each entry of Windows' list is read as the setup reads it (ListedPath): without the !, the *1 or *2 that recent
-        // Windows builds put first, and the \??\ (with only the last stripped, no entry of the install folder was found).
-        InE2e(@"return ($item -replace '^!', '' -replace '^\*[12]', '' -replace '^\\\?\?\\', '')");
+        // Each entry of Windows' list is read as the setup reads it (ListedPath): without the *1 or *2 that recent Windows
+        // builds put first (before a move target's !), the !, a *1 or *2 after it, and the \??\ (with only the last
+        // stripped, no entry of the install folder was found; with the ! stripped before the *1, every target kept its !).
+        InE2e(@"return ($item -replace '^\*[12]', '' -replace '^!', '' -replace '^\*[12]', '' -replace '^\\\?\?\\', '')");
         Assert.Equal(2, Regex.Matches(e2e, Regex.Escape("$from = Get-ListedPath $ops[$i]")).Count);
         Assert.Equal(2, Regex.Matches(e2e, Regex.Escape("$to = Get-ListedPath $ops[$i + 1]")).Count);
         Assert.Contains("if (CharAt(Result, 1) = '*') and ((CharAt(Result, 2) = '1') or (CharAt(Result, 2) = '2')) then", Whole("ListedPath"));

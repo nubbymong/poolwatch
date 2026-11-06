@@ -1216,10 +1216,13 @@ begin
 end;
 
 { A path as Windows' list writes it (ReadRestartWork), without what may come before it: the ! of a move that may replace
-  a file (MOVEFILE_REPLACE_EXISTING), the *1 or *2 Inno Setup notes that some writers put first, and the \??\. }
+  a file (MOVEFILE_REPLACE_EXISTING), the *1 or *2 that recent Windows builds put first, before that ! (a move's target
+  reads *1!\??\...), and that other writers may put after it, and the \??\. }
 function ListedPath(const Item: String): String;
 begin
   Result := Item;
+  if (CharAt(Result, 1) = '*') and ((CharAt(Result, 2) = '1') or (CharAt(Result, 2) = '2')) then
+    Result := Copy(Result, 3, Length(Result));
   if CharAt(Result, 1) = '!' then
     Result := Copy(Result, 2, Length(Result));
   if (CharAt(Result, 1) = '*') and ((CharAt(Result, 2) = '1') or (CharAt(Result, 2) = '2')) then

@@ -294,11 +294,11 @@ function Get-RestartValue([string]$name) {
     if ($null -eq $value) { return }
     return @($value)
 }
-# A path as Windows' list writes it, without what may come before it, as the setup reads it (ListedPath): the ! of a
-# move that may replace a file, the *1 or *2 that recent Windows builds put first (every entry on a Windows 11 25H2 PC
-# has one), and the \??\.
+# A path as Windows' list writes it, without what may come before it, as the setup reads it (ListedPath): the *1 or *2
+# that recent Windows builds put first (every entry on a Windows 11 25H2 PC has one; a move's target reads *1!\??\...),
+# the ! of a move that may replace a file, a *1 or *2 after it, and the \??\.
 function Get-ListedPath([string]$item) {
-    return ($item -replace '^!', '' -replace '^\*[12]', '' -replace '^\\\?\?\\', '')
+    return ($item -replace '^\*[12]', '' -replace '^!', '' -replace '^\*[12]', '' -replace '^\\\?\?\\', '')
 }
 function Get-RestartWork {
     $work = @()
