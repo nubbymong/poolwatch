@@ -8,6 +8,8 @@ using PoolWatch.Core.Model;
 using PoolWatch.Core.Recommendations;
 using PoolWatch.Core.Tags;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
 /// <summary>
@@ -58,10 +60,10 @@ internal sealed class ClearWorld : IDisposable
     {
         var now = T0 + Step * Index++;
         var entries = tags.Select(t => new PoolTagEntry(PoolTag.Parse(t.Tag), 0, 0, 0, t.Allocs, t.Frees, (ulong)t.Bytes)).ToList();
-        History.Add(new Sample(now, new PoolTotals(1UL << 30, (ulong)nonPagedTotal, 0, 0), entries, []));
+        History.Add(new Sample(now, new PoolTotals(1UL << 30, (ulong)nonPagedTotal, 0, 0), entries, []) { TickMs = Clocks.At(now).Ms });
         var clears = _seesClears ? new OwnClears(Clears, Settle) : OwnClears.None;
         var alerts = Detector.Evaluate(History, clears);
-        Incidents.Process(History, Detector, alerts, now);
+        Incidents.Process(History, Detector, alerts, At(now));
         Alerts.Add(alerts);
         Status.Add(Detector.Status.ToDictionary());
         Holding.Add(Detector.Holding);
@@ -71,7 +73,7 @@ internal sealed class ClearWorld : IDisposable
     /// <summary>PoolWatch clears the cache a second after the newest sample, as the clearer does (it records the pool then).</summary>
     public void Clear() => Clears.Add(new ClearRecord
     {
-        TimeUtc = Last.AddSeconds(1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = History.Totals[^1],
+        TimeUtc = Last.AddSeconds(1), TickMs = Clocks.At(Last.AddSeconds(1)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = History.Totals[^1],
     });
 
     /// <summary>The index of the first sample at or after a clear plus its settle time: the one its result is measured at.</summary>
@@ -397,7 +399,7 @@ public class OwnClearTests
     {
         ClearRecord At(DateTime t, string? error = null) => new()
         {
-            TimeUtc = t, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default, After = error is null ? default(PoolTotals) : null, Error = error,
+            TimeUtc = t, TickMs = Clocks.At(t).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default, After = error is null ? default(PoolTotals) : null, Error = error,
         };
         return [At(t0.AddDays(-1)), At(middle, "access denied"), At(end.AddMinutes(5))];
     }
@@ -447,8 +449,8 @@ public class OwnClearTests
                 var x = detPlain.Evaluate(world.History);
                 var y = detClears.Evaluate(world.History, around);
                 Assert.Equal(x, y);
-                mgrPlain.Process(world.History, detPlain, x, now);
-                mgrClears.Process(world.History, detClears, y, now);
+                mgrPlain.Process(world.History, detPlain, x, At(now));
+                mgrClears.Process(world.History, detClears, y, At(now));
                 Assert.Equal(Incidents(mgrPlain), Incidents(mgrClears));
             }
             for (int i = 0; i < 15; i++) Tick();
@@ -524,11 +526,11 @@ public class OwnClearTests
                     w.Sample(("File", file));
                     if (i == 14 || (i >= 15 && i < 35 && i % 5 == 4)) w.ScanHandles();
                     var now = w.Now - w.Interval;
-                    mgr.Process(w.History, det, det.Evaluate(w.History, new OwnClears(clears, settle)), now);
+                    mgr.Process(w.History, det, det.Evaluate(w.History, new OwnClears(clears, settle)), At(now));
                     holding.Add(det.Holding);
                     if (retainedAt < 0 && mgr.All.Any(x => x.Retention is not null)) retainedAt = i;
                     if (i == clearAfter) Assert.Empty(mgr.Open); // closed before the clear: only the retention is held
-                    if (i == clearAfter) clears.Add(new ClearRecord { TimeUtc = now.AddSeconds(1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default });
+                    if (i == clearAfter) clears.Add(new ClearRecord { TimeUtc = now.AddSeconds(1), TickMs = Clocks.At(now.AddSeconds(1)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default });
                 }
                 return (retainedAt, holding);
             }
@@ -553,12 +555,12 @@ public class OwnClearTests
         for (int i = 0; i < 10; i++) w.Sample(GB, ("Reff", 600 * MB));
         w.Clear();
         var clears = new OwnClears(w.Clears, ClearWorld.Settle);
-        Assert.Same(w.Clears[0], clears.Measuring(w.Clears[0].TimeUtc));
+        Assert.Same(w.Clears[0], clears.Measuring(Clocks.At(w.Clears[0].TimeUtc).Ms));
         for (int i = 0; i < 12; i++) w.Sample(GB, ("Reff", 100 * MB));
-        Assert.NotNull(clears.Measuring(w.Last));         // 119 s after the clear
+        Assert.NotNull(clears.Measuring(Clocks.At(w.Last).Ms));         // 119 s after the clear
         Assert.Equal(new ClearSpan(9, w.History.Count), Assert.Single(clears.SpansIn(w.History).Spans)); // not measured yet
         w.Sample(GB, ("Reff", 250 * MB));                  // 129 s: measured
-        Assert.Null(clears.Measuring(w.Last));
+        Assert.Null(clears.Measuring(Clocks.At(w.Last).Ms));
         var spans = clears.SpansIn(w.History);
         var span = Assert.Single(spans.Spans);
         Assert.Equal(new ClearSpan(9, 22), span);
@@ -596,21 +598,21 @@ public class OwnClearTests
         Assert.Empty(dropped);
 
         // A clear pressed again while the first is measured: one interval, measured once both are.
-        var again = new OwnClears([.. w.Clears, new ClearRecord { TimeUtc = w.History.Times[15].AddSeconds(1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default }], ClearWorld.Settle);
+        var again = new OwnClears([.. w.Clears, new ClearRecord { TimeUtc = w.History.Times[15].AddSeconds(1), TickMs = Clocks.At(w.History.Times[15].AddSeconds(1)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default }], ClearWorld.Settle);
         Assert.Equal(new ClearSpan(9, w.History.Count), Assert.Single(again.SpansIn(w.History).Spans));
-        var sameSample = new OwnClears([.. w.Clears, new ClearRecord { TimeUtc = w.Clears[0].TimeUtc.AddSeconds(4), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default }], ClearWorld.Settle);
+        var sameSample = new OwnClears([.. w.Clears, new ClearRecord { TimeUtc = w.Clears[0].TimeUtc.AddSeconds(4), TickMs = Clocks.At(w.Clears[0].TimeUtc.AddSeconds(4)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default }], ClearWorld.Settle);
         var merged = sameSample.SpansIn(w.History);
         Assert.Equal(new ClearSpan(9, 22), Assert.Single(merged.Spans));
         Assert.Null(merged.TimeOf(merged.Spans[0]));                 // two clears in one: no one time to say
-        var afterIt = new OwnClears([.. w.Clears, new ClearRecord { TimeUtc = w.History.Times[22].AddSeconds(1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default }], ClearWorld.Settle);
+        var afterIt = new OwnClears([.. w.Clears, new ClearRecord { TimeUtc = w.History.Times[22].AddSeconds(1), TickMs = Clocks.At(w.History.Times[22].AddSeconds(1)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default }], ClearWorld.Settle);
         Assert.Equal([new ClearSpan(9, 22)], afterIt.SpansIn(w.History).Spans); // it ran after the newest sample: not yet
         w.Sample(GB, ("Reff", 260 * MB));
         var two = afterIt.SpansIn(w.History);
         Assert.Equal([new ClearSpan(9, 22), new ClearSpan(22, w.History.Count)], two.Spans); // starts where the first was measured
         Assert.Equal((w.Clears[0].TimeUtc, w.History.Times[22].AddSeconds(1)), (two.TimeOf(two.Spans[0])!.Value, two.TimeOf(two.Spans[1])!.Value));
 
-        var failed = new ClearRecord { TimeUtc = w.Last, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default, Error = "access denied" };
-        Assert.Null(new OwnClears([failed], ClearWorld.Settle).Measuring(w.Last));
+        var failed = new ClearRecord { TimeUtc = w.Last, TickMs = Clocks.At(w.Last).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default, Error = "access denied" };
+        Assert.Null(new OwnClears([failed], ClearWorld.Settle).Measuring(Clocks.At(w.Last).Ms));
         Assert.Empty(new OwnClears([failed], ClearWorld.Settle).SpansIn(w.History).Spans);
         Assert.Empty(OwnClears.None.SpansIn(w.History).Spans);
     }
@@ -640,7 +642,7 @@ public class OwnClearTests
         Assert.Equal(expected, a.Status[at][toke].Delta60m);
         Assert.Equal(expected, Assert.Single(a.Alerts[at], x => x.Tag == toke && x.Window == TimeSpan.FromHours(1)).Bytes);
         var evidence = KnowledgeEvidence.Gather(KnowledgeBase.Embedded(), a.History, a.Clears, ClearWorld.Settle,
-            new RecommendationInputs { NowUtc = a.Last }, null, []);
+            new RecommendationInputs { NowUtc = a.Last, NowMs = Clocks.At(a.Last).Ms }, null, []);
         Assert.Equal(TimeSpan.FromHours(1), evidence.GrowthOver);
         Assert.Equal(expected, evidence.Growth[toke].NonPagedBytes);
         Assert.InRange(expected, (360 - 13) * 40 * MB / 6 - 4096, (360 - 13) * 40 * MB / 6 + 4096); // to the KB the history holds
@@ -944,7 +946,7 @@ public class OwnClearTests
         // The history starts a minute after PoolWatch's clear (its dip at 400 MB, 450 MB when it is measured), then Over grows
         // to 1 GB. The incident's series starts inside the clear's interval: its growth counts from 450 MB.
         using var a = new ClearWorld(new Settings());
-        a.Clears.Add(new ClearRecord { TimeUtc = ClearWorld.T0.AddSeconds(-60), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = default });
+        a.Clears.Add(new ClearRecord { TimeUtc = ClearWorld.T0.AddSeconds(-60), TickMs = Clocks.At(ClearWorld.T0.AddSeconds(-60)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = default });
         long Over(int i) => i < 6 ? 400 * MB : 450 * MB + Math.Min(i - 6, 90) * 550 * MB / 90;
         for (int i = 0; i <= 100; i++) a.Sample(GB, ("Over", Over(i)));
         var inc = Assert.Single(a.Incidents.All, i => i.Tag == PoolTag.Parse("Over"));
@@ -1025,7 +1027,7 @@ public class OwnClearTests
             b.Sample(GB, ("Plat", Plat(i)));
             if (i == c1) a.Clear();
             if (i == c1 && c2 == c1)
-                a.Clears.Add(new ClearRecord { TimeUtc = a.Last.AddSeconds(1 + apartSeconds), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = a.History.Totals[^1] });
+                a.Clears.Add(new ClearRecord { TimeUtc = a.Last.AddSeconds(1 + apartSeconds), TickMs = Clocks.At(a.Last.AddSeconds(1 + apartSeconds)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = a.History.Totals[^1] });
             else if (i == c2 && c2 != c1) a.Clear();
         }
         int ClosedAt(ClearWorld w) => w.Open.FindIndex(w.Open.FindIndex(o => o.Contains(plat)), o => !o.Contains(plat));
@@ -1211,7 +1213,7 @@ public class OwnClearTests
         long Own(int k) => 500 * MB + k * 120 * 1024L;
         long A(int i) => i <= clearAfter ? Own(i) : i < clearAfter + cut ? Own(clearAfter) - 350 * MB : Own(i - cut) - 300 * MB;
         long P(int i) => i <= clearAfter ? Own(i) : i < clearAfter + cut ? Own(clearAfter) : Own(i - cut);
-        Sample At(int i, long v) => new(ClearWorld.T0 + step * i, new PoolTotals(1UL << 30, 1UL << 30, 0, 0), [new PoolTagEntry(slow, 0, 0, 0, 1, 0, (ulong)v)], []);
+        Sample At(int i, long v) => new(ClearWorld.T0 + step * i, new PoolTotals(1UL << 30, 1UL << 30, 0, 0), [new PoolTagEntry(slow, 0, 0, 0, 1, 0, (ulong)v)], []) { TickMs = Clocks.At(ClearWorld.T0 + step * i).Ms };
         var (ha, hp) = (History.ForInterval(7), History.ForInterval(7));
         var (da, dp) = (new Detector(new Settings()), new Detector(new Settings()));
         var clears = new List<ClearRecord>();
@@ -1221,7 +1223,7 @@ public class OwnClearTests
             ha.Add(At(i, A(i)));
             da.Evaluate(ha, new OwnClears(clears, ClearWorld.Settle));
             sa.Add(da.Holding ? null : da.Status.GetValueOrDefault(slow)?.State);
-            if (i == clearAfter) clears.Add(new ClearRecord { TimeUtc = ClearWorld.T0 + step * i + TimeSpan.FromSeconds(offsetSeconds), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = default });
+            if (i == clearAfter) clears.Add(new ClearRecord { TimeUtc = ClearWorld.T0 + step * i + TimeSpan.FromSeconds(offsetSeconds), TickMs = Clocks.At(ClearWorld.T0 + step * i + TimeSpan.FromSeconds(offsetSeconds)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = default });
             hp.Add(At(i, P(i)));
             dp.Evaluate(hp);
             sp.Add(dp.Status.GetValueOrDefault(slow)?.State);
@@ -1823,8 +1825,8 @@ public class OwnClearTests
                 w.Sample(("File", file - freed));
                 if (i == 14 || (i >= 15 && i < 55 && i % 5 == 4)) w.ScanHandles();
                 var now = w.Now - w.Interval;
-                mgr.Process(w.History, det, det.Evaluate(w.History, new OwnClears(clears, settle)), now);
-                ClearRecord Ran() => new() { TimeUtc = now.AddSeconds(1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default };
+                mgr.Process(w.History, det, det.Evaluate(w.History, new OwnClears(clears, settle)), At(now));
+                ClearRecord Ran() => new() { TimeUtc = now.AddSeconds(1), TickMs = Clocks.At(now.AddSeconds(1)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default };
                 if (duringMb > 0 && i == 25) clears.Add(Ran());
                 if (laterAt < 0 && mgr.All.Any(x => x.Retention is not null)) laterAt = i + 330;
                 if (i == laterAt && laterMb > 0) { clears.Add(Ran()); later = clears[^1].TimeUtc; }

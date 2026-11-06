@@ -46,6 +46,8 @@ public sealed record ChangeRecord
 public static class ChangeIds
 {
     public const string LogonTask = "logon-task", AutoClear = "auto-clear", TokenGuard = "token-guard";
+    /// <summary>The token-leak guard's Windows setting, still changed while the guard is off (Windows did not let PoolWatch put it back).</summary>
+    public const string TokenGuardSetting = "token-guard-setting";
     public static string Service(string name) => "service:" + name.ToLowerInvariant();
     public static string RemovedClearTask(string taskPath) => "clear-task:" + taskPath;
     public static string ScheduledTask(string taskPath) => "task:" + taskPath;

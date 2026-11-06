@@ -1,5 +1,6 @@
 using PoolWatch.Analysis;
 using PoolWatch.Core;
+using PoolWatch.Core.Setup;
 using PoolWatch.Engine;
 
 namespace PoolWatch.Ui;
@@ -23,7 +24,9 @@ internal sealed class SettingsDialog : Form
     private readonly LiveSettings? _live;
     private readonly SettingsEditor? _editor;
     private readonly Action<Action<Settings>>? _onApplied;
-    private readonly CheckBox _logon = new WrapCheckBox { Text = "Start PoolWatch when I sign in", AutoSize = true };
+    private readonly CheckBox _logon = new WrapCheckBox { Text = Core.Setup.SignInStates.SettingsBox, AutoSize = true };
+    /// <summary>Under the box: why a logon task that is there does not start PoolWatch (<see cref="LogonTick"/>); hidden otherwise.</summary>
+    private readonly Label _logonNote = new() { AutoSize = true, Visible = false };
     private readonly SimpleSettingsFields _fields = new();
     private readonly Label _clearHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
     private readonly Label _deeperHint = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
@@ -49,11 +52,12 @@ internal sealed class SettingsDialog : Form
         _saveButton.Click += (_, _) => actions.Guarded(this, "Save settings", Save);
         _shortcutButton.Click += (_, _) => actions.Guarded(this, "Create shortcut", CreateShortcut);
 
-        // schtasks /query can take seconds: ask in the background, then wire the checkbox on this (the UI) thread. The
-        // answer is posted to the context captured here, so it arrives whether or not the dialog has a window handle yet.
+        // Reading the task from Task Scheduler can take seconds: read it in the background, then wire the checkbox on this
+        // (the UI) thread. The answer is posted to the context captured here, so it arrives whether or not the dialog has
+        // a window handle yet.
         _logon.Enabled = false;
         var ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
-        Task.Run(SafeExists).ContinueWith(t => ui.Post(_ => { if (!IsDisposed) WireLogon(t.Result, actions); }, null), TaskScheduler.Default);
+        Task.Run(() => ReadSignIn(LogonTask.AtSignIn)).ContinueWith(t => ui.Post(_ => { if (!IsDisposed) WireLogon(t.Result, actions); }, null), TaskScheduler.Default);
         // A suggestion, the setup guide or Undo may change a setting while the form is open (Undo on a worker thread):
         // the form follows on this thread, so Save never puts an older value back.
         _onApplied = change => ui.Post(_ =>
@@ -66,14 +70,15 @@ internal sealed class SettingsDialog : Form
     }
 
     /// <summary>
-    /// The form as it lays out, showing <paramref name="shown"/>, with nothing behind it: no logon task is read and no
-    /// button acts (tests, which check that it fits).
+    /// The form as it lays out, showing <paramref name="shown"/> and <paramref name="logonNote"/> under the sign-in box,
+    /// with nothing behind it: no logon task is read and no button acts (tests, which check that it fits).
     /// </summary>
-    internal SettingsDialog(Settings shown, ShortcutOffer? shortcut) : this(editor: null, shortcut)
+    internal SettingsDialog(Settings shown, ShortcutOffer? shortcut, string? logonNote = null) : this(editor: null, shortcut)
     {
         _fields.Fill(SimpleSettings.From(shown));
         _clearHint.Text = SimpleSettings.AutoClearHint(shown);
         _deeperHint.Text = SimpleSettings.DeeperCaptureHint(shown);
+        ShowLogonNote(logonNote, null);
         EnableClearFields();
     }
 
@@ -125,6 +130,7 @@ internal sealed class SettingsDialog : Form
         first.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
         Row(first, Heading("Start at logon"));
         Row(first, _logon, indent);
+        Row(first, _logonNote, indent);
         Row(first, Hint("A scheduled task with the highest privileges, so there is no UAC prompt at each sign-in. It changes as soon as you " +
                         "tick or untick it, and is created only for a copy installed in Program Files."), indent, bottom: 10);
         Row(first, Heading("Update notices"));
@@ -280,21 +286,97 @@ internal sealed class SettingsDialog : Form
         _shortcutButton.Enabled = !ok;
     }
 
-    private void WireLogon(bool exists, UiActions actions)
+    private void WireLogon((SignInState State, string? Error) read, UiActions actions)
     {
-        _logon.Checked = exists;
+        ShowSignIn(read);
         _logon.Enabled = true;
-        _logon.CheckedChanged += (_, _) => actions.Guarded(this, "Start at logon", () =>
-        {
-            var (ok, output) = LogonTask.Set(_logon.Checked, Path.Combine(_engine!.Paths.DataRoot, "logon-task.xml"), _engine.Paths.Guard.CheckReal);
-            if (!ok) MessageBox.Show(this, "Could not change the logon task:\n" + output, "PoolWatch");
-        });
+        // Wired once the box shows the task's state, so showing it changes nothing. Ticking registers the task on, with its
+        // sign-in trigger on and highest privileges; unticking deletes it.
+        _logon.CheckedChanged += (_, _) => actions.Guarded(this, "Start at logon", () => LogonBoxChanged(
+            ticked => LogonTask.Set(ticked, Path.Combine(_engine!.Paths.DataRoot, "logon-task.xml"), _engine.Paths.Guard.CheckReal),
+            output => MessageBox.Show(this, "Could not change the logon task:\n" + output, "PoolWatch")));
     }
 
-    private static bool SafeExists()
+    /// <summary>
+    /// The sign-in box and the line under it for the task's state as read (<see cref="LogonTick"/>). Windows' own message
+    /// for a task that could not be read, of any length, goes in the line's tooltip, so the line stays two lines and the
+    /// form keeps its size.
+    /// </summary>
+    internal void ShowSignIn((SignInState State, string? Error) read)
     {
-        try { return LogonTask.Exists(); } catch { return false; }
+        var (ticked, note) = LogonTick(read.State, read.Error);
+        _logon.Checked = ticked;
+        ShowLogonNote(note, read.Error);
     }
+
+    /// <summary>
+    /// The box was ticked or unticked: <paramref name="set"/> registers or deletes the task (<see cref="LogonTask.Set"/>).
+    /// When it did, the line under the box goes (the task is set up now, or gone). When it did not, or it threw, the box
+    /// goes back to what it showed, so it never shows a change that was not made (putting it back does not run this
+    /// again), and <paramref name="failed"/> is told why (a throw goes on to the caller instead).
+    /// </summary>
+    internal void LogonBoxChanged(Func<bool, (bool ok, string output)> set, Action<string> failed)
+    {
+        if (_puttingLogonBack) return;
+        bool ticked = _logon.Checked, ok = false;
+        string output = "";
+        try { (ok, output) = set(ticked); }
+        finally
+        {
+            if (!ok)
+            {
+                _puttingLogonBack = true;
+                try { _logon.Checked = !ticked; }
+                finally { _puttingLogonBack = false; }
+            }
+        }
+        if (ok) ShowLogonNote(null, null);
+        else failed(output);
+    }
+
+    /// <summary>The box is being put back after a change that was not made (<see cref="LogonBoxChanged"/>).</summary>
+    private bool _puttingLogonBack;
+
+    private void ShowLogonNote(string? note, string? tip)
+    {
+        _logonNote.Text = note ?? "";
+        _logonNote.Visible = note is not null;
+        _tips.SetToolTip(_logonNote, tip ?? "");
+    }
+
+    /// <summary>The sign-in box, the line under it and that line's tooltip, for the tests.</summary>
+    internal CheckBox LogonBox => _logon;
+    internal Label LogonNote => _logonNote;
+    internal string LogonNoteTip => _tips.GetToolTip(_logonNote) ?? "";
+
+    /// <summary>The logon task's state now (<paramref name="read"/>: <see cref="LogonTask.AtSignIn()"/>), or, when it throws, not known and Windows' message.</summary>
+    internal static (SignInState State, string? Error) ReadSignIn(Func<SignInState> read)
+    {
+        try { return (read(), null); }
+        catch (Exception ex) { return (SignInState.NotKnown, ex.Message); }
+    }
+
+    /// <summary>
+    /// Pure: whether "Start PoolWatch when I sign in" is ticked, and the line under it, for the logon task's state
+    /// (<paramref name="error"/>: Windows' message when the task could not be read, shown in the line's tooltip). Ticked
+    /// only when PoolWatch starts when you sign in (<see cref="SignInState.Starts"/>); for a task that is there but does not
+    /// start it, a short line says why, and that ticking the box sets it up again (on, with its sign-in trigger on and
+    /// highest privileges). Each is short enough for two lines in the column, so the form still fits a small screen (the
+    /// fit test lays out each).
+    /// </summary>
+    internal static (bool Ticked, string? Note) LogonTick(SignInState state, string? error) => error is not null
+        ? (false, "PoolWatch could not read its task. Tick to set it up again.")
+        : state switch
+        {
+            SignInState.Starts => (true, null),
+            SignInState.NoTask => (false, null),
+            SignInState.TaskOff => (false, "Its task is turned off, so PoolWatch does not start at sign-in. Tick to turn it on."),
+            SignInState.TriggerOff => (false, "Its task's sign-in trigger is turned off. Tick to turn it on."),
+            SignInState.NoTrigger => (false, "Its task has no sign-in trigger. Tick to set it up again."),
+            SignInState.NotHighest => (false, "Its task runs without highest privileges, which PoolWatch needs. Tick to set it up again."),
+            SignInState.NotKnown => (false, "PoolWatch could not read all of its task's settings. Tick to set it up again."),
+            _ => (false, "PoolWatch asks about its task at each start. Tick to set it up again."),
+        };
 
     /// <summary>
     /// On a screen too short for the whole form (high scaling on a small display) it keeps its width and scrolls

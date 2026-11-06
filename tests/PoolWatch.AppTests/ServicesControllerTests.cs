@@ -5,7 +5,7 @@ using PoolWatch.Engine;
 namespace PoolWatch.AppTests;
 
 /// <summary>
-/// S1 in the app layer (review round 2, item 12): the services page's record-keeping and its gate, with a fake service
+/// The services page's record-keeping and its gate in the app layer, with a fake service
 /// backend (no real service is read or changed) and the data root in TEMP (no ACL is touched).
 /// </summary>
 public sealed class ServicesControllerTests : IDisposable
@@ -17,8 +17,8 @@ public sealed class ServicesControllerTests : IDisposable
 
     /// <summary>
     /// The live services, as the fake service control manager has them; every change call is recorded. As Windows does, it
-    /// sets the start type but does not stop a service while one that depends on it runs, and does not start one while a
-    /// service it needs is Disabled (a stopped one it needs starts with it).
+    /// sets the start type but does not stop a service while one that depends on it has not stopped, and does not start one
+    /// while a service it needs is Disabled (a stopped one it needs starts with it).
     /// </summary>
     private sealed class FakeServices : IServiceBackend
     {
@@ -27,7 +27,7 @@ public sealed class ServicesControllerTests : IDisposable
         public string? ApplyError;
         /// <summary>
         /// Why Windows does not stop a service it is asked to, one that runs or is neither running nor stopped (null: it
-        /// stops, unless one that depends on it runs). One not stopped is left as it was, at its new start type.
+        /// stops, unless one that depends on it has not stopped). One not stopped is left as it was, at its new start type.
         /// </summary>
         public NotDone? StopRefused;
         /// <summary>Runs once the service is restored, before the controller records it.</summary>
@@ -46,35 +46,52 @@ public sealed class ServicesControllerTests : IDisposable
         public void AddThirdParty(string name, int pid, params string[] dependsOn) =>
             Live[name] = new ServiceView { Name = name, DisplayName = name, StartType = ServiceStartType.Automatic, Running = true, ProcessId = pid, DependsOn = dependsOn };
 
+        /// <summary>The service control manager cannot be opened: the read throws, as <see cref="ServiceControl.Enumerate"/> does.</summary>
+        public bool Unreadable;
+        /// <summary>Windows lists no service at all (no PC has none): an empty list.</summary>
+        public bool ListsNone;
+
+        /// <summary>How many times the services were read (the self-repair check reads them once a check).</summary>
+        public int Reads;
+
         public IReadOnlyList<ServiceView> Enumerate()
         {
+            Reads++;
             if (OnEnumerate is { } hook) { OnEnumerate = null; hook(); }
-            return Live.Values.ToList();
+            if (Unreadable) throw new InvalidOperationException("the service control manager could not be opened (error 5)");
+            return ListsNone ? [] : Live.Values.ToList();
         }
 
         public bool InsiderEnrolled() => false;
 
-        /// <summary>As Windows answers a stop refused because a service that depends on it is running (error 1051).</summary>
-        public static readonly NotDone DependentsRunning = new("a service that depends on it is running", NotDoneCause.DependentsRunning);
+        /// <summary>As Windows answers a stop refused because a service that depends on it has not stopped (error 1051).</summary>
+        public static readonly NotDone DependentsRunning = ServiceControl.Answered(1051, lookedAgain: false).Why!;
 
-        public (string? error, NotDone? notStopped) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
+        public (string? error, NotDone? notStopped, bool? wasRunning) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
         {
             string name = op.Option.Service.Name;
             Calls.Add("apply " + name);
             if (OnApply is { } hook) { OnApply = null; hook(); }
-            if (ApplyError is { } e) return (e, null);
+            if (ApplyError is { } e) return (e, null, null);
             var live = Live[name];
             NotDone? notStopped = op.NewStart == ServiceStartType.Disabled && (live.Running || live.NeitherRunningNorStopped)
-                ? StopRefused ?? (Live.Values.Any(v => v.Running && v.DependsOn.Contains(name, StringComparer.OrdinalIgnoreCase)) ? DependentsRunning : null)
+                ? StopRefused ?? (Live.Values.Any(v => (v.Running || v.NeitherRunningNorStopped) && v.DependsOn.Contains(name, StringComparer.OrdinalIgnoreCase))
+                    ? DependentsRunning : null)
                 : null;
             Live[name] = notStopped is null ? live with { StartType = op.NewStart, Running = false, NeitherRunningNorStopped = false }
                 : live with { StartType = op.NewStart };
-            return (null, notStopped);
+            return (null, notStopped, SawNothing ? null : SawRunning ?? ServicePlan.WasRunning(live)); // what the change saw, as the service is when it acts
         }
+
+        /// <summary>What the change sees of whether the service runs, when not the service as <see cref="Live"/> has it (it started meanwhile, say).</summary>
+        public bool? SawRunning;
+        /// <summary>The change could not tell whether the service was running (Windows could not give its state when it looked).</summary>
+        public bool SawNothing;
 
         public (string? error, NotDone? notDone) Restore(ServiceChange change, IReadOnlySet<string> allowed, bool insiderEnrolled)
         {
             Calls.Add("restore " + change.Service);
+            if (OnRestoreStart is { } first) { OnRestoreStart = null; first(); }
             if (change.OriginalStart == ServiceStartType.Disabled && Live[change.Service].Running && StopRefused is { } refused)
             {
                 // Putting back Disabled stops it too; Windows refuses the stop, the start type is back all the same.
@@ -82,7 +99,9 @@ public sealed class ServicesControllerTests : IDisposable
                 OnRestore?.Invoke();
                 return (null, refused);
             }
-            bool running = change.OriginalRunning;
+            // As ServiceControl.Restore: started again only when the record says it was running; an original of Disabled is
+            // stopped; else it is left running or not, as it is.
+            bool start = ServicePlan.StartAfterRestore(change), running = start;
             NotDone? notStarted = null;
             var needs = Live[change.Service].DependsOn;
             if (running && CannotStart.Contains(change.Service))
@@ -91,10 +110,16 @@ public sealed class ServicesControllerTests : IDisposable
                 (running, notStarted) = (false, ServiceControl.Started(1068)); // as Windows answers: one it needs did not start
             else if (running)
                 foreach (var d in needs.Where(Live.ContainsKey)) Live[d] = Live[d] with { Running = true };
-            Live[change.Service] = Live[change.Service] with { StartType = change.OriginalStart, Running = running };
+            var now = Live[change.Service];
+            Live[change.Service] = start || change.OriginalStart == ServiceStartType.Disabled
+                ? now with { StartType = change.OriginalStart, Running = running, NeitherRunningNorStopped = false }
+                : now with { StartType = change.OriginalStart };
             OnRestore?.Invoke();
             return (null, notStarted);
         }
+
+        /// <summary>Runs once, when a Put back reaches the service, before it changes it.</summary>
+        public Action? OnRestoreStart;
 
         public string? SetDefault(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
         {
@@ -113,7 +138,41 @@ public sealed class ServicesControllerTests : IDisposable
         var svc = new FakeServices();
         svc.Add("MapsBroker", ServiceStartType.Automatic, running: true); // a catalogue service ("Downloaded Maps Manager")
         setup?.Invoke(svc);
-        return (new ServicesController(paths, LogOf(paths), _findings.Add, _ => null, _ => null, svc), svc, paths);
+        return (new ServicesController(paths, LogOf(paths), _findings.Add, _ => null, _ => null, svc, Host()), svc, paths);
+    }
+
+    /// <summary>
+    /// The clock every PoolWatch in a test reads (it moves only when the test moves it), and the PoolWatch processes that
+    /// run, by number and start time.
+    /// </summary>
+    private sealed class Clock
+    {
+        public long NowMs = 50_000_000;
+        public readonly HashSet<(int, long)> Running = [(Tray, 1)];
+        public int ControlWaitSeconds = ServiceControl.DefaultControlWaitSeconds;
+    }
+
+    /// <summary>A PoolWatch process (<paramref name="pid"/>, started at 1) on <paramref name="clock"/>.</summary>
+    private sealed class FakeHost(Clock clock, int pid) : IServicesHost
+    {
+        public long NowMs => clock.NowMs;
+        public (int Pid, long Started) Self => (pid, 1);
+        public bool Runs(int p, long started) => clock.Running.Contains((p, started));
+        public int ControlWaitSeconds => clock.ControlWaitSeconds;
+    }
+
+    /// <summary>The app's PoolWatch, and one run from the command line while it runs.</summary>
+    private const int Tray = 100, CommandLine = 200;
+
+    private readonly Clock _clock = new();
+
+    private FakeHost Host(int pid = Tray) => new(_clock, pid);
+
+    /// <summary>A self-repair check by <paramref name="ctl"/>, the next one it makes (the clock moves on 6 minutes first).</summary>
+    private void Check(ServicesController ctl)
+    {
+        _clock.NowMs += 6 * 60 * 1000;
+        ctl.CheckSelfRepair();
     }
 
     private static Log LogOf(AppPaths paths) => new(Path.Combine(paths.DataRoot, "test.log"));
@@ -212,8 +271,8 @@ public sealed class ServicesControllerTests : IDisposable
         Assert.Equal(["SysMain", "Fax"], change);
         Assert.Equal(2, off);
         Assert.Equal("2 services will be stopped and set to not start:\n\n  SysMain\n  Fax\n\n" +
-                     "If a running service you did not tick depends on one of them, Windows does not stop that one: it is set to not start and stops " +
-                     "when Windows restarts.\n\n2 more ticked services are off already and are left as they are.\n\n" +
+                     "If a service you did not tick depends on one of them and has not stopped, Windows does not stop that one: it is set to not start " +
+                     "and stops when Windows restarts.\n\n2 more ticked services are off already and are left as they are.\n\n" +
                      "PoolWatch saves how each one was set first, so you can put it back. Continue?", Ui.ServicesPageText.ApplyQuestion(change, off));
         Assert.Contains("\n\n1 more ticked service is off already and is left as it is.\n\n", Ui.ServicesPageText.ApplyQuestion(["SysMain"], 1));
         var (none, one) = Ui.ServicesPageText.ApplyPlan(["inventorysvc"], options);
@@ -244,7 +303,7 @@ public sealed class ServicesControllerTests : IDisposable
     [Fact]
     public void RestoreGoesThroughTheGateBeforeAnythingChanges()
     {
-        // Records read back from service-changes.json are untrusted (S1): each is re-gated against the live service first.
+        // Records read back from service-changes.json are untrusted: each is re-gated against the live service first.
         var protectedOne = new ServiceChange { Service = "WinDefend", OriginalStart = ServiceStartType.Automatic, OriginalRunning = true, NewStart = ServiceStartType.Disabled };
         var tampered = new ServiceChange { Service = "Fax", OriginalStart = (ServiceStartType)99, OriginalRunning = false, NewStart = ServiceStartType.Disabled };
         var changedSince = new ServiceChange { Service = "RetailDemo", OriginalStart = ServiceStartType.Manual, OriginalRunning = false, NewStart = ServiceStartType.Disabled };
@@ -329,7 +388,7 @@ public sealed class ServicesControllerTests : IDisposable
     {
         var (app, svc, paths) = New(s => s.Add("RetailDemo", ServiceStartType.Manual, running: false));
         // The command line, while the app runs: a controller of its own over the same file.
-        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc);
+        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc, Host());
         Assert.Null(Assert.Single(commandLine.Apply(["MapsBroker"], "command line")).error);
 
         Assert.Null(Assert.Single(app.Apply(["RetailDemo"], "test")).error); // later, from the Services tab
@@ -347,7 +406,7 @@ public sealed class ServicesControllerTests : IDisposable
     {
         var (app, svc, paths) = New();
         Assert.Null(Assert.Single(app.Apply(["MapsBroker"], "test")).error);
-        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc);
+        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc, Host());
         // While the app restores it, the command line turns it off again: its record is the one that counts now.
         svc.OnRestore = () =>
         {
@@ -364,7 +423,7 @@ public sealed class ServicesControllerTests : IDisposable
     public void AChangeThatFailsKeepsARecordSavedAgainSinceItSaved()
     {
         var (app, svc, paths) = New();
-        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc);
+        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc, Host());
         // The app's record is saved; before its change fails, the command line turns the service off and saves its own.
         svc.ApplyError = "access denied";
         svc.OnApply = () =>
@@ -383,7 +442,7 @@ public sealed class ServicesControllerTests : IDisposable
     public void TheServicesPageShowsAChangeTheCommandLineMade()
     {
         var (app, svc, paths) = New();
-        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc);
+        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc, Host());
         Assert.Null(Assert.Single(commandLine.Apply(["MapsBroker"], "command line")).error);
 
         var maps = app.Options().Single(o => o.Service.Name == "MapsBroker");
@@ -480,13 +539,13 @@ public sealed class ServicesControllerTests : IDisposable
     [Fact]
     public void TheTabsWordsForApplyAReadThatFailedAndWhatToDo()
     {
-        // The one exception to "stopped": a running service nobody ticked depends on it.
-        const string ItKeepsRunning = "If a running service you did not tick depends on it, Windows does not stop it: it is set to not start and stops when " +
-                                      "Windows restarts.\n\n";
+        // The one exception to "stopped": a service nobody ticked depends on it and has not stopped.
+        const string ItKeepsRunning = "If a service you did not tick depends on it and has not stopped, Windows does not stop it: it is set to not start and " +
+                                      "stops when Windows restarts.\n\n";
         Assert.Equal("1 service will be stopped and set to not start:\n\n  SysMain\n\n" + ItKeepsRunning +
                      "PoolWatch saves how each one was set first, so you can put it back. Continue?",
             Ui.ServicesPageText.ApplyQuestion(["SysMain"]));
-        Assert.StartsWith("2 services will be stopped and set to not start:\n\n  SysMain\n  Fax\n\nIf a running service you did not tick depends on one of them, ",
+        Assert.StartsWith("2 services will be stopped and set to not start:\n\n  SysMain\n  Fax\n\nIf a service you did not tick depends on one of them and has not stopped, ",
             Ui.ServicesPageText.ApplyQuestion(["SysMain", "Fax"]));
         // Services Apply sets to Manual, which it does not stop, are said apart.
         Assert.Equal("1 service will be stopped and set to not start:\n\n  SysMain\n\n" + ItKeepsRunning +
@@ -678,6 +737,31 @@ public sealed class ServicesControllerTests : IDisposable
         Assert.Equal((ServiceStartType.Automatic, true), (svc.Live["AcmeSync"].StartType, svc.Live["AcmeSync"].Running));
     }
 
+    /// <summary>
+    /// Error 1051 while one service that depends on it is paused and another runs: when Windows' own list could not be
+    /// read, the result names both, each with its state, as the services were read; never only the running one. When
+    /// Windows listed them, its list is the one named.
+    /// </summary>
+    [Fact]
+    public void ADependentThatIsPausedIsNamedToo()
+    {
+        var (ctl, svc, _) = New(s =>
+        {
+            MapsTrio(s);
+            s.Live["AcmeSync"] = s.Live["AcmeSync"] with { Running = false, NeitherRunningNorStopped = true, Between = ServiceRunState.Paused, ProcessId = 0 };
+        });
+        svc.StopRefused = FakeServices.DependentsRunning;
+        Assert.Equal([("MapsBroker", (string?)"set to Disabled, but still running: AcmeMaps (running), AcmeSync (paused) depend on it and have not stopped. " +
+                      "It stops when Windows restarts, or when you turn it off again after those have stopped")],
+            ctl.Apply(["MapsBroker"], "manual"));
+
+        var (again, svc2, _) = New(MapsTrio);
+        svc2.StopRefused = FakeServices.DependentsRunning with { Dependents = [new("AcmeSync", ServiceRunState.Starting)] };
+        Assert.Equal([("MapsBroker", (string?)"set to Disabled, but still running: AcmeSync depends on it and is starting. " +
+                      "It stops when Windows restarts, or when you turn it off again after that service has stopped")],
+            again.Apply(["MapsBroker"], "manual"));
+    }
+
     /// <summary>Ticked alone, MapsBroker's result names both running services that depend on it, in the plural.</summary>
     [Fact]
     public void SeveralRunningDependentsAreNamedInThePlural()
@@ -747,7 +831,7 @@ public sealed class ServicesControllerTests : IDisposable
         string summary = Assert.Single(ctl.Changes).Summary();
         Assert.Single(_findings, f => f.Title == $"Service not stopped: {summary}: {expected}" && f.Severity == FindingSeverity.Warning);
         Assert.Null(ctl.SavingsText("MapsBroker"));
-        ctl.CheckSelfRepair(DateTime.UtcNow);
+        Check(ctl);
         Assert.Empty(SelfRepairWarnings());
     }
 
@@ -757,7 +841,7 @@ public sealed class ServicesControllerTests : IDisposable
     /// when Windows cannot say, it says that; when it was still stopping, it says it is not stopped yet.
     /// </summary>
     [Theory]
-    [InlineData("1051", "it is still running: a service that depends on it is running. It stops when Windows restarts")]
+    [InlineData("1051", "it is still running: a service that depends on it has not stopped (Windows error 1051). It stops when Windows restarts")]
     [InlineData("unknown", "Windows could not say whether it is running, so it is not known to have stopped. If it is still running, it stops when Windows restarts")]
     [InlineData("stopping", "it is not stopped yet: it was still stopping 20 seconds after Windows took the stop. It stops when Windows restarts, if not before")]
     [InlineData("paused", "it is still paused: it does not take a stop (Windows error 1052). It stops when Windows restarts")]
@@ -925,21 +1009,20 @@ public sealed class ServicesControllerTests : IDisposable
     {
         var (ctl, svc, paths) = New(MapsPair);
         Assert.NotNull(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error); // not stopped: Acme Maps runs
-        var t = DateTime.UtcNow;
-        ctl.CheckSelfRepair(t);
+        Check(ctl);
         Assert.Empty(SelfRepairWarnings());
-        new ServicesController(paths, LogOf(paths), _findings.Add, _ => null, _ => null, svc).CheckSelfRepair(t); // PoolWatch started again
+        Check(new ServicesController(paths, LogOf(paths), _findings.Add, _ => null, _ => null, svc, Host())); // PoolWatch started again
         Assert.Empty(SelfRepairWarnings());
 
         // Acme Maps stops, then MapsBroker: off as PoolWatch meant, and its record no longer says it ran on.
         svc.Live["AcmeMaps"] = svc.Live["AcmeMaps"] with { Running = false };
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { Running = false, ProcessId = 0 };
-        ctl.CheckSelfRepair(t.AddMinutes(6));
+        Check(ctl);
         Assert.Empty(SelfRepairWarnings());
         Assert.Null(Assert.Single(Saved(paths)).NotStoppedPid);
 
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { Running = true, ProcessId = 40 };
-        ctl.CheckSelfRepair(t.AddMinutes(12));
+        Check(ctl);
         Assert.Equal(["Service re-enabled outside PoolWatch: MapsBroker is Disabled, running again (you turned it off). Turn it off again with " +
                       "Turn off; Put back works again after that on the Services tab."], SelfRepairWarnings());
     }
@@ -958,7 +1041,7 @@ public sealed class ServicesControllerTests : IDisposable
         Assert.NotNull(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
         Assert.Equal(0, Assert.Single(Saved(paths)).NotStoppedPid);
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { ProcessId = 55 };
-        ctl.CheckSelfRepair(DateTime.UtcNow);
+        Check(ctl);
         Assert.Empty(SelfRepairWarnings());
         Assert.Equal(0, Assert.Single(Saved(paths)).NotStoppedPid);
     }
@@ -973,7 +1056,7 @@ public sealed class ServicesControllerTests : IDisposable
         var (ctl, svc, paths) = New(MapsPair);
         Assert.NotNull(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = start, ProcessId = pid };
-        ctl.CheckSelfRepair(DateTime.UtcNow);
+        Check(ctl);
         Assert.StartsWith($"Service re-enabled outside PoolWatch: MapsBroker is {start}, running again (you turned it off).", Assert.Single(SelfRepairWarnings()));
         Assert.Null(Assert.Single(Saved(paths)).NotStoppedPid);
     }
@@ -1006,22 +1089,21 @@ public sealed class ServicesControllerTests : IDisposable
         int? mark = Assert.Single(Saved(paths)).NotStoppedPid;
         Assert.NotNull(mark);
 
-        var t = DateTime.UtcNow;
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { Running = false, ProcessId = 0, NeitherRunningNorStopped = true }; // at the check
-        ctl.CheckSelfRepair(t);
+        Check(ctl);
         Assert.Equal(mark, Assert.Single(Saved(paths)).NotStoppedPid);
         Assert.StartsWith("set to Disabled, not known to have stopped (turned off by PoolWatch ",
             ServicePlan.StateText(ctl.Options().Single(o => o.Service.Name == "MapsBroker")));
 
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { Running = true, ProcessId = 40, NeitherRunningNorStopped = false };
-        ctl.CheckSelfRepair(t.AddMinutes(6));
+        Check(ctl);
         Assert.Empty(SelfRepairWarnings());
 
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { Running = false, ProcessId = 0 }; // STOPPED
-        ctl.CheckSelfRepair(t.AddMinutes(12));
+        Check(ctl);
         Assert.Null(Assert.Single(Saved(paths)).NotStoppedPid);
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { Running = true, ProcessId = 40 };
-        ctl.CheckSelfRepair(t.AddMinutes(18));
+        Check(ctl);
         Assert.Equal(["Service re-enabled outside PoolWatch: MapsBroker is Disabled, running again (you turned it off). Turn it off again with " +
                       "Turn off; Put back works again after that on the Services tab."], SelfRepairWarnings());
     }
@@ -1029,32 +1111,35 @@ public sealed class ServicesControllerTests : IDisposable
     /// <summary>
     /// A self-repair check that comes while Turn off is under way (the record saved, the start type set, the stop not
     /// done yet, so Disabled and still running with no mark) skips the service: PoolWatch's own change is never read as
-    /// switched back on outside it, also once its record is older than the longest a Turn off can take (the last of several
-    /// services turned off at once, say). Once the change is done, the check reads it again, and its mark holds.
+    /// switched back on outside it, however long the change takes (the last of several services turned off at once, say).
+    /// The record says the change is under way in this PoolWatch until it is done; then the check reads it again, and its
+    /// mark holds.
     /// </summary>
     [Fact]
     public void TheSelfRepairCheckSkipsAServiceWhoseTurnOffIsUnderWay()
     {
         var (ctl, svc, paths) = New(MapsPair);
-        DateTime t = default;
         svc.OnApply = () =>
         {
             var record = Assert.Single(Saved(paths));
             Assert.Null(record.NotStoppedPid); // saved, not marked yet
+            Assert.Equal(new ChangeUnderWay { Pid = Tray, ProcessStarted = 1, TickMs = _clock.NowMs }, record.UnderWay);
             svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Disabled };
-            t = record.ChangedUtc + ServicesController.TurnOffAtMost;
-            ctl.CheckSelfRepair(t);
+            _clock.NowMs += 60 * 60 * 1000; // an hour on
+            Check(ctl);
         };
         Assert.NotNull(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error); // not stopped: Acme Maps runs
         Assert.Empty(SelfRepairWarnings());
-        Assert.Equal(40, Assert.Single(Saved(paths)).NotStoppedPid);
-        ctl.CheckSelfRepair(t.AddMinutes(6));
+        var done = Assert.Single(Saved(paths));
+        Assert.Equal((40, (ChangeUnderWay?)null), (done.NotStoppedPid, done.UnderWay));
+        Check(ctl);
         Assert.Empty(SelfRepairWarnings());
     }
 
     /// <summary>
-    /// A Turn off whose change throws still lets go of the service: the self-repair check reads it again (once its
-    /// record, which has no mark, can no longer be one still under way), so a switch-on is not hidden for good.
+    /// A Turn off whose change throws still lets go of the service: the self-repair check reads it again (its record still
+    /// says the change is under way, but in this PoolWatch, which reads its own changes from what it is doing now), so a
+    /// switch-on is not hidden for good.
     /// </summary>
     [Fact]
     public void ATurnOffThatThrowsLetsTheSelfRepairCheckReadTheServiceAgain()
@@ -1064,7 +1149,8 @@ public sealed class ServicesControllerTests : IDisposable
         Assert.Throws<InvalidOperationException>(() => ctl.Apply(["MapsBroker"], "manual"));
         Assert.Equal("MapsBroker", Assert.Single(ctl.Changes).Service); // its record was saved first
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Disabled };
-        ctl.CheckSelfRepair(DateTime.UtcNow + ServicesController.TurnOffAtMost);
+        Assert.NotNull(Assert.Single(ctl.Changes).UnderWay); // its own mark stays, as the change never ended
+        ctl.CheckSelfRepair(); // at once: this PoolWatch's own mark does not hold its check back
         Assert.StartsWith("Service re-enabled outside PoolWatch: MapsBroker is Disabled, running again", Assert.Single(SelfRepairWarnings()));
     }
 
@@ -1157,21 +1243,20 @@ public sealed class ServicesControllerTests : IDisposable
         var (ctl, svc, paths) = New(notStopped ? MapsPair : (Action<FakeServices>?)null);
         void SwitchedOn() => svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true, ProcessId = 40 };
         Assert.Equal(notStopped, Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error is not null);
-        var t = DateTime.UtcNow + ServicesController.TurnOffAtMost; // checks from when the Turn off can no longer be under way
         SwitchedOn();
-        ctl.CheckSelfRepair(t);
+        Check(ctl);
         Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
 
         // Turned off again; --service-off runs a PoolWatch of its own, with its own memory, on the same record.
-        var again = fromCommandLine ? new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc) : ctl;
+        var again = fromCommandLine ? new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc, Host()) : ctl;
         Assert.Equal(notStopped, Assert.Single(again.Apply(["MapsBroker"], fromCommandLine ? "command line" : "manual")).error is not null);
         if (notStopped)
         {
-            ctl.CheckSelfRepair(t.AddMinutes(6)); // running on at Disabled, as Turn off left it: nothing to report
+            Check(ctl); // running on at Disabled, as Turn off left it: nothing to report
             Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
         }
         SwitchedOn();
-        ctl.CheckSelfRepair(t.AddMinutes(12));
+        Check(ctl);
         Assert.Equal([MapsBrokerSwitchedOn, MapsBrokerSwitchedOn], SelfRepairWarnings());
     }
 
@@ -1184,15 +1269,14 @@ public sealed class ServicesControllerTests : IDisposable
     {
         var (ctl, svc, _) = New();
         Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
-        var t = DateTime.UtcNow + ServicesController.TurnOffAtMost; // checks from when the Turn off can no longer be under way
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true, ProcessId = 40 };
-        ctl.CheckSelfRepair(t);
+        Check(ctl);
         Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
 
         svc.ApplyError = "access denied";
         Assert.Equal([("MapsBroker", (string?)"access denied")], ctl.Apply(["MapsBroker"], "manual"));
         Assert.Equal(["apply MapsBroker", "apply MapsBroker"], svc.Calls);
-        ctl.CheckSelfRepair(t.AddMinutes(6));
+        Check(ctl);
         Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
     }
 
@@ -1206,9 +1290,8 @@ public sealed class ServicesControllerTests : IDisposable
     {
         var (ctl, svc, _) = New();
         Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
-        var t = DateTime.UtcNow + ServicesController.TurnOffAtMost;
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true, ProcessId = 40 };
-        ctl.CheckSelfRepair(t);
+        Check(ctl);
         Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
 
         // The next check reads the services just as a Turn off (on another thread) has saved its record and waits for its
@@ -1227,12 +1310,12 @@ public sealed class ServicesControllerTests : IDisposable
             turnOff = Task.Run(() => ctl.Apply(["MapsBroker"], "manual"));
             Assert.True(applying.Wait(TimeSpan.FromSeconds(30)), "the Turn off did not get under way");
         };
-        ctl.CheckSelfRepair(t.AddMinutes(6));
+        Check(ctl);
         checkDone.Set();
         Assert.Equal([("MapsBroker", (string?)"access denied")], await turnOff!);
         Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
 
-        ctl.CheckSelfRepair(t.AddMinutes(12));
+        Check(ctl);
         Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
     }
 
@@ -1243,80 +1326,943 @@ public sealed class ServicesControllerTests : IDisposable
     [Fact]
     public void AServiceNoLongerInstalledIsReportedAgainOnceItIsBackInAStateReportedBefore()
     {
-        var (ctl, svc, _) = New();
+        var (ctl, svc, _) = New(s => s.Add("Spooler", ServiceStartType.Automatic, running: true)); // the PC has other services
         Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
-        var t = DateTime.UtcNow + ServicesController.TurnOffAtMost; // checks from when the Turn off can no longer be under way
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true, ProcessId = 40 };
         var switchedOn = svc.Live["MapsBroker"];
-        ctl.CheckSelfRepair(t);
+        Check(ctl);
         Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
 
         svc.Live.Remove("MapsBroker"); // uninstalled
-        ctl.CheckSelfRepair(t.AddMinutes(6));
+        Check(ctl);
         Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
 
         svc.Live["MapsBroker"] = switchedOn; // installed again, as it was
-        ctl.CheckSelfRepair(t.AddMinutes(12));
+        Check(ctl);
         Assert.Equal([MapsBrokerSwitchedOn, MapsBrokerSwitchedOn], SelfRepairWarnings());
     }
 
     /// <summary>
     /// A Turn off from the command line runs in a PoolWatch of its own, whose skip of a Turn off under way this one cannot
-    /// see: it saves its record, with no mark yet, before it sets the start type, and the stop can take up to
-    /// <see cref="ServicesController.TurnOffAtMost"/> (Windows holds each stop request up to 30 seconds while a service is
-    /// busy). A self-repair check here in that time does not read it as switched back on outside PoolWatch, before or after
-    /// the start type is set. A check's time is its sample's, which can be a moment before the save it reads. A switch-on is
-    /// reported by a check that long or longer from the save, either way, not later.
+    /// see. Its record says the change is under way in that process, from before it sets the start type until it is done.
+    /// A self-repair check here meanwhile does not read it as switched back on outside PoolWatch, before or after the start
+    /// type is set, however long Windows holds the stop; it looks again soon, and once the change is done a switch-on is
+    /// reported at that next look, not a whole check later.
     /// </summary>
     [Theory]
-    [InlineData(false, 40)] // the start type not set yet: still Automatic and running
-    [InlineData(true, 40)]  // set to Disabled, the stop not done yet
-    [InlineData(true, 100)] // set to Disabled, both stop requests held by Windows while a service is busy
-    [InlineData(true, -1)]  // the check's sample taken a moment before the save
-    public void ATurnOffFromTheCommandLineStillUnderWayIsNotReadAsSwitchedOnOutside(bool startTypeSet, int checkSeconds)
+    [InlineData(false, 40)]  // the start type not set yet: still Automatic and running
+    [InlineData(true, 40)]   // set to Disabled, the stop not done yet
+    [InlineData(true, 100)]  // set to Disabled, both stop requests held by Windows while a service is busy
+    public void ATurnOffFromTheCommandLineStillUnderWayIsNotReadAsSwitchedOnOutside(bool startTypeSet, int stopSeconds)
     {
         var (tray, svc, paths) = New();
-        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc);
-        DateTime saved = default;
+        _clock.Running.Add((CommandLine, 1));
+        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc, Host(CommandLine));
         svc.OnApply = () =>
         {
             var record = Assert.Single(Saved(paths));
-            Assert.Null(record.NotStoppedPid); // saved, not marked yet
-            saved = record.ChangedUtc;
+            Assert.Equal((null, CommandLine), (record.NotStoppedPid, record.UnderWay?.Pid)); // saved, under way in that PoolWatch
             if (startTypeSet) svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Disabled };
-            tray.CheckSelfRepair(saved.AddSeconds(checkSeconds)); // the tray's check, while the stop is under way
+            _clock.NowMs += stopSeconds * 1000L;
+            tray.CheckSelfRepair(); // the tray's check, while the stop is under way
         };
         Assert.Null(Assert.Single(commandLine.Apply(["MapsBroker"], "command line")).error);
         Assert.Empty(SelfRepairWarnings());
+        Assert.Null(Assert.Single(Saved(paths)).UnderWay); // done
 
-        // Switched on again outside PoolWatch at once. Each check here is a PoolWatch's first, so no check before it holds
-        // it back (one runs every 5 minutes).
+        // Switched on again outside PoolWatch at once: the tray's next look, within LookAgainMs, reports it.
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true, ProcessId = 40 };
-        var atMost = ServicesController.TurnOffAtMost;
-        CheckAt(saved + atMost - TimeSpan.FromSeconds(1));
-        CheckAt(saved - atMost + TimeSpan.FromSeconds(1));
-        Assert.Empty(SelfRepairWarnings());
-        CheckAt(saved + atMost);
-        CheckAt(saved - atMost); // a clock set back that far or more since the save
-        Assert.Equal([MapsBrokerSwitchedOn, MapsBrokerSwitchedOn], SelfRepairWarnings());
+        _clock.NowMs += ServicesController.LookAgainMs;
+        tray.CheckSelfRepair();
+        Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
+    }
 
-        void CheckAt(DateTime when) => new ServicesController(paths, LogOf(paths), _findings.Add, _ => null, _ => null, svc).CheckSelfRepair(when);
+    /// <summary>A change under way in another PoolWatch: its record as that PoolWatch saved it before it acted.</summary>
+    private ServiceChange UnderWayIn(int pid, long tickMs) => new()
+    {
+        Service = "MapsBroker", OriginalStart = ServiceStartType.Automatic, OriginalRunning = true, NewStart = ServiceStartType.Disabled,
+        ChangedUtc = DateTime.UtcNow, Via = "command line", UnderWay = new ChangeUnderWay { Pid = pid, ProcessStarted = 1, TickMs = tickMs },
+    };
+
+    /// <summary>
+    /// The check holds back for another PoolWatch's change only while that change can still be under way: the process
+    /// that marked it still runs (the same one: a later process given its number is not it), and the change began less
+    /// than the longest a change can take ago, on Windows' own clock. A PoolWatch that ended mid-change, or that hangs past
+    /// that, no longer holds a switch-on back.
+    /// </summary>
+    [Theory]
+    [InlineData("runs", false)]
+    [InlineData("ended", true)]
+    [InlineData("reused", true)]  // its number now another process's
+    [InlineData("hangs", true)]   // still running, longer than a change can take
+    [InlineData("future", true)]  // a mark from a clock that is not this boot's
+    public void AnotherPoolWatchsMarkHoldsTheCheckBackOnlyWhileItsChangeCanBeUnderWay(string how, bool reported)
+    {
+        long atMost = (long)ServicesController.ChangeAtMost(ServiceControl.DefaultControlWaitSeconds).TotalMilliseconds;
+        long began = how switch { "hangs" => _clock.NowMs - atMost - 1, "future" => _clock.NowMs + 60_000, _ => _clock.NowMs - 1000 };
+        var (tray, svc, _) = New(s => s.Live["MapsBroker"] = s.Live["MapsBroker"] with { ProcessId = 40 }, saved: [UnderWayIn(CommandLine, began)]);
+        if (how is not "ended") _clock.Running.Add((CommandLine, how == "reused" ? 2 : 1));
+        _clock.NowMs += 1; // the check comes now
+        tray.CheckSelfRepair();
+        Assert.Equal(reported ? [MapsBrokerSwitchedOn] : [], SelfRepairWarnings());
     }
 
     /// <summary>
-    /// The longest a Turn off can take is the sum of its waits: the wait to settle and the wait for the stop, Windows' wait
-    /// on a busy service for each stop request, and the margin for the rest. One left out, the check could read a Turn off
-    /// from the command line, still under way, as switched back on outside PoolWatch. As the parts stand, that is 105
-    /// seconds; a part made longer makes the skip longer, and so hides a real switch-on for longer, so the sum is pinned too.
+    /// The longest a change can take follows Windows' wait on a busy service on this PC (ServicesPipeTimeout): a change
+    /// from the command line whose stop requests Windows holds 3 minutes each still holds the check back, as long as it can
+    /// still be under way.
     /// </summary>
     [Fact]
-    public void TheLongestTurnOffIsTheSumOfItsWaits()
+    public void ALongerServicesPipeTimeoutHoldsTheCheckBackForAsLong()
     {
-        Assert.Equal(TimeSpan.FromSeconds(ServiceControl.StopWaitSeconds + ServiceControl.StopWaitSeconds
-                                          + ServiceControl.StopRequestsAtMost * ServiceControl.BusyServiceWaitSeconds
-                                          + ServicesController.TurnOffMarginSeconds),
-            ServicesController.TurnOffAtMost);
-        Assert.Equal(TimeSpan.FromSeconds(105), ServicesController.TurnOffAtMost);
+        _clock.ControlWaitSeconds = 180;
+        long began = _clock.NowMs - 300_000; // 5 minutes ago: more than 105 seconds, less than 20 + 20 + 2 * 180 + 5
+        var (tray, _, _) = New(s => s.Live["MapsBroker"] = s.Live["MapsBroker"] with { ProcessId = 40 }, saved: [UnderWayIn(CommandLine, began)]);
+        _clock.Running.Add((CommandLine, 1));
+        tray.CheckSelfRepair();
+        Assert.Empty(SelfRepairWarnings());
+        _clock.ControlWaitSeconds = ServiceControl.DefaultControlWaitSeconds;
+        _clock.NowMs += ServicesController.LookAgainMs;
+        tray.CheckSelfRepair();
+        Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
+    }
+
+    /// <summary>
+    /// The longest a change can take is the sum of its waits: the wait to settle and the wait for the stop, Windows' wait
+    /// on a busy service for each stop request (30 seconds unless ServicesPipeTimeout sets it longer), and the margin for
+    /// the rest. One left out, the check could read a change another PoolWatch still has under way, but hanging or slow, as
+    /// switched back on outside PoolWatch. With Windows' default wait that is 105 seconds.
+    /// </summary>
+    [Fact]
+    public void TheLongestChangeIsTheSumOfItsWaits()
+    {
+        foreach (int wait in new[] { ServiceControl.DefaultControlWaitSeconds, 180 })
+            Assert.Equal(TimeSpan.FromSeconds(ServiceControl.StopWaitSeconds + ServiceControl.StopWaitSeconds
+                                              + ServiceControl.StopRequestsAtMost * wait + ServicesController.ChangeMarginSeconds),
+                ServicesController.ChangeAtMost(wait));
+        Assert.Equal(TimeSpan.FromSeconds(105), ServicesController.ChangeAtMost(ServiceControl.DefaultControlWaitSeconds));
+    }
+
+    /// <summary>
+    /// The check is timed on the host's clock alone (<see cref="IServicesHost.NowMs"/>, which only goes forward), every 5
+    /// minutes: not before 5 minutes on that clock, and at once when they are up, with no other clock read. That the real
+    /// host's clock is Environment.TickCount64, which setting the system clock does not move, is
+    /// <c>ServiceControlTests.TheRealCheckThatAProcessStillRunsKnowsThisOne</c>.
+    /// </summary>
+    [Fact]
+    public void TheCheckRunsEveryFiveMinutesOnTheHostsClockAlone()
+    {
+        var (ctl, svc, _) = New();
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        ctl.CheckSelfRepair();
+        svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true, ProcessId = 40 };
+        _clock.NowMs += ServicesController.SelfRepairEveryMs - 1;
+        ctl.CheckSelfRepair();
+        Assert.Empty(SelfRepairWarnings()); // not due yet
+        _clock.NowMs += 1;
+        ctl.CheckSelfRepair();
+        Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
+    }
+
+    /// <summary>
+    /// "Saved about N cores over the hour after" is timed on the same clock that only goes forward: the finding comes once
+    /// that clock has moved an hour since the Turn off, not before, whatever the system clock does meanwhile.
+    /// </summary>
+    [Fact]
+    public void TheSavedFindingComesAnHourAfterTheTurnOffOnTheClockThatOnlyGoesForward()
+    {
+        var (ctl, _, _) = New();
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        IReadOnlyList<Core.Model.ServiceEntry> none = [];
+        bool Reported() => _findings.Any(f => f.Title.StartsWith("Service turned off an hour ago: MapsBroker", StringComparison.Ordinal));
+        for (int sec = 10; sec < 3600; sec += 10) { _clock.NowMs += 10_000; ctl.ObserveSavings(none); }
+        Assert.False(Reported());
+        Assert.Contains("so far (59 min measured)", ctl.SavingsText("MapsBroker"));
+        _clock.NowMs += 10_000;
+        ctl.ObserveSavings(none);
+        Assert.True(Reported());
+    }
+
+    /// <summary>
+    /// "--service-restore" while the app runs: the Put back from the command line marks its record before it acts, so the
+    /// app's check, reading the service already back on but the record still there, does not report it as switched back
+    /// on outside PoolWatch; once the Put back is done the record is gone, and there is nothing to report.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)] // the check read the record just before the Put back marked it
+    public void APutBackFromTheCommandLineIsNotReadAsSwitchedOnOutside(bool readBeforeTheMark)
+    {
+        var (tray, svc, paths) = New();
+        Assert.Null(Assert.Single(tray.Apply(["MapsBroker"], "manual")).error);
+        _clock.Running.Add((CommandLine, 1));
+        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc, Host(CommandLine));
+        List<(string service, string? error)>? restored = null;
+        if (readBeforeTheMark)
+        {
+            // The app's check reads the record, then the whole Put back runs while the check reads the services.
+            svc.OnEnumerate = () => restored = commandLine.Restore("MapsBroker");
+            Check(tray);
+        }
+        else
+        {
+            // The app's check comes while the Put back is under way: the service back on and started again, its record still there.
+            svc.OnRestore = () =>
+            {
+                Assert.Equal(CommandLine, Assert.Single(Saved(paths)).UnderWay?.Pid); // marked before it acted
+                tray.CheckSelfRepair(); // its first check: due now
+            };
+            restored = commandLine.Restore("MapsBroker");
+        }
+        Assert.Equal([("MapsBroker", (string?)null)], restored);
+        Assert.Equal((ServiceStartType.Automatic, true), (svc.Live["MapsBroker"].StartType, svc.Live["MapsBroker"].Running));
+        Assert.Empty(Saved(paths));
+        Check(tray);
+        Assert.Empty(SelfRepairWarnings());
+    }
+
+    /// <summary>
+    /// A Put back that fails keeps its record, and takes its under-way mark off again, so the check reads the service as
+    /// before.
+    /// </summary>
+    [Fact]
+    public void APutBackThatFailsTakesItsMarkOff()
+    {
+        var (ctl, svc, paths) = New();
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        svc.OnRestoreStart = () => throw new InvalidOperationException("access denied");
+        Assert.Equal([("MapsBroker", (string?)"access denied")], ctl.Restore("MapsBroker"));
+        var kept = Assert.Single(Saved(paths));
+        Assert.Null(kept.UnderWay);
+    }
+
+    /// <summary>
+    /// "--service-restore" while the app runs puts MapsBroker back (marked, restored, started again), but cannot remove its
+    /// record (the file held open by a reader), and exits. The record still carries that Put back's mark, so the app's
+    /// check never reports PoolWatch's own Put back as switched back on outside it, then or later; the State column says
+    /// a Put back began, and the app's own Put back finishes it (it finds the service back and removes the record).
+    /// </summary>
+    [Fact]
+    public void ACommandLinePutBackWhoseRecordWasNotRemovedIsNotReportedAfterItExits()
+    {
+        var (tray, svc, paths) = New();
+        Assert.Null(Assert.Single(tray.Apply(["MapsBroker"], "manual")).error);
+        _clock.Running.Add((CommandLine, 1));
+        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc, Host(CommandLine));
+        FileStream? held = null;
+        svc.OnRestore = () => held = new FileStream(ChangeFile(paths), FileMode.Open, FileAccess.Read, FileShare.Read);
+        try { Assert.Equal([("MapsBroker", (string?)null)], commandLine.Restore("MapsBroker")); }
+        finally { held?.Dispose(); }
+        Assert.Equal((ServiceStartType.Automatic, true), (svc.Live["MapsBroker"].StartType, svc.Live["MapsBroker"].Running));
+        var left = Assert.Single(Saved(paths));
+        Assert.Equal((CommandLine, true), (left.UnderWay?.Pid, left.UnderWay?.PutBack));
+        _clock.Running.Remove((CommandLine, 1)); // the command line has exited
+
+        Check(tray);
+        Check(tray);
+        Assert.Empty(SelfRepairWarnings());
+        Assert.StartsWith("running (PoolWatch began to put back its change of ", ServicePlan.StateText(tray.Options().Single(o => o.Service.Name == "MapsBroker")));
+
+        Assert.Equal([("MapsBroker", (string?)null)], tray.Restore("MapsBroker"));
+        Assert.Empty(Saved(paths));
+        Assert.Contains("was already back to Automatic", _findings.Last().Title);
+    }
+
+    /// <summary>
+    /// A Put back from the command line whose start takes longer than the bound on a change (Windows starts the services
+    /// it depends on first): the app's check, past that bound while the Put back still runs, reads the service at its
+    /// original start type, as that Put back leaves it, and does not report it as switched back on outside PoolWatch.
+    /// </summary>
+    [Fact]
+    public void APutBackThatOutlastsTheBoundOnAChangeIsNotReported()
+    {
+        var (tray, svc, paths) = New();
+        Assert.Null(Assert.Single(tray.Apply(["MapsBroker"], "manual")).error);
+        _clock.Running.Add((CommandLine, 1));
+        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc, Host(CommandLine));
+        svc.OnRestore = () =>
+        {
+            Assert.True(Assert.Single(Saved(paths)).UnderWay?.PutBack);
+            _clock.NowMs += (long)ServicesController.ChangeAtMost(_clock.ControlWaitSeconds).TotalMilliseconds + 1;
+            tray.CheckSelfRepair(); // due, and past the bound on a change: the mark alone no longer holds it back
+        };
+        Assert.Equal([("MapsBroker", (string?)null)], commandLine.Restore("MapsBroker"));
+        Assert.Empty(SelfRepairWarnings());
+        Assert.Empty(Saved(paths));
+    }
+
+    /// <summary>
+    /// A Turn off's mark is not a Put back's: a record whose Turn off from the command line was left marked (its process
+    /// gone), with the service switched back on outside PoolWatch to the original start type, is reported as usual.
+    /// </summary>
+    [Fact]
+    public void ATurnOffsLeftOverMarkDoesNotHideASwitchOn()
+    {
+        var (tray, svc, paths) = New();
+        _clock.Running.Add((CommandLine, 1));
+        var commandLine = new ServicesController(paths, LogOf(paths), _ => { }, _ => null, _ => null, svc, Host(CommandLine));
+        FileStream? held = null;
+        svc.OnApply = () => held = new FileStream(ChangeFile(paths), FileMode.Open, FileAccess.Read, FileShare.Read);
+        try { Assert.Null(Assert.Single(commandLine.Apply(["MapsBroker"], "manual")).error); }
+        finally { held?.Dispose(); }
+        Assert.Equal((CommandLine, false), (Assert.Single(Saved(paths)).UnderWay?.Pid, Assert.Single(Saved(paths)).UnderWay?.PutBack));
+        _clock.Running.Remove((CommandLine, 1));
+        svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true, ProcessId = 40 };
+        Check(tray);
+        Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
+    }
+
+    /// <summary>
+    /// The uninstaller's path for a service: a record whose running state is not known is put back through the Undo the
+    /// uninstaller runs (ServicesSource, then Program.UninstallSummary): the summary says it was put back only in part,
+    /// that it was not started again and why, never a plain "Put back"; so does one whose start failed (Windows error
+    /// 1067), and a record of the published beta that says "not running" (that version saved it also for a service it
+    /// turned off while paused or starting). A plain one stays plain.
+    /// </summary>
+    [Theory]
+    [InlineData("not known")]
+    [InlineData("start failed")]
+    [InlineData("beta, not running")]
+    [InlineData("plain")]
+    public void TheUninstallSummarySaysWhatAPutBackDidNotDo(string how)
+    {
+        var record = new ServiceChange
+        {
+            Service = "MapsBroker", DisplayName = "Downloaded Maps Manager", OriginalStart = ServiceStartType.Automatic, OriginalRunning = how is "start failed" or "plain",
+            OriginalRunningNotKnown = how == "not known", NewStart = ServiceStartType.Disabled, ChangedUtc = new DateTime(2026, 10, 30, 9, 0, 0, DateTimeKind.Utc), Via = "manual",
+        };
+        string? beta = how != "beta, not running" ? null : """
+            [{"service":"MapsBroker","displayName":"Downloaded Maps Manager","originalStart":"Automatic","originalRunning":false,"newStart":"Disabled",
+              "changedUtc":"2026-10-30T09:00:00Z","via":"manual","beforeCores":null,"beforePageFaultsPerSec":null,"notStoppedPid":null}]
+            """;
+        var (ctl, svc, _) = New(s =>
+        {
+            s.Live["MapsBroker"] = s.Live["MapsBroker"] with { StartType = ServiceStartType.Disabled, Running = false };
+            if (how == "start failed") s.CannotStart.Add("MapsBroker");
+        }, saved: beta is null ? [record] : null, file: beta);
+        var source = new Engine.Changes.ServicesSource(ctl);
+        var change = Assert.Single(source.List());
+        var result = source.Undo(change, confirmed: false);
+        Assert.True(result.Done);
+        Assert.Equal(how == "plain", svc.Live["MapsBroker"].Running); // started again only when it was known to run
+        string line = Assert.Single(Program.UninstallSummary([change], null, [(change, result)], DateTime.Now).Split(Environment.NewLine),
+            l => l.Contains("ut back: ", StringComparison.Ordinal));
+        Assert.Equal(how switch
+        {
+            "start failed" => "Partly put back: Turned off Downloaded Maps Manager (MapsBroker). The start type is back to Automatic, but starting it again failed: error 1067.",
+            "plain" => "Put back: Turned off Downloaded Maps Manager (MapsBroker)",
+            _ => "Partly put back: Turned off Downloaded Maps Manager (MapsBroker). The start type is back to Automatic, but " + ServicePlan.RunningNotKnownText + ".",
+        }, line);
+    }
+
+    /// <summary>
+    /// --service-off and --service-restore exit with a code that says whether everything asked for was done: 0 when it
+    /// was (a service off already, and a Put back whose start type is back but that was not started again, count as
+    /// done, and so does "all" with nothing recorded); 10 when a service was not turned off, or not stopped, or the services
+    /// could not be read; 8 when a service was not put back (its record kept), also when another was put back in the same
+    /// run, and when no change of the service named is recorded. Each result is printed.
+    /// </summary>
+    [Fact]
+    public void TheCommandLineSaysByItsExitCodeWhetherEverythingWasDone()
+    {
+        var (ctl, svc, _) = New(s =>
+        {
+            s.Add("Fax", ServiceStartType.Disabled, running: false);
+            s.Add("XblGameSave", ServiceStartType.Automatic, true, 0, "MapsBroker");
+            s.Add("WinDefend", ServiceStartType.Automatic, running: true);
+        });
+        int Run(string? off, string? restore, out string printed)
+        {
+            var output = new StringWriter();
+            int code = Program.Services(ctl, null, off, restore, output);
+            printed = output.ToString();
+            return code;
+        }
+
+        Assert.Equal(0, Run("Fax", null, out var said)); // off already
+        Assert.Equal("Fax: " + ServicesController.OffAlready + Environment.NewLine, said);
+        Assert.Equal(Engine.ExitCodes.NotAllTurnedOff, Run("WinDefend", null, out said)); // refused: protected
+        Assert.Contains("protected", said);
+        Assert.Equal(Engine.ExitCodes.NotAllTurnedOff, Run("MapsBroker", null, out said)); // set to Disabled, not stopped: XblGameSave runs
+        Assert.True(ServicePlan.IsNotStoppedText(said["MapsBroker: ".Length..].TrimEnd()), said);
+        svc.Live["XblGameSave"] = svc.Live["XblGameSave"] with { Running = false };
+        svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { Running = false };
+        Assert.Equal(0, Run(null, "all", out said)); // put back
+        Assert.Equal("MapsBroker: restored" + Environment.NewLine, said);
+
+        Assert.Equal(0, Run("MapsBroker", null, out said));
+        svc.CannotStart.Add("MapsBroker");
+        Assert.Equal(0, Run(null, "MapsBroker", out said)); // put back, not started again: said, and put back all the same
+        Assert.Contains("starting it again failed", said);
+
+        Assert.Equal(0, Run("MapsBroker", null, out _));
+        svc.OnRestoreStart = () => throw new InvalidOperationException("access denied");
+        Assert.Equal(Engine.ExitCodes.NotAllPutBack, Run(null, "MapsBroker", out said)); // not put back: its record is kept
+        Assert.Equal("MapsBroker: access denied" + Environment.NewLine, said);
+
+        // "all", one put back and one not: 8, by the one not put back, whatever the other did.
+        svc.Live["Fax"] = svc.Live["Fax"] with { StartType = ServiceStartType.Manual };
+        Assert.Equal(0, Run("Fax", null, out _));
+        Assert.Equal(["MapsBroker", "Fax"], ctl.Current().Select(c => c.Service));
+        svc.OnRestoreStart = () => throw new InvalidOperationException("access denied"); // the first one reached: MapsBroker
+        Assert.Equal(Engine.ExitCodes.NotAllPutBack, Run(null, "all", out said));
+        Assert.Equal("MapsBroker: access denied" + Environment.NewLine + "Fax: restored" + Environment.NewLine, said);
+        Assert.Equal("MapsBroker", Assert.Single(ctl.Current()).Service);
+
+        // A name PoolWatch holds no change of (typed wrong, say): said, and not done.
+        Assert.Equal(Engine.ExitCodes.NotAllPutBack, Run(null, "MapsBrokr", out said));
+        Assert.Equal("PoolWatch has not changed MapsBrokr: nothing to put back." + Environment.NewLine, said);
+        Assert.Equal("MapsBroker", Assert.Single(ctl.Current()).Service); // nothing else was touched
+        Assert.Equal(0, Run(null, "all", out said)); // put back
+        Assert.Equal(0, Run(null, "all", out said)); // "all" with nothing recorded: done
+        Assert.Equal("Nothing to put back: PoolWatch has not changed any service." + Environment.NewLine, said);
+
+        svc.Unreadable = true;
+        Assert.Equal(Engine.ExitCodes.NotAllTurnedOff, Run("MapsBroker", null, out said));
+        Assert.Contains("could not read the services", said);
+        Assert.Equal(Engine.ExitCodes.NotAllPutBack, Run(null, "all", out said));
+        Assert.Contains("could not read the services", said);
+    }
+
+    // ---------------------------------------------------------------- what PoolWatch records of whether it ran
+
+    /// <summary>
+    /// The services list read MapsBroker as not known to run (Windows could not give its state), as starting or paused, or
+    /// as stopped (it started after the list was read), but Turn off found it running and stopped it: its record says it
+    /// was running, from what the stop saw, and Put back starts it again and says so. For the stopped row only what the
+    /// change saw can say so: the record saved first says it is not known.
+    /// </summary>
+    [Theory]
+    [InlineData(0u)]                                    // Windows could not say when the list was read
+    [InlineData(ServiceControl.SERVICE_START_PENDING)]  // starting (a delayed-start service at sign-in, say)
+    [InlineData(ServiceControl.SERVICE_PAUSED)]
+    [InlineData(ServiceControl.SERVICE_STOPPED)]        // stopped when the list was read; running when Turn off looked
+    public void TurnOffRecordsWhatItsStopSawAndPutBackStartsItAgain(uint stateWhenRead)
+    {
+        var (running, between) = ServiceControl.RunState(stateWhenRead);
+        var (ctl, svc, paths) = New(s => s.Live["MapsBroker"] = s.Live["MapsBroker"] with
+        {
+            Running = running, NeitherRunningNorStopped = between, StateUnknown = ServiceControl.StateUnknown(stateWhenRead), Between = ServiceControl.BetweenOf(stateWhenRead),
+        });
+        svc.SawRunning = true; // by the time Turn off looks, Windows says it runs, and it is stopped
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        var record = Assert.Single(Saved(paths));
+        Assert.Equal((true, false), (record.OriginalRunning, record.OriginalRunningNotKnown));
+
+        Assert.Equal([("MapsBroker", (string?)null)], ctl.Restore("MapsBroker"));
+        Assert.Contains("restore MapsBroker", svc.Calls);
+        Assert.True(svc.Live["MapsBroker"].Running);
+        Assert.Equal(("Service put back: MapsBroker -> Automatic, started again (it was running before)", FindingSeverity.Info),
+            (_findings.Last().Title, _findings.Last().Severity));
+    }
+
+    /// <summary>
+    /// The record saved before the change says "running" only when the list read it so, and "not known" otherwise, also
+    /// for a service the list read stopped (it may start before Turn off reaches it). The change then records what it saw:
+    /// running, not running, or, when it could not tell either, the saved value stands.
+    /// </summary>
+    [Theory]
+    [InlineData("unknown", null, false, true)]
+    [InlineData("unknown", false, false, false)]
+    [InlineData("unknown", true, true, false)]
+    [InlineData("stopped", null, false, true)]
+    [InlineData("stopped", false, false, false)]
+    [InlineData("stopped", true, true, false)]   // it started after the list was read: the stop found it running
+    [InlineData("running", false, false, false)] // it stopped after the list was read: Turn off found it stopped
+    public void ARecordSavesNotKnownUntilTheChangeSawWhetherItRan(string read, bool? sawRunning, bool running, bool notKnown)
+    {
+        var (ctl, svc, paths) = New(s => s.Live["MapsBroker"] = read switch
+        {
+            "unknown" => s.Live["MapsBroker"] with { Running = false, NeitherRunningNorStopped = true, StateUnknown = true },
+            "stopped" => s.Live["MapsBroker"] with { Running = false },
+            _ => s.Live["MapsBroker"],
+        });
+        (bool, bool)? savedFirst = null;
+        svc.OnApply = () => { var first = Assert.Single(Saved(paths)); savedFirst = (first.OriginalRunning, first.OriginalRunningNotKnown); };
+        svc.SawRunning = sawRunning;
+        svc.SawNothing = sawRunning is null; // Windows could not say when Turn off looked
+        ctl.Apply(["MapsBroker"], "manual");
+        Assert.Equal(read == "running" ? (true, false) : (false, true), savedFirst);
+        var record = Assert.Single(Saved(paths));
+        Assert.Equal((running, notKnown), (record.OriginalRunning, record.OriginalRunningNotKnown));
+    }
+
+    /// <summary>
+    /// The list read MapsBroker stopped; it started before Turn off reached it, so the stop was asked for and taken; then
+    /// the save at the end of the change failed (the record file held open by a reader). The record never says "was not
+    /// running": it says not known, so Put back sets the start type back without starting it and says it does not know
+    /// whether it was running, never a plain "put back".
+    /// </summary>
+    [Fact]
+    public void AFailedEndOfChangeSaveNeverLeavesAPlainWasNotRunning()
+    {
+        var (ctl, svc, paths) = New(s => s.Live["MapsBroker"] = s.Live["MapsBroker"] with { Running = false });
+        svc.SawRunning = true; // running by the time Turn off looked: its stop was asked for and taken
+        FileStream? held = null;
+        svc.OnApply = () => held = new FileStream(ChangeFile(paths), FileMode.Open, FileAccess.Read, FileShare.Read);
+        try { Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error); }
+        finally { held?.Dispose(); }
+        var record = Assert.Single(Saved(paths));
+        Assert.NotNull(record.UnderWay); // the end of the change was not saved
+        Assert.Equal((false, true), (record.OriginalRunning, record.OriginalRunningNotKnown));
+
+        Assert.Equal([("MapsBroker", (string?)("the start type is back to Automatic, but " + ServicePlan.RunningNotKnownText))], ctl.Restore("MapsBroker"));
+        Assert.Equal((ServiceStartType.Automatic, false), (svc.Live["MapsBroker"].StartType, svc.Live["MapsBroker"].Running));
+        Assert.Empty(Saved(paths));
+    }
+
+    /// <summary>
+    /// A second Turn off keeps what the first record says of whether the service was running, whatever the second change
+    /// saw: MapsBroker was turned off while it ran (or when that was not known); later something set it back to Automatic
+    /// but it stayed stopped, and it is turned off again. The record still says what the first change saw, so Put back
+    /// starts it again (or says it does not know).
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)] // the first change could not tell
+    public void AReApplyKeepsWhetherTheServiceWasRunningAtTheFirstChange(bool firstSawRunning)
+    {
+        var (ctl, svc, paths) = New(s =>
+        {
+            if (!firstSawRunning) s.Live["MapsBroker"] = s.Live["MapsBroker"] with { Running = false, NeitherRunningNorStopped = true, StateUnknown = true };
+        });
+        svc.SawNothing = !firstSawRunning;
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        var first = Assert.Single(Saved(paths));
+        Assert.Equal((firstSawRunning, !firstSawRunning), (first.OriginalRunning, first.OriginalRunningNotKnown));
+
+        svc.SawNothing = false;
+        svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = false, NeitherRunningNorStopped = false, StateUnknown = false };
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error); // this change sees it stopped
+        var again = Assert.Single(Saved(paths));
+        Assert.Equal((ServiceStartType.Automatic, firstSawRunning, !firstSawRunning), (again.OriginalStart, again.OriginalRunning, again.OriginalRunningNotKnown));
+
+        var putBack = Assert.Single(ctl.Restore("MapsBroker"));
+        Assert.Equal(firstSawRunning, svc.Live["MapsBroker"].Running);
+        Assert.Equal(firstSawRunning ? null : "the start type is back to Automatic, but " + ServicePlan.RunningNotKnownText, putBack.error);
+    }
+
+    /// <summary>
+    /// The list saw MapsBroker running, and the change could not tell (Windows could not give its state when Turn off
+    /// looked): what the list saw stands, so the record says it was running (never "not known"), Active changes says so,
+    /// and Put back starts it again.
+    /// </summary>
+    [Fact]
+    public void TheListSawItRunningAndTheChangeCouldNotTellKeepsRunning()
+    {
+        var (ctl, svc, paths) = New();
+        svc.SawNothing = true;
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        var record = Assert.Single(Saved(paths));
+        Assert.Equal((true, false), (record.OriginalRunning, record.OriginalRunningNotKnown));
+        Assert.Equal("service · was Automatic and running", Assert.Single(new Engine.Changes.ServicesSource(ctl).List()).Detail);
+
+        Assert.Equal([("MapsBroker", (string?)null)], ctl.Restore("MapsBroker"));
+        Assert.True(svc.Live["MapsBroker"].Running);
+        Assert.Equal("Service put back: MapsBroker -> Automatic, started again (it was running before)", _findings.Last().Title);
+    }
+
+    /// <summary>
+    /// A record whose running state is not known says so in Active changes ("not known if it was running"), never the words
+    /// of one that was not running ("was Automatic" alone).
+    /// </summary>
+    [Fact]
+    public void ActiveChangesSaysWhenItIsNotKnownWhetherTheServiceRan()
+    {
+        var (ctl, svc, _) = New(s => s.Live["MapsBroker"] = s.Live["MapsBroker"] with { Running = false, NeitherRunningNorStopped = true, StateUnknown = true });
+        svc.StopRefused = ServiceControl.Looked(0, asked: false, timeUp: false).Why; // Windows could not say when Turn off looked either
+        svc.SawNothing = true;
+        ctl.Apply(["MapsBroker"], "manual");
+        Assert.Equal("service · was Automatic, not known if it was running", Assert.Single(new Engine.Changes.ServicesSource(ctl).List()).Detail);
+    }
+
+    /// <summary>
+    /// A record whose running state is not known: Put back sets the start type back, does not start the service, and says
+    /// plainly that it could not know (never a plain "put back"); the record goes. A service running by then is back as it
+    /// was, and nothing more is said.
+    /// </summary>
+    [Fact]
+    public void PutBackSaysPlainlyWhenItCouldNotKnowWhetherTheServiceRan()
+    {
+        var notKnown = new ServiceChange
+        {
+            Service = "MapsBroker", OriginalStart = ServiceStartType.Automatic, OriginalRunning = false, OriginalRunningNotKnown = true,
+            NewStart = ServiceStartType.Disabled, ChangedUtc = DateTime.UtcNow.AddHours(-1), Via = "manual",
+        };
+        var (ctl, svc, paths) = New(s => s.Live["MapsBroker"] = s.Live["MapsBroker"] with { StartType = ServiceStartType.Disabled, Running = false }, saved: [notKnown]);
+        string expected = "the start type is back to Automatic, but " + ServicePlan.RunningNotKnownText;
+        Assert.Equal([("MapsBroker", (string?)expected)], ctl.Restore("MapsBroker"));
+        Assert.Equal((ServiceStartType.Automatic, false), (svc.Live["MapsBroker"].StartType, svc.Live["MapsBroker"].Running));
+        Assert.Empty(Saved(paths));
+        Assert.Equal(("Service put back: MapsBroker -> Automatic, but " + ServicePlan.RunningNotKnownText, FindingSeverity.Warning),
+            (_findings.Last().Title, _findings.Last().Severity));
+
+        // Already back and running: only the record goes.
+        var (again, svc2, paths2) = New(s => s.Live["MapsBroker"] = s.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true }, saved: [notKnown]);
+        Assert.Equal([("MapsBroker", (string?)null)], again.Restore("MapsBroker"));
+        Assert.DoesNotContain("restore MapsBroker", svc2.Calls);
+        Assert.Empty(Saved(paths2));
+    }
+
+    /// <summary>
+    /// A Turn off record service-changes.json holds from the published beta (no "originalRunningNotKnown", no "underWay"),
+    /// of an Automatic original, still loads and is put back. That version saved "running" only when the services list read
+    /// the service as RUNNING: its "running" is started again; its "not running" (also what it saved for a service it
+    /// turned off while paused, starting or in a state Windows could not give) is not known, so Put back of the service,
+    /// stopped then, sets the start type back, does not start it, and says PoolWatch does not know whether it was running.
+    /// Saved again, the record says whether that is known. Not every "not running" record of that version gets those
+    /// words: one whose original is Disabled is put back whole (<see cref="ABetaWindowsDefaultRecordIsPutBackWhole"/>), and
+    /// so is one whose service runs by the time it is put back.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ARecordFromThePublishedBetaIsPutBackAsItSays(bool originalRunning)
+    {
+        string beta = $$"""
+            [
+              {
+                "service": "MapsBroker",
+                "displayName": "Downloaded Maps Manager",
+                "originalStart": "Automatic",
+                "originalRunning": {{(originalRunning ? "true" : "false")}},
+                "newStart": "Disabled",
+                "changedUtc": "2026-10-30T09:15:00Z",
+                "via": "manual",
+                "beforeCores": 0.2,
+                "beforePageFaultsPerSec": 1500,
+                "notStoppedPid": null
+              }
+            ]
+            """;
+        var (ctl, svc, paths) = New(s => s.Live["MapsBroker"] = s.Live["MapsBroker"] with { StartType = ServiceStartType.Disabled, Running = false }, file: beta);
+        var record = Assert.Single(ctl.Current());
+        Assert.Equal((originalRunning, !originalRunning, (ChangeUnderWay?)null), (record.OriginalRunning, record.OriginalRunningNotKnown, record.UnderWay));
+        Assert.Equal([("MapsBroker", originalRunning ? null : "the start type is back to Automatic, but " + ServicePlan.RunningNotKnownText)],
+            ctl.Restore("MapsBroker"));
+        Assert.Equal((ServiceStartType.Automatic, originalRunning), (svc.Live["MapsBroker"].StartType, svc.Live["MapsBroker"].Running));
+        Assert.Empty(Saved(paths));
+        Assert.Equal(originalRunning ? FindingSeverity.Info : FindingSeverity.Warning, _findings.Last().Severity);
+
+        string written = ServiceChangeLog.ToJson([record]);
+        Assert.Contains($"\"originalRunningNotKnown\": {(originalRunning ? "false" : "true")}", written);
+        Assert.DoesNotContain("underWay", written);
+    }
+
+    /// <summary>
+    /// A "Set to its Windows default" record of the published beta, in that version's file shape: its original is Disabled
+    /// and it says "not running", which reads as not known. Put back sets an original of Disabled back to Disabled and stops
+    /// the service if it runs, whatever it did before, so nothing is left undone: the service, stopped or running at Put
+    /// back, is Disabled and stopped, the record goes, the finding is plain (Info), the result has no caveat, and the
+    /// uninstaller's summary has a plain "Put back:" line for it, never "Partly put back:".
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ABetaWindowsDefaultRecordIsPutBackWhole(bool runningNow)
+    {
+        string beta = """
+            [
+              {
+                "service": "MapsBroker",
+                "displayName": "Downloaded Maps Manager",
+                "originalStart": "Disabled",
+                "originalRunning": false,
+                "newStart": "Automatic",
+                "changedUtc": "2026-10-30T09:15:00Z",
+                "via": "Windows default",
+                "beforeCores": null,
+                "beforePageFaultsPerSec": null,
+                "notStoppedPid": null
+              }
+            ]
+            """;
+        var (ctl, svc, paths) = New(s => s.Live["MapsBroker"] = s.Live["MapsBroker"] with
+        {
+            StartType = ServiceStartType.Automatic, Running = runningNow, ProcessId = runningNow ? 40 : 0,
+        }, file: beta);
+        var record = Assert.Single(ctl.Current());
+        Assert.Equal((false, true), (record.OriginalRunning, record.OriginalRunningNotKnown));
+        var source = new Engine.Changes.ServicesSource(ctl);
+        var row = Assert.Single(source.List());
+        var result = source.Undo(row, confirmed: true);
+        Assert.Equal((true, (string?)null), (result.Done, result.Caveat));
+        Assert.Equal(["restore MapsBroker"], svc.Calls);
+        Assert.Equal((ServiceStartType.Disabled, false), (svc.Live["MapsBroker"].StartType, svc.Live["MapsBroker"].Running));
+        Assert.Empty(Saved(paths));
+        Assert.Equal(("Service put back: MapsBroker -> Disabled", FindingSeverity.Info), (_findings.Last().Title, _findings.Last().Severity));
+        string summary = Program.UninstallSummary([row], null, [(row, result)], new DateTime(2026, 11, 2, 9, 0, 0));
+        Assert.Equal("Put back: " + row.What, summary.Split(Environment.NewLine)[1]);
+    }
+
+    /// <summary>
+    /// Put back of a record whose original is Disabled (undoing "Set to its Windows default") does not read a service that
+    /// is Disabled but still running, paused or not seen stopped as already back: it goes through Put back, which stops it,
+    /// and the record goes only then. One Disabled and seen stopped is already back.
+    /// </summary>
+    [Theory]
+    [InlineData("running", false)]
+    [InlineData("paused", false)]
+    [InlineData("stopped", true)]
+    public void PuttingBackDisabledReadsARunningServiceAsNotBackYet(string state, bool already)
+    {
+        var setDefault = new ServiceChange
+        {
+            Service = "MapsBroker", OriginalStart = ServiceStartType.Disabled, OriginalRunning = false, NewStart = ServiceStartType.Automatic,
+            ChangedUtc = DateTime.UtcNow.AddHours(-1), Via = ServicePlan.ViaWindowsDefault,
+        };
+        var (ctl, svc, paths) = New(s => s.Live["MapsBroker"] = s.Live["MapsBroker"] with
+        {
+            StartType = ServiceStartType.Disabled, Running = state == "running", NeitherRunningNorStopped = state == "paused",
+            Between = state == "paused" ? ServiceRunState.Paused : null, ProcessId = state == "running" ? 40 : 0,
+        }, saved: [setDefault]);
+        Assert.Equal([("MapsBroker", (string?)null)], ctl.Restore("MapsBroker"));
+        Assert.Equal(already ? [] : ["restore MapsBroker"], svc.Calls);
+        Assert.Equal((false, false), (svc.Live["MapsBroker"].Running, svc.Live["MapsBroker"].NeitherRunningNorStopped));
+        Assert.Empty(Saved(paths));
+        Assert.Equal(already, _findings.Last().Title.Contains("was already back to Disabled", StringComparison.Ordinal));
+    }
+
+    // ---------------------------------------------------------------- a service list that cannot be read
+
+    /// <summary>
+    /// When the services cannot be read (the service control manager cannot be opened, or Windows lists none), that is not
+    /// known, never "nothing installed": Turn off and the profile at start change nothing and say why, Put back keeps every
+    /// record and says why (never "no longer installed"), "Set to its Windows default" refuses, and the self-repair check
+    /// neither reports nor forgets what it reported: once the list reads again, a state reported before is not reported again.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AServiceListThatCannotBeReadIsNotKnownNeverNothingInstalled(bool throws)
+    {
+        var (ctl, svc, paths) = New();
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true, ProcessId = 41 };
+        Check(ctl);
+        Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
+
+        if (throws) svc.Unreadable = true; else svc.ListsNone = true;
+        string why = "PoolWatch could not read the services: " + (throws ? "the service control manager could not be opened (error 5)" : "Windows listed no services");
+        Check(ctl);
+        Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings()); // nothing said, nothing forgotten
+        var run = ctl.ApplyProfile(new ServiceProfile("P", ["MapsBroker"]), ProfileAtStart.Via("P"));
+        Assert.Equal([("MapsBroker", why)], run.Skipped);
+        Assert.Empty(run.TurnedOff);
+        Assert.Equal([("(services)", (string?)why)], ctl.Apply(["MapsBroker"], "manual"));
+        Assert.Equal([("MapsBroker", (string?)why)], ctl.Restore("MapsBroker"));
+        Assert.Equal([("(services)", (string?)why)], ctl.Restore(null));
+        Assert.Equal([("MapsBroker", (string?)why)], ctl.RestoreToDefault("MapsBroker"));
+        Assert.Equal("MapsBroker", Assert.Single(Saved(paths)).Service); // kept
+        Assert.Equal(["apply MapsBroker"], svc.Calls);
+        Assert.DoesNotContain(_findings, f => f.Title.Contains("no longer installed", StringComparison.Ordinal));
+        Assert.Throws<ServicesNotReadException>(() => ctl.Options());
+
+        (svc.Unreadable, svc.ListsNone) = (false, false);
+        Check(ctl);
+        Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings()); // the same state, reported once
+    }
+
+    /// <summary>
+    /// The warned-once memory: a state reported is not reported again at the next checks while it stays; a different state
+    /// it is switched to is; once the service is seen off again, the same state is reported again; and a check that could
+    /// not read the services in between changes none of that.
+    /// </summary>
+    [Fact]
+    public void TheWarnedOnceMemoryHoldsAcrossAListThatCouldNotBeRead()
+    {
+        var (ctl, svc, _) = New();
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        void Set(ServiceStartType start, bool running) => svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = start, Running = running, ProcessId = running ? 41 : 0 };
+        Set(ServiceStartType.Automatic, true);
+        Check(ctl);
+        Check(ctl);
+        Assert.Single(SelfRepairWarnings());
+        svc.Unreadable = true;
+        Set(ServiceStartType.Disabled, false); // off again while it could not be read: not seen
+        Check(ctl);
+        Set(ServiceStartType.Automatic, true);
+        svc.Unreadable = false;
+        Check(ctl);
+        Assert.Single(SelfRepairWarnings()); // the same state, never seen off: not again
+        Set(ServiceStartType.Manual, true);
+        Check(ctl);
+        Assert.Equal(2, SelfRepairWarnings().Count); // a new state
+        Set(ServiceStartType.Disabled, false);
+        Check(ctl);
+        Set(ServiceStartType.Manual, true);
+        Check(ctl);
+        Assert.Equal(3, SelfRepairWarnings().Count); // seen off, then on again: reported again
+    }
+
+    // ---------------------------------------------------------------- a service the check could not read
+
+    /// <summary>MapsBroker as a listed service PoolWatch could not open: neither its start type nor its state is known.</summary>
+    private static void Unopenable(FakeServices s) => s.Live["MapsBroker"] = ServiceControl.Unread("MapsBroker", "Downloaded Maps Manager");
+
+    /// <summary>
+    /// A service PoolWatch turned off that it then cannot open, or whose start type alone, or state alone, it cannot read, is
+    /// not read by the self-repair check: no "re-enabled outside PoolWatch ... is Unknown again" (nor any warning) while it
+    /// reads so. Once it reads again, a real switch-on is reported.
+    /// </summary>
+    [Theory]
+    [InlineData("unopenable")]
+    [InlineData("start type")] // the configuration could not be read; the state could
+    [InlineData("state")]      // the state could not be read; the start type could (and is not Disabled)
+    public void AServiceTheCheckCouldNotReadIsNotReportedAsReEnabled(string unread)
+    {
+        var (ctl, svc, _) = New();
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        if (unread == "unopenable") Unopenable(svc);
+        else if (unread == "start type") svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Unknown, Running = true, ProcessId = 41 };
+        else svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = false, NeitherRunningNorStopped = true, StateUnknown = true };
+        Check(ctl);
+        Check(ctl);
+        Assert.Empty(SelfRepairWarnings());
+
+        svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true, NeitherRunningNorStopped = false, StateUnknown = false, ProcessId = 41 };
+        Check(ctl);
+        Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
+    }
+
+    /// <summary>
+    /// The warned-once memory across a check that could not read the service: a switch-on already reported is not reported
+    /// again once the service reads again in the same state (whether it could not be opened, or was Disabled with its state
+    /// not given), and the unread check reports nothing of its own.
+    /// </summary>
+    [Theory]
+    [InlineData("unopenable")]
+    [InlineData("Disabled, state not given")]
+    public void ACheckThatCouldNotReadTheServiceDoesNotResetTheWarnedOnceMemory(string unread)
+    {
+        var (ctl, svc, _) = New();
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        var on = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true, ProcessId = 41 };
+        svc.Live["MapsBroker"] = on;
+        Check(ctl);
+        if (unread == "unopenable") Unopenable(svc);
+        else svc.Live["MapsBroker"] = on with { StartType = ServiceStartType.Disabled, Running = false, ProcessId = 0, NeitherRunningNorStopped = true, StateUnknown = true };
+        Check(ctl);
+        svc.Live["MapsBroker"] = on;
+        Check(ctl);
+        Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
+    }
+
+    /// <summary>
+    /// A service whose Turn off could not stop it (Acme Maps, which depends on it, runs) keeps its mark across a check that
+    /// could not read it: read again as Turn off left it (Disabled, running in the same process), it is not reported as
+    /// switched back on, and its record still says it ran on.
+    /// </summary>
+    [Fact]
+    public void AKeptRunningServiceKeepsItsMarkAcrossACheckThatCouldNotReadIt()
+    {
+        var (ctl, svc, paths) = New(MapsPair);
+        Assert.NotNull(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        var asLeft = svc.Live["MapsBroker"];
+        Assert.Equal((ServiceStartType.Disabled, true, 40), (asLeft.StartType, asLeft.Running, Assert.Single(Saved(paths)).NotStoppedPid));
+        Unopenable(svc);
+        Check(ctl);
+        Assert.Equal(40, Assert.Single(Saved(paths)).NotStoppedPid);
+        svc.Live["MapsBroker"] = asLeft;
+        Check(ctl);
+        Assert.Empty(SelfRepairWarnings());
+        Assert.Equal(40, Assert.Single(Saved(paths)).NotStoppedPid);
+    }
+
+    /// <summary>
+    /// What was reported is forgotten only once the service is seen Disabled and STOPPED: one paused at Disabled (its process
+    /// still there) and then resumed is still in the state reported before, so "running again" is not repeated. Seen
+    /// stopped, a later start is reported again.
+    /// </summary>
+    [Fact]
+    public void APausedServiceDoesNotResetTheWarnedOnceMemory()
+    {
+        var (ctl, svc, _) = New();
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        var running = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Disabled, Running = true, ProcessId = 41 };
+        svc.Live["MapsBroker"] = running;
+        Check(ctl);
+        svc.Live["MapsBroker"] = running with { Running = false, NeitherRunningNorStopped = true, Between = ServiceRunState.Paused };
+        Check(ctl);
+        svc.Live["MapsBroker"] = running;
+        Check(ctl);
+        const string again = "Service re-enabled outside PoolWatch: MapsBroker is Disabled, running again (you turned it off). Turn it off again with " +
+                             "Turn off; Put back works again after that on the Services tab.";
+        Assert.Equal([again], SelfRepairWarnings());
+
+        svc.Live["MapsBroker"] = running with { Running = false, ProcessId = 0 }; // STOPPED
+        Check(ctl);
+        svc.Live["MapsBroker"] = running;
+        Check(ctl);
+        Assert.Equal([again, again], SelfRepairWarnings());
+    }
+
+    /// <summary>
+    /// Put back of a service PoolWatch can no longer open changes nothing, keeps the record, and says it could not read the
+    /// service's start type (never that it "was changed since"); once it reads again as PoolWatch left it, Put back works.
+    /// </summary>
+    [Fact]
+    public void PutBackOfAServiceItCannotOpenChangesNothingAndSaysWhy()
+    {
+        var (ctl, svc, paths) = New();
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        var asLeft = svc.Live["MapsBroker"];
+        Unopenable(svc);
+        var (service, error) = Assert.Single(ctl.Restore("MapsBroker"));
+        Assert.Equal("MapsBroker", service);
+        Assert.StartsWith("'MapsBroker': PoolWatch could not read its start type now", error);
+        Assert.DoesNotContain("changed since", error);
+        Assert.DoesNotContain("restore MapsBroker", svc.Calls);
+        Assert.Single(Saved(paths));
+
+        svc.Live["MapsBroker"] = asLeft;
+        Assert.Equal([("MapsBroker", (string?)null)], ctl.Restore("MapsBroker"));
+        Assert.Empty(Saved(paths));
+    }
+
+    /// <summary>
+    /// A check that could not read a service looks again soon (<see cref="ServicesController.LookAgainMs"/>), once: while it
+    /// stays unreadable, the checks after that come at the usual pace, so a service that never reads does not have the
+    /// services read every few seconds.
+    /// </summary>
+    [Fact]
+    public void ACheckThatCouldNotReadAServiceLooksAgainSoonOnce()
+    {
+        var (ctl, svc, _) = New();
+        Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
+        Unopenable(svc);
+        Check(ctl);
+        int reads = svc.Reads;
+        _clock.NowMs += ServicesController.LookAgainMs;
+        ctl.CheckSelfRepair();
+        Assert.Equal(reads + 1, svc.Reads); // looked again soon
+        _clock.NowMs += ServicesController.LookAgainMs;
+        ctl.CheckSelfRepair();
+        Assert.Equal(reads + 1, svc.Reads); // still unreadable: not again so soon
+        _clock.NowMs += ServicesController.SelfRepairEveryMs;
+        ctl.CheckSelfRepair();
+        Assert.Equal(reads + 2, svc.Reads); // at the usual pace
+    }
+
+    /// <summary>
+    /// The Services tab's status line when the services cannot be read says "PoolWatch could not read the services" once,
+    /// whether the read failed or Windows listed none: built, as the tab builds it, from the exception of its background
+    /// read (a task's, so wrapped). Any other error gives its own message.
+    /// </summary>
+    [Theory]
+    [InlineData(true, "PoolWatch could not read the services: the service control manager could not be opened (error 5). Refresh tries again.")]
+    [InlineData(false, "PoolWatch could not read the services: Windows listed no services. Refresh tries again.")]
+    public async Task TheTabSaysTheServicesCouldNotBeReadOnce(bool throws, string expected)
+    {
+        var (ctl, svc, _) = New();
+        if (throws) svc.Unreadable = true; else svc.ListsNone = true;
+        var read = Task.Run(() => ctl.Options());
+        await Assert.ThrowsAsync<ServicesNotReadException>(() => read);
+        Assert.Equal(expected, Ui.ServicesPageText.ReadFailed(read.Exception!));
+
+        var other = Task.Run(new Action(() => throw new UnauthorizedAccessException("Access is denied.")));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => other);
+        Assert.Equal("PoolWatch could not read the services: Access is denied. Refresh tries again.", Ui.ServicesPageText.ReadFailed(other.Exception!));
     }
 
     /// <summary>
@@ -1330,7 +2276,7 @@ public sealed class ServicesControllerTests : IDisposable
         Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true, ProcessId = 40 };
         File.WriteAllText(ChangeFile(paths), "{ damaged");
-        ctl.CheckSelfRepair(DateTime.UtcNow + ServicesController.TurnOffAtMost);
+        Check(ctl);
         Assert.Equal([MapsBrokerSwitchedOn], SelfRepairWarnings());
         Assert.Contains("damaged or empty", ctl.RecordError);
         Assert.Equal("{ damaged", File.ReadAllText(ChangeFile(paths))); // left as it is

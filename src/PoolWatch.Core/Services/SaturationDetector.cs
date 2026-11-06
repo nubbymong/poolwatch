@@ -2,11 +2,11 @@ using System.Globalization;
 
 namespace PoolWatch.Core.Services;
 
-/// <summary>A process's live cost in a window, with its identity (addendum 4 A): for the "PC is saturated" answer.</summary>
+/// <summary>A process's live cost in a window, with its identity: for the "PC is saturated" answer.</summary>
 public sealed record ProcessCost(int Pid, string Image, string Identity, double Cores, long PageFaultsPerSec, string? CatalogueService = null);
 
 /// <summary>
-/// The system-wide page-fault split per second (addendum 4 A): demand-zero (fresh zeroed memory: a vendor telemetry service's 887k/s storm in one report),
+/// The system-wide page-fault split per second: demand-zero (fresh zeroed memory: a vendor telemetry service's 887k/s storm in one report),
 /// transition (pages taken back from the standby / modified lists: no disk read) and hard (pages read from disk:
 /// "Pages Input/sec").
 /// </summary>
@@ -31,16 +31,21 @@ public readonly record struct FaultSplit(double DemandZeroPerSec, double Transit
 }
 
 /// <summary>
-/// One moment of system-wide load: CPU busy fraction (0..1 over all cores), run queue (threads waiting for a core; null when
-/// it was not measured: PDH unavailable), whether the lag probe trips, and the fault split.
+/// One moment of system-wide load, stamped on two clocks: <see cref="TimeUtc"/> for people and load.csv, and
+/// <see cref="TickMs"/>, milliseconds since Windows started (the sample's <see cref="Model.Sample.TickMs"/>), a clock that
+/// only goes forward whatever the system clock does: how long load has lasted is timed on it. A parameter of its own, and
+/// a record class, which has no constructor without parameters (a struct always has one, and an object initializer on
+/// it compiles without TickMs), so no point is made without it. Then the CPU busy fraction (0..1 over all cores), the run
+/// queue (threads waiting for a core; null when it was not measured: PDH unavailable), whether the lag probe trips, and
+/// the fault split.
 /// </summary>
-public readonly record struct LoadPoint(DateTime TimeUtc, double CpuFraction, double? RunQueue, int Cores, bool ProbeTripping, FaultSplit? Faults = null);
+public sealed record LoadPoint(DateTime TimeUtc, long TickMs, double CpuFraction, double? RunQueue, int Cores, bool ProbeTripping, FaultSplit? Faults = null);
 
 /// <summary>
-/// "PC is saturated" (addendum 4 A): the run queue stays above the core count, or the responsiveness probe (item 9)
+/// "PC is saturated": the run queue stays above the core count, or the responsiveness probe
 /// trips, for over <see cref="MinSustained"/>. The answer names the top processes by CPU and by page faults. One alert
 /// per episode. Pure; the counters and process costs are the caller's.
-/// C2 (review round 2): without PDH there is no run queue. The caller used to put the sum of the processes' cores in its
+/// Without PDH there is no run queue. The caller used to put the sum of the processes' cores in its
 /// place, which can never exceed the core count, so the rule could never trip. Now an unmeasured run queue turns that rule
 /// off and total CPU above <see cref="CpuRuleFraction"/> takes its place (the probe still counts); the answer says so.
 /// </summary>
@@ -50,7 +55,8 @@ public sealed class SaturationDetector
     /// <summary>Without a run queue reading: total CPU above this counts as saturated (the capture governor's 85% too).</summary>
     public const double CpuRuleFraction = 0.85;
 
-    private DateTime? _since;
+    /// <summary>When the episode began (<see cref="LoadPoint.TickMs"/>), null while there is none.</summary>
+    private long? _sinceMs;
     private bool _alerting;
 
     public bool Saturated => _alerting;
@@ -59,19 +65,22 @@ public sealed class SaturationDetector
     public static bool UnderLoad(LoadPoint p) =>
         p.ProbeTripping || (p.RunQueue is { } q ? q > p.Cores : p.CpuFraction > CpuRuleFraction);
 
-    /// <summary>Feeds one moment. Returns an answer line when an episode has lasted past the threshold (once per episode).</summary>
+    /// <summary>
+    /// Feeds one moment. Returns an answer line when an episode has lasted past the threshold (once per episode), timed on
+    /// <see cref="LoadPoint.TickMs"/>: setting the system clock back or forward neither holds the answer back nor gives it early.
+    /// </summary>
     public string? Observe(LoadPoint p, IReadOnlyList<ProcessCost> costs)
     {
         if (UnderLoad(p))
         {
-            _since ??= p.TimeUtc;
-            if (!_alerting && p.TimeUtc - _since.Value >= MinSustained)
+            _sinceMs ??= p.TickMs;
+            if (!_alerting && p.TickMs - _sinceMs.Value >= (long)MinSustained.TotalMilliseconds)
             {
                 _alerting = true;
                 return Answer(p, costs);
             }
         }
-        else { _since = null; _alerting = false; }
+        else { _sinceMs = null; _alerting = false; }
         return null;
     }
 

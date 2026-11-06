@@ -47,6 +47,8 @@ public sealed class AgentsGuideTests : IDisposable
             Assert.DoesNotContain(setting, text);
         // The file map says where the service profiles are (one may be applied, unasked, each time PoolWatch starts).
         Assert.Contains("| `settings.json` | PoolWatch's settings, and the service profiles: the services each keeps off, and the one applied when PoolWatch starts |", text);
+        // And the token-leak guard's record of the setting it replaced, which turning the guard off puts back.
+        Assert.Contains($"| `cache\\{TokenGuardSetting.FileName}` | the Windows setting the token-leak guard replaced", text);
     }
 
     [Fact]

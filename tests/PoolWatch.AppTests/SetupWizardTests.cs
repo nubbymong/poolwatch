@@ -48,10 +48,10 @@ public sealed class SetupWizardTests : IDisposable
     // ------------------------------------------------------------------ the flow and the first run
 
     [Fact]
-    public void TheFirstRunCannotBeClosedOrSkippedButPoolWatchOrWindowsStillCloseIt()
+    public void TheFirstRunAsksBeforeTheOwnerClosesItButPoolWatchOrWindowsCloseItAtOnce()
     {
         var flow = new SetupFlow(firstRun: true);
-        Assert.False(flow.MayClose(CloseReason.UserClosing));      // the close button, Alt+F4, the taskbar's Close
+        Assert.False(flow.MayClose(CloseReason.UserClosing));      // the close button, Esc, Alt+F4, the taskbar's Close: they ask first
         Assert.True(flow.MayClose(CloseReason.ApplicationExitCall)); // PoolWatch exits: setup opens again at the next start
         Assert.True(flow.MayClose(CloseReason.WindowsShutDown));
         Assert.True(flow.MayClose(CloseReason.TaskManagerClosing));
@@ -61,7 +61,7 @@ public sealed class SetupWizardTests : IDisposable
         while (flow.Forward()) seen.Add(flow.Step);
         Assert.Equal(SetupFlow.Steps, seen);
         Assert.Equal(["Welcome", "Your PC", "Safety", "Standby cache", "Fixes", "Services", "Ready"], SetupFlow.Steps.Select(SetupText.Rail));
-        Assert.False(flow.MayClose(CloseReason.UserClosing));      // the last step too, until its button
+        Assert.False(flow.MayClose(CloseReason.UserClosing));      // the last step too (it asks), until its button
         Assert.Equal((RailMark.Done, RailMark.Now), (flow.Mark(SetupStep.Services), flow.Mark(SetupStep.Ready)));
 
         flow.Finish();
@@ -152,53 +152,161 @@ public sealed class SetupWizardTests : IDisposable
     }
 
     [Fact]
-    public void EscCancelsSetupOpenedAgainButNotTheFirstRun()
+    public void EscClosesSetupAsItsCloseButtonDoes()
     {
         // The form's own key handling, as Windows calls it for Esc (the window is never shown).
         var processDialogKey = typeof(Form).GetMethod("ProcessDialogKey", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-        using var first = new SetupWizardForm(new FakeHost(Busy()), firstRun: true, advanced: false);
+        var firstHost = new FakeHost(Busy());
+        using var first = new SetupWizardForm(firstHost, firstRun: true, advanced: false);
         _ = first.Handle;
         bool closed = false;
         first.FormClosed += (_, _) => closed = true;
-        Assert.Equal(false, processDialogKey.Invoke(first, [Keys.Escape]));  // not taken as "cancel" at all
+        Assert.Equal(true, processDialogKey.Invoke(first, [Keys.Escape])); // the first run asks, and the owner says no
+        Assert.Equal(["asked to close"], firstHost.Calls.Where(c => c == "asked to close"));
         Assert.False(closed);
 
-        using var again = new SetupWizardForm(new FakeHost(Busy()), firstRun: false, advanced: false);
+        var againHost = new FakeHost(Busy());
+        using var again = new SetupWizardForm(againHost, firstRun: false, advanced: false);
         _ = again.Handle;
         bool cancelled = false;
         again.FormClosed += (_, _) => cancelled = true;
         Assert.Equal(true, processDialogKey.Invoke(again, [Keys.Escape]));
         Assert.True(cancelled);
         Assert.False(again.Finished);
+        Assert.DoesNotContain("asked to close", againHost.Calls); // opened again: cancelled at once
     }
 
     /// <summary>
-    /// On the first run Windows still draws the setup window's close button, but it does nothing (CS_NOCLOSE) and the
-    /// window does not close; the CI UI test reads the same from <c>WindowStats</c>. Opened again, its close button works.
+    /// How the CI reading of the close works, on plain windows: the window gets its close button's message, and the
+    /// question is answered No in its place. A window that asks once and cancels reads as one that asks first; one that
+    /// closes without asking, or asks twice, does not; one with no window yet is not probed. The reading was worked out
+    /// from the setup flow alone, so a close button that did nothing again would still have read as one that asks.
     /// </summary>
     [Fact]
-    public void TheFirstRunWindowsCloseButtonDoesNothingAndItDoesNotCloseButOneOpenedAgainDoes()
+    public void TheCloseReadingSendsTheCloseButtonsMessageAndAnswersNo()
     {
-        using var first = new SetupWizardForm(new FakeHost(Busy()), firstRun: true, advanced: false);
+        Func<bool>? answer = null;
+        using var asks = new Form();
+        asks.FormClosing += (_, e) => { if (answer is not null && !answer()) e.Cancel = true; };
+        _ = asks.Handle; // never shown
+        bool closed = false;
+        asks.FormClosed += (_, _) => closed = true;
+        Assert.True(SetupWizardForm.AsksOnceAndStaysOpen(asks, a => answer = a));
+        Assert.False(closed);
+        Assert.Null(answer); // taken away after the reading
+
+        using var closes = new Form();
+        _ = closes.Handle;
+        Assert.False(SetupWizardForm.AsksOnceAndStaysOpen(closes, a => answer = a));
+        Assert.True(closes.IsDisposed || !closes.IsHandleCreated, "the window that does not ask was not closed by the reading");
+
+        using var twice = new Form();
+        twice.FormClosing += (_, e) => { if (answer is not null) { answer(); e.Cancel = !answer(); } };
+        _ = twice.Handle;
+        Assert.False(SetupWizardForm.AsksOnceAndStaysOpen(twice, a => answer = a));
+
+        using var unmade = new Form();
+        Assert.False(SetupWizardForm.AsksOnceAndStaysOpen(unmade, a => answer = a));
+        Assert.False(unmade.IsHandleCreated);
+    }
+
+    /// <summary>
+    /// On the first run the setup window's close button works and asks first: Windows' close button is never one that does
+    /// nothing (no CS_NOCLOSE), a no keeps setup open, a yes closes it unfinished, after which the tray app does nothing
+    /// more (<see cref="FirstRunGate.SetupClosed"/>: PoolWatch keeps running in the tray, and the next way into the window
+    /// opens setup again, as <see cref="UntilSetupWasCompletedOnceEveryWayIntoTheAppBringsSetup"/> holds), and PoolWatch
+    /// exiting, Windows shutting down or Task Manager close it without asking. The CI UI test reads the close from
+    /// <c>WindowStats</c>, through the closing path. Opened again, it closes at once, without asking. It drew a close
+    /// button that did nothing.
+    /// </summary>
+    [Fact]
+    public void TheFirstRunWindowsCloseButtonAsksFirstAndOneOpenedAgainClosesAtOnce()
+    {
+        var host = new FakeHost(Busy());
+        using var first = new SetupWizardForm(host, firstRun: true, advanced: false);
         _ = first.Handle; // a native window, never shown
-        Assert.False(first.CloseButtonWorks);
-        Assert.Contains("closeButtonWorks = False,", first.WindowStats().ToString());
-        Assert.Contains("($g.window.closeButtonWorks -eq $false)", File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "ci", "m4-ui.ps1")));
         bool closed = false;
         first.FormClosed += (_, _) => closed = true;
-        first.Close();
+        Assert.True(first.CloseButtonEnabled);
+        // The CI reading sends the window its close button's message and answers the question No itself: the close went
+        // through the closing path, as the owner's would, and asked once; the window stayed open; the host was never asked.
+        Assert.Contains("closeButtonEnabled = True, closeAsksFirst = True,", first.WindowStats().ToString());
+        Assert.Equal(1, first.CloseQuestions);
         Assert.False(closed);
+        Assert.DoesNotContain("asked to close", host.Calls);
+        Assert.Contains("($g.window.closeButtonEnabled -eq $true -and $g.window.closeAsksFirst -eq $true)", File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "ci", "m4-ui.ps1")));
+        // A check of its own where the CI UI test reads smoke.json, with its CHECK-RAN marker next (CheckMarkerTests).
+        Assert.True(ScriptCode.CheckThenMarker(File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "ci", "m4-ui.ps1")),
+            "Assert-True ($g.window.closeButtonEnabled -eq $true -and $g.window.closeAsksFirst -eq $true) \"", "ui-setup-close-button", "if (Test-Path $smokeFile) {"),
+            "the CI UI test does not check the close button");
+        first.Close(); // the owner says no
+        Assert.False(closed);
+        Assert.Single(host.Calls, "asked to close");
 
-        using var again = new SetupWizardForm(new FakeHost(Busy()), firstRun: false, advanced: true);
+        // PoolWatch exiting (or Windows) closes it without asking.
+        var onClosing = typeof(SetupWizardForm).GetMethod("OnFormClosing", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        foreach (var reason in new[] { CloseReason.ApplicationExitCall, CloseReason.WindowsShutDown, CloseReason.TaskManagerClosing })
+        {
+            var e = new FormClosingEventArgs(reason, cancel: false);
+            onClosing.Invoke(first, [e]);
+            Assert.False(e.Cancel, reason.ToString());
+        }
+        Assert.Single(host.Calls, "asked to close");
+
+        host.CloseAnswer = true; // the owner says yes
+        first.Close();
+        Assert.True(closed);
+        Assert.False(first.Finished); // unfinished: the tray app does nothing more, so PoolWatch keeps running
+        Assert.Equal(2, host.Calls.Count(c => c == "asked to close"));
+        var gate = new GateFake();
+        gate.Gate(smoke: false).SetupClosed(finished: first.Finished, advanced: first.Advanced, advancedBefore: false);
+        Assert.Empty(gate.Calls);
+
+        var againHost = new FakeHost(Busy());
+        using var again = new SetupWizardForm(againHost, firstRun: false, advanced: true);
         _ = again.Handle;
-        Assert.True(again.CloseButtonWorks);
-        Assert.Contains("closeButtonWorks = True,", again.WindowStats().ToString());
+        Assert.True(again.CloseButtonEnabled);
+        Assert.Contains("closeButtonEnabled = True, closeAsksFirst = False,", again.WindowStats().ToString());
         bool cancelled = false;
         again.FormClosed += (_, _) => cancelled = true;
         again.Close();
         Assert.True(cancelled);
         Assert.False(again.Finished);
         Assert.True(again.Advanced);                // the view it was opened with, kept
+        Assert.DoesNotContain("asked to close", againHost.Calls);
+    }
+
+    /// <summary>
+    /// The first run's close question (<see cref="SetupHost.AskCloseFirstRun"/>, as the message box over setup asks it) is
+    /// Yes or No with No the default, so Enter keeps setup open; only Yes closes setup. The message box itself
+    /// (<see cref="SetupHost.ConfirmCloseFirstRun"/>) is read from the source, as a test never shows one: it asks that
+    /// question and passes each of its values, the default included, on to MessageBox.Show.
+    /// </summary>
+    [Fact]
+    public void TheFirstRunCloseQuestionIsYesOrNoWithNoTheDefault()
+    {
+        var source = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "Setup", "SetupSession.cs"))
+            .Split('\n').Select(l => l.Trim()).ToList();
+        int box = source.IndexOf("public bool ConfirmCloseFirstRun(IWin32Window owner) =>");
+        Assert.True(box >= 0, "SetupHost.ConfirmCloseFirstRun was not found");
+        Assert.Equal("AskCloseFirstRun((text, caption, buttons, icon, defaultButton) => MessageBox.Show(owner, text, caption, buttons, icon, defaultButton));",
+                     source[box + 1]);
+
+        var asked = new List<(string Text, string Caption, MessageBoxButtons Buttons, MessageBoxIcon Icon, MessageBoxDefaultButton Default)>();
+        Func<string, string, MessageBoxButtons, MessageBoxIcon, MessageBoxDefaultButton, DialogResult> Answer(DialogResult result) =>
+            (text, caption, buttons, icon, defaultButton) => { asked.Add((text, caption, buttons, icon, defaultButton)); return result; };
+
+        Assert.True(SetupHost.AskCloseFirstRun(Answer(DialogResult.Yes)));
+        Assert.False(SetupHost.AskCloseFirstRun(Answer(DialogResult.No)));
+        Assert.False(SetupHost.AskCloseFirstRun(Answer(DialogResult.None))); // the box gone without an answer
+        Assert.Equal(3, asked.Count);
+        Assert.All(asked, a =>
+        {
+            Assert.Equal((SetupText.CloseFirstRun, SetupText.WindowTitle), (a.Text, a.Caption));
+            Assert.Equal(MessageBoxButtons.YesNo, a.Buttons);
+            Assert.Equal(MessageBoxDefaultButton.Button2, a.Default); // No, the second of Yes and No
+            Assert.Equal(MessageBoxIcon.Question, a.Icon);
+        });
     }
 
     [Fact]
@@ -273,7 +381,7 @@ public sealed class SetupWizardTests : IDisposable
         var needs = Facts(Ntfs) with { TokenLeak = TokenLeakStatus.NeedsTest };
         Assert.Equal(LeakState.Checking, ImpactRows.Leak(needs, false, null, checking: true, notRun: false));
         var checking = ImpactRows.From(needs, LeakState.Checking)[4];
-        Assert.Equal(((ImpactLevel?)null, (string?)null), (checking.Level, checking.Under));
+        Assert.Equal(((ImpactLevel?)null, (string?)null, false), (checking.Level, checking.Under, checking.NotKnown)); // "Checking...", not Not known
         // Its usual time, never a promise: a helper that hangs can take far longer.
         Assert.Equal("Checking this Windows build for it (usually about 20 seconds)...", checking.Detail);
         Assert.Contains("(usually about 20 seconds)", FixRows.GuardChecking);
@@ -303,12 +411,12 @@ public sealed class SetupWizardTests : IDisposable
         Assert.Equal(("Defender checking your files", ImpactLevel.Low, (SetupStep?)null), (row.Title, row.Level!.Value, row.FixStep)); // nothing for setup to set
 
         row = ImpactRows.From(Facts(Ntfs, DevDrive('D')), LeakState.NotFound)[1];                                                    // not read: no claim
-        Assert.Equal((ImpactLevel.None, "PoolWatch could not read Defender's settings. Another antivirus may be in use."), (row.Level!.Value, row.Detail));
+        Assert.Equal((true, "PoolWatch could not read Defender's settings. Another antivirus may be in use."), (row.NotKnown, row.Detail));
         // Covered only when that was read: performance mode on, and each Dev Drive trusted.
         var covered = Facts(DevDrive('D')) with { DefenderRealTimeOn = true, DefenderPerformanceModeOn = true };
         Assert.Equal("Performance mode covers your Dev Drives.", ImpactRows.From(covered, LeakState.NotFound)[1].Detail);
         row = ImpactRows.From(covered with { DefenderPerformanceModeOn = null }, LeakState.NotFound)[1];
-        Assert.Equal((ImpactLevel.None, "PoolWatch could not read whether performance mode covers your Dev Drives."), (row.Level!.Value, row.Detail));
+        Assert.Equal((true, "PoolWatch could not read whether performance mode covers your Dev Drives."), (row.NotKnown, row.Detail));
         row = ImpactRows.From(Facts(DevDrive('D', trusted: null)) with { DefenderRealTimeOn = true, DefenderPerformanceModeOn = true }, LeakState.NotFound)[1];
         Assert.Equal("PoolWatch could not read whether performance mode covers your Dev Drives.", row.Detail);
     }
@@ -326,6 +434,317 @@ public sealed class SetupWizardTests : IDisposable
     {
         Assert.Empty(ImpactRows.From(null, LeakState.NotChecked));
         Assert.Empty(FixRows.From(null, LeakState.NotChecked, false, true));
+    }
+
+    // ------------------------------------------------------------------ a cause PoolWatch could not check: Not known, never None
+
+    /// <summary>A row PoolWatch could not tell about: no level, "Not known", still watched, and no step to fix it.</summary>
+    private static void IsNotKnown(ImpactRow row) =>
+        Assert.Equal(((ImpactLevel?)null, true, SetupText.StillWatching, (SetupStep?)null), (row.Level, row.NotKnown, row.Under, row.FixStep));
+
+    [Theory]
+    [InlineData(TokenLeakStatus.Unknown, false)]   // the build or the live setting could not be read, so the check cannot run
+    [InlineData(TokenLeakStatus.NeedsTest, true)]  // the check was wanted but could not run (the CI UI test never runs it)
+    public void ATokenLeakCheckThatCouldNotRunIsNotKnownNotNone(TokenLeakStatus status, bool notRun)
+    {
+        var f = Facts(Ntfs) with { DefenderRealTimeOn = false, TokenLeak = status };
+        var state = ImpactRows.Leak(f, guardOn: false, now: null, checking: false, notRun: notRun);
+        Assert.Equal(LeakState.NotChecked, state);
+        var row = ImpactRows.From(f, state)[4];
+        IsNotKnown(row);
+        Assert.Equal("PoolWatch could not check for it now. PoolWatch keeps watching, and offers the fix if it appears.", row.Detail);
+    }
+
+    [Fact]
+    public void ATokenLeakCheckWithNoClearAnswerIsNotKnownNotNone()
+    {
+        var f = Facts(Ntfs) with { DefenderRealTimeOn = false, TokenLeak = TokenLeakStatus.NeedsTest };
+        var state = ImpactRows.Leak(f, guardOn: false, now: LeakVerdict.Unclear, checking: false, notRun: false);
+        Assert.Equal(LeakState.Unclear, state);
+        var row = ImpactRows.From(f, state)[4];
+        IsNotKnown(row);
+        Assert.Equal("The check gave no clear answer. PoolWatch keeps watching, and offers the fix if it appears.", row.Detail);
+    }
+
+    [Fact]
+    public void ATokenLeakCheckThatAWorkaroundAlreadyInEffectStoppedIsNotKnownNotNone()
+    {
+        // No verdict saved for this build, and the live foreground lock timeout already 0: the check cannot measure the leak.
+        var f = Facts(Ntfs) with { DefenderRealTimeOn = false, TokenLeak = TokenLeakStatus.WorkedAroundAlready };
+        var state = ImpactRows.Leak(f, guardOn: false, now: null, checking: false, notRun: false);
+        Assert.Equal(LeakState.WorkedAround, state);
+        var row = ImpactRows.From(f, state)[4];
+        IsNotKnown(row);
+        Assert.Equal("Something on this PC already works around it, so PoolWatch could not check. PoolWatch keeps watching, and offers " +
+                     "the fix if it appears.", row.Detail);
+    }
+
+    [Fact]
+    public void DefenderSettingsThatCouldNotBeReadAreNotKnownNotNone()
+    {
+        const string settings = "PoolWatch could not read Defender's settings. Another antivirus may be in use.";
+        const string cover = "PoolWatch could not read whether performance mode covers your Dev Drives.";
+        var unread = new (EnvironmentFacts Facts, string Detail)[]
+        {
+            (Facts(Ntfs) with { DefenderRealTimeOn = null }, settings),                                                   // real-time protection not read
+            (Facts(Ntfs, DevDrive('D')) with { DefenderRealTimeOn = null, DefenderPerformanceModeOn = false }, settings),
+            (Facts(DevDrive('D')) with { DefenderRealTimeOn = true, DefenderPerformanceModeOn = null }, cover),            // performance mode not read
+            (Facts(DevDrive('D', trusted: null)) with { DefenderRealTimeOn = true, DefenderPerformanceModeOn = true }, cover), // the drive's trust not read
+        };
+        foreach (var (f, detail) in unread)
+        {
+            var row = ImpactRows.From(f, LeakState.NotFound)[1];
+            IsNotKnown(row);
+            Assert.Equal(detail, row.Detail);
+            Assert.Null(ImpactRows.DefenderLevel(f));
+            Assert.DoesNotContain(FixRows.From(f, LeakState.NotFound, false, true), r => r.Fix == Fix.Defender); // nothing offered for what was not seen
+        }
+    }
+
+    [Fact]
+    public void ADriveTheScanCouldNotReadWholeLeavesTheRowsItCouldChangeNotKnown()
+    {
+        // Performance mode on and the one Dev Drive found trusted would be None; E: could be a Dev Drive it does not cover.
+        var f = Facts(Ntfs, DevDrive('D')) with { DefenderRealTimeOn = true, DefenderPerformanceModeOn = true, UnreadVolumes = [@"E:\"] };
+        var defender = ImpactRows.From(f, LeakState.NotFound)[1];
+        IsNotKnown(defender);
+        Assert.Equal("PoolWatch could not read E:.", defender.Detail);
+        Assert.DoesNotContain(FixRows.From(f, LeakState.NotFound, false, true), r => r.Fix == Fix.Defender);
+        // With no Dev Drive found, Low (no Dev Drive) and "No Dev Drive or ReFS drive" are not known either.
+        var none = Facts(Ntfs) with { DefenderRealTimeOn = true, UnreadVolumes = [@"E:\", @"F:\"] };
+        var rows = ImpactRows.From(none, LeakState.NotFound);
+        IsNotKnown(rows[0]);
+        IsNotKnown(rows[1]);
+        Assert.Equal(["PoolWatch could not read E: and F:.", "PoolWatch could not read E: and F:."], rows.Take(2).Select(r => r.Detail));
+        // What no Dev Drive more could change stands: a Dev Drive Defender checks before its files open, real-time protection
+        // off, and a ReFS drive found for the Dev Drive row.
+        Assert.Equal(ImpactRules.DefenderDevDriveLevel, ImpactRows.DefenderLevel(f with { DefenderPerformanceModeOn = false }));
+        Assert.Equal(ImpactLevel.None, ImpactRows.DefenderLevel(f with { DefenderRealTimeOn = false }));
+        Assert.Equal(ImpactLevel.High, ImpactRows.From(f, LeakState.NotFound)[0].Level);
+        // A ReFS drive Windows could not say is a Dev Drive: ReFS is enough for the Dev Drive row, not for the Defender row.
+        var unsure = Facts(Ntfs, new VolumeFact(@"G:\", "ReFS", null, null)) with { DefenderRealTimeOn = true, DefenderPerformanceModeOn = true };
+        rows = ImpactRows.From(unsure, LeakState.NotFound);
+        Assert.Equal(ImpactLevel.High, rows[0].Level);
+        Assert.Equal("G: uses ReFS, and Windows rarely empties its cache.", rows[0].Detail);
+        IsNotKnown(rows[1]);
+        Assert.Equal("PoolWatch could not read whether G: is a Dev Drive.", rows[1].Detail);
+        Assert.Equal("Defender checking your files", rows[1].Title); // never said to be a Dev Drive
+    }
+
+    /// <summary>
+    /// A ReFS drive Windows could not say is a Dev Drive (null) is never counted as one where setup and the issue report
+    /// count Dev Drives: it is not among the Dev Drives Defender checks before their files open (the drives the Defender
+    /// advice names), it does not give the Defender row the Dev Drive level (the row is then not known), and the issue
+    /// report does not count it; the same drive that Windows says is an untrusted Dev Drive is, in each.
+    /// </summary>
+    [Fact]
+    public void ADriveNotKnownToBeADevDriveIsNeverCountedAsOne()
+    {
+        var unsure = Facts(Ntfs, new VolumeFact(@"G:\", "ReFS", null, false)) with { DefenderRealTimeOn = true, DefenderPerformanceModeOn = false };
+        var sure = unsure with { Volumes = [Ntfs, new VolumeFact(@"G:\", "ReFS", true, false)] };
+        Assert.Empty(ImpactRows.ScannedFirst(unsure));
+        Assert.Equal([@"G:\"], ImpactRows.ScannedFirst(sure));
+        Assert.Null(ImpactRows.DefenderLevel(unsure));
+        Assert.Equal(ImpactRules.DefenderDevDriveLevel, ImpactRows.DefenderLevel(sure));
+        Assert.Equal("Defender checking your files", ImpactRows.From(unsure, LeakState.NotFound)[1].Title);
+        Assert.Equal("Defender scanning your Dev Drives", ImpactRows.From(sure, LeakState.NotFound)[1].Title);
+        Assert.Equal(0, ReportIssueDialog.DevDrives([new VolumeInfo(@"G:\", "ReFS", "", null, "Fixed")]));
+        Assert.Equal(1, ReportIssueDialog.DevDrives([new VolumeInfo(@"G:\", "ReFS", "", true, "Fixed")]));
+        // The scan's log line counts the same way: a drive not known to be a Dev Drive is among those not read whole.
+        string probe = UninstallerTests.OneLine(File.ReadAllText(Path.Combine(TokenLeakHelperStartTests.RepoDir(), "src", "PoolWatch", "Engine", "Setup", "EnvironmentProbe.cs")));
+        Assert.Contains("$\"{volumes.Count(v => v.IsDevDrive == true)} Dev Drive(s), {unreadVolumes.Count + volumes.Count(v => v.IsDevDrive is null)} drive(s) not read whole, \"", probe);
+    }
+
+    [Fact]
+    public void ADriveAppOrServiceListTheScanCouldNotReadIsNotKnownNotNone()
+    {
+        var f = Facts() with { DefenderRealTimeOn = true, VolumesNotRead = true, PackagesNotRead = true, ServicesNotRead = true };
+        var rows = ImpactRows.From(f, LeakState.NotFound);
+        Assert.All(rows.Take(4), IsNotKnown);
+        Assert.Equal(
+        [
+            "PoolWatch could not read this PC's drives.",
+            "PoolWatch could not read this PC's drives.",  // real-time protection on, and no way to tell whether a Dev Drive is there
+            "PoolWatch could not read which apps are installed.",
+            "PoolWatch could not read which services are running.",
+        ], rows.Take(4).Select(r => r.Detail));
+        // Performance mode read as on says nothing about drives that could not be read: never "covers your Dev Drives".
+        var modeOn = ImpactRows.From(f with { DefenderPerformanceModeOn = true }, LeakState.NotFound)[1];
+        IsNotKnown(modeOn);
+        Assert.Equal("PoolWatch could not read this PC's drives.", modeOn.Detail);
+        Assert.DoesNotContain(FixRows.From(f, LeakState.NotFound, false, true), r => r.Fix is Fix.Defender or Fix.Shortcut);
+        // Real-time protection off is None, whatever the drives.
+        Assert.Equal(((ImpactLevel?)ImpactLevel.None, false), (ImpactRows.From(f with { DefenderRealTimeOn = false }, LeakState.NotFound)[1].Level,
+            ImpactRows.From(f with { DefenderRealTimeOn = false }, LeakState.NotFound)[1].NotKnown));
+        // What was found still counts, whatever else could not be read.
+        var found = Facts(DevDrive('D')) with { VolumesNotRead = true, ChatGptInstalled = true, PackagesNotRead = true, OptionalServicesRunning = 2, ServicesNotRead = true };
+        rows = ImpactRows.From(found, LeakState.NotFound);
+        Assert.Equal([ImpactLevel.High, ImpactLevel.Low, ImpactLevel.Low], new[] { rows[0], rows[2], rows[3] }.Select(r => r.Level!.Value));
+    }
+
+    [Fact]
+    public void WhatWasReadAndFoundCleanIsNoneNeverNotKnown()
+    {
+        // Every value read and clean: no ReFS drive, real-time protection off, no Codex app, no service running, no leak found.
+        var f = Facts(Ntfs) with { DefenderRealTimeOn = false, TokenLeak = TokenLeakStatus.Clean };
+        var rows = ImpactRows.From(f, ImpactRows.Leak(f, guardOn: false, now: null, checking: false, notRun: false));
+        Assert.All(rows, r => Assert.Equal(((ImpactLevel?)ImpactLevel.None, false, SetupText.StillWatching), (r.Level, r.NotKnown, r.Under)));
+        // Performance mode read as on, for a Dev Drive read as trusted.
+        var covered = ImpactRows.From(Facts(DevDrive('D')) with { DefenderRealTimeOn = true, DefenderPerformanceModeOn = true }, LeakState.NotFound)[1];
+        Assert.Equal(((ImpactLevel?)ImpactLevel.None, false), (covered.Level, covered.NotKnown));
+        // The check found none, the build does not have it, or the guard is on (the leak cannot build up).
+        foreach (var leak in new[] { LeakState.NotFound, LeakState.NotAffected, LeakState.GuardOn })
+        {
+            var row = ImpactRows.From(f, leak)[4];
+            Assert.Equal(((ImpactLevel?)ImpactLevel.None, false), (row.Level, row.NotKnown));
+        }
+    }
+
+    [Fact]
+    public void ANotKnownMeterSaysSoInTheGreyOfStillWatchingWithItsBarsEmpty()
+    {
+        var scale = new SetupScale(96, 1, 96);
+        using var fonts = new SetupFonts(scale);
+        using var meter = new ImpactMeter(scale, fonts);
+        meter.Width = meter.MeterWidth;
+        meter.Show(null, SetupText.StillWatching, notKnown: true);
+        Assert.Equal(("Not known", (ImpactLevel?)null, true), (meter.LevelText, meter.Level, meter.NotKnown));
+        Assert.Equal((SetupTheme.Muted, SetupTheme.Muted), (meter.WordColour, meter.UnderColour)); // the grey "Still watching" is in
+        Assert.NotEqual(UiColors.Good, meter.WordColour);                                            // never None's green
+        Assert.True(meter.Fits);
+
+        // Drawn without a window: the three bars all in the empty grey, none in a level's colour, and the word in the grey,
+        // never in None's green. (High contrast draws in the system's colours instead, so the pixels are checked without it.)
+        bool designColours = !SystemInformation.HighContrast;
+        Rectangle barsArea = new(0, fonts.Body.Height / 2, scale.S(60), 1), wordArea = new(scale.S(60), 0, meter.Width - scale.S(60), fonts.Body.Height);
+        if (designColours)
+        {
+            var bars = Drawn(barsArea);
+            Assert.Contains(UiColors.Track.ToArgb(), bars);
+            Assert.DoesNotContain(UiColors.Low.ToArgb(), bars);
+            Assert.DoesNotContain(UiColors.Medium.ToArgb(), bars);
+            Assert.DoesNotContain(UiColors.High.ToArgb(), bars);
+            var word = Drawn(wordArea);
+            Assert.Contains(UiColors.Muted.ToArgb(), word);
+            Assert.DoesNotContain(UiColors.Good.ToArgb(), word);
+        }
+
+        // A check that ran and found nothing is still None, in green (drawn too: the pixel check above can see green).
+        meter.Show(ImpactLevel.None, SetupText.StillWatching, notKnown: false);
+        Assert.Equal(("None", false, SetupTheme.Good), (meter.LevelText, meter.NotKnown, meter.WordColour));
+        if (designColours) Assert.Contains(UiColors.Good.ToArgb(), Drawn(wordArea));
+
+        // The meter drawn into a bitmap, and the colours of the pixels in one part of it.
+        HashSet<int> Drawn(Rectangle area)
+        {
+            using var bitmap = new Bitmap(meter.Width, meter.Height);
+            using (var g = Graphics.FromImage(bitmap))
+            {
+                g.Clear(Color.White);
+                meter.Draw(g);
+            }
+            return Enumerable.Range(area.Left, area.Width).SelectMany(x => Enumerable.Range(area.Top, area.Height).Select(y => bitmap.GetPixel(x, y).ToArgb())).ToHashSet();
+        }
+    }
+
+    [Fact]
+    public async Task AScreenReaderHearsNotKnownForACausePoolWatchCouldNotCheck()
+    {
+        // Defender's settings not read and no way to check for the token leak; the rest read and clean.
+        var session = await Session(Facts(Ntfs) with { DefenderRealTimeOn = null, TokenLeak = TokenLeakStatus.Unknown });
+        var (view, fonts) = View(session, 100, new Size(880, 586));
+        using (view)
+        using (fonts)
+        {
+            await session.GoTo(SetupStep.YourPc);
+            var page = (ImpactPage)view.Pages[SetupStep.YourPc];
+            foreach (var cause in new[] { Cause.Defender, Cause.TokenLeak })
+            {
+                var meter = page.Meters[cause];
+                Assert.Equal(("Not known", "Not known. Still watching"), (meter.LevelText, meter.AccessibleName));
+                Assert.Equal("Not known. Still watching", meter.AccessibilityObject.Name);
+            }
+            Assert.Equal("None. Still watching", page.Meters[Cause.DevDriveRecords].AccessibleName); // read, and none found
+            Assert.Equal(2, page.Texts().Count(t => t == "Not known | Still watching"));
+            Assert.Empty(view.LayoutProblems());
+        }
+    }
+
+    // ------------------------------------------------------------------ the rows by level: Not known just above None
+
+    [Fact]
+    public void TheRowsAreListedByLevelWithNotKnownJustAboveNone()
+    {
+        // As on the CI runner: services running (Low), the token-leak check not run (Not known), the rest read and clean.
+        var runner = Facts(Ntfs) with { DefenderRealTimeOn = false, OptionalServicesRunning = 3, TokenLeak = TokenLeakStatus.NeedsTest };
+        Assert.Equal([Cause.BackgroundServices, Cause.TokenLeak, Cause.DevDriveRecords, Cause.Defender, Cause.CodexShaderCache],
+            ImpactRows.ByLevel(ImpactRows.From(runner, LeakState.NotChecked)).Select(r => r.Cause));
+        // A check still running has no level yet either: it sorts with Not known.
+        Assert.Equal([Cause.BackgroundServices, Cause.TokenLeak, Cause.DevDriveRecords, Cause.Defender, Cause.CodexShaderCache],
+            ImpactRows.ByLevel(ImpactRows.From(runner, LeakState.Checking)).Select(r => r.Cause));
+
+        // Every level: High, Medium, then Low above a Not known that the design lists before it, then None.
+        var every = Facts(DevDrive('D', trusted: false)) with
+        {
+            DefenderRealTimeOn = true, DefenderPerformanceModeOn = false, PackagesNotRead = true, OptionalServicesRunning = 2,
+        };
+        var rows = ImpactRows.ByLevel(ImpactRows.From(every, LeakState.NotFound));
+        Assert.Equal([Cause.DevDriveRecords, Cause.Defender, Cause.BackgroundServices, Cause.CodexShaderCache, Cause.TokenLeak], rows.Select(r => r.Cause));
+        Assert.Equal(["High impact", "Medium impact", "Low impact", "Not known", "None"],
+            rows.Select(r => r.NotKnown ? SetupText.NotKnown : SetupText.Level(r.Level!.Value)));
+
+        // None rows the design lists first go below a Not known one; rows at the same level keep the design's order.
+        var mixed = Facts(Ntfs) with { DefenderRealTimeOn = null, ChatGptInstalled = true };
+        Assert.Equal([Cause.TokenLeak, Cause.CodexShaderCache, Cause.Defender, Cause.DevDriveRecords, Cause.BackgroundServices],
+            ImpactRows.ByLevel(ImpactRows.From(mixed, LeakState.Found)).Select(r => r.Cause));
+    }
+
+    [Fact]
+    public void EveryLevelHasAPlaceOfItsOwnAndNoLevelSortsWithNotKnown()
+    {
+        // Every member of the scale, so a level added later fails here (its rank throws) instead of sorting with Not known.
+        static int RankOf(ImpactLevel? level) =>
+            ImpactRows.Rank(new ImpactRow(Cause.TokenLeak, SetupIcon.Key, "", "", level, null, null, NotKnown: level is null));
+        Assert.Equal([4, 2, 1, 0], Enum.GetValues<ImpactLevel>().Select(l => RankOf(l)));    // None, Low, Medium, High
+        Assert.Equal(3, RankOf(null));                                                       // Not known, or still checking
+        Assert.Throws<ArgumentOutOfRangeException>(() => RankOf((ImpactLevel)99));           // a level the list does not name
+    }
+
+    [Fact]
+    public async Task TheStepShowsItsRowsByLevelAndARowMovesWhenItsCheckEnds()
+    {
+        // Services running (Low), the rest read and clean, and the token-leak check running until the test lets it find the leak.
+        var host = new FakeHost(Facts(Ntfs) with { DefenderRealTimeOn = false, OptionalServicesRunning = 3, TokenLeak = TokenLeakStatus.NeedsTest })
+            { CheckGives = LeakVerdict.Leak, CheckGate = new() };
+        var session = new SetupSession(host, firstRun: true, advanced: false);
+        var (view, fonts) = View(session, 100, new Size(880, 586));
+        using (view)
+        using (fonts)
+        {
+            var load = session.LoadAsync(CancellationToken.None);
+            await session.GoTo(SetupStep.YourPc);
+            var page = (ImpactPage)view.Pages[SetupStep.YourPc];
+            Assert.Equal(SetupText.CheckingNow, page.Meters[Cause.TokenLeak].LevelText);
+            Shown([Cause.BackgroundServices, Cause.TokenLeak, Cause.DevDriveRecords, Cause.Defender, Cause.CodexShaderCache]);
+
+            host.CheckGate.SetResult();                                          // found: High, so it moves to the top
+            await load;
+            Assert.Equal("High impact", page.Meters[Cause.TokenLeak].LevelText);
+            Shown([Cause.TokenLeak, Cause.BackgroundServices, Cause.DevDriveRecords, Cause.Defender, Cause.CodexShaderCache]);
+
+            // Top to bottom as listed: the rows, the meters on the page, and the page's text (what a screen reader reads): the
+            // step's heading and lead first, then the rows.
+            void Shown(Cause[] order)
+            {
+                Assert.Empty(view.LayoutProblems());
+                Assert.Equal(order, page.RowsShown.Select(r => r.Cause));
+                var tops = order.Select(c => page.Meters[c].Top).ToList();
+                Assert.True(tops.Zip(tops.Skip(1)).All(p => p.First < p.Second), string.Join(", ", tops));
+                var titles = page.RowsShown.Select(r => r.Title).ToList();
+                string[] heading = [SetupText.ImpactTitle, SetupText.ImpactLead];
+                Assert.Equal([.. heading, .. titles], page.Texts().Where(t => heading.Contains(t) || titles.Contains(t)));
+            }
+        }
     }
 
     // ------------------------------------------------------------------ the standby cache's four choices
@@ -504,9 +923,22 @@ public sealed class SetupWizardTests : IDisposable
         Assert.Equal([SetupLinks.TokenLeak, SetupLinks.LogonFix, SetupLinks.ForegroundLock], guard.Links);
 
         // Already set up: a status, nothing to apply.
-        var done = FixRows.From(Busy() with { LogonTaskExists = true }, LeakState.GuardOn, shortcutMade: true, launcherInstalled: true, leakFound: true);
+        var done = FixRows.From(Busy() with { SignIn = SignInState.Starts }, LeakState.GuardOn, shortcutMade: true, launcherInstalled: true, leakFound: true);
         Assert.Equal([(Fix.SignIn, "On"), (Fix.Shortcut, "On your desktop"), (Fix.TokenGuard, "On")],
             done.Where(r => r.Input == FixInput.Status).Select(r => (r.Fix, r.Status!)));
+        // A logon task that a switch of its own keeps off (it, its sign-in trigger, or no sign-in trigger): said as off,
+        // saying which and how to set it up again, and no switch that would turn it on as the guide finishes.
+        FixRow SignInRow(SignInState state) => FixRows.From(Busy() with { SignIn = state }, LeakState.NotFound, false, true).Single(r => r.Fix == Fix.SignIn);
+        foreach (var state in new[] { SignInState.TaskOff, SignInState.TriggerOff, SignInState.NoTrigger })
+            Assert.Equal((FixInput.Status, "Off", RecommendationRules.KeptOffText(state)), (SignInRow(state).Input, SignInRow(state).Status!, SignInRow(state).Detail));
+        Assert.Contains("sign-in trigger of your PoolWatch logon task is turned off", SignInRow(SignInState.TriggerOff).Detail);
+        Assert.Contains("has no sign-in trigger", SignInRow(SignInState.NoTrigger).Detail);
+        // None: the switch. One that is there for another reason: the switch, and the row says why and that finishing
+        // with it on replaces the task.
+        Assert.Equal((FixInput.Toggle, "So it watches from the moment you sign in."), (SignInRow(SignInState.NoTask).Input, SignInRow(SignInState.NoTask).Detail));
+        foreach (var state in new[] { SignInState.NotHighest, SignInState.NotKnown, SignInState.NotSafe })
+            Assert.Equal((FixInput.Toggle, RecommendationRules.ReplacedWhy(state) + " With this on, finishing replaces it with one that starts PoolWatch when you sign in."),
+                (SignInRow(state).Input, SignInRow(state).Detail));
         // Not found: no guard to offer (PoolWatch keeps watching). Not installed with the installer: said so, no switch.
         var plain = FixRows.From(Busy() with { InstalledInProgramFiles = false }, LeakState.NotFound, false, launcherInstalled: false);
         Assert.DoesNotContain(plain, r => r.Fix == Fix.TokenGuard);
@@ -720,7 +1152,8 @@ public sealed class SetupWizardTests : IDisposable
     [Fact]
     public async Task AScanThatDoesNotEndStopsHoldingSetupAfterTheWait()
     {
-        // The first run cannot be closed: a read that hangs must not keep it from finishing. Setup goes on with what PoolWatch had.
+        // A first run is there to be finished (closing it asks first): a read that hangs must not keep it from finishing.
+        // Setup goes on with what PoolWatch had.
         var cached = Facts(Ntfs) with { InstalledInProgramFiles = true };
         var host = new FakeHost(cached) { Scanned = Busy(), ScanGate = new() };
         long now = 0;
@@ -824,7 +1257,7 @@ public sealed class SetupWizardTests : IDisposable
     {
         var cached = Facts(Ntfs) with { InstalledInProgramFiles = true };
         var landed = Busy();
-        var newest = landed with { LogonTaskExists = true };
+        var newest = landed with { SignIn = SignInState.Starts };
         var host = new FakeHost(cached) { Scanned = landed, ScanGate = new(), CacheGate = new() };
         var session = new SetupSession(host, firstRun: true, advanced: false, scanWait: TimeSpan.FromMilliseconds(50));
         await session.LoadAsync(CancellationToken.None);
@@ -908,8 +1341,8 @@ public sealed class SetupWizardTests : IDisposable
         Assert.Equal(["run TokenLeakGuard"], host.Calls.Where(c => c.StartsWith("run", StringComparison.Ordinal)));
 
         // A scan setup stopped waiting for ends while the step shows: the sign-in switch and the shortcut appear, on.
-        var late = new FakeHost(Busy() with { LogonTaskExists = true }) { ScanGate = new() };
-        late.Facts = Busy() with { LogonTaskExists = true, ChatGptInstalled = false };
+        var late = new FakeHost(Busy() with { SignIn = SignInState.Starts }) { ScanGate = new() };
+        late.Facts = Busy() with { SignIn = SignInState.Starts, ChatGptInstalled = false };
         var s2 = new SetupSession(late, firstRun: true, advanced: false, scanWait: TimeSpan.Zero, clock: () => now);
         await s2.LoadAsync(CancellationToken.None);
         await s2.GoTo(SetupStep.Fixes);
@@ -1798,7 +2231,7 @@ public sealed class SetupWizardTests : IDisposable
     }
 
     [Fact]
-    public async Task TheWelcomeChoiceIsSetupsAndTheAppsAndStartsFromTheViewInUse()
+    public async Task TheWelcomeChoiceIsTheAppsViewAndStartsFromTheViewInUse()
     {
         var session = new SetupSession(new FakeHost(Busy()), firstRun: false, advanced: true);
         var (view, fonts) = View(session, 100, new Size(880, 586));
@@ -1813,6 +2246,229 @@ public sealed class SetupWizardTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The Standby cache step's picture counts the hour as PoolWatch does, from the last clear (<c>ClearPolicy.Due</c>):
+    /// its three hourly clears are evenly spaced, the first an hour after the picture's start (PoolWatch's start) and each
+    /// next an hour after the clear before it; the clear at the chosen size comes where the line reaches the limit, before
+    /// the next hour, and the picture ends before another hour has passed. Every fall of the line is at a clear, and the
+    /// clears' labels never overlap at any choice the step offers. The three hourly drops were drawn unevenly spaced
+    /// (220 and then 150 apart).
+    /// </summary>
+    [Fact]
+    public void TheStandbyPicturesHourlyDropsAreEvenlySpacedAndTheSizeDropIsAtTheLimit()
+    {
+        var drops = CacheChart.Drops;
+        Assert.Equal([false, false, false, true], drops.Select(d => d.AtSize));
+        float last = CacheChart.Start;
+        foreach (var (x, atSize) in drops)
+        {
+            if (atSize) Assert.True(x - last < CacheChart.Hour, $"the clear at the size, {x - last} after the last, came after the next hour");
+            else Assert.Equal(last + CacheChart.Hour, x);
+            last = x;
+        }
+        var hourly = drops.Where(d => !d.AtSize).Select(d => d.X).ToList();
+        Assert.Single(hourly.Zip(hourly.Skip(1), (a, b) => b - a).Distinct());
+
+        var pool = CacheChart.Pool;
+        Assert.All(pool.Zip(pool.Skip(1)), s => Assert.True(s.Second.X >= s.First.X, "the line goes back in time"));
+        var falls = pool.Zip(pool.Skip(1)).Where(s => s.First.X == s.Second.X).ToList();
+        Assert.All(falls, s => Assert.True(s.Second.Y > s.First.Y, "a vertical step that is not a fall"));
+        Assert.Equal(drops.Select(d => d.X), falls.Select(s => s.First.X));
+        for (int i = 0; i < drops.Count; i++)
+            if (drops[i].AtSize) Assert.Equal(CacheChart.LimitY, falls[i].First.Y);   // emptied as it reaches the limit
+            else Assert.True(falls[i].First.Y > CacheChart.LimitY, "an hourly clear at or over the limit");
+        Assert.True(pool[^1].X - drops[^1].X < CacheChart.Hour, "the picture runs past the next hour without a clear");
+
+        // The labels at the picture's own scale, with the widest hour and size the step offers.
+        using var small = new Font("Segoe UI", 11f, GraphicsUnit.Pixel);
+        const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
+        foreach (double hours in CacheChoices.HourOptions)
+            foreach (double gb in CacheChoices.GbOptions)
+            {
+                var widths = drops.Select(d => TextRenderer.MeasureText($"emptied, {(d.AtSize ? SetupText.Gb(gb) : SetupText.Number(hours) + " h")}", small, Size.Empty, flags).Width).ToList();
+                for (int i = 1; i < drops.Count; i++)
+                    Assert.True(drops[i].X - drops[i - 1].X >= (widths[i] + widths[i - 1]) / 2f + 6, $"at {hours} h and {gb} GB the labels at {drops[i - 1].X} and {drops[i].X} touch");
+                Assert.True(drops[0].X - widths[0] / 2f >= 0 && drops[^1].X + widths[^1] / 2f <= 600, "a label runs off the picture");
+            }
+    }
+
+    /// <summary>
+    /// A setup link asks to be painted again when Windows starts or stops showing focus cues (the first Tab, or Alt), as
+    /// a LinkLabel does, so a link that already has the focus shows its focus rectangle at once. It drew it only at its
+    /// next repaint.
+    /// </summary>
+    [Fact]
+    public void ALinkPaintsAgainWhenWindowsChangesItsFocusCues()
+    {
+        using var host = new Panel { Size = new Size(300, 60) };
+        var link = new LinkText { Text = "Microsoft Learn", Bounds = new Rectangle(0, 0, 200, 24) };
+        host.Controls.Add(link);
+        host.CreateControl(); // made, never shown
+        int painted = 0;
+        link.Invalidated += (_, _) => painted++;
+        var changed = typeof(Control).GetMethod("OnChangeUICues", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        changed.Invoke(link, [new UICuesEventArgs(UICues.ShowFocus | UICues.ChangeFocus)]);
+        Assert.Equal(1, painted);
+        changed.Invoke(link, [new UICuesEventArgs(UICues.ChangeFocus)]); // and when they stop
+        Assert.Equal(2, painted);
+    }
+
+    /// <summary>
+    /// How PoolWatch works: the links beside "Read more:" keep one left edge when they wrap (a link that does not fit
+    /// starts its line under the first link; they wrapped back under "Read more:"), at every width and text size; a link
+    /// is underlined only under the pointer and shows the keyboard focus with the focus rectangle (the focus underlined it,
+    /// so the window that opened with the focus on its first link showed that one underlined); and the window opens with
+    /// the focus on Close, where Enter goes.
+    /// </summary>
+    [Theory]
+    [InlineData(1f)]
+    [InlineData(1.5f)]
+    public void HowPoolWatchWorksLinksWrapUnderTheFirstLinkAndCloseHasTheFocus(float text)
+    {
+        using var form = new SetupWizardForm(new FakeHost(Busy()), firstRun: false, advanced: false);
+        using var how = new HowItWorksForm(form.Session, _ => { }, text);
+        _ = how.Handle; // never shown
+        Control? active = how.ActiveControl; // the view, a container, holds its own active control
+        while (active is ContainerControl { ActiveControl: { } inner }) active = inner;
+        Assert.Same(how.View.CloseButton, active);
+
+        var page = how.View.Page;
+        var readMore = page.Controls.OfType<TextBlock>().Single(t => t.Text == "Read more:");
+        var links = page.Controls.OfType<LinkText>().ToList();
+        Assert.Equal(HowPage.Links.Select(l => l.Text), links.Select(l => l.Text));
+        int wrapped = 0;
+        for (int width = 420; width <= 1100; width += 10)
+        {
+            page.Arrange(width);
+            string at = $"at {width} px and {text:0.#}x: " + string.Join(", ", links.Select(l => $"\"{l.Text}\" {l.Bounds}")) + $", Read more: {readMore.Bounds}";
+            Assert.True(readMore.Top == links[0].Top && links[0].Left > readMore.Right, at);
+            var lineStarts = links.Where((l, i) => i > 0 && l.Top > links[i - 1].Top).ToList();
+            wrapped += lineStarts.Count;
+            Assert.All(lineStarts, l => Assert.True(l.Left == links[0].Left, $"\"{l.Text}\" starts its line at {l.Left}, not under the first link ({links[0].Left}) {at}"));
+            Assert.All(links, l => Assert.True(l.Right <= width && l.Top >= readMore.Top, at));
+            for (int i = 1; i < links.Count; i++)
+                Assert.False(links[i].Bounds.IntersectsWith(links[i - 1].Bounds), at);
+        }
+        Assert.True(wrapped > 0, "no width made the links wrap");
+
+        Assert.Equal((true, false), LinkText.Cues(hover: true, focused: false, showFocusCues: true));
+        Assert.Equal((false, true), LinkText.Cues(hover: false, focused: true, showFocusCues: true));
+        Assert.Equal((false, false), LinkText.Cues(hover: false, focused: true, showFocusCues: false));
+        Assert.Equal((true, true), LinkText.Cues(hover: true, focused: true, showFocusCues: true));
+    }
+
+    /// <summary>
+    /// The Welcome step's choice picks only the view the app opens in, as its words now say: setup's seven steps, with every
+    /// text, row and choice, are the same with Simple and with Advanced, and the words claim nothing for setup but that.
+    /// They said Simple's setup "picks safe settings for you" and Advanced's "shows every choice", while both ran the same
+    /// seven steps with the same choices.
+    /// </summary>
+    [Fact]
+    public async Task TheLevelChoicePicksOnlyTheAppsViewAsItsWordsSay()
+    {
+        foreach (var words in new[] { SetupText.SimpleText, SetupText.AdvancedText })
+        {
+            Assert.StartsWith("The app opens ", words, StringComparison.Ordinal);
+            Assert.DoesNotContain("setup", words, StringComparison.OrdinalIgnoreCase);
+        }
+        Assert.DoesNotContain("setup", SetupText.LevelQuestion, StringComparison.OrdinalIgnoreCase);
+        Assert.StartsWith("Setup is the same either way.", SetupText.LevelLater, StringComparison.Ordinal);
+
+        var seen = new Dictionary<bool, (List<List<string>> Texts, (CacheChoice, double, double) Cache, List<string> Fixes)>();
+        foreach (bool advanced in new[] { false, true })
+        {
+            var session = new SetupSession(new FakeHost(Busy()), firstRun: true, advanced: advanced);
+            await session.LoadAsync(CancellationToken.None);
+            var (view, fonts) = View(session, 100, new Size(880, 586));
+            using (view)
+            using (fonts)
+            {
+                var steps = new List<List<string>>();
+                foreach (var step in SetupFlow.Steps)
+                {
+                    await session.GoTo(step);
+                    steps.Add(view.Page.Texts().ToList());
+                }
+                seen[advanced] = (steps, (session.Cache, session.Hours, session.PoolGb), session.Fixes.Select(f => $"{f.Fix} {f.Input} {f.Title}").ToList());
+            }
+        }
+        Assert.Equal(SetupFlow.Steps.Count, seen[true].Texts.Count);
+        for (int i = 0; i < SetupFlow.Steps.Count; i++) Assert.Equal(seen[false].Texts[i], seen[true].Texts[i]);
+        Assert.Equal(seen[false].Cache, seen[true].Cache);
+        Assert.Equal(seen[false].Fixes, seen[true].Fixes);
+        Assert.Contains(SetupText.LevelLater, seen[true].Texts[0]);
+    }
+
+    /// <summary>
+    /// The safety step's promises, as the setup's Ready page and the Active changes footer word the uninstaller's: it puts
+    /// each change back or says why it could not (a change Windows would not let it put back, or one it leaves), never
+    /// that it puts everything back.
+    /// </summary>
+    [Fact]
+    public void TheSafetyPromisesSayUninstallingPutsEachChangeBackOrSaysWhyItCouldNot()
+    {
+        Assert.Equal(["Nothing changes without your OK.", "Anything PoolWatch changes can be put back, one at a time or all at once.",
+            "Uninstalling puts each change back, or says why it could not."], SetupText.Promises);
+        Assert.All(SetupText.Promises, p => Assert.DoesNotContain("everything back", p));
+    }
+
+    /// <summary>
+    /// None of the texts it reads says that uninstalling puts "everything" back. It reads README.md, SECURITY.md, the
+    /// .md files directly in docs, the guide the app ships for AI assistants (src/PoolWatch/Assets/AGENTS.md) and every
+    /// comment of the C# code under src (<see cref="RecommendationActionsTests.ScannedTexts"/>); the repository's
+    /// AGENTS.md, CONTRIBUTING.md and CHANGELOG.md, the installer's script, with a message written over string literals
+    /// that only a + joins read whole (<see cref="RecommendationActionsTests.ScriptAsShown"/>), and every comment of the
+    /// C# code under tests (<see cref="RecommendationActionsTests.MoreTexts"/>); no other file. A comment after code on
+    /// its line, or between /* and */, is read too (<see cref="RecommendationActionsTests.CommentTexts"/>). A sentence
+    /// (or a clause between semicolons, or a table cell) is listed when uninstalling, the uninstaller or an uninstall is
+    /// followed, within 90 characters, by a claim that it puts back (or "puts back:") "everything", "every change" or
+    /// "every row", "all of these" or "all of them", or "it all", or that it has (or gets) everything, each or every
+    /// change, all of these or them, or it all put back, unless the claim says what it can ("everything it can") or that
+    /// it could not. The setup's own rollback, which puts back the old files, is not uninstalling.
+    /// </summary>
+    [Fact]
+    public void NoTextSaysUninstallingPutsEverythingBack()
+    {
+        const string whole = @"(everything|every\s+(change|row)|all\s+of\s+(these|them)|it\s+all)";
+        var all = new Regex(@"\buninstall\w*\b[^.;|]{0,90}?(?<!\bnot )(\bput(s|ting)?\s+(back:?\s+)?" + whole + @"|\b(have|has|having|get|gets|getting)\s+(" +
+            whole + @"|each\s+change)\s+put\s+back)\b(?!\s+(it|that\s+it)\s+can\b|[^.;|]{0,40}\bthat it can\b)", RegexOptions.IgnoreCase);
+        IEnumerable<string> Claims(string text) => Regex.Split(text, @"(?<=[.;|])\s+").Where(s => all.IsMatch(s));
+        var texts = RecommendationActionsTests.ScannedTexts().Concat(RecommendationActionsTests.MoreTexts()).ToList();
+        var found = texts.SelectMany(t => Claims(t.Text).Select(s => $"{t.File}: {s}")).ToList();
+        Assert.True(found.Count == 0, string.Join(Environment.NewLine, found));
+        // Each of those is read: the repository's AGENTS.md (its own "all it can"), CONTRIBUTING.md, CHANGELOG.md, the
+        // script's notice written over two literals as it is shown, and a test's comment.
+        Assert.Contains(texts, t => t.File == "the repository's AGENTS.md" && t.Text.Contains("the uninstaller puts back by default all it can"));
+        Assert.Contains(texts, t => t.File == "the repository's CONTRIBUTING.md" && t.Text.Length > 0);
+        Assert.Contains(texts, t => t.File == "the repository's CHANGELOG.md" && t.Text.Length > 0);
+        Assert.Contains(texts, t => t.File == "PoolWatch.iss" && t.Text.Contains("another program has them in use, or an earlier update of PoolWatch finishes"));
+        Assert.Contains(texts, t => t.File == "SetupWizardTests.cs" && t.Text.Contains("The scan finds the words it is for"));
+        // A claim in a comment after code on its line, or between /* and */, is found as well.
+        Assert.Equal(["The uninstaller puts back everything PoolWatch changed.", "Uninstalling puts it all back."],
+            RecommendationActionsTests.CommentTexts(["    _gate = hold; // The uninstaller puts back everything PoolWatch changed.",
+                "    Run(/* Uninstalling puts it all back. */ x);"]).SelectMany(Claims));
+        // A claim written over two string literals of the script's code, as the script writes a long message, is read as
+        // one, as the notice shows it (the script's text as written would not show it): here the list-failed notice of
+        // PutBackAnswer with its words so split.
+        string split = "MsgBox('PoolWatch could not list its changes. Uninstalling puts back ' +\r\n      'everything it recorded.', mbInformation, MB_OK);";
+        Assert.Equal(["Uninstalling puts back everything it recorded.', mbInformation, MB_OK);"], Claims(RecommendationActionsTests.ScriptAsShown(split)));
+        Assert.Empty(Claims(UninstallerTests.OneLine(split)));
+        // The scan finds the words it is for, and not those that say what it can, that it could not, or the setup's rollback.
+        Assert.All(new[] { "The uninstaller puts back everything PoolWatch changed", "the footer when uninstalling puts every row back",
+            "The footer: uninstalling puts all of these back, unless a row says it does not",
+            "a silent uninstall (/SILENT, /VERYSILENT) and /DELETEDATA put everything back without asking",
+            "Uninstalling puts back every change it recorded", "says what uninstalling puts back and asks, with putting it all back as the default",
+            "a silent uninstall (/SILENT, /VERYSILENT) and /DELETEDATA have each change put back without asking", "the uninstaller has everything put back",
+            "What the uninstaller puts back: everything (null), or with --keep-changes only the logon task and the desktop shortcut" },
+            s => Assert.Matches(all, s));
+        Assert.All(new[] { "Uninstalling puts back everything it can by default", "By default the uninstaller puts back everything PoolWatch changed that it can",
+            "a silent uninstall (/SILENT, /VERYSILENT) and /DELETEDATA choose to put the changes back without asking",
+            "the uninstaller has everything put back that it can", "an uninstall does not have every change put back",
+            "the uninstaller says the cleanup could not put everything back", "Uninstalling puts each of these back, or says why it could not.",
+            "it writes its uninstaller in a folder of its own, which Apps and Features then starts (one opened later, while the setup runs, " +
+            "can make the setup fail, which then puts everything back as above)" }, s => Assert.DoesNotMatch(all, s));
+    }
+
     [Fact]
     public void TheTextsArePlainWords()
     {
@@ -1823,6 +2479,7 @@ public sealed class SetupWizardTests : IDisposable
             SetupText.Mission, SetupText.SimpleText, SetupText.AdvancedText, SetupText.LevelLater, SetupText.Duration, SetupText.ImpactLead, SetupText.NotRead,
             SetupText.CacheLead, SetupText.LaterText, SetupText.Stutter, SetupText.ReplacesOwnTask, SetupText.ServicesLead, SetupText.WindowsServicesText,
             SetupText.PutBack, SetupText.FindIt, SetupText.ReadyLead, SetupText.TrayNote, SetupText.NextAgain, SetupText.WaitForScan, FixRows.GuardChecking,
+            SetupText.CloseFirstRun,
         };
         texts.AddRange(SetupText.Pillars.SelectMany(p => new[] { p.Title, p.Text }));
         texts.AddRange(SetupText.Promises);
@@ -1889,15 +2546,85 @@ public sealed class SetupWizardTests : IDisposable
     [Fact]
     public void TheCiUiTestLooksForTheScreenshotsAndTheMenuItemSetupHas()
     {
+        Assert.Equal(["6-setup-1-welcome.png", "6-setup-2-your-pc.png", "6-setup-3-safety.png", "6-setup-4-standby-cache.png", "6-setup-5-fixes.png",
+            "6-setup-6-services.png", "6-setup-7-ready.png", "6-setup-how-it-works.png"], SetupShots());
+        CiUiTestChecksSetup(CiUiScript());
+    }
+
+    /// <summary>
+    /// The CI UI test's pin fails when another assignment in the script's code sets its list of screenshots, here just
+    /// before the loop over it: to one name of its own (as a branch the run takes), cut to its first six names by a pipe, one
+    /// name put in place of a setup screenshot by an index, and the same with a scope or in a multiple assignment. The
+    /// list's own statement and the loop are still as the pin holds them, so only the count of the list's assignments fails
+    /// it; and each would leave a setup screenshot unchecked in CI with the loop's marker printed.
+    /// </summary>
+    [Theory]
+    [InlineData("if ($shots.Count -gt 0) { $names = '1-simple-view.png' }")]
+    [InlineData("if ($names) { $names = $names | Select-Object -First 6 }")]
+    [InlineData("$names[6] = '1-simple-view.png'")]
+    [InlineData("$script:names = '1-simple-view.png'")]
+    [InlineData("$names, $rest = '1-simple-view.png', $null")]
+    [InlineData("${names} = '1-simple-view.png'")]
+    [InlineData("${script:names} = '1-simple-view.png'")]
+    [InlineData("$rest, ${names} = $null, '1-simple-view.png'")]
+    public void TheCiUiPinFailsWhenAnotherAssignmentSetsTheScreenshotList(string added)
+    {
+        string script = CiUiScript();
+        CiUiTestChecksSetup(script);
+        const string loop = "    foreach ($n in $names) {";
+        int at = script.IndexOf(loop, StringComparison.Ordinal);
+        Assert.True(at >= 0 && script.IndexOf(loop, at + 1, StringComparison.Ordinal) < 0, "the screenshot loop is not a line of ci/m4-ui.ps1 once");
+        string changed = script[..at] + "    " + added + "\r\n" + script[at..];
+        Assert.Single(ScriptCode.StatementsIn(changed, "$names = ", CiUiSmoke));
+        Assert.True(ScriptCode.OnlyCheckThenMarker(changed, "Assert-True ($n -in $shots) \"", "ui-screenshots-taken", CiUiSmoke, loop.Trim()));
+        Assert.Equal(2, ScriptCode.PowerShellAssignments(changed, "names"));
+        Assert.ThrowsAny<Xunit.Sdk.XunitException>(() => CiUiTestChecksSetup(changed));
+    }
+
+    /// <summary>The block of ci/m4-ui.ps1 that reads smoke.json, where its checks of the windows are.</summary>
+    private const string CiUiSmoke = "if (Test-Path $smokeFile) {";
+
+    /// <summary>The screenshots of setup's steps and of How PoolWatch works, by their file names.</summary>
+    private static List<string> SetupShots() => SetupFlow.Steps.Select(SetupWizardForm.ShotName).Append(SetupWizardForm.HowItWorksShot).ToList();
+
+    private static string CiUiScript()
+    {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "PoolWatch.slnx"))) dir = dir.Parent;
         Assert.NotNull(dir);
-        string script = File.ReadAllText(Path.Combine(dir!.FullName, "ci", "m4-ui.ps1"));
-        var names = SetupFlow.Steps.Select(SetupWizardForm.ShotName).Append(SetupWizardForm.HowItWorksShot).ToList();
-        Assert.Equal(["6-setup-1-welcome.png", "6-setup-2-your-pc.png", "6-setup-3-safety.png", "6-setup-4-standby-cache.png", "6-setup-5-fixes.png",
-            "6-setup-6-services.png", "6-setup-7-ready.png", "6-setup-how-it-works.png"], names);
-        Assert.All(names, n => Assert.Contains($"'{n}'", script));
-        Assert.Contains($"'{FirstRunGate.MenuItem}'", script);
+        return File.ReadAllText(Path.Combine(dir!.FullName, "ci", "m4-ui.ps1"));
+    }
+
+    /// <summary>
+    /// That ci/m4-ui.ps1 (<paramref name="script"/>) checks each of setup's screenshots and its tray menu item. In its code,
+    /// where it reads smoke.json: the list of screenshots, as strings and nothing else, in a statement of that block that is
+    /// the only assignment of <c>$names</c> in the script's code (<see cref="ScriptCode.PowerShellAssignments"/>), and a
+    /// loop over <c>$names</c> whose body is only the check of each one and its CHECK-RAN marker; and a loop over the tray
+    /// menu items, listed in its head as strings and nothing else, whose body is only the check of each and its marker. So
+    /// a setup screenshot or the setup's menu item taken out of its list (into the check's message, say), either list cut
+    /// short by a pipe or an index after it, or the screenshots' list set again by another assignment, fails this test; no
+    /// statement of either loop can skip the check of a later item (a continue before it, a break after the marker); and a
+    /// run of the UI job in which the loop's check never ran fails (CheckMarkerTests). A list set another way (Set-Variable,
+    /// say) is not read.
+    /// </summary>
+    private static void CiUiTestChecksSetup(string script)
+    {
+        var names = SetupShots();
+        const string smoke = CiUiSmoke, shotLoop = "foreach ($n in $names) {", trayLoop = "foreach ($item in 'Open PoolWatch',";
+        int sets = ScriptCode.PowerShellAssignments(script, "names");
+        Assert.True(sets == 1, $"ci/m4-ui.ps1's code assigns $names {sets} times, not once (its list's own statement)");
+        var shots = Regex.Match(Assert.Single(ScriptCode.StatementsIn(script, "$names = ", smoke)), @"^\$names = (.*)$");
+        Assert.True(shots.Success);
+        var shotList = ScriptCode.StringList(shots.Groups[1].Value);
+        Assert.NotNull(shotList); // strings and nothing else
+        Assert.All(names, n => Assert.Contains(n, shotList));
+        Assert.True(ScriptCode.OnlyCheckThenMarker(script, "Assert-True ($n -in $shots) \"", "ui-screenshots-taken", smoke, shotLoop), "the screenshots are not each checked");
+        var tray = Regex.Match(ScriptCode.Head(Assert.Single(ScriptCode.StatementsIn(script, trayLoop, smoke))), @"^foreach \(\$item in (.*)\)$");
+        Assert.True(tray.Success);
+        var trayList = ScriptCode.StringList(tray.Groups[1].Value);
+        Assert.NotNull(trayList); // strings and nothing else
+        Assert.Contains(FirstRunGate.MenuItem, trayList);
+        Assert.True(ScriptCode.OnlyCheckThenMarker(script, "Assert-True ($item -in $tray) \"", "ui-tray-menu-items", smoke, trayLoop), "the tray menu's items are not each checked");
     }
 
     [Fact]
@@ -2106,7 +2833,7 @@ public sealed class SetupWizardTests : IDisposable
             if (result.Item1)
                 switch (r.Id)
                 {
-                    case RecommendationId.StartAtSignIn: Facts = Facts! with { LogonTaskExists = true }; break;
+                    case RecommendationId.StartAtSignIn: Facts = Facts! with { SignIn = SignInState.Starts }; break;
                     case RecommendationId.TokenLeakGuard: Running.TokenGuardEnabled = true; break;
                     case RecommendationId.ChatGptShortcut: ShortcutMade = true; break;
                     case RecommendationId.DefenderDevDrive: Instructions = r.Instructions ?? ""; break;
@@ -2140,6 +2867,15 @@ public sealed class SetupWizardTests : IDisposable
         public void MarkCompleted() => Completed++;
         public void OpenWebPage(IWin32Window owner, string url) => Calls.Add("open " + url);
         public void Log(string line) { }
+
+        /// <summary>What the owner answers when setup asks whether to close on its first run; each question is in Calls.</summary>
+        public bool CloseAnswer;
+
+        public bool ConfirmCloseFirstRun(IWin32Window owner)
+        {
+            Calls.Add("asked to close");
+            return CloseAnswer;
+        }
     }
 
     private sealed class FakeUpdates : IUpdateCheck
@@ -2189,7 +2925,6 @@ public sealed class SetupWizardTests : IDisposable
         }
         public Task<LeakVerdict?> CheckTokenLeak(CancellationToken stop) => throw new NotSupportedException();
         public (bool Ok, string Message) CreateChatGptShortcut(string? iconPath, string via) => throw new NotSupportedException();
-        public ClearRecord? StartClear() => throw new NotSupportedException();
         public string IncidentsDir => "";
         public void Timeline(string line) => TimelineLines.Add(line);
     }
@@ -2220,7 +2955,7 @@ public sealed class SetupWizardTests : IDisposable
         public GuardState? SavedGuardState() => null;
         public uint? LiveForegroundLockTimeout() => null;
         public IReadOnlyList<string> OwnClearTasks() => [@"\RAMMap clear"];
-        public bool LogonTaskExists() => false;
+        public SignInState SignInTask() => SignInState.NoTask;
         public bool InstalledInProgramFiles() => true;
         public IReadOnlyList<string> RunningOptionalServices() => [];
         public (bool? RealTime, bool? PerformanceMode) Defender() => (null, null);
@@ -2252,7 +2987,6 @@ public sealed class SetupWizardTests : IDisposable
             Calls.Add("create the shortcut");
             return (true, "");
         }
-        public ClearRecord? StartClear() => throw new NotSupportedException();
         public string IncidentsDir => "";
         public void Timeline(string line) { }
     }
@@ -2276,6 +3010,7 @@ public sealed class SetupWizardTests : IDisposable
         public void MarkCompleted() { }
         public void OpenWebPage(IWin32Window owner, string url) { }
         public void Log(string line) { }
+        public bool ConfirmCloseFirstRun(IWin32Window owner) => false;
     }
 
     private sealed class NoShell : IShell

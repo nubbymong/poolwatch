@@ -20,7 +20,7 @@ public class TokenLeakWatchTests
 
     private static RecommendationInputs Inputs(string build = "26200.7000", string? savedFor = "26100.4000", TokenLeakStatus status = TokenLeakStatus.NeedsTest) => new()
     {
-        NowUtc = Now, SavedVerdictBuild = savedFor, SavedVerdict = GuardResult.CleanOnce,
+        NowUtc = Now, NowMs = Clocks.At(Now).Ms, SavedVerdictBuild = savedFor, SavedVerdict = GuardResult.CleanOnce,
         Facts = new EnvironmentFacts { ScannedUtc = Now, WindowsName = "Windows 11 Pro", Build = build, Architecture = "x64", TokenLeak = status },
     };
 

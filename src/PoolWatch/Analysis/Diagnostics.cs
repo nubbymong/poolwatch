@@ -19,7 +19,6 @@ internal sealed class Diagnostics
     private readonly MonitorEngine _engine;
     private readonly AnalysisPipeline _analysis;
     private readonly FileProbe _probe = new();
-    private DateTime _nextStrayCheck = DateTime.MinValue;
 
     public Diagnostics(MonitorEngine engine, AnalysisPipeline analysis)
     {
@@ -30,10 +29,10 @@ internal sealed class Diagnostics
         StrayGit = new StrayGitCheck(_probe, Git);
         Tokens = new Core.Tokens.TokenCorrelator(engine.Settings, engine.Registry);
         Lag = new Core.Lag.LagMonitor(engine.Settings);
-        // Addendum 4 A: "PC is saturated" when the run queue stays above the core count OR the responsiveness probe (item
-        // 9) trips, for over 60 s. The probe's state counts only while it is fresh (three probe intervals, at least 30 s).
+        // "PC is saturated" when the run queue stays above the core count OR the responsiveness probe
+        // trips, for over 60 s. The probe's state counts only while it is fresh (three probe intervals, at least 30 s).
         var probeFresh = TimeSpan.FromSeconds(Math.Max(30, 3 * engine.Settings.LagProbeSeconds));
-        ProbeTripping = () => { lock (Lag) return Lag.Tripping(DateTime.UtcNow, probeFresh); };
+        ProbeTripping = () => { lock (Lag) return Lag.Tripping(Environment.TickCount64, probeFresh); }; // freshness on the clock that only goes forward
         Accumulation = new Core.Spawn.ChildAccumulation(engine.Settings);
         AppSnapshots = new Core.Boot.AppSnapshots(engine.Settings.WatchedApps);
         if (engine.Settings.LagProbeSeconds > 0)
@@ -43,7 +42,7 @@ internal sealed class Diagnostics
                 engine.Paths.Guard.CheckReal);
         }
         EventLog = new EventLogFeed(engine.Log.Info, Path.Combine(engine.Paths.EnsureDir(engine.Paths.CacheDir), "eventlog-last.txt"), engine.Paths.Guard.CheckReal);
-        // C6: the event-log feed is a diagnostic extra; nothing in it may stop PoolWatch from starting.
+        // The event-log feed is a diagnostic extra; nothing in it may stop PoolWatch from starting.
         try { EventLog.Start(); }
         catch (Exception ex) { engine.Log.Info("event log feed not started: " + ex.Message); }
         analysis.Incidents.Opened += (_, _) => _instancesRequested = true;
@@ -54,7 +53,7 @@ internal sealed class Diagnostics
         // the sampler's next tick, like every other finding raised off the sampler thread.
         Services = new ServicesController(engine.Paths, engine.Log, f => _fromOtherThreads.Enqueue(f), LiveCost, RecentCost);
         Findings.Added += OnFinding;
-        // S3 (review round 3): a data folder moved aside or repaired at start is on the timeline (recorded on the first tick).
+        // A data folder moved aside or repaired at start is on the timeline (recorded on the first tick).
         foreach (var n in engine.Paths.StartupNotes)
             _fromOtherThreads.Enqueue(new Finding { TimeUtc = DateTime.UtcNow, Kind = FindingKind.Setup, Severity = FindingSeverity.Warning, Title = "Data folder: " + n });
         engine.Lifecycle += OnLifecycle;
@@ -63,9 +62,9 @@ internal sealed class Diagnostics
     }
 
     /// <summary>
-    /// C1: PoolWatch's own trace (recording or parsing) or cache clear is running, or ended under 30 s ago. The lag probe
+    /// PoolWatch's own trace (recording or parsing) or cache clear is running, or ended under 30 s ago. The lag probe
     /// pauses then (probe thread), so lag PoolWatch causes itself is not recorded as a pool lag onset.
-    /// C1 b (review round 2): at most 10 min for one piece of work. A capture thread that hangs (a stuck parse) used to keep
+    /// At most 10 min for one piece of work. A capture thread that hangs (a stuck parse) used to keep
     /// the probe silent until PoolWatch restarted; past 10 min the probe runs again, and that is said once per stuck piece
     /// of work (log and a Lag finding).
     /// </summary>
@@ -103,12 +102,13 @@ internal sealed class Diagnostics
     public Core.Filters.FilterTimeline Filters { get; } = new();
     public Core.Lag.LagMonitor Lag { get; }
     public Core.Spawn.ChildAccumulation Accumulation { get; }
-    /// <summary>Item 13: each watched app's last tag snapshot before it started and first after it exited (lock it to read).</summary>
+    /// <summary>Each watched app's last tag snapshot before it started and first after it exited (lock it to read).</summary>
     public Core.Boot.AppSnapshots AppSnapshots { get; }
     private readonly LagProber? _lagProber;
     public bool DwmAvailable => _lagProber?.DwmAvailable ?? false;
     public EventLogFeed EventLog { get; }
-    private DateTime _nextServices = DateTime.MinValue, _nextInstances = DateTime.MinValue;
+    /// <summary>When the version, crash, stray .git and filter checks run, on the clock that only goes forward.</summary>
+    private readonly CheckSchedule _checks = new();
 
     /// <summary>The running (or last) A/B experiment. Read under its own lock.</summary>
     public Core.Experiments.Experiment? Experiment { get; private set; }
@@ -118,7 +118,7 @@ internal sealed class Diagnostics
     /// <summary>Raised on the sampler thread at each experiment phase change (the tray shows the prompt).</summary>
     public event Action<Core.Experiments.ExperimentStep>? ExperimentStep;
 
-    /// <summary>The "lag before vs after a clear" preset (addendum 2 C), when that was the last experiment asked for.</summary>
+    /// <summary>The "lag before vs after a clear" preset, when that was the last experiment asked for.</summary>
     public Core.Experiments.ClearLagExperiment? ClearExperiment { get; private set; }
 
     public bool AnyExperimentActive
@@ -172,8 +172,9 @@ internal sealed class Diagnostics
     {
         lock (_experimentLock)
         {
-            if (ClearExperiment is { } c) return c.Statement is { } st ? $"{c.Status(DateTime.UtcNow)}: {st}" : c.Status(DateTime.UtcNow);
-            return Experiment is { } e ? (e.Result is { } r ? $"{e.Status(DateTime.UtcNow)}: {r.Statement}" : e.Status(DateTime.UtcNow)) : "";
+            long nowMs = Core.Model.Moment.Now().Ms; // the minutes left are timed on the forward clock
+            if (ClearExperiment is { } c) return c.Statement is { } st ? $"{c.Status(nowMs)}: {st}" : c.Status(nowMs);
+            return Experiment is { } e ? (e.Result is { } r ? $"{e.Status(nowMs)}: {r.Statement}" : e.Status(nowMs)) : "";
         }
     }
 
@@ -185,13 +186,13 @@ internal sealed class Diagnostics
         return f;
     }
     private volatile bool _instancesRequested;
-    /// <summary>Clear cache (addendum 2): manual and automatic standby purges, measured.</summary>
+    /// <summary>Clear cache: manual and automatic standby purges, measured.</summary>
     public CacheClearer Cache { get; }
-    /// <summary>The token-leak guard (addendum 3). Its findings come from worker threads: queued, recorded on the sampler.</summary>
+    /// <summary>The token-leak guard. Its findings come from worker threads: queued, recorded on the sampler.</summary>
     public TokenLeakGuard Guard { get; }
-    /// <summary>The background-services page (addendum 4): enumerate, apply/restore, self-repair watch.</summary>
+    /// <summary>The background-services page: enumerate, apply/restore, self-repair watch.</summary>
     public ServicesController Services { get; }
-    /// <summary>The "PC is saturated" detector (addendum 4 A).</summary>
+    /// <summary>The "PC is saturated" detector.</summary>
     public SaturationDetector Saturation { get; } = new();
     /// <summary>Per-process CPU and page-fault rates in the last window (for the saturation answer and the page).</summary>
     public ProcessLoad.Rates? Load { get; private set; }
@@ -203,29 +204,16 @@ internal sealed class Diagnostics
     /// <summary>A PID's cost in the latest window (the services page's Cost column); null before the first window.</summary>
     public (double cores, long faultsPerSec)? CostOfPid(int pid) => LiveCost(pid);
 
-    /// <summary>
-    /// A process's measured cost for the tasks / startup list: its average over the last 30 minutes while it has been busy
-    /// (<see cref="Costs"/>), else the latest window (idle processes are not tracked: they cost about nothing).
-    /// </summary>
-    public (double cores, long faultsPerSec)? CostOfProcess(ProcessKey key)
-    {
-        lock (Costs)
-            if (Costs.Average(key, TimeSpan.FromMinutes(30), DateTime.UtcNow) is { } avg) return (avg.cores, avg.faultsPerSec);
-        if (Load is not { } load) return null;
-        foreach (var r in load.Processes) if (r.Key == key) return (r.Cores, r.PageFaultsPerSec);
-        return (0, 0);
-    }
-
-    /// <summary>Heavy background apps (addendum 4 C): over 0.5 core for the last 30 minutes with no window in front.</summary>
+    /// <summary>Heavy background apps: over 0.5 core for the last 30 minutes with no window in front.</summary>
     public List<HeavyProcess> HeavyBackground()
     {
-        lock (Costs) return Costs.Heavy(DateTime.UtcNow, TimeSpan.FromMinutes(30), 0.5);
+        lock (Costs) return Costs.Heavy(ProcessCostHistory.ClockNow(), TimeSpan.FromMinutes(30), 0.5);
     }
 
-    /// <summary>A change the owner made on the Background services page (task / startup entry): a timeline finding. Any thread.</summary>
-    /// <summary>A finding raised off the sampler thread (the logon-task check, review round 3): recorded on the next tick.</summary>
+    /// <summary>A finding raised off the sampler thread (the logon-task check): recorded on the next tick.</summary>
     public void RecordFromOtherThread(Finding f) => _fromOtherThreads.Enqueue(f);
 
+    /// <summary>A change the owner made on the Background services page (task / startup entry): a timeline finding. Any thread.</summary>
     public void RecordOwnerChange(string title, string? image) => _fromOtherThreads.Enqueue(new Finding
     {
         TimeUtc = DateTime.UtcNow, Kind = FindingKind.ServiceChange, Severity = FindingSeverity.Info, Title = title, Image = image,
@@ -244,13 +232,13 @@ internal sealed class Diagnostics
     {
         if (_engine.Registry.GetLive(pid) is { } rec)
             lock (Costs)
-                if (Costs.Average(rec.Key, TimeSpan.FromMinutes(10), DateTime.UtcNow) is { } avg) return (avg.cores, avg.faultsPerSec);
+                if (Costs.Average(rec.Key, TimeSpan.FromMinutes(10), ProcessCostHistory.ClockNow()) is { } avg) return (avg.cores, avg.faultsPerSec);
         return LiveCost(pid);
     }
     public double? RunQueue { get; private set; }
-    private IReadOnlyList<ProcessSample>? _prevProcs;
-    private DateTime _prevProcsUtc;
-    /// <summary>Whether the lag probe (item 9) is tripping now: one of the two saturation conditions (wired in the constructor).</summary>
+    /// <summary>The sample before this one, for the load per process between the two (<see cref="StepLoad"/>).</summary>
+    private Sample? _prevSample;
+    /// <summary>Whether the lag probe is tripping now: one of the two saturation conditions (wired in the constructor).</summary>
     public Func<bool>? ProbeTripping { get; set; }
     /// <summary>The tray UI's notices for the guard (null headless).</summary>
     public IGuardUi? GuardUi { get; set; }
@@ -266,12 +254,15 @@ internal sealed class Diagnostics
     public Task StartTokenGuard(IGuardUi? ui)
     {
         GuardUi = ui;
-        // C4 (review): a crash during the leak test must still leave the logon protected. The clean shutdown path calls
+        // A crash during the leak test must still leave the logon protected. The clean shutdown path calls
         // OnExit via StopTokenGuard; an unhandled exception or a bare process exit call it too, through the failsafe the
         // guard hooked when it was made, whatever the guard setting (TokenLeakGuard.HookProcessExit). Not a kill or a native
-        // crash (no handler runs): the next start's logon check re-applies the workaround (residual risk, TokenLeakGuard.OnExit).
+        // crash (no handler runs): the logon check's helper then asks for the one click, and the next start's logon check
+        // re-applies the workaround without testing (TokenLeakGuard.OnExit, GuardStep.TurnOnInterrupted).
         // Once a check has finished, a new one starts: the guard turned off (Undo) and on again in the same run must check
         // this logon again, or it stays unprotected until the next start.
+        // Turned on: the guard may set the setting again, also in a check still under way since it was turned off.
+        Guard.TurnedOn();
         lock (_guardStartLock)
         {
             if (_guardTask is not { IsCompleted: false }) _guardTask = Task.Run(() => Guard.RunAtLogon(ui, _guardStop.Token));
@@ -290,32 +281,52 @@ internal sealed class Diagnostics
     }
 
     private static readonly string OwnImage = Path.GetFileName(Environment.ProcessPath ?? "PoolWatch.exe");
-    private DateTime _ownHelperSeen = DateTime.MinValue;
+    /// <summary>Until when (Environment.TickCount64, monotonic) the guard's helper's children are still left out of the spawn diagnostics.</summary>
+    private long _ownHelperUntilMs;
 
     /// <summary>A child of the guard's helper: a PoolWatch.exe started by this PoolWatch (via its hidden cmd.exe).</summary>
     private bool IsOwnHelper(int parentPid)
     {
         string? image = _engine.Registry.GetLive(parentPid)?.Image ?? _engine.Registry.RecentImage(parentPid);
         bool own = image is not null && (image.Equals(OwnImage, StringComparison.OrdinalIgnoreCase) || parentPid == Environment.ProcessId);
-        if (own) _ownHelperSeen = DateTime.UtcNow.AddMinutes(2); // the last children are counted a little after the test ends
+        if (own) _ownHelperUntilMs = Environment.TickCount64 + 120_000; // the last children are counted a little after the test ends
         return own;
     }
+
+    /// <summary>
+    /// One sample's step of the processes' costs: a minute point in <paramref name="costs"/>, and the load per process
+    /// since <paramref name="before"/> (the Services tab's Cost column, a change's before-cost when no average is held),
+    /// null when there is no sample before or no time passed. Both are timed on the samples' <see cref="Sample.TickMs"/>, a
+    /// clock that only goes forward, never on <see cref="Sample.TimeUtc"/>: setting the system clock back neither freezes
+    /// them until it catches up nor gives a rate over a wrong time.
+    /// </summary>
+    internal static ProcessLoad.Rates? StepLoad(Sample s, Sample? before, ProcessCostHistory costs, int cores, int foregroundPid)
+    {
+        lock (costs) costs.Observe(TimeSpan.FromMilliseconds(s.TickMs), s.Processes, foregroundPid);
+        return before is not null && s.TickMs > before.TickMs
+            ? ProcessLoad.Between(before.Processes, s.Processes, TimeSpan.FromMilliseconds(s.TickMs - before.TickMs), cores)
+            : null;
+    }
+
+    /// <summary>
+    /// The system-wide load at sample <paramref name="s"/>, stamped with both of its times: the "PC is saturated" check
+    /// times how long load has lasted on <see cref="LoadPoint.TickMs"/>, the sample's <see cref="Sample.TickMs"/>.
+    /// </summary>
+    internal static LoadPoint PointOf(Sample s, double cpuFraction, double? runQueue, int cores, bool probeTripping, FaultSplit? faults) =>
+        new(s.TimeUtc, s.TickMs, cpuFraction, runQueue, cores, probeTripping, faults);
 
     private void ObserveLoad(Sample s)
     {
         int cores = Environment.ProcessorCount;
-        if (_prevProcs is { } prev && s.TimeUtc > _prevProcsUtc)
-            Load = ProcessLoad.Between(prev, s.Processes, s.TimeUtc - _prevProcsUtc, cores);
-        _prevProcs = s.Processes;
-        _prevProcsUtc = s.TimeUtc;
-        lock (Costs) Costs.Observe(s.TimeUtc, s.Processes, Native.InputNative.ForegroundPid());
+        if (StepLoad(s, _prevSample, Costs, cores, Native.InputNative.ForegroundPid()) is { } rates) Load = rates;
+        _prevSample = s;
         var reading = Native.SystemLoadNative.Read();
         RunQueue = reading.RunQueue;
         Faults = reading.Faults;
         if (Load is not { } load) return;
         bool probe = ProbeTripping?.Invoke() ?? false;
-        // C2 (review round 2): no PDH, no run queue: the rule is off (null), not fed the sum of process cores (it never tripped).
-        var point = new LoadPoint(s.TimeUtc, load.CpuFraction, RunQueue, cores, probe, Faults);
+        // No PDH, no run queue: the rule is off (null), not fed the sum of process cores (it never tripped).
+        var point = PointOf(s, load.CpuFraction, RunQueue, cores, probe, Faults);
         // The load series (load.csv): CPU, run queue, the fault split and whether the probe trips, every sample.
         _engine.WriteLoad(point, load.SystemPageFaultsPerSec);
         var costs = load.Processes.Take(8).Select(r =>
@@ -389,12 +400,12 @@ internal sealed class Diagnostics
         catch (Exception ex) { _engine.Log.Info("saturation / load failed: " + ex.Message); }
         try
         {
-            Services.CheckSelfRepair(s.TimeUtc);
-            Services.ObserveSavings(s.TimeUtc, _engine.Services);
+            Services.CheckSelfRepair();
+            Services.ObserveSavings(_engine.Services);
         }
         catch (Exception ex) { _engine.Log.Info("service self-repair / savings check failed: " + ex.Message); }
         if (_guardTask is not null)
-            try { Guard.Recheck(s.TimeUtc, TimeSpan.FromMinutes(_engine.Settings.TokenGuardRecheckMinutes), () => GuardUi); }
+            try { Guard.Recheck(TimeSpan.FromMinutes(_engine.Settings.TokenGuardRecheckMinutes), () => GuardUi); }
             catch (Exception ex) { _engine.Log.Info("token guard re-check failed: " + ex.Message); }
         try { Cache.Observe(s); }
         catch (Exception ex) { _engine.Log.Info("clear cache failed: " + ex.Message); }
@@ -403,16 +414,16 @@ internal sealed class Diagnostics
             List<Finding> findings;
             List<SpawnStorm> toWrite;
             // The token-leak guard's own test (PoolWatch.exe starting 300 cmd.exe) is not a spawn storm to report.
-            var spawnEvents = Guard.Checking || _ownHelperSeen > s.TimeUtc ? events.Where(e => !IsOwnHelper(e.ParentPid)).ToList() : events;
-            lock (Spawns) (findings, toWrite) = Spawns.Observe(spawnEvents, s.TimeUtc);
-            foreach (var storm in toWrite) WriteStorm(storm, s.TimeUtc); // sets ReportDir on the storm's latest finding
+            var spawnEvents = Guard.Checking || Environment.TickCount64 < _ownHelperUntilMs ? events.Where(e => !IsOwnHelper(e.ParentPid)).ToList() : events;
+            lock (Spawns) (findings, toWrite) = Spawns.Observe(spawnEvents, Core.Model.Moment.Of(s));
+            foreach (var storm in toWrite) WriteStorm(storm, s.TickMs); // sets ReportDir on the storm's latest finding
             foreach (var f in findings) Findings.Add(f);
         }
         catch (Exception ex) { _engine.Log.Info("spawn diagnostics failed: " + ex.Message); }
         try
         {
             Finding? token;
-            lock (Tokens) token = Tokens.Observe(s, events);
+            lock (Tokens) token = Tokens.Observe(s, events, Environment.TickCount64);
             if (token is not null) Findings.Add(token);
         }
         catch (Exception ex) { _engine.Log.Info("token correlation failed: " + ex.Message); }
@@ -427,7 +438,7 @@ internal sealed class Diagnostics
                     _engine.WriteLag(probe);
                     if (lag is not null)
                     {
-                        // Addendum 2 C: what the CPU is doing while it lags, next to the pool size (a CPU-only trace). C1: through
+                        // What the CPU is doing while it lags, next to the pool size (a CPU-only trace). Through
                         // the capture governor (CpuTraceEnabled + DeeperCapture, hourly cap, not while saturated or typing); the
                         // finding says what happened ("capture skipped: ...").
                         var (inc, note) = _analysis.CaptureForLag("lag probe tripped: " + lag.Title, lag.TimeUtc);
@@ -440,32 +451,33 @@ internal sealed class Diagnostics
         catch (Exception ex) { _engine.Log.Info("lag probe failed: " + ex.Message); }
         try
         {
-            // C6: one inbox for the run: the folder is listed only when it changed, and undeletable files never block new marks.
-            _markInbox ??= new Core.Experiments.MarkInbox(_engine.Paths.RequestsDir, _engine.Paths.Guard.CheckReal);
-            foreach (var (t, text) in _markInbox.Take(s.TimeUtc)) AddMark(text, "command line", t);
+            // One inbox for the run: the folder is listed only when it changed, and undeletable files never block new marks.
+            _markInbox ??= new Core.Experiments.MarkInbox(_engine.Paths.RequestsDir, _engine.Paths.CheckRealNoWait);
+            foreach (var (t, text) in _markInbox.Take(s.TickMs)) AddMark(text, "command line", t);
             DrainOtherThreads();
         }
         catch (Exception ex) { _engine.Log.Info("mark requests failed: " + ex.Message); }
-        if (s.TimeUtc >= _nextVersionCheck)
+        // The checks' schedules are timed on the clock that only goes forward (the sample's own moment). The filter manager's
+        // services and instances are counted as done where they are read (ObserveFilters), so a failure before them leaves
+        // them, and an incident's request for the instances, due at the next sample.
+        var due = _checks.At(s, _engine.Settings, _instancesRequested);
+        if (due.Version)
         {
-            _nextVersionCheck = s.TimeUtc.AddMinutes(_engine.Settings.VersionCheckMinutes);
             try { CheckVersions(s.TimeUtc); }
             catch (Exception ex) { _engine.Log.Info("version markers failed: " + ex.Message); }
         }
-        if (s.TimeUtc >= _nextCrashCheck)
+        if (due.Crash)
         {
-            _crashChecks++;
-            _nextCrashCheck = s.TimeUtc + (_crashChecks == 1 ? TimeSpan.FromMinutes(5) : _crashChecks == 2 ? TimeSpan.FromMinutes(10) : TimeSpan.FromMinutes(_engine.Settings.VersionCheckMinutes));
-            // C6: a log that filled its page has more records behind it: the next page in a minute, not at the next check.
-            try { if (CheckCrashes(s.TimeUtc) && _nextCrashCheck > s.TimeUtc.AddMinutes(1)) _nextCrashCheck = s.TimeUtc.AddMinutes(1); }
+            // A log that filled its page has more records behind it: the next page in a minute, not at the next check.
+            try { if (CheckCrashes(s.TimeUtc)) _checks.CrashPageFull(s); }
             catch (Exception ex) { _engine.Log.Info("crash markers failed: " + ex.Message); }
         }
-        if (Accumulation.Due(s.TimeUtc))
+        if (Accumulation.Due(Core.Model.Moment.Of(s)))
         try
         {
             List<Finding> acc;
             lock (Accumulation)
-                acc = Accumulation.Observe(_engine.Registry.LiveRecords(), r => _engine.Registry.Ancestry(r.Key) is { Count: > 0 } chain ? Core.Identity.ProcessIdentities.Of(chain) : null, s.TimeUtc);
+                acc = Accumulation.Observe(_engine.Registry.LiveRecords(), r => _engine.Registry.Ancestry(r.Key) is { Count: > 0 } chain ? Core.Identity.ProcessIdentities.Of(chain) : null, Core.Model.Moment.Of(s));
             foreach (var f in acc) Findings.Add(f);
         }
         catch (Exception ex) { _engine.Log.Info("child accumulation failed: " + ex.Message); }
@@ -473,17 +485,16 @@ internal sealed class Diagnostics
         catch (Exception ex) { _engine.Log.Info("experiment failed: " + ex.Message); }
         try
         {
-            // Item 13: before-launch / after-exit tag snapshots of the watched apps, outside experiments too.
+            // Before-launch / after-exit tag snapshots of the watched apps, outside experiments too.
             List<Core.Boot.AppSnapshot> taken;
             lock (AppSnapshots) taken = AppSnapshots.Observe(s.TimeUtc, s.Processes, s.Tags);
             foreach (var t in taken) _engine.Log.Info($"tag snapshot kept: {t.App} {t.Moment} ({t.Tags.Count} tags)");
         }
         catch (Exception ex) { _engine.Log.Info("app snapshots failed: " + ex.Message); }
-        try { ObserveFilters(s.TimeUtc, events); }
+        try { ObserveFilters(s, due, events); }
         catch (Exception ex) { _engine.Log.Info("filter / container timeline failed: " + ex.Message); }
-        if (s.TimeUtc >= _nextStrayCheck)
+        if (due.StrayGit)
         {
-            _nextStrayCheck = s.TimeUtc.AddMinutes(_engine.Settings.StrayGitCheckMinutes);
             try
             {
                 foreach (var f in StrayGit.Run(StrayGitCandidates(), GitContext(), s.TimeUtc)) Findings.Add(f);
@@ -492,10 +503,16 @@ internal sealed class Diagnostics
         }
     }
 
-    private DateTime _nextVersionCheck = DateTime.MinValue;
     public IReadOnlyDictionary<string, string> Versions { get; private set; } = new Dictionary<string, string>();
     public List<Core.Versions.CrashMarkers.SystemCrash> SystemCrashes { get; } = new();
     public int AppCrashes { get; private set; }
+
+    /// <summary>
+    /// Every live process named like AICC's exe, from any folder, in the order seen: VersionCollector takes the version of
+    /// the one that is AICC's own (<see cref="VersionCollector.AiccVersion"/>), so none is passed over by name alone.
+    /// </summary>
+    internal static List<string?> AiccCandidates(IEnumerable<ProcessRecord> live) =>
+        live.Where(r => r.Image.Equals(Core.Aicc.ProcessLabels.AiccExe, StringComparison.OrdinalIgnoreCase)).Select(r => r.ImagePath).ToList();
 
     /// <summary>
     /// At start and every <see cref="Core.Settings.VersionCheckMinutes"/>: app versions against the last check (kept in
@@ -505,14 +522,13 @@ internal sealed class Diagnostics
     {
         string cache = _engine.Paths.EnsureDir(_engine.Paths.CacheDir);
         string versionsFile = Path.Combine(cache, "versions.txt");
-        string? aicc = _engine.Registry.LiveRecords().FirstOrDefault(r => r.Image.Equals(Core.Aicc.ProcessLabels.AiccExe, StringComparison.OrdinalIgnoreCase))?.ImagePath;
-        var current = VersionCollector.Read(_engine.Settings, aicc, _engine.Log.Info);
-        Dictionary<string, string>? previous = File.Exists(versionsFile) ? Core.Versions.VersionMarkers.Parse(File.ReadAllText(versionsFile)) : null;
+        var current = VersionCollector.Read(_engine.Settings, AiccCandidates(_engine.Registry.LiveRecords()), _engine.Log.Info);
+        Dictionary<string, string>? previous = File.Exists(versionsFile) ? Core.Versions.VersionMarkers.Parse(PoolWatch.Engine.NoWaitOpen.ReadAllText(versionsFile)) : null;
         // AICC's version is only readable while it runs: keep the last one seen rather than report it gone.
         if (!current.ContainsKey("AI Code Conductor") && previous?.TryGetValue("AI Code Conductor", out var av) == true) current["AI Code Conductor"] = av;
         var changes = Core.Versions.VersionMarkers.Diff(previous, current, now);
         Versions = current;
-        if (previous is null || changes.Count > 0) File.WriteAllText(_engine.Paths.Guard.CheckReal(versionsFile), Core.Versions.VersionMarkers.Serialize(current));
+        if (previous is null || changes.Count > 0) PoolWatch.Engine.NoWaitOpen.WriteAllText(_engine.Paths.Guard.CheckReal(versionsFile), Core.Versions.VersionMarkers.Serialize(current));
         foreach (var f in changes) Findings.Add(f);
 
     }
@@ -521,14 +537,12 @@ internal sealed class Diagnostics
     private readonly List<Core.Versions.CrashRecord> _systemRecords = new();
     private Core.Versions.CrashCursor? _crashCursor;
     private readonly Dictionary<Core.Versions.CrashMarkers.SystemCrash, string> _crashDirs = new(ReferenceEqualityComparer.Instance);
-    private DateTime _nextCrashCheck = DateTime.MinValue;
-    private int _crashChecks;
 
     /// <summary>
     /// Crash records since PoolWatch last looked (cache\last-seen.txt = where reading stopped in each log, or the lookback on
     /// a first run): at start, again 5 and 15 minutes later (WER writes the BugCheck record and the BlueScreen bucket a few
     /// minutes after logon), then with every version check. Records of one restart that arrive in different reads still make
-    /// one crash: its report folder is rewritten with the later records. C6: each log is paged through by record ID (a
+    /// one crash: its report folder is rewritten with the later records. Each log is paged through by record ID (a
     /// bounded page per check, oldest first), so records beyond a page are read at the next check, never skipped. Returns
     /// true when a log filled its page (more to read).
     /// </summary>
@@ -538,13 +552,13 @@ internal sealed class Diagnostics
         if (_crashCursor is null)
         {
             string? text = null;
-            try { if (File.Exists(seenFile)) text = File.ReadAllText(seenFile); }
+            try { if (File.Exists(seenFile)) text = PoolWatch.Engine.NoWaitOpen.ReadAllText(seenFile); }
             catch (Exception ex) { _engine.Log.Info("last-seen.txt not read (reading the lookback): " + ex.Message); }
             _crashCursor = Core.Versions.CrashCursor.Parse(text, DateTime.UtcNow);
         }
         var (events, more) = VersionCollector.CrashEvents(_crashCursor, DateTime.UtcNow, _engine.Settings.CrashLookbackDays, _engine.Log.Info);
         var records = events.Select(e => Core.Versions.CrashMarkers.Parse(e, _engine.Settings.WatchedApps)).OfType<Core.Versions.CrashRecord>().ToList();
-        try { File.WriteAllText(_engine.Paths.Guard.CheckReal(seenFile), _crashCursor.Format()); }
+        try { PoolWatch.Engine.NoWaitOpen.WriteAllText(_engine.Paths.Guard.CheckReal(seenFile), _crashCursor.Format()); }
         catch (Exception ex) { _engine.Log.Info("last-seen.txt not saved: " + ex.Message); } // read again after a restart: repeats, never gaps
 
         var newSystem = records.Where(r => r.Kind is Core.Versions.CrashKind.BugCheck or Core.Versions.CrashKind.KernelPower or Core.Versions.CrashKind.BlueScreenReport).ToList();
@@ -569,7 +583,7 @@ internal sealed class Diagnostics
                     var md = new System.Text.StringBuilder("## Records\n\n");
                     foreach (var r in c.Records) md.AppendLine($"- {Core.Detection.Fmt.Stamp(r.TimeUtc)} {r.Kind}: {FindingReport.Md(r.Text)}");
                     md.AppendLine().AppendLine("Read from the System and Application event logs (records since PoolWatch last looked).");
-                    FindingReport.Write(dir, f, md.ToString(), null, _engine.Paths.Guard.CheckReal);
+                    FindingReport.Write(dir, f, md.ToString(), null, _engine.Paths.CheckRealNoWait);
                     f.ReportDir = dir;
                     _crashDirs[c] = dir;
                 }
@@ -586,7 +600,7 @@ internal sealed class Diagnostics
             if (i >= 0) apps[i] = apps[i] with { Bucket = rep.Bucket, Text = apps[i].Text + $", fault bucket {rep.Bucket}" };
             else apps.Add(rep);
         }
-        // C6: the newest 50 one by one; any older ones in one summary finding (they were dropped before).
+        // The newest 50 one by one; any older ones in one summary finding (they were dropped before).
         foreach (var f in Core.Versions.CrashMarkers.AppFindings(apps)) Findings.Add(f);
         AppCrashes += apps.Count;
         return more;
@@ -609,7 +623,7 @@ internal sealed class Diagnostics
             {
                 string dir = FindingReport.NewDir(_engine.Paths.IncidentsDir, step.Finding, e.App);
                 FindingReport.Write(dir, step.Finding, r.Markdown(e.App, e.PhaseLength) + "\n" + _engine.Meter.OwnCostLine() + "\n",
-                    new Dictionary<string, string> { ["experiment.csv"] = r.Csv() }, _engine.Paths.Guard.CheckReal);
+                    new Dictionary<string, string> { ["experiment.csv"] = r.Csv() }, _engine.Paths.CheckRealNoWait);
                 step.Finding.ReportDir = dir;
             }
             catch (Exception ex) { _engine.Log.Info("experiment report failed: " + ex.Message); }
@@ -640,9 +654,9 @@ internal sealed class Diagnostics
             try
             {
                 string dir = FindingReport.NewDir(_engine.Paths.IncidentsDir, x.step.Finding, "lag-vs-clear");
-                string md = "## In plain words\n\n" + FindingReport.Md(st) + "\n\n" + string.Concat(c.Notes.Select(n => "- " + FindingReport.Md(n) + "\n")) +
+                string md = "## In plain words\n\n" + Core.Util.MdText.Line(st) + "\n\n" + string.Concat(c.Notes.Select(n => "- " + FindingReport.Md(n) + "\n")) +
                             "\nThe clear itself is its own CacheClear finding (pool and top tags before and 2 min after).\n\n" + _engine.Meter.OwnCostLine() + "\n";
-                FindingReport.Write(dir, x.step.Finding, md, new Dictionary<string, string>(), _engine.Paths.Guard.CheckReal);
+                FindingReport.Write(dir, x.step.Finding, md, new Dictionary<string, string>(), _engine.Paths.CheckRealNoWait);
                 x.step.Finding.ReportDir = dir;
             }
             catch (Exception ex) { _engine.Log.Info("experiment report failed: " + ex.Message); }
@@ -651,32 +665,63 @@ internal sealed class Diagnostics
         ExperimentStep?.Invoke(x.step);
     }
 
-    /// <summary>Filter / package events, container processes and services, and (hourly or on alert) the filter instances.</summary>
-    private void ObserveFilters(DateTime now, IReadOnlyList<LifecycleEvent> events)
+    /// <summary>
+    /// Filter / package events, container processes and services, and (hourly or on alert) the filter instances. The services
+    /// and the instances are counted as done as each is read, after the events (<see cref="ReadFilters"/>): a failure before
+    /// them leaves them due at the next sample, and a query that fails waits for its next time, as before.
+    /// </summary>
+    private void ObserveFilters(Sample s, CheckSchedule.Due due, IReadOnlyList<LifecycleEvent> events)
     {
-        var found = new List<Finding>();
+        List<Finding> found;
         lock (Filters)
-        {
-            foreach (var e in EventLog.Drain()) found.AddRange(Filters.OnLogEvent(e));
-            found.AddRange(Filters.OnLifecycle(events, _engine.Registry.LiveRecords, now));
-            if (now >= _nextServices)
-            {
-                _nextServices = now.AddSeconds(_engine.Settings.ServiceIntervalSeconds);
-                try { found.AddRange(Filters.OnServices(ServiceStates.Query(Core.Filters.FilterTimeline.WatchedServices), now)); }
-                catch (Exception ex) { _engine.Log.Info("service state query failed: " + ex.Message); }
-            }
-            if (now >= _nextInstances || _instancesRequested)
-            {
-                _instancesRequested = false;
-                _nextInstances = now.AddMinutes(60);
-                var (instances, note) = FilterInstanceQuery.Query();
-                found.AddRange(Filters.OnInstances(instances, note, now));
-            }
-        }
+            found = ReadFilters(_checks, s, due, Filters, events, _engine.Registry.LiveRecords,
+                new FilterSources(EventLog.Drain, () => ServiceStates.Query(Core.Filters.FilterTimeline.WatchedServices), FilterInstanceQuery.Query),
+                instancesTaken: () => _instancesRequested = false, _engine.Log.Info);
         foreach (var f in found) Findings.Add(f);
     }
 
-    private void WriteStorm(SpawnStorm storm, DateTime now)
+    /// <summary>
+    /// What the filter part of a sample reads (<see cref="ReadFilters"/>): the event-log records drained since the last
+    /// sample, the filter manager's watched services, and its instances with a note on the query.
+    /// </summary>
+    internal sealed record FilterSources(Func<IEnumerable<Core.Filters.LogEvent>> EventRecords, Func<IReadOnlyDictionary<string, bool>> Services,
+        Func<(List<Core.Filters.FilterInstance>? Instances, string? Note)> Instances);
+
+    /// <summary>
+    /// The filter part of sample <paramref name="s"/> (<see cref="ObserveFilters"/>), read from <paramref name="sources"/>
+    /// in <see cref="CheckSchedule.ReadFilters"/>'s order: the event-log records and the lifecycle events into the
+    /// timeline first, then the services and the instances <paramref name="due"/> says are due, each counted as read just
+    /// before it is read. A service query that throws is logged (<paramref name="log"/>) and the instances are still read;
+    /// <paramref name="instancesTaken"/> runs before the instance query, so an incident's request for them is taken also
+    /// when the query throws (they then wait for their hour). Anything else that throws goes on to the caller, and what was
+    /// found is not kept.
+    /// </summary>
+    internal static List<Finding> ReadFilters(CheckSchedule checks, Sample s, CheckSchedule.Due due, Core.Filters.FilterTimeline filters,
+        IReadOnlyList<LifecycleEvent> events, Func<IEnumerable<ProcessRecord>> live, FilterSources sources, Action instancesTaken, Action<string> log)
+    {
+        var now = s.TimeUtc;
+        var found = new List<Finding>();
+        checks.ReadFilters(s, due,
+            timeline: () =>
+            {
+                foreach (var e in sources.EventRecords()) found.AddRange(filters.OnLogEvent(e, Core.Model.Moment.Of(s)));
+                found.AddRange(filters.OnLifecycle(events, live, now));
+            },
+            services: () =>
+            {
+                try { found.AddRange(filters.OnServices(sources.Services(), now)); }
+                catch (Exception ex) { log("service state query failed: " + ex.Message); }
+            },
+            instances: () =>
+            {
+                instancesTaken();
+                var (instances, note) = sources.Instances();
+                found.AddRange(filters.OnInstances(instances, note, now));
+            });
+        return found;
+    }
+
+    private void WriteStorm(SpawnStorm storm, long nowMs)
     {
         try
         {
@@ -691,14 +736,14 @@ internal sealed class Diagnostics
             // spawns.csv (up to 2,000 rows) when it gained rows, and once more at close / exit (late exit codes).
             bool final = !storm.IsOpen || _finishing;
             var extra = storm.Trace.Count != storm.TraceWritten || final ? new Dictionary<string, string> { ["spawns.csv"] = SpawnTracker.TraceCsv(storm) } : null;
-            FindingReport.Write(storm.ReportDir, head, Spawns.StormMarkdown(storm) + "\n" + _engine.Meter.OwnCostLine() + "\n", extra, _engine.Paths.Guard.CheckReal);
+            FindingReport.Write(storm.ReportDir, head, Spawns.StormMarkdown(storm) + "\n" + _engine.Meter.OwnCostLine() + "\n", extra, _engine.Paths.CheckRealNoWait);
             storm.TraceWritten = storm.Trace.Count;
-            storm.LastWriteUtc = now;
+            storm.LastWriteMs = nowMs;
             if (storm.LastFinding is { } lf) lf.ReportDir = storm.ReportDir;
         }
         catch (Exception ex)
         {
-            storm.LastWriteUtc = now; // back off to the normal refresh interval instead of retrying every tick
+            storm.LastWriteMs = nowMs; // back off to the normal refresh interval instead of retrying every tick
             _engine.Log.Info("spawn storm report failed: " + ex.Message);
         }
     }
@@ -714,7 +759,7 @@ internal sealed class Diagnostics
         _lagProber?.Dispose();
         EventLog.Dispose();
         lock (Spawns)
-            foreach (var storm in Spawns.OpenStorms.ToList()) WriteStorm(storm, DateTime.UtcNow);
+            foreach (var storm in Spawns.OpenStorms.ToList()) WriteStorm(storm, Environment.TickCount64);
     }
 
     /// <summary>Every finding: log, findings.jsonl, events.csv and the incident timelines.</summary>
@@ -726,7 +771,7 @@ internal sealed class Diagnostics
             // Today's folder, also for a finding dated earlier (a replayed event-log record): never re-create an old day.
             string dir = _engine.Paths.EnsureDir(_engine.Paths.CsvDir(DateTime.UtcNow));
             string line = FindingLog.ToJsonLine(f) + "\n";
-            File.AppendAllText(_engine.Paths.Guard.CheckReal(Path.Combine(dir, "findings.jsonl")), line);
+            PoolWatch.Engine.NoWaitOpen.AppendAllText(_engine.Paths.Guard.CheckReal(Path.Combine(dir, "findings.jsonl")), line);
             Core.Util.Profiler.Wrote("findings.jsonl", line.Length);
         }
         catch (Exception ex) { _engine.Log.Info("findings.jsonl write failed: " + ex.Message); }
@@ -737,25 +782,17 @@ internal sealed class Diagnostics
         try
         {
             _engine.RecordEvents([ev]);
-            lock (_analysis.History.SyncRoot) _analysis.Incidents.AddEvents([ev]);
+            lock (_analysis.History.SyncRoot) _analysis.Incidents.AddEvents([ev], Core.Model.Moment.Now());
         }
         catch (Exception ex) { _engine.Log.Info("finding event write failed: " + ex.Message); }
     }
 
-    /// <summary>Parents' working directories (PEB reads), kept for a minute: a parent can change directory.</summary>
-    private readonly Dictionary<ProcessKey, (string? cwd, DateTime until)> _cwdCache = new();
+    /// <summary>Parents' working directories (PEB reads), each kept for a minute on the clock that only goes forward: a parent can change directory.</summary>
+    private readonly Core.Model.KeptBy<ProcessKey, string?> _cwdCache = new(TimeSpan.FromMinutes(1), 512);
 
     /// <summary>The parent's working directory for a git start without -C. Kept apart from the record's session context.</summary>
-    private string? CwdOf(ProcessKey key)
-    {
-        var now = DateTime.UtcNow;
-        if (_cwdCache.TryGetValue(key, out var c) && c.until > now) return c.cwd;
-        var rec = _engine.Registry.Get(key);
-        string? cwd = rec is { IsAlive: true } ? PebReader.Read(key.Pid, key.CreateTime, [])?.cwd : null;
-        if (_cwdCache.Count > 512) _cwdCache.Clear();
-        _cwdCache[key] = (cwd, now.AddMinutes(1));
-        return cwd;
-    }
+    private string? CwdOf(ProcessKey key) => _cwdCache.Get(key, k =>
+        _engine.Registry.Get(k) is { IsAlive: true } ? PebReader.Read(k.Pid, k.CreateTime, [])?.cwd : null);
 
     internal static GitRootContext GitContext()
     {
@@ -765,12 +802,17 @@ internal sealed class Diagnostics
         return new GitRootContext(profiles, OneDriveRoots(), profile.Length > 0 ? Path.GetDirectoryName(profile) : null);
     }
 
-    /// <summary>OneDrive roots from the environment and the per-account registry entries (HKCU, read-only).</summary>
-    internal static List<string> OneDriveRoots()
+    /// <summary>
+    /// OneDrive roots from the account's environment (read as data: PoolWatch's own, which its launcher builds, has no
+    /// OneDrive variables) and the per-account registry entries (HKCU, read-only).
+    /// </summary>
+    internal static List<string> OneDriveRoots() => OneDriveRoots(Engine.UserEnvironment.Read());
+
+    internal static List<string> OneDriveRoots(IReadOnlyDictionary<string, string> account)
     {
         var roots = new List<string>();
         foreach (var v in new[] { "OneDrive", "OneDriveConsumer", "OneDriveCommercial" })
-            if (Environment.GetEnvironmentVariable(v) is { Length: > 0 } p) roots.Add(p);
+            if (account.GetValueOrDefault(v) is { Length: > 0 } p) roots.Add(p);
         try
         {
             using var accounts = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\OneDrive\Accounts");
@@ -796,9 +838,16 @@ internal sealed class Diagnostics
     }
 
     /// <summary>Real file-system probes for the git-root resolver: single explicit paths, fixed drives only.</summary>
-    private sealed class FileProbe : IFileProbe
+    /// <param name="clock">Reads the two clocks (<see cref="Core.Model.Moment.Now"/>; a test gives its own).</param>
+    /// <param name="driveType">A drive's type (GetDriveTypeW of its root; a test gives its own).</param>
+    internal sealed class FileProbe(Func<Core.Model.Moment>? clock = null, Func<char, uint>? driveType = null) : IFileProbe
     {
-        private readonly Dictionary<char, (bool fixedDrive, DateTime until)> _drives = new();
+        /// <summary>How long a drive's answer is kept before Windows is asked again.</summary>
+        internal static readonly TimeSpan DriveAge = TimeSpan.FromMinutes(5);
+        /// <summary>Each drive's answer, kept for <see cref="DriveAge"/> on the clock that only goes forward.</summary>
+        private readonly Dictionary<char, Core.Model.Kept<bool>> _drives = new();
+        private readonly Func<Core.Model.Moment> _clock = clock ?? Core.Model.Moment.Now;
+        private readonly Func<char, uint> _driveType = driveType ?? (d => Native.NativeMethods.GetDriveTypeW(d + ":\\"));
 
         public bool DirectoryExists(string path) => Directory.Exists(path);
         public bool FileExists(string path) => File.Exists(path);
@@ -821,10 +870,8 @@ internal sealed class Diagnostics
             char d = char.ToUpperInvariant(path[0]);
             lock (_drives)
             {
-                if (_drives.TryGetValue(d, out var c) && c.until > DateTime.UtcNow) return c.fixedDrive;
-                bool f = Native.NativeMethods.GetDriveTypeW(d + ":\\") == 3;
-                _drives[d] = (f, DateTime.UtcNow.AddMinutes(5));
-                return f;
+                if (!_drives.TryGetValue(d, out var kept)) _drives[d] = kept = new(DriveAge, () => _driveType(d) == 3, _clock);
+                return kept.Value;
             }
         }
     }

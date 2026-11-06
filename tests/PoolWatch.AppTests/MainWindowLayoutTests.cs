@@ -93,7 +93,7 @@ public sealed class MainWindowLayoutTests(ITestOutputHelper output)
             GraphRow.PerformLayout();
         }
 
-        /// <summary>The view and tab shown (the window's _isAdvanced and _tabs.SelectedIndex); it opens on Pool causes.</summary>
+        /// <summary>The view and tab shown (the window's IsAdvanced and _tabs.SelectedIndex); it opens on Pool causes.</summary>
         public bool IsAdvanced { get; private set; } = true;
         public int Tab { get; private set; }
 
@@ -365,7 +365,7 @@ public sealed class MainWindowLayoutTests(ITestOutputHelper output)
 
     private static ClearRecord Clear(DateTime at, long freed) => new()
     {
-        TimeUtc = at, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals((ulong)(10 * GB), 0, 0, 0),
+        TimeUtc = at, TickMs = AppClocks.Ms(at), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals((ulong)(10 * GB), 0, 0, 0),
         After = new PoolTotals((ulong)(10 * GB - freed), 0, 0, 0),
     };
 
@@ -545,28 +545,88 @@ public sealed class MainWindowLayoutTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// The main window needs the whole app to build, so its source is read: its switch of view (<c>SetView</c>) and of tab
-    /// (the tabs' SelectedIndexChanged) each lay the window out once, through <see cref="MainForm.LayOutOnce"/>, with the
-    /// header in the same pass and the graph's row fitted after the window docks. Nothing after that pass in
-    /// <c>SetView</c> lays the header out or fits the graph's row again (that was a second pass for the header's height).
+    /// The main window needs the whole app to build, so its source is read: its switch of view and of tab each lay the
+    /// window out once, through <see cref="MainForm.LayOutOnce"/>, with the header in the same pass and the graph's row
+    /// fitted after the window docks. The switch of view (<see cref="ViewSwitch"/>, whose test runs the order) gets
+    /// LayOutOnce as its one layout; the view's parts (<c>ArrangeView</c>, run inside it) lay the header out there and
+    /// refresh nothing, and the read after it (<c>ReadView</c>, the view's one refresh) lays out nothing again (that was
+    /// a second pass for the header's height). ArrangeView's whole body is held here, as ReadView's is, and so is each of
+    /// the window's own methods and properties it reaches (<c>LayoutAdvancedRows</c>, <c>HeaderHeight</c>,
+    /// <c>ShownButtons</c>, <c>IsAdvanced</c>, <c>Px</c> and <c>S</c>), so any call added to any of them fails this test:
+    /// a read of a page (RefreshCauses, a tab's Refresh, ReadSimple) or of the view (RefreshNow, RefreshVisible), and a
+    /// call that leads to one or sets the graph's data (PumpRankings, SetData), among them. The window's other methods
+    /// they call are static, as the tests that call them on the class need (AdvancedRows, SettingsShown, LayoutHeader and
+    /// CompactHeader). Of what it sets, the Advanced view switch's change returns at once when the window sets it to the
+    /// view the switch shows (the switch sets its view before it arranges the view, which the switch's test holds), and
+    /// the graph's span, span choice and Show RAM raise no change when set from code (GrowthViewTests).
     /// </summary>
     [Fact]
     public void TheWindowLaysOutEachSwitchOfViewOrTabOnce()
     {
         string source = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "MainForm.cs"));
-        string setView = Block(source, "private void SetView(bool advanced)");
-        const string open = "LayOutOnce(this, _advanced, () =>", close = "}, FitGraphRow);";
-        Assert.StartsWith(open, setView.Trim(), StringComparison.Ordinal);
-        int from = setView.IndexOf(open, StringComparison.Ordinal), to = setView.IndexOf(close, StringComparison.Ordinal);
-        Assert.True(to > from && setView.IndexOf(close, to + 1, StringComparison.Ordinal) < 0, "SetView has one LayOutOnce, ending with FitGraphRow");
-        string change = setView[(from + open.Length)..to], after = setView[(to + close.Length)..];
-        Assert.Contains("HeaderHeight();", change.Split('\n').Select(l => l.Trim()));
-        foreach (var call in new[] { "HeaderHeight(", "LayoutHeader(", "FitGraphRow(" }) Assert.DoesNotContain(call, after);
-        Assert.DoesNotContain("ResumeLayout(", setView);
-        Assert.DoesNotContain("LayoutHeader(", setView);
-        string tab = Block(source, "_tabs.SelectedIndexChanged += (_, _) =>");
-        Assert.Contains("LayOutOnce(this, _advanced, () => { LayoutAdvancedRows(); HeaderHeight(); }, FitGraphRow);", tab.Split('\n').Select(l => l.Trim()));
+        static List<string> Lines(string block) => block.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
+        var lines = Lines(source);
+        Assert.Contains("_switch = new ViewSwitch(_tabs, change => LayOutOnce(this, _advanced, change, FitGraphRow), ArrangeView, ReadView, tabChanged: () =>", lines);
+        Assert.Contains("private void SetView(bool advanced) => _switch.Show(advanced);", lines);
+        string arrange = Block(source, "private void ArrangeView(bool advanced)"), read = Block(source, "private void ReadView()");
+        Assert.Equal(
+        [
+            "if (advanced)",
+            "{",
+            "LayoutAdvancedRows();",
+            "_chart.Margin = Px(0, 0, 12, 0);",
+            "_graphRow.Controls.Add(_chart);",
+            "_chart.BringToFront(); // the fill docks last, after the stats panel",
+            "_chart.Span = _window.Span;",
+            "_chart.SpanBox.SelectedIndex = StatsWindow.All.ToList().IndexOf(_window);",
+            "_chart.SpanOption = true;",
+            "_chart.RamOption = true;",
+            "_chart.ShowRam = _context.Live.Running.ShowRam;",
+            "}",
+            "else",
+            "{",
+            "_simple.SetChart(_chart);",
+            "_chart.Span = PoolChart.SimpleSpan;",
+            "_chart.SpanOption = false;",
+            "_chart.RamOption = false;",
+            "}",
+            "_advanced.Visible = advanced;",
+            "_simple.Visible = !advanced;",
+            "_advancedBox.Checked = advanced;",
+            "HeaderHeight();",
+        ], Lines(arrange));
+        // The window's own methods and properties that ArrangeView reaches, each held whole (IsAdvanced below): a call
+        // added to one of them fails here, as it does in ArrangeView.
+        Assert.Equal(
+        [
+            "bool services = _tabs.SelectedIndex >= 1;",
+            "if (services == _servicesRows) return;",
+            "_servicesRows = services;",
+            "var (graph, tabs) = AdvancedRows(services);",
+            "_advanced.SuspendLayout();",
+            "_advanced.RowStyles[0] = graph;",
+            "_advanced.RowStyles[1] = tabs;",
+            "_graphRow.Visible = !services;",
+            "_advanced.ResumeLayout(true);",
+        ], Lines(Block(source, "private void LayoutAdvancedRows()")));
+        Assert.Equal(
+        [
+            "if (_buttons.Controls.Count == 0) return;",
+            "bool settings = SettingsShown(IsAdvanced, _tabs.SelectedIndex);",
+            "foreach (var b in _advancedButtons) if (b.Visible != settings) b.Visible = settings;",
+            "LayoutHeader(_header, _headerView, _buttons, ShownButtons.ToList(), ClientSize.Width, IsAdvanced, _tabs.SelectedIndex);",
+        ], Lines(Block(source, "private void HeaderHeight()")));
+        Assert.Contains("private IEnumerable<Button> ShownButtons => _headerButtons.Where(b => !_advancedButtons.Contains(b) || SettingsShown(IsAdvanced, _tabs.SelectedIndex));", lines);
+        Assert.Contains("private int S(int logical) => LogicalToDeviceUnits(logical);", lines);
+        Assert.Contains("private Padding Px(int l, int t, int r, int b) => new(S(l), S(t), S(r), S(b));", lines);
+        // Set to the view the switch shows, the Advanced view switch returns at once (no second switch, no read).
+        Assert.Contains("private bool IsAdvanced => _switch.Advanced;", lines);
+        Assert.Equal("if (_advancedBox.Checked == IsAdvanced) return; // set by the window itself", Lines(Block(source, "_advancedBox.CheckedChanged += (_, _) =>"))[0]);
+        Assert.Equal(["_simpleRead = new(SimpleEvery);", "RefreshNow(force: true);"], Lines(read));
+        string tab = Block(source, "_switch = new ViewSwitch(");
+        Assert.Contains("LayOutOnce(this, _advanced, () => { LayoutAdvancedRows(); HeaderHeight(); }, FitGraphRow);", Lines(tab));
         Assert.DoesNotContain("LayoutHeader();", tab);
+        Assert.DoesNotContain("_tabs.SelectedIndexChanged", source); // the tab's own change is the switch's (ViewSwitch)
     }
 
     /// <summary>
@@ -622,8 +682,9 @@ public sealed class MainWindowLayoutTests(ITestOutputHelper output)
 
     /// <summary>
     /// The window tells the details pane it lays out which row they show, before it fills them, so another row's details
-    /// open at their top (<see cref="DetailsPane.ShowRow"/>). Read from the window's source, as the window needs the whole
-    /// app to build.
+    /// open at their top (<see cref="DetailsPane.ShowRow"/>), and so does each of the two texts without a row: its key
+    /// says which one it is (<see cref="DetailsPane.KeyOf"/>), and the texts are filled with the same keys. Read from the
+    /// window's source, as the window needs the whole app to build.
     /// </summary>
     [Fact]
     public void TheWindowsDetailsOpenAnotherRowAtTheirTop()
@@ -632,9 +693,290 @@ public sealed class MainWindowLayoutTests(ITestOutputHelper output)
         var page = Block(source, "private TabPage CausesPage()").Split('\n').Select(l => l.Trim()).ToList();
         int laid = page.FindIndex(l => l.StartsWith("var details = LayDetails(", StringComparison.Ordinal));
         Assert.True(laid >= 0 && page[laid + 1] == "_details = details;", "the window keeps the details pane it lays out");
-        var show = Block(source, "private void ShowCauseDetails()").Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
+        string block = Block(source, "private void ShowCauseDetails()");
+        var show = block.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
         Assert.Equal("var row = SelectedRow();", show[0]);
-        Assert.StartsWith("_details?.ShowRow(row?.Key);", show[1], StringComparison.Ordinal);
+        Assert.StartsWith("_details?.ShowRow(DetailsPane.KeyOf(row?.Key, _causeRows.Count));", show[1], StringComparison.Ordinal);
+        Assert.Contains("how sure PoolWatch is.\", DetailsPane.NothingListed);", block, StringComparison.Ordinal);
+        Assert.Contains("SetText(_detailText, \"\", DetailsPane.NoneSelected);", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The page moved into a control of its own and made with its handles as showing makes them, under WinForms' hidden
+    /// parking window, so nothing is shown (a pane never made does not scroll). Dispose it before the page.
+    /// </summary>
+    private static Control Made(CausesPage p)
+    {
+        var host = new Panel { Size = p.Area.Size, Font = p.Form.Font };
+        p.Form.Controls.Remove(p.Area);
+        host.Controls.Add(p.Area);
+        host.CreateControl();
+        return host;
+    }
+
+    /// <summary>As a key pressed on the pane does (it has no focus while it is not shown).</summary>
+    private static void Press(Control c, Keys key) => On(c, "OnKeyDown", new KeyEventArgs(key));
+
+    /// <summary>Raises one of the control's own events (<paramref name="name"/>: its On method), as Windows would.</summary>
+    private static void On(Control c, string name, EventArgs e) =>
+        c.GetType().GetMethod(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, [e.GetType()])!.Invoke(c, [e]);
+
+    private static bool IsInputKey(Control c, Keys key) =>
+        (bool)typeof(Control).GetMethod("IsInputKey", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(c, [key])!;
+
+    private static bool Selectable(Control c) =>
+        (bool)typeof(Control).GetMethod("GetStyle", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(c, [ControlStyles.Selectable])!;
+
+    /// <summary>
+    /// The controls Tab stops at, in order, under <paramref name="root"/> (as SelectNextControl walks them once the window
+    /// shows: selectable tab stops, each parent before its children, children in their tab order).
+    /// </summary>
+    private static List<Control> TabStops(Control root)
+    {
+        var stops = new List<Control>();
+        void Walk(Control parent)
+        {
+            for (var c = parent.GetNextControl(null, forward: true); c is not null && c.Parent == parent; c = parent.GetNextControl(c, forward: true))
+            {
+                if (c.TabStop && Selectable(c)) stops.Add(c);
+                Walk(c);
+            }
+        }
+        Walk(root);
+        return stops;
+    }
+
+    /// <summary>
+    /// In a small window the Pool causes details scroll, and the keyboard reaches all of them: the pane is a tab stop of
+    /// its own, before the words and each action, named by its title for a screen reader; the arrow keys, Page Up, Page
+    /// Down, Home and End scroll it while Tab still moves on; and Tab or Shift+Tab bringing the focus to it shows its top,
+    /// the title, while the focus WinForms gives back when the window is active again keeps the place (it showed the top
+    /// on every focus, so each Alt+Tab back lost where the keys had scrolled to). Before, Tab reached the words and the
+    /// actions but the pane was no tab stop, so the title of details scrolled down could not be brought back with the
+    /// keyboard.
+    /// </summary>
+    [Fact]
+    public void TheDetailsPaneIsATabStopThatShowsItsTitleAndScrollsWithTheKeys()
+    {
+        var smallest = CausesAreaAt(new Size(760, 540));
+        using var p = new CausesPage(100, smallest, PoolCausesTests.LongTitle, PoolCausesTests.LongGreenLines()[0]);
+        using var host = Made(p); // made as showing makes it: a pane that is not made does not scroll
+        var pane = p.Details;
+        int Top() => -pane.AutoScrollPosition.Y;
+        int end = pane.Content.Height - pane.ClientSize.Height, line = p.Words.Font.Height, page = pane.ClientSize.Height - line;
+        Assert.True(end > line, $"at 760 x 540 the details ({pane.Content.Height} px) do not scroll in {pane.ClientSize.Height} px");
+
+        Assert.True(pane.TabStop && Selectable(pane), "the details pane is no tab stop");
+        Assert.Equal([pane, p.Words, .. p.Buttons], TabStops(p.Split.Panel2));
+        Assert.Equal(PoolCausesTests.LongTitle, pane.AccessibleName);
+        p.Title.Text = "Open files (File): +1 MB (now 5 MB)";
+        Assert.Equal(p.Title.Text, pane.AccessibleName);
+
+        Assert.All(new[] { Keys.Up, Keys.Down, Keys.PageUp, Keys.PageDown, Keys.Home, Keys.End }, k => Assert.True(IsInputKey(pane, k), $"{k} is not the pane's"));
+        Assert.False(IsInputKey(pane, Keys.Tab)); // Tab still moves on to the words and the actions
+        end = pane.Content.Height - pane.ClientSize.Height; // the shorter title
+        Press(pane, Keys.Down);
+        Assert.Equal(line, Top());
+        Press(pane, Keys.Up);
+        Assert.Equal(0, Top());
+        Press(pane, Keys.Up); // already at the top
+        Assert.Equal(0, Top());
+        Press(pane, Keys.PageDown);
+        Assert.Equal(Math.Min(end, page), Top());
+        Press(pane, Keys.End);
+        Assert.Equal(end, Top());
+        Assert.Equal(pane.ClientSize.Height, pane.Content.Bottom); // the content's end in view
+        Press(pane, Keys.Shift | Keys.Up); // not a key of the pane's
+        Assert.Equal(end, Top());
+
+        // Scrolled to its end: the focus given back as the window is active again (Alt+Tab back, a restore, a show from the
+        // tray) keeps the place. Tab into the details, or Shift+Tab back from the words, shows the title: WinForms selects
+        // the pane "directed" then, as here.
+        On(pane, "OnGotFocus", EventArgs.Empty);
+        Assert.Equal(end, Top());
+        Assert.True(p.Split.Panel2.SelectNextControl(null, forward: true, tabStopOnly: true, nested: true, wrap: false)); // Tab
+        Assert.Equal(0, Top());
+        Assert.Equal(0, pane.Content.Top);
+        Press(pane, Keys.End);
+        Assert.True(p.Split.Panel2.SelectNextControl(p.Words, forward: false, tabStopOnly: true, nested: true, wrap: false)); // Shift+Tab
+        Assert.Equal(0, Top());
+        Press(pane, Keys.End);
+        Press(pane, Keys.Home);
+        Assert.Equal(0, Top());
+    }
+
+    /// <summary>
+    /// The two texts the details show without a row, "Nothing stands out right now" (nothing is listed) and "Select a row
+    /// to see its details" (none is selected), each open at their top like another row's: they have keys of their own,
+    /// which no row's key can be (each has a kind and a colon). Both had none, so from one to the other the pane kept where
+    /// it was scrolled, the new title out of view in a small window. The same key, refreshed, keeps its place.
+    /// </summary>
+    [Fact]
+    public void TheTwoTextsWithoutARowEachOpenAtTheirTop()
+    {
+        string nothing = DetailsPane.KeyOf(null, rows: 0), none = DetailsPane.KeyOf(null, rows: 9);
+        Assert.NotEqual(nothing, none);
+        Assert.Equal("tag:52656666", DetailsPane.KeyOf("tag:52656666", rows: 9));
+        Assert.All(new[] { nothing, none }, k => Assert.DoesNotContain(':', k));
+
+        var smallest = CausesAreaAt(new Size(760, 540));
+        using var p = new CausesPage(100, smallest, PoolCausesTests.LongTitle, PoolCausesTests.LongGreenLines()[0]);
+        using var host = Made(p); // made as showing makes it: a pane that is not made does not scroll
+        var pane = p.Details;
+        int Top() => -pane.AutoScrollPosition.Y;
+        pane.ShowRow(nothing);
+        Press(pane, Keys.End);
+        int end = Top();
+        Assert.True(end > 0, "the details do not scroll at 760 x 540");
+        pane.ShowRow(nothing); // the same text, refreshed: it stays where it was scrolled
+        Assert.Equal(end, Top());
+        pane.ShowRow(none);    // the other text: at its top
+        Assert.Equal(0, Top());
+        Press(pane, Keys.End);
+        pane.ShowRow(nothing);
+        Assert.Equal(0, Top());
+        Press(pane, Keys.End);
+        pane.ShowRow("tag:52656666"); // a row's details
+        Assert.Equal(0, Top());
+    }
+
+    /// <summary>
+    /// The user guide says when each of the details' actions shows, as the window shows them: Export report always, Copy
+    /// summary only when the row has a summary or evidence to copy, Open report folder only once the row's report folder
+    /// exists. It listed all three as always there. The window's rule (<see cref="MainForm.DetailActions"/>) is run here;
+    /// that the window shows its two answers is read from its source (the window needs the whole app to build), and the
+    /// guide's words from the guide.
+    /// </summary>
+    [Fact]
+    public void TheGuideSaysWhenOpenReportFolderAndCopySummaryShow()
+    {
+        const string made = @"C:\ProgramData\PoolWatch\incidents\20261101-File", named = @"C:\ProgramData\PoolWatch\incidents\20261101-Toke";
+        bool Exists(string folder) => folder == made;
+        Assert.Equal((true, true), MainForm.DetailActions(true, hasSummary: true, null, made, Exists));
+        Assert.Equal((true, false), MainForm.DetailActions(true, hasSummary: false, "evidence", named, Exists)); // named, not made yet
+        Assert.Equal((false, false), MainForm.DetailActions(true, hasSummary: false, null, null, Exists));      // nothing to copy, no folder
+        Assert.Equal((false, false), MainForm.DetailActions(false, hasSummary: true, "evidence", made, Exists)); // no row selected
+
+        string root = TrayIconsTests.RepoRoot();
+        string source = File.ReadAllText(Path.Combine(root, "src", "PoolWatch", "Ui", "MainForm.cs"));
+        var show = Block(source, "private void ShowCauseDetails()").Split('\n').Select(l => l.Trim()).ToList();
+        Assert.Contains("var (summary, folder) = DetailActions(row is not null, copy?.Summary is not null, copy?.Evidence, row?.Folder, Directory.Exists);", show);
+        Assert.Contains("if (_copySummary.Visible != summary) _copySummary.Visible = summary;", show);
+        Assert.Contains("if (_openFolder.Visible != folder) _openFolder.Visible = folder;", show);
+        Assert.Contains("private readonly Button _exportReport = new() { Text = \"Export report...\", AutoSize = true };", source.Split('\n').Select(l => l.Trim()));
+
+        string guide = string.Join(' ', File.ReadAllText(Path.Combine(root, "docs", "USER-GUIDE.md")).Split((char[])[' ', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries));
+        Assert.Contains("**Export report** is always there", guide, StringComparison.Ordinal);
+        Assert.Contains("**Copy summary** shows when the row has a summary or evidence to copy", guide, StringComparison.Ordinal);
+        Assert.Contains("**Open report folder** once the row's report folder exists", guide, StringComparison.Ordinal);
+        Assert.DoesNotContain("**Open report folder** and **Copy summary** work on it", guide, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Opening the Advanced view on a chosen tab (a card's "Open Services", the tray's way in) reads only that tab, once:
+    /// from the Simple view the tab is picked inside the switch of view, before the view is arranged, and the switch's one
+    /// read after its one layout reads it; the tab's own change, raised by that pick, does nothing. It switched the view
+    /// first, which read the tab shown before (every time), and then picked the tab, which read the new one. In the
+    /// Advanced view the tab's own change lays it out and reads it, as a click on the tab. The switch (<see cref="ViewSwitch"/>)
+    /// is run here with real tabs, made as showing makes them (never shown), so picking one raises its change as on screen,
+    /// and with steps that record what each sees; the window gives it its own steps and hands it ShowAdvanced, and the CI
+    /// soak's walk opens its tabs through it too.
+    /// </summary>
+    [Fact]
+    public void OpeningTheAdvancedViewOnATabReadsOnlyThatTab()
+    {
+        using var tabs = new TabControl { Size = new Size(400, 300) };
+        foreach (var name in new[] { "Pool causes", "Services", "Tasks and startup apps" }) tabs.TabPages.Add(name);
+        _ = tabs.Handle; // made, never shown: picking a tab raises its change, as on screen
+        var log = new List<string>();
+        bool inLayout = false;
+        ViewSwitch? view = null;
+        string Shown() => view!.Advanced ? $"tab {tabs.SelectedIndex}" : "the Simple view";
+        view = new ViewSwitch(tabs,
+            layOutOnce: change =>
+            {
+                inLayout = true;
+                try { change(); }
+                finally { inLayout = false; }
+                log.Add("laid out");
+            },
+            arrange: advanced => log.Add($"arranged {(advanced ? "the Advanced view" : "the Simple view")}{(inLayout ? "" : " outside the layout")}, showing {Shown()}"),
+            read: () => log.Add($"read {Shown()}"),
+            tabChanged: () => log.Add($"the tab's change read {Shown()}"));
+        List<string> Run(Action a)
+        {
+            log.Clear();
+            a();
+            return [.. log];
+        }
+
+        Assert.Equal(["arranged the Simple view, showing the Simple view", "laid out", "read the Simple view"], Run(() => view.Show(false)));
+        // From the Simple view: the tab is picked before the view is arranged, and it is the only one read, once.
+        Assert.Equal(["arranged the Advanced view, showing tab 1", "laid out", "read tab 1"], Run(() => view.ShowAdvanced(1)));
+        // In the Advanced view: the tab's own change reads it, as a click on the tab does.
+        Assert.Equal(["the tab's change read tab 2"], Run(() => view.ShowAdvanced(2)));
+        Assert.Equal(["the tab's change read tab 0"], Run(() => tabs.SelectedIndex = 0));
+        Assert.Empty(Run(() => view.ShowAdvanced(0))); // already there: nothing to read again
+        // Back to the Simple view, then the Advanced view on a tab out of range (kept within the tabs) or on the tab it
+        // already shows (nothing to pick), or with no tab (the one it showed last).
+        Assert.Equal(["arranged the Simple view, showing the Simple view", "laid out", "read the Simple view"], Run(() => view.Show(false)));
+        Assert.Equal(["arranged the Advanced view, showing tab 2", "laid out", "read tab 2"], Run(() => view.ShowAdvanced(9)));
+        view.Show(false);
+        Assert.Equal(["arranged the Advanced view, showing tab 0", "laid out", "read tab 0"], Run(() => view.ShowAdvanced(-3)));
+        view.Show(false);
+        Assert.Equal(["arranged the Advanced view, showing tab 0", "laid out", "read tab 0"], Run(() => view.Show(true, tab: 0)));
+        view.Show(false);
+        Assert.Equal(["arranged the Advanced view, showing tab 0", "laid out", "read tab 0"], Run(() => view.Show(true)));
+
+        // The window builds the switch with its own steps and hands it ShowAdvanced, and the CI soak's walk opens its tabs
+        // the same way (it switched the view, which read the tab shown before, then picked its page). The window needs
+        // the whole app to build, so this is read from its source.
+        string source = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "MainForm.cs"));
+        static List<string> Lines(string block) => block.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
+        Assert.Equal(["_view?.Remember(true);", "_switch.ShowAdvanced(tab);"], Lines(Block(source, "public void ShowAdvanced(int tab)")));
+        var walk = Lines(Block(source, "public void StartSoakCycle()"));
+        int at = walk.IndexOf("if (page < 0) { SetView(false); return; }");
+        Assert.True(at >= 0, "the soak's walk shows the Simple view for a page below 0");
+        Assert.StartsWith("_switch.ShowAdvanced(page);", walk[at + 1], StringComparison.Ordinal);
+        Assert.DoesNotContain("_tabs.SelectedIndex", string.Join('\n', walk));
+    }
+
+    /// <summary>A details pane with the focus or not, and focus cues or not, as the test sets them (no window that is never shown has the focus).</summary>
+    private sealed class FocusedPane(WrapLabel title, Control words, WrapLabel handled, Control actions) : DetailsPane(title, words, handled, actions)
+    {
+        public bool HasFocus;
+        public bool Cues;
+        public override bool Focused => HasFocus;
+        protected override bool ShowFocusCues => Cues;
+    }
+
+    /// <summary>
+    /// The details' title is framed as the focus only while the pane has the focus and Windows shows focus cues (after the
+    /// first Tab or Alt; a mouse user never sees the frame): the focus coming or going, and Windows starting or stopping
+    /// the cues, each frame it or take the frame away. The pane's own events are raised as Windows raises them.
+    /// </summary>
+    [Fact]
+    public void TheDetailsTitleIsFramedOnlyWithTheFocusAndFocusCues()
+    {
+        var title = new WrapLabel { Text = PoolCausesTests.LongTitle };
+        using var pane = new FocusedPane(title, new TextBox(), new WrapLabel(), new FlowLayoutPanel());
+        var cues = new UICuesEventArgs(UICues.ChangeFocus);
+
+        pane.HasFocus = true;
+        On(pane, "OnGotFocus", EventArgs.Empty); // a mouse click, cues hidden
+        Assert.False(title.FocusCue, "the title is framed while Windows hides focus cues");
+        pane.Cues = true;
+        On(pane, "OnChangeUICues", cues);        // the first Tab or Alt
+        Assert.True(title.FocusCue, "the title is not framed with the focus and focus cues");
+        pane.HasFocus = false;
+        On(pane, "OnLostFocus", EventArgs.Empty);
+        Assert.False(title.FocusCue, "the title stays framed without the focus");
+        pane.HasFocus = true;
+        On(pane, "OnGotFocus", EventArgs.Empty);
+        Assert.True(title.FocusCue);
+        pane.Cues = false;
+        On(pane, "OnChangeUICues", cues);        // Windows stops showing focus cues
+        Assert.False(title.FocusCue, "the title stays framed once Windows hides focus cues");
     }
 
     /// <summary>The text between the braces of the block that follows <paramref name="header"/> in <paramref name="source"/> (its only one).</summary>

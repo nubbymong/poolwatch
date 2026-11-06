@@ -45,6 +45,10 @@ internal static class SetupText
     public const string Next = "Next", Back = "Back", Working = "Working...";
     /// <summary>Under a change that did not work, when Next stays on the step.</summary>
     public const string NextAgain = "Press Next again to go on without it.";
+    /// <summary>The question when the owner closes setup on its first run (Yes closes it).</summary>
+    public const string CloseFirstRun =
+        "Close setup?\n\nPoolWatch keeps running in the tray and keeps watching the kernel pool. Changes you already made with Next stay. " +
+        "Setup opens again when you open PoolWatch, and the next time PoolWatch starts.";
 
     // 1 Welcome
     public const string WelcomeTitle = "Welcome to PoolWatch";
@@ -56,11 +60,14 @@ internal static class SetupText
         (SetupIcon.Wrench, "Fixes known issues", "The token leak, Codex's shader cache, Defender on Dev Drives."),
         (SetupIcon.Layers, "Trims background work", "If you want: services, scheduled tasks and startup apps you don't need."),
     ];
-    public const string LevelQuestion = "Choose your setup and app experience";
+    // The level picks only the view the app opens in (SetupSession.Advanced): setup's seven steps and their choices are the
+    // same either way, so the words claim nothing for setup ("Setup picks safe settings for you" and "Setup shows every
+    // choice" were not true).
+    public const string LevelQuestion = "Choose how the app opens";
     public const string Simple = "Simple", Advanced = "Advanced", Recommended = "Recommended";
-    public const string SimpleText = "Setup picks safe settings for you. The app shows the essentials.";
-    public const string AdvancedText = "Setup shows every choice. The app shows every number and tool.";
-    public const string LevelLater = "You can change this later in the app.";
+    public const string SimpleText = "The app opens on the essentials: the kernel pool, its trend and what to do about it.";
+    public const string AdvancedText = "The app opens with every number and tool: Pool causes, services, tasks and startup apps.";
+    public const string LevelLater = "Setup is the same either way. You can switch views later in the app.";
     public const string Duration = "Setup takes about 3 minutes";
     public const string GetStarted = "Get started";
 
@@ -73,6 +80,8 @@ internal static class SetupText
     public const string NotRead = "PoolWatch could not read this PC's details. It keeps watching, and suggests fixes in the app.";
     public const string StillWatching = "Still watching";
     public const string CheckingNow = "Checking...";
+    /// <summary>The level word of a cause PoolWatch could not tell about (a check that could not run or was unclear, or a value it could not read).</summary>
+    public const string NotKnown = "Not known";
 
     // 3 Safety
     public const string SafetyTitle = "You stay in control";
@@ -80,7 +89,7 @@ internal static class SetupText
     [
         "Nothing changes without your OK.",
         "Anything PoolWatch changes can be put back, one at a time or all at once.",
-        "Uninstalling puts everything back.",
+        "Uninstalling puts each change back, or says why it could not.",
     ];
 
     // 4 Standby cache
@@ -155,9 +164,10 @@ internal static class SetupText
 }
 
 /// <summary>
-/// Which step setup is on and whether its window may close. The first run cannot be closed or skipped: it ends only on the
-/// Ready step's button (PoolWatch exiting, or Windows shutting down, still closes it, and the next start opens setup again).
-/// Opened again later from the tray, it can be cancelled.
+/// Which step setup is on and whether its window may close without asking. The first run cannot be skipped: it completes
+/// only on the Ready step's button; a close the owner asks for asks first (PoolWatch exiting, or Windows shutting down,
+/// closes it without asking), and the next way into the window, or the next start, opens setup again. Opened again later
+/// from the tray, it can be cancelled.
 /// </summary>
 internal sealed class SetupFlow(bool firstRun)
 {
@@ -191,8 +201,9 @@ internal sealed class SetupFlow(bool firstRun)
     public void Finish() => Finished = true;
 
     /// <summary>
-    /// Whether the window may close for <paramref name="reason"/>: always once setup is finished or when it is not the
-    /// first run (a re-run is cancelled by closing it); on the first run only when PoolWatch or Windows closes it.
+    /// Whether the window may close for <paramref name="reason"/> without asking: always once setup is finished or when it
+    /// is not the first run (a re-run is cancelled by closing it); on the first run only when PoolWatch or Windows closes
+    /// it. A close the owner asks for on the first run asks first (<c>SetupWizardForm.OnFormClosing</c>).
     /// </summary>
     public bool MayClose(CloseReason reason) => Finished || !FirstRun || reason is not (CloseReason.UserClosing or CloseReason.None);
 
@@ -203,51 +214,112 @@ internal sealed class SetupFlow(bool firstRun)
 internal enum RailMark { Done, Now, Ahead }
 
 /// <summary>One row of "How your PC is impacted": the cause, what PoolWatch found, its level and where setup fixes it.</summary>
-/// <param name="Level">Null while the token-leak check runs.</param>
-/// <param name="Under">The line under the level: "Fix in step 4", "Trim in the app", "Still watching", or none (and none while the check runs).</param>
-/// <param name="FixStep">The step that fixes it, when setup does.</param>
-internal sealed record ImpactRow(Cause Cause, SetupIcon Icon, string Title, string Detail, ImpactLevel? Level, string? Under, SetupStep? FixStep);
+/// <param name="Level">Null while the token-leak check runs, and when PoolWatch could not tell (<paramref name="NotKnown"/>).</param>
+/// <param name="Under">
+/// The line under the level: "Fix in step 4", "Trim in the app", "Still watching" (at None and at Not known), or none while
+/// the check runs.
+/// </param>
+/// <param name="FixStep">The step that fixes it, when setup does (never at None or Not known).</param>
+/// <param name="NotKnown">
+/// PoolWatch could not tell: its check could not run or gave no clear answer, or a value the rule needs could not be read.
+/// The row reads "Not known", in grey with an empty meter, never None (which is only for what was read and found clean).
+/// </param>
+internal sealed record ImpactRow(Cause Cause, SetupIcon Icon, string Title, string Detail, ImpactLevel? Level, string? Under, SetupStep? FixStep, bool NotKnown);
 
 /// <summary>
 /// The scan of the PC as "How your PC is impacted" shows it: one row per known cause, its level from
 /// <see cref="ImpactRules.FromFacts"/> (a true first run has nothing measured yet), and the step that fixes it. A level
-/// of None says PoolWatch is still watching for it. Pure.
+/// of None, and a cause PoolWatch could not tell about (Not known), say PoolWatch is still watching for it. Pure.
 /// </summary>
 internal static class ImpactRows
 {
     /// <summary>Volumes on ReFS: every Dev Drive, and any other drive formatted with ReFS.</summary>
     public static IReadOnlyList<VolumeFact> ReFs(EnvironmentFacts f) =>
-        f.Volumes.Where(v => v.IsDevDrive || v.FileSystem.Equals("ReFS", StringComparison.OrdinalIgnoreCase)).ToList();
+        f.Volumes.Where(v => v.IsDevDrive == true || v.FileSystem.Equals("ReFS", StringComparison.OrdinalIgnoreCase)).ToList();
 
     /// <summary>The Dev Drives Defender checks before their files open (the drives the Defender advice is for).</summary>
     public static IReadOnlyList<string> ScannedFirst(EnvironmentFacts f) =>
-        f.Volumes.Where(v => v.IsDevDrive && ImpactRules.FromFacts.ScannedFirst(f.DefenderPerformanceModeOn, v.Trusted)).Select(v => v.Root).ToList();
+        f.Volumes.Where(v => v.IsDevDrive == true && ImpactRules.FromFacts.ScannedFirst(f.DefenderPerformanceModeOn, v.Trusted)).Select(v => v.Root).ToList();
 
-    public static ImpactLevel DefenderLevel(EnvironmentFacts f) =>
-        ImpactRules.FromFacts.DefenderScanning(f.DefenderRealTimeOn, f.DefenderPerformanceModeOn, f.Volumes.Where(v => v.IsDevDrive).Select(v => v.Trusted).ToList());
+    /// <summary>
+    /// The Defender row's level; null when what decides it could not be read (the row reads Not known): Defender's settings,
+    /// or a volume the scan could not read whole (<see cref="EnvironmentFacts.VolumesNotAllRead"/>), which may be a Dev
+    /// Drive, unless the level is one no Dev Drive more could change: None with real-time protection off, or a Dev Drive
+    /// found that Defender checks before its files open.
+    /// </summary>
+    public static ImpactLevel? DefenderLevel(EnvironmentFacts f)
+    {
+        var devDrives = f.Volumes.Where(v => v.IsDevDrive == true).Select(v => v.Trusted).ToList();
+        var level = ImpactRules.FromFacts.DefenderScanning(f.DefenderRealTimeOn, f.DefenderPerformanceModeOn, devDrives.Count == 0 && f.VolumesNotRead ? null : devDrives);
+        return f.VolumesNotAllRead && f.DefenderRealTimeOn != false && level != ImpactRules.DefenderDevDriveLevel ? null : level;
+    }
 
-    /// <summary>The rows, in the design's order; empty when the PC could not be read.</summary>
+    /// <summary>
+    /// Why the drives leave a row not known (<see cref="EnvironmentFacts.VolumesNotAllRead"/>): none could be read, or the
+    /// ones the scan could not read, and the ReFS ones it could not say are Dev Drives, by letter.
+    /// </summary>
+    public static string DrivesNotRead(EnvironmentFacts f)
+    {
+        if (f.VolumesNotRead) return "PoolWatch could not read this PC's drives.";
+        var said = new List<string>();
+        if (f.UnreadVolumes.Count > 0) said.Add($"PoolWatch could not read {SetupText.Drives(f.UnreadVolumes)}.");
+        var unsure = f.Volumes.Where(v => v.IsDevDrive is null).Select(v => v.Root).ToList();
+        if (unsure.Count > 0)
+            said.Add($"PoolWatch could not read whether {SetupText.Drives(unsure)} {(unsure.Count == 1 ? "is a Dev Drive" : "are Dev Drives")}.");
+        return string.Join(" ", said);
+    }
+
+    /// <summary>The rows, in the design's order; empty when the PC could not be read. The step lists them <see cref="ByLevel"/>.</summary>
     public static IReadOnlyList<ImpactRow> From(EnvironmentFacts? f, LeakState leak)
     {
         if (f is null) return [];
         return [DevDrive(f), Defender(f), Codex(f), Services(f), TokenLeak(leak)];
     }
 
-    private static ImpactRow Row(Cause cause, SetupIcon icon, string title, string detail, ImpactLevel? level, SetupStep? fix, string? action = null) =>
-        new(cause, icon, title, detail, level,
-            level switch { null => null, ImpactLevel.None => SetupText.StillWatching, _ => fix is { } s ? SetupText.FixIn(s) : action },
-            level is null or ImpactLevel.None ? null : fix);
+    /// <summary>
+    /// The rows as the step lists them: by level, the highest first (High, Medium, Low), then the causes PoolWatch could not
+    /// tell about (Not known) with a check still running, then None. Rows of the same level keep the design's order.
+    /// </summary>
+    public static IReadOnlyList<ImpactRow> ByLevel(IEnumerable<ImpactRow> rows) => rows.OrderBy(Rank).ToList(); // OrderBy keeps ties in order
+
+    /// <summary>
+    /// Where a row sorts (<see cref="ByLevel"/>): High 0, Medium 1, Low 2, Not known 3, None 4. A row still being checked has
+    /// no level yet either, so it sorts with Not known. A level not named here throws rather than sorting with Not known.
+    /// </summary>
+    public static int Rank(ImpactRow row) => row.Level switch
+    {
+        ImpactLevel.High => 0,
+        ImpactLevel.Medium => 1,
+        ImpactLevel.Low => 2,
+        null => 3,
+        ImpactLevel.None => 4,
+        _ => throw new ArgumentOutOfRangeException(nameof(row), row.Level, "No place in the list for this level."),
+    };
+
+    /// <param name="level">The rule's level; null when it could not tell, which the row shows as Not known.</param>
+    /// <param name="checking">The token-leak check runs now: no level and no line under it yet.</param>
+    private static ImpactRow Row(Cause cause, SetupIcon icon, string title, string detail, ImpactLevel? level, SetupStep? fix, string? action = null, bool checking = false) =>
+        checking ? new(cause, icon, title, detail, null, null, null, NotKnown: false)
+        : level switch
+        {
+            null => new(cause, icon, title, detail, null, SetupText.StillWatching, null, NotKnown: true),
+            ImpactLevel.None => new(cause, icon, title, detail, ImpactLevel.None, SetupText.StillWatching, null, NotKnown: false),
+            { } found => new(cause, icon, title, detail, found, fix is { } s ? SetupText.FixIn(s) : action, fix, NotKnown: false),
+        };
 
     private static ImpactRow DevDrive(EnvironmentFacts f)
     {
         var refs = ReFs(f);
-        var level = ImpactRules.FromFacts.RefsMetadata(refs.Count > 0);
+        // A ReFS drive found is enough; with none found, a volume the scan could not read whole leaves it not known.
+        bool? present = refs.Count > 0 ? true : f.VolumesNotAllRead ? null : false;
+        var level = ImpactRules.FromFacts.RefsMetadata(present);
         string detail;
-        if (refs.Count == 0) detail = "No Dev Drive or ReFS drive on this PC.";
+        if (present is null) detail = DrivesNotRead(f);
+        else if (refs.Count == 0) detail = "No Dev Drive or ReFS drive on this PC.";
         else
         {
             string drives = SetupText.Drives(refs.Select(v => v.Root).ToList());
-            bool one = refs.Count == 1, allDevDrives = refs.All(v => v.IsDevDrive);
+            bool one = refs.Count == 1, allDevDrives = refs.All(v => v.IsDevDrive == true);
             detail = allDevDrives
                 ? $"{drives} {(one ? "is a Dev Drive" : "are Dev Drives")}, and Windows rarely empties {(one ? "its" : "their")} cache."
                 : $"{drives} {(one ? "uses" : "use")} ReFS, and Windows rarely empties {(one ? "its" : "their")} cache.";
@@ -257,17 +329,19 @@ internal static class ImpactRows
 
     private static ImpactRow Defender(EnvironmentFacts f)
     {
-        bool devDrives = f.Volumes.Any(v => v.IsDevDrive);
+        bool devDrives = f.Volumes.Any(v => v.IsDevDrive == true);
         string title = devDrives ? "Defender scanning your Dev Drives" : "Defender checking your files";
         var level = DefenderLevel(f);
-        if (level == ImpactLevel.None)
+        if (level is null or ImpactLevel.None)
         {
-            // Only what was read is said: performance mode covers the Dev Drives only when it is on and each is trusted.
-            bool covered = f.DefenderPerformanceModeOn == true && f.Volumes.Where(v => v.IsDevDrive).All(v => v.Trusted == true);
+            // Only what was read is said: performance mode covers the Dev Drives only when it is on and each is trusted
+            // (None, as with real-time protection off). Settings that could not be read leave the row Not known.
+            bool covered = f.DefenderPerformanceModeOn == true && f.Volumes.Where(v => v.IsDevDrive == true).All(v => v.Trusted == true);
             string why = f.DefenderRealTimeOn switch
             {
                 false => "Defender's real-time protection is off.",
                 null => "PoolWatch could not read Defender's settings. Another antivirus may be in use.",
+                true when level is null && f.VolumesNotAllRead => DrivesNotRead(f),
                 true when covered => "Performance mode covers your Dev Drives.",
                 true => "PoolWatch could not read whether performance mode covers your Dev Drives.",
             };
@@ -284,14 +358,29 @@ internal static class ImpactRows
         return Row(Cause.Defender, SetupIcon.Shield, title, detail, level, SetupStep.Fixes);
     }
 
-    private static ImpactRow Codex(EnvironmentFacts f) =>
-        Row(Cause.CodexShaderCache, SetupIcon.Chat, "Codex shader cache", f.ChatGptInstalled ? "The Codex app is installed." : "The Codex app is not installed.",
-            ImpactRules.FromFacts.CodexShaderCache(f.ChatGptInstalled), SetupStep.Fixes);
+    private static ImpactRow Codex(EnvironmentFacts f)
+    {
+        bool? installed = f.ChatGptInstalled ? true : f.PackagesNotRead ? null : false;
+        string detail = installed switch
+        {
+            true => "The Codex app is installed.",
+            false => "The Codex app is not installed.",
+            null => "PoolWatch could not read which apps are installed.",
+        };
+        return Row(Cause.CodexShaderCache, SetupIcon.Chat, "Codex shader cache", detail, ImpactRules.FromFacts.CodexShaderCache(installed), SetupStep.Fixes);
+    }
 
-    private static ImpactRow Services(EnvironmentFacts f) =>
-        Row(Cause.BackgroundServices, SetupIcon.Gear, "Background services",
-            f.OptionalServicesRunning > 0 ? "Services you may not need, running all day." : "None of the services PoolWatch knows is running.",
-            ImpactRules.FromFacts.BackgroundServices(f.OptionalServicesRunning), null, SetupText.TrimInApp);
+    private static ImpactRow Services(EnvironmentFacts f)
+    {
+        int? running = f.OptionalServicesRunning > 0 ? f.OptionalServicesRunning : f.ServicesNotRead ? null : 0;
+        string detail = running switch
+        {
+            null => "PoolWatch could not read which services are running.",
+            > 0 => "Services you may not need, running all day.",
+            _ => "None of the services PoolWatch knows is running.",
+        };
+        return Row(Cause.BackgroundServices, SetupIcon.Gear, "Background services", detail, ImpactRules.FromFacts.BackgroundServices(running), null, SetupText.TrimInApp);
+    }
 
     private static ImpactRow TokenLeak(LeakState leak)
     {
@@ -307,8 +396,16 @@ internal static class ImpactRows
             LeakState.GuardOn => "The token-leak guard is on, so it cannot build up.",
             _ => "PoolWatch could not check for it now. " + watching,
         };
-        ImpactLevel? level = leak == LeakState.Checking ? null : ImpactRules.FromFacts.TokenLeak(leak == LeakState.Found);
-        return Row(Cause.TokenLeak, SetupIcon.Key, "Windows token leak", detail, level, SetupStep.Fixes);
+        // Not known when the check could not run (a workaround already in effect stops it too) or gave no clear answer. A
+        // build without the leak or the guard on is None: the leak cannot build up here.
+        bool? found = leak switch
+        {
+            LeakState.Found => true,
+            LeakState.NotChecked or LeakState.Unclear or LeakState.WorkedAround => null,
+            _ => false,
+        };
+        return Row(Cause.TokenLeak, SetupIcon.Key, "Windows token leak", detail, ImpactRules.FromFacts.TokenLeak(found), SetupStep.Fixes,
+            checking: leak == LeakState.Checking);
     }
 
     /// <summary>

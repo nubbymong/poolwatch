@@ -5,10 +5,12 @@ using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
-/// <summary>Addendum 1 (2a-2f): a real Reff incident (FCB_DATA grew while an agent session ran short shell commands), reduced.</summary>
-public class AddendumTests
+/// <summary>A real Reff incident (FCB_DATA grew while an agent session ran short shell commands), reduced.</summary>
+public class ReffIncidentTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 6, 34, 0, DateTimeKind.Utc);
     private static readonly PoolTag Reff = PoolTag.Parse("Reff");
@@ -41,13 +43,14 @@ public class AddendumTests
         string[] shorts = ["git.exe", "date.exe", "timeout.exe", "bash.exe"];
         for (int i = 0; i < shortCommands; i++) Command(shorts[i % shorts.Length], "git status", 700 * KB, 540, 10 + i * 0.1, 0.2);
         // A reused PID: the same number as grep, a different process later, nothing to do with the session.
-        var cap = new CaptureResult { PoolEventsParsed = true, StartUtc = traceStart, EndUtc = traceStart.AddMinutes(1), Tags = [Reff], Pool = pool };
+        var cap = new CaptureResult { PoolEventsParsed = true, StartUtc = traceStart, EndUtc = traceStart.AddMinutes(1), StartMs = Clocks.At(traceStart).Ms, EndMs = Clocks.At(traceStart.AddMinutes(1)).Ms, Tags = [Reff], Pool = pool };
         return (reg, cap);
     }
 
     private static Incident Inc() => new()
     {
         Id = "x", Dir = "x", Tag = Reff, Kind = IncidentKind.Growth, OnsetUtc = T0, LastRiseUtc = T0.AddMinutes(26), EndUtc = T0.AddMinutes(26),
+        OnsetMs = At(T0).Ms, LastRiseMs = At(T0.AddMinutes(26)).Ms, EndMs = At(T0.AddMinutes(26)).Ms,
         StartBytes = 95 * MB, PeakBytes = 675 * MB, CurrentBytes = 675 * MB,
     };
 
@@ -71,7 +74,7 @@ public class AddendumTests
         Assert.Contains("+147 MB from two commands in 1 min, and about 700 KB per short command, none freed.", line);
         Assert.Contains("Started by: Claude Code session sample-app (PID 4000).", line);
         Assert.EndsWith("412 short commands x 700 KB = 281.6 MB.", line);
-        // 2b: every traced process carries its identity, command line and chain.
+        // Every traced process carries its identity, command line and chain.
         var grep = inc.Traced.Single(t => t.Identity.Image == "grep.exe");
         Assert.Equal("grep -rn TODO .", grep.CommandLine);
         Assert.Contains("claude.exe", grep.Chain[0]);
@@ -108,7 +111,7 @@ public class AddendumTests
         inc.CurrentBytes = currentMb * MB;
         inc.ClearedBytes = clearedMb * MB;
         inc.ClearedAtUtc = oneClear ? clearUtc : null;
-        inc.EndUtc = null;
+        (inc.EndUtc, inc.EndMs) = (null, null);
         inc.Capture = cap;
         inc.Traced = TraceAttribution.Resolve(cap, Reff, reg);
         inc.TraceOwners = TraceAttribution.Owners(inc.Traced);
@@ -128,7 +131,7 @@ public class AddendumTests
         Assert.Equal("grep old", reg.FindInstance(700, 0, T0.AddSeconds(1))!.CommandLine);
         Assert.Null(reg.FindInstance(701, 0, T0));
         // A trace row PoolWatch never saw keeps the trace's own command line, under its parent.
-        var cap = new CaptureResult { PoolEventsParsed = true, StartUtc = T0, EndUtc = T0.AddMinutes(1), Tags = [Reff],
+        var cap = new CaptureResult { PoolEventsParsed = true, StartUtc = T0, EndUtc = T0.AddMinutes(1), StartMs = Clocks.At(T0).Ms, EndMs = Clocks.At(T0.AddMinutes(1)).Ms, Tags = [Reff],
             Pool = [new(9999, "cut.exe", Reff, 5 * MB, 0, 10, 0, [], 0, "cut -f2", 700, T0.AddSeconds(1))] };
         var t = Assert.Single(TraceAttribution.Resolve(cap, Reff, reg));
         Assert.False(t.Resolved);
@@ -141,7 +144,8 @@ public class AddendumTests
     {
         ProcessRegistry Run(DateTime? protect)
         {
-            var reg = new ProcessRegistry { KeepShortLived = TimeSpan.FromMinutes(15), ProtectSince = protect };
+            // The registry reads the times onto its forward clock as they arrive (the real one here): so does the window.
+            var reg = new ProcessRegistry { KeepShortLived = TimeSpan.FromMinutes(15), ProtectSinceMs = protect is { } p ? Moment.Now().MsOf(p) : null };
             reg.ObserveSnapshot([new() { Pid = 4, ImageName = "System" }], T0);
             for (int i = 0; i < 400; i++)
             {
@@ -159,9 +163,9 @@ public class AddendumTests
     [Fact]
     public void ProtectedRecordsAreSizedByTimeNotByACount()
     {
-        // Part 3 (2b): every short command of the window stays resolvable, however many: the newest keep their full record,
+        // Every short command of the window stays resolvable, however many: the newest keep their full record,
         // older ones a compact start record (identity, parent, path; the trace carries the command line itself).
-        var reg = new ProcessRegistry { KeepShortLived = TimeSpan.FromMinutes(15), ProtectSince = T0.AddMinutes(-10) };
+        var reg = new ProcessRegistry { KeepShortLived = TimeSpan.FromMinutes(15), ProtectSinceMs = Moment.Now().MsOf(T0.AddMinutes(-10)) };
         reg.ObserveSnapshot([new() { Pid = 4, ImageName = "System" }], T0);
         var claude = reg.OnStart(4000, 4, Ft(T0.AddHours(-1)), "claude.exe", null, "claude", null, T0.AddHours(-1));
         int n = ProcessRegistry.MaxProtectedShortLived + 500;
@@ -180,8 +184,8 @@ public class AddendumTests
         Assert.Equal(500, reg.CompactCount);
         Assert.Equal("grep x", reg.FindInstance(10_000 + n - 1, 0, T0.AddMilliseconds((n - 1) * 100))!.CommandLine); // the newest stay full
 
-        // The window ends (ProtectUntil): records that exited after it are no longer kept; the compact ones go with it.
-        reg.ProtectSince = null;
+        // The window ends: records that exited in it are no longer kept; the compact ones go with it.
+        reg.ProtectSinceMs = null;
         reg.ObserveSnapshot([new() { Pid = 4, ImageName = "System" }, new() { Pid = 4000, ParentPid = 4, CreateTime = claude.Key.CreateTime, ImageName = "claude.exe" }], T0.AddMinutes(42));
         Assert.Equal(0, reg.CompactCount);
         Assert.Null(reg.FindInstance(10_000, Ft(T0), T0));
@@ -190,7 +194,10 @@ public class AddendumTests
     [Fact]
     public void TheProtectedWindowEndsTenMinutesAfterAClosedIncident()
     {
-        var reg = new ProcessRegistry { KeepShortLived = TimeSpan.FromMinutes(15), ProtectSince = T0.AddMinutes(-10), ProtectUntil = T0.AddMinutes(10) };
+        var reg = new ProcessRegistry
+        {
+            KeepShortLived = TimeSpan.FromMinutes(15), ProtectSinceMs = Moment.Now().MsOf(T0.AddMinutes(-10)), ProtectUntilMs = Moment.Now().MsOf(T0.AddMinutes(10)),
+        };
         reg.ObserveSnapshot([new() { Pid = 4, ImageName = "System" }], T0);
         for (int i = 0; i < 400; i++)
         {
@@ -214,12 +221,12 @@ public class AddendumTests
     public void EventWindowCoversTheGrowthNotTheClose()
     {
         var inc = Inc();
-        inc.ClosedUtc = T0.AddMinutes(47);
-        Assert.Equal(T0.AddMinutes(-2), IncidentManager.EventWindowStart(inc));
-        Assert.Equal(T0.AddMinutes(27), IncidentManager.EventWindowEnd(inc, T0.AddHours(2)));
-        inc.EndUtc = null;
-        inc.ClosedUtc = null; // still open: up to the latest sample
-        Assert.Equal(T0.AddMinutes(61), IncidentManager.EventWindowEnd(inc, T0.AddMinutes(60)));
+        (inc.ClosedUtc, inc.ClosedMs) = (T0.AddMinutes(47), At(T0.AddMinutes(47)).Ms);
+        Assert.Equal(At(T0.AddMinutes(-2)).Ms, IncidentManager.EventWindowStartMs(inc));
+        Assert.Equal(At(T0.AddMinutes(27)).Ms, IncidentManager.EventWindowEndMs(inc, At(T0.AddHours(2)).Ms));
+        (inc.EndUtc, inc.EndMs) = (null, null);
+        (inc.ClosedUtc, inc.ClosedMs) = (null, null); // still open: up to the latest sample
+        Assert.Equal(At(T0.AddMinutes(61)).Ms, IncidentManager.EventWindowEndMs(inc, At(T0.AddMinutes(60)).Ms));
     }
 
     [Fact]
@@ -235,7 +242,7 @@ public class AddendumTests
             w.AddProcess(4, 0, "System");
             w.AddProcess(100, 4, "leaker.exe");
             long tag = 50 * Settings.MB;
-            void Step() { w.Sample(("VdMm", tag)); mgr.Process(w.History, det, det.Evaluate(w.History), w.Now - w.Interval); }
+            void Step() { w.Sample(("VdMm", tag)); mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval)); }
             for (int i = 0; i < 15; i++) Step();
             for (int round = 0; round < 3; round++)
             {
@@ -254,7 +261,7 @@ public class AddendumTests
     }
 }
 
-public class AddendumReviewTests
+public class IncidentLifecycleTests
 {
     [Fact]
     public void ReopenedIncidentDoesNotFlapOnTheMaximumDuration()
@@ -272,7 +279,7 @@ public class AddendumReviewTests
             long tag = 50 * Settings.MB;
             int opens = 0;
             mgr.Opened += (_, _) => opens++;
-            void Step() { w.Sample(("Nbuf", tag)); mgr.Process(w.History, det, det.Evaluate(w.History), w.Now - w.Interval); }
+            void Step() { w.Sample(("Nbuf", tag)); mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval)); }
             for (int i = 0; i < 15; i++) Step();
             for (int i = 0; i < 120; i++) { w.Io(100, other: 2000); tag += 800_000; Step(); } // 4 min of steady growth
             var inc = Assert.Single(mgr.All, i => i.Tag == PoolTag.Parse("Nbuf"));
@@ -299,7 +306,7 @@ public class AddendumReviewTests
             reg.OnStop(1000 + i, t.ToFileTimeUtc(), 0, t.AddMilliseconds(100));
             pool.Add(new CapturePoolUsage(1000 + i, "git.exe", PoolTag.Parse("Reff"), 700 << 10, 0, 540, 0, [], t.ToFileTimeUtc(), "git status", 10, t));
         }
-        var cap = new CaptureResult { PoolEventsParsed = true, StartUtc = t0, EndUtc = t0.AddMinutes(1), Tags = [PoolTag.Parse("Reff")], Pool = pool };
+        var cap = new CaptureResult { PoolEventsParsed = true, StartUtc = t0, EndUtc = t0.AddMinutes(1), StartMs = Clocks.At(t0).Ms, EndMs = Clocks.At(t0.AddMinutes(1)).Ms, Tags = [PoolTag.Parse("Reff")], Pool = pool };
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var owners = TraceAttribution.Owners(TraceAttribution.Resolve(cap, PoolTag.Parse("Reff"), reg));
         for (int i = 0; i < 100; i++) _ = owners[0].PerShortCommand + owners[0].ShortOnes.Count + owners[0].Big.Count;
@@ -314,7 +321,7 @@ public class AddendumReviewTests
         var reg = new ProcessRegistry();
         var t0 = new DateTime(2026, 10, 26, 7, 0, 0, DateTimeKind.Utc);
         var u = new CapturePoolUsage(4321, "PID 4321", PoolTag.Parse("Reff"), 700 << 10, 0, 540, 0, [], t0.ToFileTimeUtc(), null, 0, t0, t0.AddMilliseconds(300));
-        var cap = new CaptureResult { PoolEventsParsed = true, StartUtc = t0.AddSeconds(-1), EndUtc = t0.AddMinutes(1), Tags = [u.Tag], Pool = [u] };
+        var cap = new CaptureResult { PoolEventsParsed = true, StartUtc = t0.AddSeconds(-1), EndUtc = t0.AddMinutes(1), StartMs = Clocks.At(t0.AddSeconds(-1)).Ms, EndMs = Clocks.At(t0.AddMinutes(1)).Ms, Tags = [u.Tag], Pool = [u] };
         var t = Assert.Single(TraceAttribution.Resolve(cap, u.Tag, reg));
         Assert.True(t.Short);
         Assert.StartsWith("unknown process (started ", t.Name);

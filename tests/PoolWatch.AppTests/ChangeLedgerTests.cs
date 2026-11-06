@@ -1,7 +1,9 @@
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using PoolWatch.Core;
 using PoolWatch.Core.Changes;
 using PoolWatch.Core.Services;
+using PoolWatch.Core.Setup;
 using PoolWatch.Engine;
 using PoolWatch.Engine.Changes;
 
@@ -89,9 +91,10 @@ internal sealed class FakeClearTasks : IClearTaskStore
     public readonly Dictionary<string, string> AccessRules = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Each folder or file whose rules were read, in order.</summary>
     public readonly List<string> RulesRead = new();
-    public UnelevatedAccount? Account = new(new(Sddl.SomeoneSid), []);
+    /// <summary>Where each folder really is, by path (not listed: where it is named): a folder link and where it leads.</summary>
+    public readonly Dictionary<string, string> RealPaths = new(StringComparer.OrdinalIgnoreCase);
 
-    public AdminPlaces Places => new([@"C:\Program Files", @"C:\Program Files (x86)"], Rules, Account);
+    public AdminPlaces Places => new([@"C:\Program Files", @"C:\Program Files (x86)"], Rules, p => RealPaths.GetValueOrDefault(p, p), _ => []);
 
     private System.Security.AccessControl.RawSecurityDescriptor? Rules(string path)
     {
@@ -254,7 +257,7 @@ public sealed class ChangeLedgerTests : IDisposable
         var live = _f.Live();
         IChangeSource[] sources =
         [
-            new LogonTaskSource(new FakeLogonTasks()), new SettingsSource(live, _f.Records, null),
+            new LogonTaskSource(new FakeLogonTasks(), Fine), new SettingsSource(live, _f.Records, null),
             new ServicesSource(new ServicesController(_f.Paths, _f.Log, _ => { }, _ => null, _ => null, new FakeServices())), _f.Recorded(live),
         ];
         var rows = sources.Select(s => s.Unread("Access is denied.")).ToList();
@@ -1022,7 +1025,7 @@ public sealed class ChangeLedgerTests : IDisposable
     {
         var live = _f.Live(new Settings { AutoClearEnabled = true, AutoClearEveryHours = 1, AutoClearPoolGb = 8, TokenGuardEnabled = true });
         bool guardStopped = false;
-        var source = new SettingsSource(live, _f.Records, () => guardStopped = true);
+        var source = new SettingsSource(live, _f.Records, () => { guardStopped = true; return ChangeWords.TokenGuardOffPutBack; });
         var rows = source.List().ToList();
         Assert.Equal(["The cache is cleared every hour, or sooner when the kernel pool reaches 8 GB", ChangeWords.TokenGuard], rows.Select(r => r.What));
         Assert.Null(rows[0].Note);
@@ -1034,7 +1037,7 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.True(source.Undo(rows[0], false).Done);
         Assert.False(live.Running.AutoClearEnabled);
         Assert.False(_f.Saved().AutoClearEnabled);
-        Assert.True(source.Undo(rows[1], false).Done);
+        Assert.Equal(new UndoResult(true, ChangeWords.TokenGuardOffPutBack), source.Undo(rows[1], false)); // what the guard said it did
         Assert.False(live.Running.TokenGuardEnabled);
         Assert.True(guardStopped);
         Assert.Empty(source.List());
@@ -1044,16 +1047,18 @@ public sealed class ChangeLedgerTests : IDisposable
     {
         public LogonTaskPolicy.ExistingTask? Task = new(@"C:\Program Files\PoolWatch\PoolWatch.exe", "--tray", Highest: true);
         public string? RemoveError;
-        public LogonTaskPolicy.ExistingTask? Read() => Task;
-        public string? RegisterCurrent() => throw new InvalidOperationException("never registered here");
+        public Exception? ReadError;
+        public LogonTaskPolicy.ExistingTask? Read() => ReadError is { } e ? throw e : Task;
+        public string? RegisterCurrent(bool on = true, bool signInTrigger = true) => throw new InvalidOperationException("never registered here");
         public string? Remove() { if (RemoveError is null) Task = null; return RemoveError; }
+        public bool IsThisAccount(string? userId) => true;
     }
 
     [Fact]
     public void TheLogonTaskIsListedWhileItExists()
     {
         var tasks = new FakeLogonTasks { RemoveError = "access denied" };
-        var source = new LogonTaskSource(tasks);
+        var source = new LogonTaskSource(tasks, Fine);
         var row = Assert.Single(source.List());
         Assert.Equal((ChangeIds.LogonTask, ChangeWords.LogonTask, (DateTime?)null), (row.Id, row.What, row.ChangedUtc));
         Assert.False(source.Undo(row, false).Done);
@@ -1062,9 +1067,96 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.Empty(source.List());
     }
 
+    /// <summary>The task as the check at start would judge it fine, where highest privileges are needed (so no test depends on what is installed on this PC, or on its UAC).</summary>
+    private static SignInState Fine(LogonTaskPolicy.ExistingTask task) => LogonTaskPolicy.AtSignIn(task, LogonTaskPolicy.Judgement.Fine, highestNeeded: true);
+
     /// <summary>
-    /// The live services in memory. As Windows does, a service is not stopped while one that depends on it runs (its start
-    /// type is set all the same), and not started while a service it needs is Disabled (a stopped one it needs starts with it).
+    /// Active changes says the sign-in task as Settings does: "PoolWatch starts when you sign in", with Turn off, only for
+    /// a task that does (on, a sign-in trigger on, fine by the check at start, with highest privileges where they are
+    /// needed); one that does not is listed as there, saying which switch or reason (turned off, its sign-in trigger turned
+    /// off, no sign-in trigger, without highest privileges), or, when its state could not be read or the check at start
+    /// asks about it, with why; its button is Remove, which deletes it and says so. On this PC the state is the one
+    /// Settings reads.
+    /// </summary>
+    [Fact]
+    public void ALogonTaskThatDoesNotStartPoolWatchIsListedAsThereSayingWhyWithRemove()
+    {
+        var on = new FakeLogonTasks().Task!;
+        foreach (var (task, what, detail) in new[]
+                 {
+                     (on with { Enabled = false }, ChangeWords.LogonTaskOff, ChangeWords.LogonTaskOffDetail),
+                     (on with { SignInTrigger = LogonTaskPolicy.Trigger.Off }, ChangeWords.LogonTaskTriggerOff, ChangeWords.LogonTaskTriggerOffDetail),
+                     (on with { SignInTrigger = LogonTaskPolicy.Trigger.None }, ChangeWords.LogonTaskNoTrigger, ChangeWords.LogonTaskNoTriggerDetail),
+                     (on with { Highest = false }, ChangeWords.LogonTaskNotHighest, ChangeWords.LogonTaskNotHighestDetail),
+                 })
+        {
+            var tasks = new FakeLogonTasks { Task = task };
+            var row = Assert.Single(new LogonTaskSource(tasks, Fine).List());
+            Assert.Equal((what, detail, ChangeWords.LogonTaskTitle), (row.What, row.Detail, row.Title));
+            Assert.Null(row.Note);
+            Assert.Equal(ChangeWords.Remove, ActiveChange.ButtonOf(row));
+            var undo = new LogonTaskSource(tasks, Fine).Undo(row, false);
+            Assert.Equal((true, ChangeWords.LogonTaskRemoved), (undo.Done, undo.Message));
+            Assert.Null(tasks.Task);
+        }
+        var unknown = Assert.Single(new LogonTaskSource(new FakeLogonTasks { Task = on with { Enabled = null } }, Fine).List());
+        Assert.Equal((ChangeWords.LogonTaskThere, ChangeWords.LogonTaskThereDetail, ChangeWords.LogonTaskStateNotRead), (unknown.What, unknown.Detail, unknown.Note));
+        Assert.Equal(ChangeWords.Remove, ActiveChange.ButtonOf(unknown));
+        foreach (var asked in new[] { LogonTaskPolicy.Judgement.Untrusted, LogonTaskPolicy.Judgement.Outdated })
+        {
+            var row = Assert.Single(new LogonTaskSource(new FakeLogonTasks(), t => LogonTaskPolicy.AtSignIn(t, asked, highestNeeded: true)).List());
+            Assert.Equal((ChangeWords.LogonTaskThere, ChangeWords.LogonTaskThereDetail, ChangeWords.LogonTaskAskedAbout), (row.What, row.Detail, row.Note));
+            Assert.Equal(ChangeWords.Remove, ActiveChange.ButtonOf(row));
+        }
+        var unread = Assert.Single(new LogonTaskSource(new FakeLogonTasks { ReadError = new IOException("x") }, Fine).List());
+        Assert.Equal((ChangeWords.LogonTaskThere, ChangeWords.Remove), (unread.What, ActiveChange.ButtonOf(unread)));
+        Assert.Equal("PoolWatch could not read its sign-in task (x). Remove, Put all back and uninstalling delete it all the same.", unread.Note);
+        var failing = new FakeLogonTasks { Task = on with { Enabled = false }, RemoveError = "access denied" };
+        Assert.Equal("PoolWatch could not delete its sign-in task: access denied",
+            new LogonTaskSource(failing, Fine).Undo(Assert.Single(new LogonTaskSource(failing, Fine).List()), false).Message);
+        // Turn off on a task that starts PoolWatch, refused: it says PoolWatch could not stop starting at sign-in, and why,
+        // and the task stays.
+        var starting = new FakeLogonTasks { Task = on, RemoveError = "access denied" };
+        var refused = new LogonTaskSource(starting, Fine).Undo(Assert.Single(new LogonTaskSource(starting, Fine).List()), false);
+        Assert.Equal((false, "PoolWatch could not stop starting when you sign in: access denied"), (refused.Done, refused.Message));
+        Assert.NotNull(starting.Task);
+        // SECURITY.md says that the surfaces name each reason a task does not start PoolWatch, or that its settings could
+        // not all be read, as the row above does for a task it could not read.
+        string security = UninstallerTests.OneLine(File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "SECURITY.md")));
+        Assert.Contains("otherwise they say which of these it is, or, when PoolWatch could not read all of the task's settings, that it could not " +
+                        "(Settings then offers to set the task up again, Active changes to remove it).", security);
+        Assert.StartsWith("PoolWatch could not read all of this task's settings.", ChangeWords.LogonTaskStateNotRead);
+        var shown = Assert.Single(new LogonTaskSource(new FakeLogonTasks(), Fine).List());
+        Assert.Equal((ChangeWords.LogonTask, ChangeWords.LogonTaskDetail, (string?)null), (shown.What, shown.Detail, shown.Note));
+        Assert.Equal(ChangeWords.TurnOff, ActiveChange.ButtonOf(shown));
+        Assert.Equal("Removes PoolWatch's sign-in task: PoolWatch no longer starts by itself when you sign in.", Ui.ActiveChangesView.ButtonTip(shown));
+        Assert.Equal("Deletes PoolWatch's sign-in task.", Ui.ActiveChangesView.ButtonTip(unknown));
+        // On this PC: the state Settings reads, in both places the list is made.
+        string ledger = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "Changes", "ChangeLedger.cs"));
+        Assert.Equal(2, Regex.Matches(ledger, Regex.Escape("new LogonTaskSource(new Ui.WindowsLogonTasks(") + @"[a-zA-Z.]+\), Ui\.LogonTask\.AtSignIn\)").Count);
+    }
+
+    /// <summary>
+    /// A sign-in task that is there but could not be read is still listed, with why, and can still be removed (removing it
+    /// needs no reading), so Put all back and the uninstaller never leave it behind.
+    /// </summary>
+    [Fact]
+    public void ALogonTaskThatCannotBeReadIsStillListedAndRemoved()
+    {
+        var tasks = new FakeLogonTasks { ReadError = new UnauthorizedAccessException("Access is denied.") };
+        var source = new LogonTaskSource(tasks, Fine);
+        var row = Assert.Single(source.List());
+        Assert.True(row.CanUndo);
+        Assert.Contains("could not read its sign-in task (Access is denied.)", row.Note);
+        Assert.True(source.Undo(row, false).Done);
+        Assert.Null(tasks.Task);
+    }
+
+    /// <summary>
+    /// The live services in memory. As Windows does, a service is not stopped while one that depends on it has not stopped
+    /// (it runs, or is paused, starting, stopping, resuming or pausing; the start type is set all the same), and not started
+    /// while a service it needs is Disabled (a stopped one it needs starts with it). Put back starts it again only as
+    /// <see cref="ServicePlan.StartAfterRestore"/> says.
     /// </summary>
     private sealed class FakeServices : IServiceBackend
     {
@@ -1075,17 +1167,20 @@ public sealed class ChangeLedgerTests : IDisposable
 
         public IReadOnlyList<ServiceView> Enumerate() => Live.Values.ToList();
         public bool InsiderEnrolled() => false;
-        public (string? error, NotDone? notStopped) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
+        public (string? error, NotDone? notStopped, bool? wasRunning) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
         {
             string name = op.Option.Service.Name;
-            bool refused = op.NewStart == ServiceStartType.Disabled && Live[name].Running
-                           && Live.Values.Any(v => v.Running && v.DependsOn.Contains(name, StringComparer.OrdinalIgnoreCase));
-            Live[name] = Live[name] with { StartType = op.NewStart, Running = refused };
-            return (null, refused ? ServiceControl.Answered(1051, lookedAgain: false).Why : null); // as Windows answers: one that depends on it runs
+            bool? was = ServicePlan.WasRunning(Live[name]); // what the change saw
+            static bool NotStopped(ServiceView v) => v.Running || v.NeitherRunningNorStopped;
+            bool refused = op.NewStart == ServiceStartType.Disabled && NotStopped(Live[name])
+                           && Live.Values.Any(v => NotStopped(v) && v.DependsOn.Contains(name, StringComparer.OrdinalIgnoreCase));
+            Live[name] = refused || op.NewStart != ServiceStartType.Disabled ? Live[name] with { StartType = op.NewStart }
+                : Live[name] with { StartType = op.NewStart, Running = false, NeitherRunningNorStopped = false, StateUnknown = false, Between = null };
+            return (null, refused ? ServiceControl.Answered(1051, lookedAgain: false).Why : null, was); // as Windows answers: one that depends on it has not stopped
         }
         public (string? error, NotDone? notDone) Restore(ServiceChange change, IReadOnlySet<string> allowed, bool insiderEnrolled)
         {
-            bool running = change.OriginalRunning;
+            bool running = ServicePlan.StartAfterRestore(change);
             NotDone? notStarted = null;
             var needs = Live[change.Service].DependsOn;
             if (running && needs.Any(d => Live.TryGetValue(d, out var v) && v.StartType == ServiceStartType.Disabled))

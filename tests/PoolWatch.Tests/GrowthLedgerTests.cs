@@ -4,6 +4,7 @@ using PoolWatch.Core.Detection;
 using PoolWatch.Core.History;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Growth;
+using static PoolWatch.Tests.Clocks;
 
 namespace PoolWatch.Tests;
 
@@ -25,8 +26,14 @@ public class GrowthLedgerTests
 
     private static ClearRecord ClearAt(DateTime utc, string? error = null) => new()
     {
-        TimeUtc = utc, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = default, Error = error,
+        TimeUtc = utc, TickMs = Clocks.At(utc).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = default, Error = error,
         After = error is null ? default(PoolTotals) : null,
+    };
+
+    /// <summary>A clear that ran at <paramref name="utc"/> by the system clock and <paramref name="ms"/> by the forward clock.</summary>
+    private static ClearRecord ClearAt(DateTime utc, long ms) => new()
+    {
+        TimeUtc = utc, TickMs = ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = default, After = default(PoolTotals),
     };
 
     /// <summary>
@@ -55,8 +62,8 @@ public class GrowthLedgerTests
             var tags = new List<PoolTagEntry> { Tag(Reff, reff), Tag(Toke, toke), Tag(Gone, gone) };
             Totals.Add(total);
             Tags[Reff].Add(reff); Tags[Toke].Add(toke); Tags[Gone].Add(gone);
-            History.Add(new Sample(t, new PoolTotals((ulong)total, 0, 0, 0), tags, []));
-            Ledger.Observe(t, total, tags, Clears);
+            History.Add(new Sample(t, new PoolTotals((ulong)total, 0, 0, 0), tags, []) { TickMs = Clocks.At(t).Ms });
+            Ledger.Observe(Clocks.At(t), total, tags, Clears);
         }
 
         public void Clear(string? error = null) => Clears.Add(ClearAt(Last + TimeSpan.FromSeconds(1), error));
@@ -170,8 +177,8 @@ public class GrowthLedgerTests
         {
             long noise = (long)((rnd.NextDouble() * 2 - 1) * MB);
             var t = T0 + step * i;
-            flat.Observe(t, 4 * GB + noise, [Tag(Reff, GB + noise)], []);
-            leak.Observe(t, 4 * GB + noise + (long)(100 * MB * (step * i).TotalHours), [], []);
+            flat.Observe(Clocks.At(t), 4 * GB + noise, [Tag(Reff, GB + noise)], []);
+            leak.Observe(Clocks.At(t), 4 * GB + noise + (long)(100 * MB * (step * i).TotalHours), [], []);
             if (i == 0) first = noise;
             last = noise;
         }
@@ -292,111 +299,69 @@ public class GrowthLedgerTests
         return started.Date == nowUtc.ToLocalTime().Date ? at : "yesterday " + at;
     }
 
-    [Fact]
-    public void AClockSetBackNeitherInflatesTheRateNorCountsAClearTwice()
-    {
-        // Two hours at 600 MB/h with a clear at 1 h 50 min that frees 300 MB; then the clock is set back an hour (the pool
-        // moved 500 MB across the step), and 70 more minutes at 600 MB/h, passing the clear's time again.
-        var ledger = new GrowthLedger(Settle, Step);
-        var clears = new List<ClearRecord>();
-        long level = 4 * GB;
-        const long perSample = 600 * MB / 360;
-        var t = T0;
-        for (int i = 0; i < 720; i++)
-        {
-            ledger.Observe(t, level, [Tag(Reff, level - 3 * GB)], clears);
-            if (i == 659) { clears.Add(ClearAt(t + TimeSpan.FromSeconds(1))); level -= 300 * MB; }
-            t += Step;
-            level += perSample;
-        }
-        Assert.Equal(1, ledger.Window(TimeSpan.FromHours(24)).Clears);
-        t -= TimeSpan.FromHours(1);
-        level += 500 * MB;
-        for (int i = 0; i < 70 * 6; i++)
-        {
-            ledger.Observe(t, level, [Tag(Reff, level - 3 * GB)], clears);
-            if (i == 1)
-            {
-                // The minute before the new time's (6 changes), the new time's own minute as it was counted before the step
-                // (6: kept, so at most the step's length is counted twice), and the change measured since (1).
-                var first = ledger.Window(TimeSpan.FromMinutes(1));
-                Assert.Equal(13 * perSample, first.Total.Change);
-                Assert.InRange(first.Tags[Reff].Change, 13 * perSample - KB, 13 * perSample + KB);
-            }
-            t += Step;
-            level += perSample;
-        }
-        var hour = ledger.Window(TimeSpan.FromHours(1));
-        Assert.InRange(hour.PerHour(hour.Total)!.Value, 590 * MB, 620 * MB); // not twice that
-        // The day: the hour before the new time (359 changes), the new time's minute as counted before (6) and the 419
-        // since the step; the minutes that lay wholly ahead of the new time went, with the clear in them, and passing its
-        // time again does not count it a second time.
-        var day = ledger.Window(TimeSpan.FromHours(24));
-        Assert.Equal(GrowthCounts.Of(784 * perSample, 0), day.Total);
-        Assert.InRange(day.Tags[Reff].Change, 784 * perSample - KB, 784 * perSample + KB);
-        Assert.Equal(0, day.Clears);
-        Assert.Equal(T0, day.StartedUtc);
-        Assert.Equal(0, ledger.PassedClears); // let go once the clock passed it again
-
-        // Set back to before PoolWatch started: everything after the new time goes, and it counts as started there.
-        var early = new GrowthLedger(Settle, Step);
-        for (int i = 0; i < 60; i++) early.Observe(T0 + Step * i, 4 * GB, [], []);
-        var back = T0 - TimeSpan.FromMinutes(50);
-        for (int i = 0; i < 6 * 40; i++) early.Observe(back + Step * i, 4 * GB + i * MB, [], []);
-        var w = early.Window(TimeSpan.FromHours(1));
-        Assert.Equal(back, w.StartedUtc);
-        Assert.Equal(239 * MB, w.Total.Grew);
-    }
-
-    [Fact]
-    public void AClearRightAfterTheClockWasSetBackIsCounted()
-    {
-        // The clock goes back half an hour; a clear runs just after the first sample on the new time and frees 1 GB.
-        var ledger = new GrowthLedger(Settle, Step);
-        var clears = new List<ClearRecord>();
-        var t = T0;
-        for (int i = 0; i < 60; i++) { ledger.Observe(t, 4 * GB, [], clears); t += Step; }
-        t -= TimeSpan.FromMinutes(30);
-        ledger.Observe(t, 4 * GB, [], clears);
-        clears.Add(ClearAt(t + TimeSpan.FromSeconds(1)));
-        for (int i = 1; i < 30; i++) ledger.Observe(t + Step * i, 3 * GB, [], clears);
-        var w = ledger.Window(TimeSpan.FromHours(1));
-        Assert.Equal((1, new GrowthCounts(0, GB, 0)), (w.Clears, w.Total));
-    }
-
     [Theory]
-    [InlineData(7 * 60 + 10, 7 * 60 + 5)]  // back 15 s from the step's next sample, inside the minute being filled
-    [InlineData(8 * 60, 7 * 60 + 55)]      // back into the minute before, where the clear was counted
-    public void AClockSetBackByAFewSecondsKeepsTheMinuteItFallsIn(int lastSecond, int newSecond)
+    [InlineData(-3600, 86_400)]      // set back an hour, then forward a day
+    [InlineData(-15, 0)]             // a time sync steps it back 15 seconds
+    [InlineData(31_536_000, -31_536_000)] // a year ahead, then put right
+    public void TheSystemClockSetBackOrForwardChangesNothingTheLedgerCounts(int firstStepSeconds, int secondStepSeconds)
     {
-        // Five minutes at 4 GB; a clear at 06:04:51 frees 1 GB and is measured by the 06:07:00 sample; a few samples more;
-        // then the clock is set back a few seconds (a time sync), as Windows may step it.
-        var ledger = new GrowthLedger(Settle, Step);
-        var clears = new List<ClearRecord>();
-        for (int s = 0; s < 5 * 60; s += 10) ledger.Observe(T0.AddSeconds(s), 4 * GB, [Tag(Reff, GB)], clears);
-        clears.Add(ClearAt(T0.AddSeconds(4 * 60 + 51)));
-        for (int s = 5 * 60; s <= lastSecond; s += 10) ledger.Observe(T0.AddSeconds(s), 3 * GB, [Tag(Reff, 10 * MB)], clears);
-        var before = ledger.Window(TimeSpan.FromHours(1));
-        Assert.Equal((1, GB), (before.Clears, before.Total.Cleared));
-
-        ledger.Observe(T0.AddSeconds(newSecond), 3 * GB, [Tag(Reff, 10 * MB)], clears);
-        ledger.Observe(T0.AddSeconds(newSecond + 10), 3 * GB + 10 * MB, [Tag(Reff, 20 * MB)], clears);
-        var after = ledger.Window(TimeSpan.FromHours(1));
-        Assert.Equal((1, GB), (after.Clears, after.Total.Cleared)); // the clear is still counted, once
-        Assert.Equal(GB - 10 * MB, after.Tags[Reff].Cleared);
-        Assert.Equal(10 * MB, after.Total.Grew);                    // and what was measured after the step
-        Assert.Equal(T0, after.StartedUtc);
+        // Two hours at 600 MB/h with a clear 50 s before their end that frees 300 MB; then the system clock is stepped (while
+        // that clear is being measured), a clear runs
+        // just after the step and frees 1 GB, and 35 minutes on the clock is stepped again; 70 minutes more at 600 MB/h, all
+        // while the forward clock goes on. The ledger counts every window as it does with the system clock left alone:
+        // each change once, each clear once, the time measured and when it started as long ago by the forward clock.
+        var stepped = new GrowthLedger(Settle, Step);
+        var steady = new GrowthLedger(Settle, Step);
+        var clearsStepped = new List<ClearRecord>();
+        var clearsSteady = new List<ClearRecord>();
+        long level = 4 * GB, ms = 0;
+        const long perSample = 600 * MB / 360;
+        var shift = TimeSpan.Zero;
+        void Sample(int i)
+        {
+            var steadyUtc = T0 + Step * i;
+            stepped.Observe(At(steadyUtc + shift, ms), level, [Tag(Reff, level - 3 * GB)], clearsStepped);
+            steady.Observe(At(steadyUtc, ms), level, [Tag(Reff, level - 3 * GB)], clearsSteady);
+        }
+        void ClearNow(int i, long freed)
+        {
+            var steadyUtc = T0 + Step * i + TimeSpan.FromSeconds(1);
+            clearsStepped.Add(ClearAt(steadyUtc + shift, ms + 1000));
+            clearsSteady.Add(ClearAt(steadyUtc, ms + 1000));
+            level -= freed;
+        }
+        for (int i = 0; i < 720 + 70 * 6; i++)
+        {
+            if (i == 720) shift += TimeSpan.FromSeconds(firstStepSeconds);
+            if (i == 720 + 35 * 6) shift += TimeSpan.FromSeconds(secondStepSeconds);
+            Sample(i);
+            if (i == 715) ClearNow(i, 300 * MB); // measured 2 minutes on, across the first step
+            if (i == 720) ClearNow(i, GB);
+            ms += (long)Step.TotalMilliseconds;
+            level += perSample;
+        }
+        foreach (var span in new[] { TimeSpan.FromMinutes(1), TimeSpan.FromHours(1), TimeSpan.FromHours(6), TimeSpan.FromHours(24) })
+        {
+            var a = stepped.Window(span);
+            var b = steady.Window(span);
+            Assert.Equal((b.Total, b.Clears, b.Measured, b.Tags[Reff]), (a.Total, a.Clears, a.Measured, a.Tags[Reff]));
+            Assert.Equal(b.NowUtc - b.StartedUtc, a.NowUtc - a.StartedUtc); // started as long ago, by the forward clock
+        }
+        var day = stepped.Window(TimeSpan.FromHours(24));
+        Assert.Equal(2, day.Clears); // each clear once
+        var hour = stepped.Window(TimeSpan.FromHours(1));
+        Assert.InRange(hour.PerHour(hour.Total)!.Value, 590 * MB, 620 * MB); // the rate, not twice it nor none
     }
 
     [Fact]
-    public void ATagIsLetGoAfterAClockThatWasAheadIsSetBack()
+    public void ATagIsLetGoOnceNoMinuteKeptOnTheForwardClockHoldsIt()
     {
-        // The clock is a year ahead while a tag grows, then put right; the tag is small again from then on. Its slot is let
-        // go once no kept minute holds it, not a year later.
+        // A tag grows while the system clock is a year ahead, then the clock is put right; the tag is small again from then
+        // on. Its slot is let go once no minute kept (25 hours, by the forward clock) holds it, not a year later.
         var ledger = new GrowthLedger(Settle, TimeSpan.FromMinutes(1));
         var ahead = T0.AddYears(1);
-        for (int i = 0; i < 5; i++) ledger.Observe(ahead.AddMinutes(i), 4 * GB, [Tag(Toke, 5 * MB + i * MB)], []);
-        for (int i = 0; i < 26 * 60; i++) ledger.Observe(T0.AddMinutes(i), 4 * GB, [Tag(Toke, MB)], []);
+        for (int i = 0; i < 5; i++) ledger.Observe(At(ahead.AddMinutes(i), i * 60_000L), 4 * GB, [Tag(Toke, 5 * MB + i * MB)], []);
+        for (int i = 5; i < 26 * 60 + 5; i++) ledger.Observe(At(T0.AddMinutes(i), i * 60_000L), 4 * GB, [Tag(Toke, MB)], []);
         Assert.Equal(0, ledger.TagCount);
     }
 
@@ -453,7 +418,7 @@ public class GrowthLedgerTests
         {
             var tags = many.Select((t, k) => Tag(t, 5 * MB + (i + k) % 3 * KB)).ToList();
             tags.Add(Tag(small, MB + i * 64 * KB));
-            ledger.Observe(T0.AddMinutes(i), 4 * GB, tags, []);
+            ledger.Observe(Clocks.At(T0.AddMinutes(i)), 4 * GB, tags, []);
         }
         Assert.Equal(GrowthLedger.MaxTags, ledger.TagCount); // the first 256 (Smal came too late: the table was full)
         Assert.InRange(ledger.MinuteCount, 25 * 60, 25 * 60 + 2);
@@ -468,7 +433,7 @@ public class GrowthLedgerTests
         // The most it holds: 25 hours of 256 tags that each change by a megabyte every minute.
         var busy = new GrowthLedger(Settle, TimeSpan.FromMinutes(1));
         for (int i = 0; i < 26 * 60; i++)
-            busy.Observe(T0.AddMinutes(i), 4 * GB, many.Select((t, k) => Tag(t, 5 * MB + (i + k) % 2 * MB)).ToList(), []);
+            busy.Observe(Clocks.At(T0.AddMinutes(i)), 4 * GB, many.Select((t, k) => Tag(t, 5 * MB + (i + k) % 2 * MB)).ToList(), []);
         Assert.Equal(25L * 60 * 256, busy.TagEntries, 256L * 2);
         Assert.InRange(busy.ApproxBytes(), 4L << 20, 6L << 20);
 
@@ -481,12 +446,12 @@ public class GrowthLedgerTests
             Tag(flat, 10 * MB), Tag(tiny, MB + i % 2 * 512 * KB),
             .. i < 10 ? [Tag(once, 8 * MB + i * MB)] : i < 60 ? Array.Empty<PoolTagEntry>() : [Tag(small, 5 * MB + i * KB)],
         ];
-        for (int i = 0; i < 2 * 60; i++) fresh.Observe(T0.AddMinutes(i), 4 * GB, At(i), []);
+        for (int i = 0; i < 2 * 60; i++) fresh.Observe(Clocks.At(T0.AddMinutes(i)), 4 * GB, At(i), []);
         var early = fresh.Window(TimeSpan.FromHours(24));
         Assert.Equal(new GrowthCounts(0, 0, 8 * MB), early.Tags[once]); // 8 MB to 17 MB, then gone: 8 MB lower
         Assert.Equal(default, early.Tags[flat]);
         Assert.False(early.Tags.ContainsKey(tiny));
-        for (int i = 2 * 60; i < 27 * 60; i++) fresh.Observe(T0.AddMinutes(i), 4 * GB, At(i), []);
+        for (int i = 2 * 60; i < 27 * 60; i++) fresh.Observe(Clocks.At(T0.AddMinutes(i)), 4 * GB, At(i), []);
         Assert.Equal(2, fresh.TagCount); // Once was let go 25 hours after it last changed; Flat and Smal are counted
         var hour = fresh.Window(TimeSpan.FromHours(1));
         Assert.True(hour.Tags.ContainsKey(small));
@@ -502,11 +467,11 @@ public class GrowthLedgerTests
         var ledger = new GrowthLedger(Settle, TimeSpan.FromMinutes(1));
         PoolTag a = PoolTag.Parse("Aaaa"), b = PoolTag.Parse("Bbbb");
         int end = 26 * 60;
-        for (int i = 0; i < end; i++) ledger.Observe(T0.AddMinutes(i), 4 * GB, [Tag(a, 5 * MB + i * MB)], []);
-        ledger.Observe(T0.AddMinutes(end), 4 * GB, [Tag(a, MB)], []);
-        ledger.Observe(T0.AddMinutes(end + 1), 4 * GB, [Tag(a, MB)], []);
-        ledger.Observe(T0.AddMinutes(end + 2), 4 * GB, [Tag(a, MB), Tag(b, 8 * MB)], []);
-        ledger.Observe(T0.AddMinutes(end + 3), 4 * GB, [Tag(a, MB), Tag(b, 8 * MB)], []);
+        for (int i = 0; i < end; i++) ledger.Observe(Clocks.At(T0.AddMinutes(i)), 4 * GB, [Tag(a, 5 * MB + i * MB)], []);
+        ledger.Observe(Clocks.At(T0.AddMinutes(end)), 4 * GB, [Tag(a, MB)], []);
+        ledger.Observe(Clocks.At(T0.AddMinutes(end + 1)), 4 * GB, [Tag(a, MB)], []);
+        ledger.Observe(Clocks.At(T0.AddMinutes(end + 2)), 4 * GB, [Tag(a, MB), Tag(b, 8 * MB)], []);
+        ledger.Observe(Clocks.At(T0.AddMinutes(end + 3)), 4 * GB, [Tag(a, MB), Tag(b, 8 * MB)], []);
         var day = ledger.Window(TimeSpan.FromHours(24));
         Assert.Equal(default, day.Tags[b]);
         // The day starts at minute end + 3 - 1440: Aaaa's megabyte a minute from there, then its fall to 1 MB.
@@ -517,7 +482,7 @@ public class GrowthLedgerTests
     [Fact]
     public void AClearDatedAfterTheNewestSampleIsNotCountedYet()
     {
-        // The clock was set back: a clear's time lies after the samples now taken. Until a sample reaches it, the changes are
+        // A clear dated after the samples taken so far (on the forward clock): until a sample reaches it, the changes are
         // the pool's own (as the detector leaves such a clear out).
         var r = new Run();
         for (int i = 0; i < 30; i++) r.Sample(800 * MB, 0, 0);

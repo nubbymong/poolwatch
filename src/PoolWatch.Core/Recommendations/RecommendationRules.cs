@@ -29,9 +29,10 @@ public static class RecommendationRules
         if (i.Facts is not { } f) return [];
         var rows = new List<Recommendation>
         {
-            f.LogonTaskExists ? Done(SignIn(), "PoolWatch starts when you sign in.")
-                : f.InstalledInProgramFiles ? SignIn()
-                : Info(SignIn(), "This needs PoolWatch installed with its installer; it runs from another folder now."),
+            f.SignIn == SignInState.Starts ? Done(SignIn(f.SignIn), "PoolWatch starts when you sign in.")
+                : SignInStates.KeptOff(f.SignIn) ? Info(SignIn(f.SignIn), KeptOffText(f.SignIn)!)
+                : f.InstalledInProgramFiles ? SignIn(f.SignIn)
+                : Info(SignIn(f.SignIn), "This needs PoolWatch installed with its installer; it runs from another folder now."),
             // The two must never both run: with a RAMMap task of your own, replacing it IS the hourly clear.
             f.OwnClearTasks.Count > 0 ? ReplaceTask()
                 : i.AutoClearOn ? Done(Hourly(), "PoolWatch clears the cache automatically.")
@@ -49,7 +50,7 @@ public static class RecommendationRules
     /// evidence and words, including the ones setup now asks about instead).
     /// </summary>
     internal static IReadOnlyList<Recommendation> OnEvidence(RecommendationInputs i, int max = 3) =>
-        Candidates(i).Where(r => !Hidden(i.Dismissed, r.Key, i.NowUtc)).OrderBy(r => r.Priority).Take(max).ToList();
+        Candidates(i).Where(r => !Hidden(i.Dismissed, r.Key, i.NowMs)).OrderBy(r => r.Priority).Take(max).ToList();
 
     /// <summary>
     /// The offers the Simple view shows ahead of its feature cards: only what PoolWatch found on this PC after setup and
@@ -59,15 +60,19 @@ public static class RecommendationRules
     /// own, Defender, the Codex shortcut, the services) is not drip-fed here.
     /// </summary>
     public static IReadOnlyList<Recommendation> Current(RecommendationInputs i, int max = 3) =>
-        Candidates(i).Where(r => ShownLater.Contains(r.Id) && !Hidden(i.Dismissed, r.Key, i.NowUtc)).OrderBy(r => r.Priority).Take(max).ToList();
+        Candidates(i).Where(r => ShownLater.Contains(r.Id) && !Hidden(i.Dismissed, r.Key, i.NowMs)).OrderBy(r => r.Priority).Take(max).ToList();
 
     /// <summary>The offers <see cref="Current"/> may show.</summary>
     public static readonly IReadOnlySet<RecommendationId> ShownLater =
         new HashSet<RecommendationId> { RecommendationId.TokenLeakGuard, RecommendationId.HourlyCacheClear, RecommendationId.ReportIncident };
 
-    /// <summary>True while a key hidden at its time is still within <see cref="DismissFor"/>.</summary>
-    public static bool Hidden(IReadOnlyDictionary<string, DateTime> dismissed, string key, DateTime nowUtc) =>
-        dismissed.TryGetValue(key, out var at) && nowUtc - at < DismissFor;
+    /// <summary>
+    /// True while a key hidden at its moment is still within <see cref="DismissFor"/> of <paramref name="nowMs"/>, on the clock
+    /// that only goes forward: setting the system clock back neither keeps a suggestion hidden longer nor, set forward, shows it
+    /// again early.
+    /// </summary>
+    public static bool Hidden(IReadOnlyDictionary<string, Model.Moment> dismissed, string key, long nowMs) =>
+        dismissed.TryGetValue(key, out var at) && nowMs - at.Ms < (long)DismissFor.TotalMilliseconds;
 
     private static IEnumerable<Recommendation> Candidates(RecommendationInputs i)
     {
@@ -87,7 +92,7 @@ public static class RecommendationRules
                     (i.SavedVerdictBuild is null ? "Some Windows 11 builds leak a little of the kernel pool each time a program starts another. "
                                                  : "Windows was updated since PoolWatch last checked for the token leak. ") +
                     "The check usually takes about 20 seconds and changes nothing.", "Check", RecommendationAction.CheckTokenLeak, CheckLeakPriority);
-            if (!f.LogonTaskExists && f.InstalledInProgramFiles) yield return SignIn();
+            if (f.SignIn != SignInState.Starts && !SignInStates.KeptOff(f.SignIn) && f.InstalledInProgramFiles) yield return SignIn(f.SignIn);
         }
         if (i.ReportableIncident is { } inc)
             yield return new Recommendation(RecommendationId.ReportIncident, "Report what PoolWatch found",
@@ -123,7 +128,7 @@ public static class RecommendationRules
     /// </summary>
     private static List<string> DefenderRoots(RecommendationInputs i, EnvironmentFacts f)
     {
-        var devDrives = f.Volumes.Where(v => v.IsDevDrive).ToList();
+        var devDrives = f.Volumes.Where(v => v.IsDevDrive == true).ToList();
         if (devDrives.Count == 0 || f.DefenderRealTimeOn != true) return [];
         if (!i.FileSystemMetadataGrewLast24h && i.DefenderCoresAvg30Min is not >= 0.25) return [];
         // The drives Defender checks before a file opens, by the same rule as the impact scan (setup names the same drives).
@@ -132,8 +137,40 @@ public static class RecommendationRules
 
     // ------------------------------------------------------------------ the rows
 
-    private static Recommendation SignIn() => new(RecommendationId.StartAtSignIn, "Start PoolWatch when you sign in",
-        "So it watches from the moment you sign in, without asking for permission each time.", "Turn on", RecommendationAction.Apply, SignInPriority);
+    /// <summary>
+    /// What is said of a logon task that a switch of its own keeps from running when you sign in (<see
+    /// cref="SignInStates.KeptOff"/>: by you, or kept so when PoolWatch pointed it at its launcher), saying which: it is
+    /// not offered again as a suggestion, and setting it up again is left to you. Null for any other state.
+    /// </summary>
+    public static string? KeptOffText(SignInState state) => state switch
+    {
+        SignInState.TaskOff => "Your PoolWatch logon task is turned off, so PoolWatch does not start when you sign in. To turn it on, " + SignInStates.TickInSettings + ".",
+        SignInState.TriggerOff => "The sign-in trigger of your PoolWatch logon task is turned off, so PoolWatch does not start when you sign in. To turn it on, " +
+                                  SignInStates.TickInSettings + ".",
+        SignInState.NoTrigger => "Your PoolWatch logon task has no sign-in trigger, so PoolWatch does not start when you sign in. To have it start then, " +
+                                 SignInStates.TickInSettings + ".",
+        _ => null,
+    };
+
+    /// <summary>
+    /// Why a logon task that is there does not start PoolWatch when you sign in, or may not, for a state where setting it up
+    /// again replaces it (the setup guide's switch, the suggestion's Turn on); null for no task, and for the other states.
+    /// </summary>
+    public static string? ReplacedWhy(SignInState state) => state switch
+    {
+        SignInState.NotHighest => "Your PoolWatch logon task runs without highest privileges, so it cannot start PoolWatch.",
+        SignInState.NotKnown => "PoolWatch could not read all of its logon task's settings.",
+        SignInState.NotSafe => "PoolWatch asks about its logon task at each start; its question says why.",
+        _ => null,
+    };
+
+    /// <summary>What setting the logon task up again does to one that is there (<see cref="ReplacedWhy"/>), after the guide's switch or the suggestion's button.</summary>
+    public static string Replaces(string by) => $"{by} replaces it with one that starts PoolWatch when you sign in.";
+
+    /// <summary>The offer to start at sign-in; for a task that is there, it says why it does not start PoolWatch and that Turn on replaces it.</summary>
+    private static Recommendation SignIn(SignInState state) => new(RecommendationId.StartAtSignIn, "Start PoolWatch when you sign in",
+        ReplacedWhy(state) is { } why ? why + " " + Replaces("Turn on") : "So it watches from the moment you sign in, without asking for permission each time.",
+        "Turn on", RecommendationAction.Apply, SignInPriority);
 
     private static Recommendation Hourly() => new(RecommendationId.HourlyCacheClear, "Clear the cache every hour",
         "Windows keeps details of recently used files in the kernel pool, and on some PCs that grows by gigabytes. An hourly clear " +

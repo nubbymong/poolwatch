@@ -2,7 +2,7 @@ using PoolWatch.Engine;
 
 namespace PoolWatch.AppTests;
 
-/// <summary>S4: an elevated PoolWatch runs only from an administrator-only folder (pure path check, nothing is run).</summary>
+/// <summary>An elevated PoolWatch runs only from an administrator-only folder (pure path check, nothing is run).</summary>
 public class InstallGuardTests
 {
     private static readonly string[] Roots = [@"C:\Program Files", @"C:\Program Files (x86)"];
@@ -10,12 +10,12 @@ public class InstallGuardTests
     [Fact]
     public void OnlyProgramFilesCountsNotWindows()
     {
-        // Review round 3: %WINDIR% has folders every user may write to (Windows\Temp, \Tasks, \tracing).
+        // %WINDIR% has folders every user may write to (Windows\Temp, \Tasks, \tracing).
         string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
         Assert.DoesNotContain(InstallGuard.AdminRoots(), r => r.Equals(windows, StringComparison.OrdinalIgnoreCase));
         foreach (var sub in new[] { "Temp", "Tasks", "tracing", "System32" })
-            Assert.False(InstallGuard.IsTrustedInstallPath(Path.Combine(windows, sub, "PoolWatch.exe")), sub);
-        Assert.True(InstallGuard.IsTrustedInstallPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "PoolWatch", "PoolWatch.exe")));
+            Assert.False(InstallGuard.IsUnderAdminRoot(Path.Combine(windows, sub, "PoolWatch.exe"), InstallGuard.AdminRoots()), sub);
+        Assert.True(InstallGuard.IsUnderAdminRoot(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "PoolWatch", "PoolWatch.exe"), InstallGuard.AdminRoots()));
     }
 
     [Theory]
@@ -40,7 +40,7 @@ public class InstallGuardTests
     [Theory]
     [InlineData(true, new string[0])]                                              // the tray app
     [InlineData(true, new[] { "--tray" })]
-    [InlineData(true, new[] { "--headless", "--duration", "60" })]                 // review round 2: headless too
+    [InlineData(true, new[] { "--headless", "--duration", "60" })]                 // headless too
     [InlineData(true, new[] { "--selftest", "--out", @"C:\x" })]
     [InlineData(true, new[] { "--service-off", "Fax" })]
     [InlineData(true, new[] { "--tasks-dump", @"C:\x\t.json" })]

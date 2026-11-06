@@ -5,8 +5,8 @@ using PoolWatch.Core.Services;
 
 namespace PoolWatch.Tests;
 
-/// <summary>Review Part 3, addendum 4 A: the page-fault split and the lag probe as a saturation condition.</summary>
-public class LoadPartThreeTests
+/// <summary>The page-fault split and the lag probe as a saturation condition.</summary>
+public class LoadConditionTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 11, 19, 0, DateTimeKind.Utc);
 
@@ -25,7 +25,7 @@ public class LoadPartThreeTests
     [Fact]
     public void SaturationAnswerCarriesTheFaultSplit()
     {
-        var p = new LoadPoint(T0, 1.0, 33, 24, false, new FaultSplit(880_000, 5_000, 2_000));
+        var p = new LoadPoint(T0, 7_000_000, 1.0, 33, 24, false, new FaultSplit(880_000, 5_000, 2_000));
         var answer = SaturationDetector.Answer(p, [new(2000, "esrv_svc.exe", "esrv_svc.exe (Intel System Usage Report service)", 1.7, 887_000, "ESRV_SVC_QUEENCREEK")]);
         Assert.Contains("33 threads waiting; page faults 880k/s demand-zero (fresh memory), 5k/s transition, 2k/s hard", answer);
         Assert.Contains("mostly demand-zero", answer);
@@ -35,7 +35,7 @@ public class LoadPartThreeTests
     }
 
     private static LagProbe Probe(int i, double timer) =>
-        new(T0.AddSeconds(10 * i), timer, 0.3, 1, 0, new PoolTotals(1_000L << 20, 2_000L << 20, 0, 0));
+        new(T0.AddSeconds(10 * i), timer, 0.3, 1, 0, new PoolTotals(1_000L << 20, 2_000L << 20, 0, 0)) { TickMs = 10_000L * i };
 
     [Fact]
     public void TheLagProbeTripsOnlyWhileItIsLaggingAndFresh()
@@ -43,12 +43,12 @@ public class LoadPartThreeTests
         var m = new LagMonitor(new Settings { LagBaselineSamples = 3, LagAlertRatio = 5 });
         int i = 0;
         for (; i < 3; i++) m.Add(Probe(i, 15.6));
-        Assert.False(m.Tripping(T0.AddSeconds(10 * i), TimeSpan.FromSeconds(30)));
+        Assert.False(m.Tripping(10_000L * i, TimeSpan.FromSeconds(30)));
         m.Add(Probe(i++, 200));
         m.Add(Probe(i++, 220)); // two in a row: lagging
-        var at = T0.AddSeconds(10 * (i - 1));
-        Assert.True(m.Tripping(at.AddSeconds(5), TimeSpan.FromSeconds(30)));
-        Assert.False(m.Tripping(at.AddSeconds(31), TimeSpan.FromSeconds(30))); // no fresh probe (paused or stopped): not counted
+        long at = 10_000L * (i - 1);
+        Assert.True(m.Tripping(at + 5_000, TimeSpan.FromSeconds(30)));
+        Assert.False(m.Tripping(at + 31_000, TimeSpan.FromSeconds(30))); // no fresh probe (paused or stopped): not counted
     }
 
     [Fact]
@@ -64,7 +64,7 @@ public class LoadPartThreeTests
         {
             m.Add(Probe(i, 250));
             var now = T0.AddSeconds(10 * i);
-            alert ??= d.Observe(new LoadPoint(now, 0.2, 2, 24, m.Tripping(now, TimeSpan.FromSeconds(30))), []);
+            alert ??= d.Observe(new LoadPoint(now, 10_000L * i, 0.2, 2, 24, m.Tripping(10_000L * i, TimeSpan.FromSeconds(30))), []);
         }
         Assert.NotNull(alert);
         Assert.Contains("typing lags", alert);

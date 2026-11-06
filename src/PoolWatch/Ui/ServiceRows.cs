@@ -166,12 +166,14 @@ internal static class ServiceRows
 
     /// <summary>
     /// The Cost cell of a service whose process costs its <see cref="ServiceView.Cores"/> and page faults now: "Low: 0.2
-    /// core", "None: idle", with a shared host said; "not running" with no meter; "measuring…" with no meter while
+    /// core", "None: idle", with a shared host said; for one that is not running, with no meter, what
+    /// <see cref="ServicePlan.NotRunningCost"/> says: "not running" (seen stopped), its state ("paused", "starting",
+    /// "stopping", "resuming", "pausing"), "state not known", or "could not read"; "measuring…" with no meter while
     /// PoolWatch has no sampling window yet (not <paramref name="measured"/>), never "idle" then.
     /// </summary>
     public static (string Text, ImpactLevel? Level) CostOf(ServiceView s, bool measured = true)
     {
-        if (!s.Running) return ("not running", null);
+        if (!s.Running) return (ServicePlan.NotRunningCost(s), null);
         if (s.ProcessId == 0) return ("", null);
         if (!measured) return (TaskRows.Measuring, null);
         var level = EntryCost.Level(s.Cores, s.PageFaultsPerSec);

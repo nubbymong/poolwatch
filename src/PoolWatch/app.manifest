@@ -4,7 +4,11 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+        <!-- PoolWatch runs as administrator, but gets those rights from its launcher (the install folder's PoolWatch.exe,
+             whose own manifest asks for them), never from a prompt of its own: this program (app\PoolWatch.exe) started by
+             hand without them hands its start to the launcher (Engine.LaunchGate). Asking here would start this .NET
+             program elevated with the environment of whoever started it. -->
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

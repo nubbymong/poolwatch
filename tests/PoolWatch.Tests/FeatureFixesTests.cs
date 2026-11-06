@@ -9,8 +9,8 @@ using PoolWatch.Core.Util;
 
 namespace PoolWatch.Tests;
 
-/// <summary>Fixes from the independent review of Part 3 (spec and code quality).</summary>
-public class ReviewFixesPartThreeTests
+/// <summary>Fixes in the features: what each now does.</summary>
+public class FeatureFixesTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 12, 0, 0, DateTimeKind.Utc);
     private static readonly ServiceCatalogue Cat = DefaultCatalogue.Load();
@@ -49,6 +49,8 @@ public class ReviewFixesPartThreeTests
     }
 
     private const long PerSecond = 10_000_000;
+    /// <summary>A moment on the cost history's clock, which only goes forward (the time since Windows started).</summary>
+    private static readonly TimeSpan Clock0 = TimeSpan.FromHours(30);
 
     [Fact]
     public void HeavyAppsDoNotFlickerBetweenMinutePointsAndGoWhenTheyStop()
@@ -57,13 +59,13 @@ public class ReviewFixesPartThreeTests
         // Points every 65 s (the sampler's 10 s ticks plus jitter), a process at 1 core.
         for (int i = 0; i <= 35; i++)
         {
-            var t = T0.AddSeconds(65 * i);
+            var t = Clock0 + TimeSpan.FromSeconds(65 * i);
             h.Observe(t, [new ProcessSample { Pid = 100, CreateTime = 7, ImageName = "TrayHelper.exe", KernelTime = PerSecond * 65 * i }], 0);
         }
-        var lastPoint = T0.AddSeconds(65 * 35);
+        var lastPoint = Clock0 + TimeSpan.FromSeconds(65 * 35);
         foreach (int s in new[] { 0, 10, 30, 55, 64 }) // asked at any moment between two points
-            Assert.Single(h.Heavy(lastPoint.AddSeconds(s), TimeSpan.FromMinutes(30), 0.5));
-        Assert.Empty(h.Heavy(lastPoint.AddMinutes(5), TimeSpan.FromMinutes(30), 0.5)); // no fresh point: it is not running now
+            Assert.Single(h.Heavy(lastPoint + TimeSpan.FromSeconds(s), TimeSpan.FromMinutes(30), 0.5));
+        Assert.Empty(h.Heavy(lastPoint + TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(30), 0.5)); // no fresh point: it is not running now
     }
 
     [Fact]
@@ -72,8 +74,8 @@ public class ReviewFixesPartThreeTests
         var h = new ProcessCostHistory();
         uint start = uint.MaxValue - 30_000_000; // wraps within the first minute at 1M faults/s
         for (int m = 0; m <= 10; m++)
-            h.Observe(T0.AddMinutes(m), [new ProcessSample { Pid = 100, CreateTime = 7, ImageName = "esrv_svc.exe", KernelTime = PerSecond * 60 * m, PageFaultCount = unchecked(start + (uint)(1_000_000L * 60 * m)) }], 0);
-        var avg = h.Average(new ProcessKey(100, 7), TimeSpan.FromMinutes(10), T0.AddMinutes(10))!.Value;
+            h.Observe(Clock0 + TimeSpan.FromMinutes(m), [new ProcessSample { Pid = 100, CreateTime = 7, ImageName = "esrv_svc.exe", KernelTime = PerSecond * 60 * m, PageFaultCount = unchecked(start + (uint)(1_000_000L * 60 * m)) }], 0);
+        var avg = h.Average(new ProcessKey(100, 7), TimeSpan.FromMinutes(10), Clock0 + TimeSpan.FromMinutes(10))!.Value;
         Assert.InRange(avg.faultsPerSec, 999_000, 1_001_000);
     }
 
@@ -123,16 +125,20 @@ public class ReviewFixesPartThreeTests
     [Fact]
     public void TheWindowStaysOpenWhileATraceRuns()
     {
-        var closed = new Incident { Id = "x", Dir = "x", Tag = PoolTag.Parse("Reff"), Kind = IncidentKind.Growth, OnsetUtc = T0, LastRiseUtc = T0.AddMinutes(20), ClosedUtc = T0.AddMinutes(30) };
-        Assert.Equal(T0.AddMinutes(30), IncidentManager.ProtectWindow([closed]).until);
-        Assert.Null(IncidentManager.ProtectWindow([closed], captureRunning: true).until);
+        var closed = new Incident
+        {
+            Id = "x", Dir = "x", Tag = PoolTag.Parse("Reff"), Kind = IncidentKind.Growth, OnsetUtc = T0, LastRiseUtc = T0.AddMinutes(20), ClosedUtc = T0.AddMinutes(30),
+            OnsetMs = Clocks.At(T0).Ms, LastRiseMs = Clocks.At(T0.AddMinutes(20)).Ms, ClosedMs = Clocks.At(T0.AddMinutes(30)).Ms,
+        };
+        Assert.Equal(Clocks.At(T0.AddMinutes(30)).Ms, IncidentManager.ProtectWindow([closed]).untilMs);
+        Assert.Null(IncidentManager.ProtectWindow([closed], captureRunning: true).untilMs);
         Assert.Equal((null, null), IncidentManager.ProtectWindow([], captureRunning: true));
     }
 
     [Fact]
     public void EvictionOverTheCapKeepsWindowRecordsCompactAndTheTraceFillsTheirCommandLine()
     {
-        var reg = new ProcessRegistry(maxRecords: 300) { KeepShortLived = TimeSpan.FromMinutes(15), ProtectSince = T0.AddMinutes(-10) };
+        var reg = new ProcessRegistry(maxRecords: 300) { KeepShortLived = TimeSpan.FromMinutes(15), ProtectSinceMs = Moment.Now().MsOf(T0.AddMinutes(-10)) };
         reg.ObserveSnapshot([new() { Pid = 4, ImageName = "System" }], T0);
         var claude = reg.OnStart(4000, 4, T0.AddHours(-1).ToFileTimeUtc(), "claude.exe", null, "claude", null, T0.AddHours(-1));
         for (int i = 0; i < 400; i++)
@@ -147,7 +153,7 @@ public class ReviewFixesPartThreeTests
         Assert.Null(oldest.CommandLine);
         // The trace row carries the command line: the identity uses it (node's script), the registry is left as it is.
         var u = new CapturePoolUsage(10_000, "node.exe", PoolTag.Parse("Reff"), 700 << 10, 0, 540, 0, [], T0.ToFileTimeUtc(), @"node C:\x\node_modules\vitest\vitest.mjs", 4000, T0);
-        var cap = new CaptureResult { PoolEventsParsed = true, StartUtc = T0, EndUtc = T0.AddMinutes(1), Tags = [u.Tag], Pool = [u] };
+        var cap = new CaptureResult { PoolEventsParsed = true, StartUtc = T0, EndUtc = T0.AddMinutes(1), StartMs = Clocks.At(T0).Ms, EndMs = Clocks.At(T0.AddMinutes(1)).Ms, Tags = [u.Tag], Pool = [u] };
         var traced = Assert.Single(TraceAttribution.Resolve(cap, u.Tag, reg));
         Assert.True(traced.Resolved);
         Assert.Contains("vitest", traced.Identity.Display);

@@ -10,7 +10,7 @@ public sealed record AppSnapshot(string App, bool BeforeLaunch, DateTime TimeUtc
 }
 
 /// <summary>
-/// Before-launch / after-exit tag snapshots outside experiments (item 13, Part 3 review): for each watched app, the last
+/// Before-launch / after-exit tag snapshots outside experiments: for each watched app, the last
 /// full tag snapshot before it started (it had no process, then it had one) and the first one after it exited (its last
 /// process ended). The vendor bundle carries them. Taken from the samples PoolWatch already has: the previous sample's tag
 /// list is held by reference (no copy each sample); a snapshot is built only when an app starts or exits, keeping tags of

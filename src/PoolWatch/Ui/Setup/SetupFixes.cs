@@ -105,8 +105,14 @@ internal static class FixRows
     }
 
     private static FixRow SignIn(EnvironmentFacts f) =>
-        f.LogonTaskExists ? new(Fix.SignIn, SetupIcon.Power, "Start when you sign in", "PoolWatch starts when you sign in.", FixInput.Status, Status: SetupText.On)
-        : f.InstalledInProgramFiles ? new(Fix.SignIn, SetupIcon.Power, "Start when you sign in", "So it watches from the moment you sign in.", FixInput.Toggle)
+        f.SignIn == SignInState.Starts ? new(Fix.SignIn, SetupIcon.Power, "Start when you sign in", "PoolWatch starts when you sign in.", FixInput.Status, Status: SetupText.On)
+        // Kept from running by a switch of its own: said, which, and left so (no switch here that would turn it on as the
+        // guide finishes).
+        : SignInStates.KeptOff(f.SignIn) ? new(Fix.SignIn, SetupIcon.Power, "Start when you sign in", RecommendationRules.KeptOffText(f.SignIn)!, FixInput.Status, Status: SetupText.Off)
+        // A task that is there for another reason: why it does not start PoolWatch, and that the switch replaces it.
+        : f.InstalledInProgramFiles ? new(Fix.SignIn, SetupIcon.Power, "Start when you sign in",
+            RecommendationRules.ReplacedWhy(f.SignIn) is { } why ? why + " " + RecommendationRules.Replaces("With this on, finishing") : "So it watches from the moment you sign in.",
+            FixInput.Toggle)
         : new(Fix.SignIn, SetupIcon.Power, "Start when you sign in", "This needs PoolWatch installed with its installer; it runs from another folder now.", FixInput.None);
 
     private static FixRow Shortcut(bool made, bool launcher)

@@ -33,6 +33,7 @@ public class RecommendationInputsBuilderTests
     {
         Id = id, Dir = @"C:\ProgramData\PoolWatch\incidents\" + id, Tag = PoolTag.Parse("Reff"), Kind = IncidentKind.Growth, OpenedUtc = Now.AddHours(-3),
         OnsetUtc = Now.AddHours(-3), ClosedUtc = closedUtc, StartBytes = 1L << 30, PeakBytes = 3L << 30, Owners = [.. owners],
+        OpenedMs = AppClocks.Ms(Now.AddHours(-3)), OnsetMs = AppClocks.Ms(Now.AddHours(-3)), ClosedMs = closedUtc is { } c ? AppClocks.Ms(c) : null,
     };
 
     [Fact]
@@ -40,15 +41,15 @@ public class RecommendationInputsBuilderTests
     {
         var older = Growth("20261028-0400-Reff", Now.AddHours(-4), Owner("app:codex", "Codex", Confidence.StronglyCorrelated));
         var newer = Growth("20261028-0600-Reff", Now.AddHours(-2), Owner("app:chatgpt", "ChatGPT", Confidence.Correlated));
-        var r = RecommendationInputsBuilder.Reportable([older, newer], new Dictionary<string, DateTime>(), Now);
+        var r = RecommendationInputsBuilder.Reportable([older, newer], new Dictionary<string, Moment>(), AppClocks.At(Now));
         Assert.NotNull(r);
         Assert.Equal("20261028-0600-Reff", r.Value.Id);
         Assert.Equal(newer.Dir, r.Value.Dir);
         Assert.StartsWith("Kernel pool grew 2", r.Value.Headline);
         Assert.EndsWith("; the likely cause is ChatGPT, with some evidence.", r.Value.Headline);
 
-        var hidden = new Dictionary<string, DateTime> { ["ReportIncident:20261028-0600-Reff"] = Now.AddDays(-1) };
-        Assert.Equal("20261028-0400-Reff", RecommendationInputsBuilder.Reportable([older, newer], hidden, Now)!.Value.Id);
+        var hidden = new Dictionary<string, Moment> { ["ReportIncident:20261028-0600-Reff"] = AppClocks.At(Now.AddDays(-1)) };
+        Assert.Equal("20261028-0400-Reff", RecommendationInputsBuilder.Reportable([older, newer], hidden, AppClocks.At(Now))!.Value.Id);
     }
 
     [Fact]
@@ -64,7 +65,7 @@ public class RecommendationInputsBuilderTests
         string at = clearUtc.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
         string onset = cleared.OnsetUtc.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
         Assert.Equal($"Kernel pool grew 2.0 GB at {onset} (PoolWatch's own cache clear at {at} freed 512 MB of it); the likely cause is X, with strong evidence.",
-            RecommendationInputsBuilder.Reportable([cleared], new Dictionary<string, DateTime>(), Now)!.Value.Headline);
+            RecommendationInputsBuilder.Reportable([cleared], new Dictionary<string, Moment>(), AppClocks.At(Now))!.Value.Headline);
         Assert.EndsWith($", closed {Fmt.Stamp(cleared.ClosedUtc!.Value)}; now 2.5 GB, after PoolWatch's own cache clear at {Fmt.Clock(clearUtc)} freed 512 MB of it",
             PoolWatch.Analysis.BundleBuilder.IncidentLine(cleared));
 
@@ -73,24 +74,24 @@ public class RecommendationInputsBuilderTests
         more.ClearedBytes = 3L << 30;
         more.ClearedAtUtc = clearUtc;
         Assert.Equal($"Kernel pool grew 2.0 GB at {onset} (PoolWatch's own cache clear at {at} freed 3.0 GB of the tag that grew); the likely cause is X, with strong evidence.",
-            RecommendationInputsBuilder.Reportable([more], new Dictionary<string, DateTime>(), Now)!.Value.Headline);
+            RecommendationInputsBuilder.Reportable([more], new Dictionary<string, Moment>(), AppClocks.At(Now))!.Value.Headline);
         more.ClearedBytes = 2L << 30;
-        Assert.EndsWith(" freed 2.0 GB of it); the likely cause is X, with strong evidence.", RecommendationInputsBuilder.Reportable([more], new Dictionary<string, DateTime>(), Now)!.Value.Headline);
+        Assert.EndsWith(" freed 2.0 GB of it); the likely cause is X, with strong evidence.", RecommendationInputsBuilder.Reportable([more], new Dictionary<string, Moment>(), AppClocks.At(Now))!.Value.Headline);
 
         var plain = Growth("20261028-0700-Reff", Now.AddHours(-1), Owner("app:x", "X", Confidence.StronglyCorrelated));
         Assert.Equal($"Kernel pool grew 2.0 GB at {onset}; the likely cause is X, with strong evidence.",
-            RecommendationInputsBuilder.Reportable([plain], new Dictionary<string, DateTime>(), Now)!.Value.Headline);
+            RecommendationInputsBuilder.Reportable([plain], new Dictionary<string, Moment>(), AppClocks.At(Now))!.Value.Headline);
         Assert.EndsWith($", closed {Fmt.Stamp(plain.ClosedUtc!.Value)}", PoolWatch.Analysis.BundleBuilder.IncidentLine(plain));
     }
 
     [Fact]
     public void NotWithoutAClearCauseNotOpenNotOld()
     {
-        var none = new Dictionary<string, DateTime>();
-        Assert.Null(RecommendationInputsBuilder.Reportable([Growth("weak", Now.AddHours(-1), Owner("app:x", "X", Confidence.Weak))], none, Now));
-        Assert.Null(RecommendationInputsBuilder.Reportable([Growth("open", null, Owner("app:x", "X", Confidence.StronglyCorrelated))], none, Now));
-        Assert.Null(RecommendationInputsBuilder.Reportable([Growth("old", Now.AddDays(-8), Owner("app:x", "X", Confidence.StronglyCorrelated))], none, Now));
-        Assert.Null(RecommendationInputsBuilder.Reportable([Growth("nothing", Now.AddHours(-1))], none, Now));
+        var none = new Dictionary<string, Moment>();
+        Assert.Null(RecommendationInputsBuilder.Reportable([Growth("weak", Now.AddHours(-1), Owner("app:x", "X", Confidence.Weak))], none, AppClocks.At(Now)));
+        Assert.Null(RecommendationInputsBuilder.Reportable([Growth("open", null, Owner("app:x", "X", Confidence.StronglyCorrelated))], none, AppClocks.At(Now)));
+        Assert.Null(RecommendationInputsBuilder.Reportable([Growth("old", Now.AddDays(-8), Owner("app:x", "X", Confidence.StronglyCorrelated))], none, AppClocks.At(Now)));
+        Assert.Null(RecommendationInputsBuilder.Reportable([Growth("nothing", Now.AddHours(-1))], none, AppClocks.At(Now)));
     }
 
     [Fact]
@@ -143,21 +144,22 @@ public class RecommendationInputsBuilderTests
         var costs = new ProcessCostHistory();
         var steady = new ProcessKey(100, 1);
         var burst = new ProcessKey(200, 1);
+        var now = TimeSpan.FromHours(30); // on the history's clock, which only goes forward
         double steadyCpu = 0, burstCpu = 0;
         for (int m = 0; m <= 31; m++)
         {
             steadyCpu += 0.3 * 60;                // 0.3 core all along
             burstCpu += m is 28 or 29 ? 30 : 4;   // mostly about 0.07 core, then a two-minute burst at 0.5
-            costs.Observe(Now.AddMinutes(m - 31), [Sample(steady, steadyCpu), Sample(burst, burstCpu)], 0);
+            costs.Observe(now + TimeSpan.FromMinutes(m - 31), [Sample(steady, steadyCpu), Sample(burst, burstCpu)], 0);
         }
         var halfHour = TimeSpan.FromMinutes(30);
-        Assert.Equal(0.3, RecommendationInputsBuilder.CoresOverWhole(costs, steady, halfHour, Now)!.Value, 2);
-        Assert.True(RecommendationInputsBuilder.CoresOverWhole(costs, burst, halfHour, Now) < 0.25);
+        Assert.Equal(0.3, RecommendationInputsBuilder.CoresOverWhole(costs, steady, halfHour, now)!.Value, 2);
+        Assert.True(RecommendationInputsBuilder.CoresOverWhole(costs, burst, halfHour, now) < 0.25);
 
         var late = new ProcessCostHistory(); // busy only for the last two minutes: not "over the last half hour"
-        for (int m = 0; m <= 2; m++) late.Observe(Now.AddMinutes(m - 2), [Sample(burst, m * 30.0)], 0);
-        Assert.Null(RecommendationInputsBuilder.CoresOverWhole(late, burst, halfHour, Now));
-        Assert.Null(RecommendationInputsBuilder.CoresOverWhole(late, steady, halfHour, Now)); // never seen
+        for (int m = 0; m <= 2; m++) late.Observe(now + TimeSpan.FromMinutes(m - 2), [Sample(burst, m * 30.0)], 0);
+        Assert.Null(RecommendationInputsBuilder.CoresOverWhole(late, burst, halfHour, now));
+        Assert.Null(RecommendationInputsBuilder.CoresOverWhole(late, steady, halfHour, now)); // never seen
     }
 
     private static ProcessSample Sample(ProcessKey key, double cpuSeconds) =>
@@ -174,7 +176,7 @@ public class RecommendationInputsBuilderTests
         for (int i = 0; i <= 70; i++)
         {
             ulong toke = (ulong)(200 * MB + i * mbPerMinute * MB);
-            h.Add(new Sample(Now.AddMinutes(i - 70), new PoolTotals(8UL << 30, 4UL << 30, 0, 0), [new PoolTagEntry(PoolTag.Parse("Toke"), 1, 0, toke, 0, 0, 0)], []));
+            h.Add(new Sample(Now.AddMinutes(i - 70), new PoolTotals(8UL << 30, 4UL << 30, 0, 0), [new PoolTagEntry(PoolTag.Parse("Toke"), 1, 0, toke, 0, 0, 0)], []) { TickMs = AppClocks.At(Now.AddMinutes(i - 70)).Ms });
         }
         return h;
     }
@@ -187,7 +189,7 @@ public class RecommendationInputsBuilderTests
     [InlineData(1.0, "26220.7344", null, true)]        // the setting could not be read: the evidence alone
     public void TheTokenLeakIsSeenInTheHistoryAsPoolCausesSeesIt(double mbPerMinute, string build, uint? lockTimeout, bool seen)
     {
-        var inputs = new Core.Recommendations.RecommendationInputs { NowUtc = Now, Facts = Facts() with { Build = build } };
+        var inputs = new Core.Recommendations.RecommendationInputs { NowUtc = Now, NowMs = AppClocks.Ms(Now), Facts = Facts() with { Build = build } };
         var with = RecommendationInputsBuilder.WithTokenLeakSeen(inputs, TokensGrowing(mbPerMinute), [], lockTimeout, []);
         Assert.Equal(seen, with.TokenLeakSeen);
         Assert.Equal(inputs with { TokenLeakSeen = seen }, with); // nothing else is touched

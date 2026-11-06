@@ -74,7 +74,7 @@ public sealed class ActiveChangesTests : IDisposable
     [Fact]
     public void FeaturesComeFirstThenWhatPoolWatchTurnedOffThenTheRestEachWithItsOwnButton()
     {
-        var logon = Row(ChangeKind.LogonTask);
+        var logon = Row(ChangeKind.LogonTask) with { What = ChangeWords.LogonTask }; // one that starts PoolWatch: Turn off
         var clear = Row(ChangeKind.AutoClear);
         var guard = Row(ChangeKind.TokenGuard);
         var shortcut = Row(ChangeKind.Shortcut);
@@ -182,7 +182,7 @@ public sealed class ActiveChangesTests : IDisposable
         var lines = ActiveChangesView.Lines(cannot, CultureInfo.InvariantCulture);
         Assert.Equal([("scheduled task that ran RAMMap", LineKind.Detail), ("PoolWatch cannot put this back. It ran with your saved password, which PoolWatch never has.", LineKind.Caveat)], lines);
         Assert.Equal(ChangeWords.CannotPutBack, ActiveChangesView.ButtonTip(cannot));
-        // Uninstalling cannot put it back either, and the footer no longer says it puts back all of them.
+        // Uninstalling cannot put it back either, so the footer says it puts back each of them except where marked.
         Assert.Equal(cannot.Note, cannot.UninstallLeaves);
         Assert.Equal(ChangeWords.UninstallPutsBackTheOthers, ActiveChangesView.UninstallNote([cannot, Row(ChangeKind.LogonTask)]));
         Assert.Equal(ChangeWords.UninstallPutsAllBack, ActiveChangesView.UninstallNote([Row(ChangeKind.LogonTask)]));
@@ -236,7 +236,7 @@ public sealed class ActiveChangesTests : IDisposable
     }
 
     [Fact]
-    public void TurningTheTokenLeakGuardOffSaysTheWindowsSettingStaysUntilYouSignOut()
+    public void TurningTheTokenLeakGuardOffSaysItPutsTheWindowsSettingBack()
     {
         var live = _f.Live(new Settings { TokenGuardEnabled = true });
         var source = new SettingsSource(live, _f.Records, null);
@@ -244,7 +244,8 @@ public sealed class ActiveChangesTests : IDisposable
         Assert.Equal((ChangeWords.TokenGuardTitle, ChangeGroup.Feature, "Turn off"), (row.Title, row.Group, ActiveChangesView.ButtonText(row)));
         Assert.Contains((ChangeWords.TokenGuardNote, LineKind.Detail), ActiveChangesView.Lines(row, CultureInfo.InvariantCulture)); // on its row
         Assert.Equal(ChangeWords.TokenGuardTurnOffTip, ActiveChangesView.ButtonTip(row));                                                // on its button, as what it does
-        Assert.StartsWith("Turns the token-leak guard off.", ActiveChangesView.ButtonTip(row));
+        Assert.Equal("Turns the token-leak guard off and puts back the Windows setting it changed when Windows allows it " +
+                     "(one it found already changed stays until you sign out).", ActiveChangesView.ButtonTip(row));
         Assert.Equal((ChangeWords.TokenGuardOff, true), ActiveChangesView.PutBackOne(Ledger(source), row));                          // and once it is off
         Assert.False(live.Running.TokenGuardEnabled);
     }
@@ -257,7 +258,7 @@ public sealed class ActiveChangesTests : IDisposable
         Assert.Equal((ChangeWords.AutoClearTitle, "every hour, or at 8 GB", ChangeGroup.Feature), (clear.Title, clear.Detail, clear.Group));
         Assert.Equal("The cache is cleared every hour, or sooner when the kernel pool reaches 8 GB", clear.What); // the uninstaller's line is as before
 
-        var logon = Assert.Single(new LogonTaskSource(new LogonTasks()).List());
+        var logon = Assert.Single(new LogonTaskSource(new LogonTasks(), _ => Core.Setup.SignInState.Starts).List());
         Assert.Equal((ChangeWords.LogonTaskTitle, ChangeWords.LogonTaskDetail, ChangeGroup.Feature), (logon.Title, logon.Detail, logon.Group));
 
         _f.Records.Put(ChangeRecordFixtures.Task());
@@ -307,11 +308,115 @@ public sealed class ActiveChangesTests : IDisposable
         Assert.Equal(ChangeWords.OtherHeading, Assert.Single(ActiveChangesView.Sections([row])).Heading);
     }
 
+    /// <summary>
+    /// A "Set to its Windows default" record of v1.0.0-beta.1, in that version's file shape: its original is Disabled and
+    /// it says "not running". PoolWatch does not know whether it ran, but Put back sets an original of Disabled back to
+    /// Disabled and stops it if it runs either way, so its row says only how it was, as beta.1 did; a record of the same
+    /// version that says "not running" of an Automatic original says it is not known.
+    /// </summary>
+    [Fact]
+    public void ABetaWindowsDefaultRecordSaysOnlyThatItWasDisabled()
+    {
+        File.WriteAllText(Path.Combine(_f.Paths.DataRoot, "service-changes.json"), """
+            [
+              {
+                "service": "ExampleSvc",
+                "displayName": "Example Device Service",
+                "originalStart": "Disabled",
+                "originalRunning": false,
+                "newStart": "Manual",
+                "changedUtc": "2026-10-30T09:15:00Z",
+                "via": "Windows default",
+                "beforeCores": null,
+                "beforePageFaultsPerSec": null,
+                "notStoppedPid": null
+              },
+              {
+                "service": "MapsBroker",
+                "displayName": "Downloaded Maps Manager",
+                "originalStart": "Automatic",
+                "originalRunning": false,
+                "newStart": "Disabled",
+                "changedUtc": "2026-10-30T09:16:00Z",
+                "via": "manual",
+                "beforeCores": null,
+                "beforePageFaultsPerSec": null,
+                "notStoppedPid": null
+              }
+            ]
+            """);
+        var services = new ServicesController(_f.Paths, _f.Log, _ => { }, _ => null, _ => null, new Services());
+        var rows = new ServicesSource(services).List();
+        Assert.All(services.Current(), c => Assert.True(c.OriginalRunningNotKnown)); // both read as not known
+        Assert.Equal([("Example Device Service", "service · set to its Windows default · was Disabled"),
+                      ("Downloaded Maps Manager", "service · was Automatic" + ChangeWords.RunningNotKnownWords)],
+            rows.Select(r => (r.Title, r.Detail)));
+    }
+
+    /// <summary>
+    /// The rows of Disabled originals that were running, or whose running state is not known: a service Disabled but
+    /// running that Turn off stopped (the Edge updater's kind), recorded by this build; a "Set to its Windows default"
+    /// record of v1.0.0-beta.1 that says "running"; and a Turn off record of v1.0.0-beta.1 that says "not running", read as
+    /// not known. Put back sets each back to Disabled and stops it if it runs, so none says whether it ran.
+    /// </summary>
+    [Fact]
+    public void TheRowOfADisabledOriginalNeverSaysWhetherItRan()
+    {
+        File.WriteAllText(Path.Combine(_f.Paths.DataRoot, "service-changes.json"), """
+            [
+              {
+                "service": "ExampleUpdater",
+                "displayName": "Example Updater Service",
+                "originalStart": "Disabled",
+                "originalRunning": true,
+                "originalRunningNotKnown": false,
+                "newStart": "Disabled",
+                "changedUtc": "2026-11-01T09:15:00Z",
+                "via": "manual",
+                "beforeCores": null,
+                "beforePageFaultsPerSec": null,
+                "notStoppedPid": null
+              },
+              {
+                "service": "ExampleSvc",
+                "displayName": "Example Device Service",
+                "originalStart": "Disabled",
+                "originalRunning": true,
+                "newStart": "Manual",
+                "changedUtc": "2026-10-30T09:15:00Z",
+                "via": "Windows default",
+                "beforeCores": null,
+                "beforePageFaultsPerSec": null,
+                "notStoppedPid": null
+              },
+              {
+                "service": "OtherUpdater",
+                "displayName": "Other Updater Service",
+                "originalStart": "Disabled",
+                "originalRunning": false,
+                "newStart": "Disabled",
+                "changedUtc": "2026-10-30T09:16:00Z",
+                "via": "manual",
+                "beforeCores": null,
+                "beforePageFaultsPerSec": null,
+                "notStoppedPid": null
+              }
+            ]
+            """);
+        var services = new ServicesController(_f.Paths, _f.Log, _ => { }, _ => null, _ => null, new Services());
+        Assert.Equal([(true, false), (true, false), (false, true)], services.Current().Select(c => (c.OriginalRunning, c.OriginalRunningNotKnown)));
+        Assert.Equal([("Example Updater Service", "service · was Disabled"),
+                      ("Example Device Service", "service · set to its Windows default · was Disabled"),
+                      ("Other Updater Service", "service · was Disabled")],
+            new ServicesSource(services).List().Select(r => (r.Title, r.Detail)));
+    }
+
     private sealed class LogonTasks : ILogonTasks
     {
         public LogonTaskPolicy.ExistingTask? Read() => new(@"C:\Program Files\PoolWatch\PoolWatch.exe", "--tray", Highest: true);
-        public string? RegisterCurrent() => throw new InvalidOperationException("never registered here");
+        public string? RegisterCurrent(bool on = true, bool signInTrigger = true) => throw new InvalidOperationException("never registered here");
         public string? Remove() => null;
+        public bool IsThisAccount(string? userId) => true;
     }
 
     private sealed class Services : IServiceBackend
@@ -323,10 +428,11 @@ public sealed class ActiveChangesTests : IDisposable
 
         public IReadOnlyList<ServiceView> Enumerate() => _live.Values.ToList();
         public bool InsiderEnrolled() => false;
-        public (string? error, NotDone? notStopped) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
+        public (string? error, NotDone? notStopped, bool? wasRunning) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
         {
+            bool? was = ServicePlan.WasRunning(_live[op.Option.Service.Name]); // what the change saw
             _live[op.Option.Service.Name] = _live[op.Option.Service.Name] with { StartType = op.NewStart, Running = false };
-            return (null, null);
+            return (null, null, was);
         }
         public (string? error, NotDone? notDone) Restore(ServiceChange change, IReadOnlySet<string> allowed, bool insiderEnrolled) => (null, null);
         public string? SetDefault(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled) => null;
@@ -338,7 +444,7 @@ public sealed class ActiveChangesTests : IDisposable
     public void TheWindowIsActiveChangesWithItsGroupsAndButtonsAndOffersNoRestorePoint()
     {
         var cannot = Row(ChangeKind.Shortcut, "shortcut:x", canUndo: false);
-        var rows = new[] { Row(ChangeKind.LogonTask), Row(ChangeKind.Service), cannot };
+        var rows = new[] { Row(ChangeKind.LogonTask) with { What = ChangeWords.LogonTask }, Row(ChangeKind.Service), cannot };
         using var form = Window();
         form.ShowList(rows, null);
 

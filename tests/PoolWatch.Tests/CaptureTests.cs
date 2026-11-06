@@ -2,6 +2,8 @@ using PoolWatch.Core;
 using PoolWatch.Core.Correlation;
 using PoolWatch.Core.Incidents;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
 public class CaptureTests
@@ -22,7 +24,7 @@ public class CaptureTests
 
         var capture = new CaptureResult
         {
-            PoolEventsParsed = true, StartUtc = w.Now.AddSeconds(-30), EndUtc = w.Now, Tags = [inc.Tag],
+            PoolEventsParsed = true, StartUtc = w.Now.AddSeconds(-30), EndUtc = w.Now, StartMs = Clocks.At(w.Now.AddSeconds(-30)).Ms, EndMs = Clocks.At(w.Now).Ms, Tags = [inc.Tag],
             Pool =
             [
                 new(100, "quiet.exe", inc.Tag, 9_000_000, 1_000_000, 9000, 1000, [new("ntfs!NtfsCreateFcb", 9_000_000)]),
@@ -51,7 +53,7 @@ public class CaptureTests
         inc.Suspects = Correlator.Rank(w.History, w.Registry, inc.Tag, new CorrelationWindow(World.T0, World.T0.AddSeconds(4), null, w.Now));
         var capture = new CaptureResult
         {
-            PoolEventsParsed = true, StartUtc = w.Now.AddSeconds(-25), EndUtc = w.Now, Tags = [inc.Tag],
+            PoolEventsParsed = true, StartUtc = w.Now.AddSeconds(-25), EndUtc = w.Now, StartMs = Clocks.At(w.Now.AddSeconds(-25)).Ms, EndMs = Clocks.At(w.Now).Ms, Tags = [inc.Tag],
             Pool = [new(300, "MsMpEng.exe", inc.Tag, 21_000_000, 600_000, 49128, 1000, []), new(200, "Leaker.exe", inc.Tag, 7_300_000, 83_000, 17348, 200, []), new(400, "x.exe", inc.Tag, 900_000, 0, 1, 0, [])],
         };
         CaptureAttribution.Apply(inc, capture, tagGrowthDuringTrace: 20_000_000);
@@ -84,11 +86,35 @@ public class SuppressionTests
             var w = new World();
             var mgr = new IncidentManager(settings, new PoolWatch.Core.Tags.TagKnowledge(null, null), new FakeHost(dir), w.Registry);
             var det = new PoolWatch.Core.Detection.Detector(settings);
-            mgr.Suppress(PoolTag.Parse("EtwB"), World.T0.AddMinutes(10));
+            mgr.Suppress(PoolTag.Parse("EtwB"), At(World.T0.AddMinutes(10)).Ms);
             long v = 10 * Settings.MB;
-            for (int i = 0; i < 30; i++) { v += 1_000_000; w.Sample(("EtwB", v)); mgr.Process(w.History, det, det.Evaluate(w.History), w.Now - w.Interval); }
-            for (int i = 0; i < 5; i++) { v -= 5_000_000; w.Sample(("EtwB", v)); mgr.Process(w.History, det, det.Evaluate(w.History), w.Now - w.Interval); }
+            for (int i = 0; i < 30; i++) { v += 1_000_000; w.Sample(("EtwB", v)); mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval)); }
+            for (int i = 0; i < 5; i++) { v -= 5_000_000; w.Sample(("EtwB", v)); mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval)); }
             Assert.Empty(mgr.All);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Fact]
+    public void TheHoldIsTimedOnTheClockThatOnlyGoesForward()
+    {
+        // The hold lasts 10 minutes on the forward clock, from 0. For the first minute of samples the tag grows and no
+        // incident opens. Then 10 minutes pass on the forward clock while the system clock (the samples' times) moves on
+        // only a few seconds, as when it is set back: the hold is over, and the tag's growth opens an incident.
+        string dir = Path.Combine(Path.GetTempPath(), "pw-sup-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var settings = new Settings { GrowthRules = [new(1, 3 * Settings.MB)], ReleaseBytes = 2 * Settings.MB, ReleaseWindowMinutes = 1 };
+            var w = new World();
+            var mgr = new IncidentManager(settings, new PoolWatch.Core.Tags.TagKnowledge(null, null), new FakeHost(dir), w.Registry);
+            var det = new PoolWatch.Core.Detection.Detector(settings);
+            mgr.Suppress(PoolTag.Parse("EtwB"), 600_000);
+            long v = 10 * Settings.MB, ms = 0;
+            for (int i = 0; i < 30; i++, ms += 2_000) { v += 1_000_000; w.Sample(("EtwB", v)); mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval, ms)); }
+            Assert.Empty(mgr.All);
+            ms = 600_000;
+            for (int i = 0; i < 30; i++, ms += 2_000) { v += 1_000_000; w.Sample(("EtwB", v)); mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval, ms)); }
+            Assert.NotEmpty(mgr.All);
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }

@@ -15,7 +15,7 @@ public class EnvironmentFactsTests
         Architecture = "x64", RamBytes = 64 * GB - 300L * (1 << 20),
         Volumes = [new(@"C:\", "NTFS", false, null), new(@"D:\", "ReFS", true, true)],
         AiTools = [new("Claude Code", "2.1.4"), new("ChatGPT desktop", "1.2026.300.0"), new("VS Code", null)],
-        TokenLeak = TokenLeakStatus.NeedsTest, OwnClearTasks = [@"\Clear standby list"], LogonTaskExists = true, InstalledInProgramFiles = true,
+        TokenLeak = TokenLeakStatus.NeedsTest, OwnClearTasks = [@"\Clear standby list"], SignIn = SignInState.Starts, InstalledInProgramFiles = true,
         OptionalServicesRunning = 3, OptionalServiceExamples = ["Xbox Live Auth Manager", "Fax"], DefenderRealTimeOn = true,
         DefenderPerformanceModeOn = false, ChatGptInstalled = true, ChatGptIconPath = @"C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__abc\app\ChatGPT.exe",
     };
@@ -93,6 +93,92 @@ public class EnvironmentFactsTests
         Assert.Equal(T0, back.ScannedUtc);
         Assert.Equal(TokenLeakStatus.NeedsTest, back.TokenLeak);
         Assert.Equal(f.Volumes, back.Volumes);
+    }
+
+    /// <summary>
+    /// The reads a scan could not make are kept in the cache, so the next start still says it could not tell; a cache from
+    /// before they were recorded reads as all read, as it was shown then.
+    /// </summary>
+    [Fact]
+    public void ReadsTheScanCouldNotMakeAreCachedAndAnOlderCacheReadsAsRead()
+    {
+        var back = EnvironmentFacts.Parse((Sample() with { VolumesNotRead = true, PackagesNotRead = true, ServicesNotRead = true }).ToJson())!;
+        Assert.Equal((true, true, true), (back.VolumesNotRead, back.PackagesNotRead, back.ServicesNotRead));
+
+        var older = System.Text.Json.Nodes.JsonNode.Parse(Sample().ToJson())!.AsObject();
+        Assert.True(older.Remove("volumesNotRead") && older.Remove("packagesNotRead") && older.Remove("servicesNotRead"));
+        back = EnvironmentFacts.Parse(older.ToJsonString())!;
+        Assert.Equal((false, false, false), (back.VolumesNotRead, back.PackagesNotRead, back.ServicesNotRead));
+    }
+
+    /// <summary>
+    /// The volumes a scan could not read whole are kept in the cache, drive roots only; a cache from before they were
+    /// recorded (which left such a volume out without saying so) is not read, so the PC is scanned again.
+    /// </summary>
+    [Fact]
+    public void TheVolumesNotReadWholeAreCachedAndACacheWithoutThemIsNotRead()
+    {
+        var f = Sample() with { UnreadVolumes = [@"E:\", @"F:\"], Volumes = [new(@"G:\", "ReFS", null, null)] };
+        var back = EnvironmentFacts.Parse(f.ToJson())!;
+        Assert.Equal([@"E:\", @"F:\"], back.UnreadVolumes);
+        Assert.Equal([new VolumeFact(@"G:\", "ReFS", null, null)], back.Volumes); // a ReFS drive not known to be a Dev Drive stays so
+        Assert.True(back.VolumesNotAllRead);
+        Assert.False(Sample().VolumesNotAllRead);
+
+        var odd = System.Text.Json.Nodes.JsonNode.Parse(f.ToJson())!.AsObject();
+        odd["unreadVolumes"] = new System.Text.Json.Nodes.JsonArray("E:\\", "C:\\Windows", "x", "E:\\ & calc");
+        Assert.Equal([@"E:\"], EnvironmentFacts.Parse(odd.ToJsonString())!.UnreadVolumes); // a drive root and nothing else
+
+        var older = System.Text.Json.Nodes.JsonNode.Parse(Sample().ToJson())!.AsObject();
+        Assert.True(older.Remove("unreadVolumes"));
+        Assert.Null(EnvironmentFacts.Parse(older.ToJsonString()));
+    }
+
+    /// <summary>
+    /// A cache from before the sign-in state was a fact said only whether a logon task was there, on or off: it is not read
+    /// (the PC is scanned again), so a task that is off is never shown as starting PoolWatch from it. Each state is kept as
+    /// it was written, by name.
+    /// </summary>
+    [Fact]
+    public void ACacheThatSaysOnlyWhetherALogonTaskIsThereIsNotRead()
+    {
+        var older = System.Text.Json.Nodes.JsonNode.Parse(Sample().ToJson())!.AsObject();
+        Assert.True(older.Remove("signIn"));
+        older["logonTaskExists"] = true;
+        Assert.Null(EnvironmentFacts.Parse(older.ToJsonString()));
+
+        foreach (var state in Enum.GetValues<SignInState>())
+        {
+            string json = (Sample() with { SignIn = state }).ToJson();
+            Assert.Contains($"\"signIn\": \"{state}\"", json);
+            Assert.Equal(state, EnvironmentFacts.Parse(json)!.SignIn);
+        }
+        // Only one state's name, as written, is read: a number (one of a state or none), a name of none, a list of names
+        // (which the stock enum converter reads as their values combined: "TaskOff, NotSafe" as NotSafe, "Starts, TaskOff"
+        // as TriggerOff), another case and a name with spaces around it make the cache unreadable.
+        string written = Sample().ToJson();
+        string Named(SignInState s) => $"\"signIn\": \"{s}\"";
+        Assert.Contains(Named(Sample().SignIn), written);
+        foreach (string value in new[] { "0", "3", "99", "-1", "\"99\"", "\"Maybe\"", "null", "\"TaskOff, NotSafe\"", "\"Starts,TaskOff\"", "\"Starts,\"",
+                                         "\"starts\"", "\"STARTS\"", "\" Starts\"", "\"Starts \"" })
+            Assert.Null(EnvironmentFacts.Parse(written.Replace(Named(Sample().SignIn), "\"signIn\": " + value)));
+    }
+
+    /// <summary>
+    /// Every enum of the cache is read only as one of its members' names: a list of the token-leak states' names, which
+    /// the stock enum converter reads as their values combined (Leaks and WorkedAroundAlready as 6, a value no state
+    /// has), makes the cache unreadable, as does a number; each state's own name is read back as it was written.
+    /// </summary>
+    [Fact]
+    public void ACachedTokenLeakStateIsReadOnlyAsOneStatesName()
+    {
+        foreach (var state in Enum.GetValues<TokenLeakStatus>())
+            Assert.Equal(state, EnvironmentFacts.Parse((Sample() with { TokenLeak = state }).ToJson())!.TokenLeak);
+        string written = Sample().ToJson();
+        const string named = "\"tokenLeak\": \"NeedsTest\"";
+        Assert.Contains(named, written);
+        foreach (string value in new[] { "\"Leaks, WorkedAroundAlready\"", "\"NeedsTest, Leaks\"", "\"needsTest\"", "1", "\"1\"" })
+            Assert.Null(EnvironmentFacts.Parse(written.Replace(named, "\"tokenLeak\": " + value)));
     }
 
     [Fact]

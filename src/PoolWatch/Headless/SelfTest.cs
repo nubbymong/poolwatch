@@ -16,6 +16,17 @@ internal static class SelfTest
 {
     private sealed record Check(string Name, bool Pass, string Detail);
 
+    /// <summary>How long the self-test waits for its child's exit to arrive from the trace, at most.</summary>
+    internal static readonly TimeSpan ExitWait = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// Looks every quarter second until <paramref name="seen"/> holds, for at most <see cref="ExitWait"/> on the clock that
+    /// only goes forward (<paramref name="clock"/>; a test gives its own, and its own <paramref name="sleep"/>). True when
+    /// it was seen.
+    /// </summary>
+    internal static bool WaitForExit(Func<bool> seen, Func<Moment>? clock = null, Action<TimeSpan>? sleep = null) =>
+        Waits.While(() => !seen(), ExitWait, TimeSpan.FromMilliseconds(250), clock, sleep);
+
     public static int Run(CommandLineOptions opt)
     {
         var paths = new AppPaths(opt.OutDir);
@@ -57,7 +68,7 @@ internal static class SelfTest
             Add("process count > 20", procs.Count > 20, $"{procs.Count} processes");
             Add("System (PID 4) present", procs.Any(p => p.Pid == 4), procs.FirstOrDefault(p => p.Pid == 4)?.ImageName ?? "missing");
             var me = procs.Single(p => p.Pid == Environment.ProcessId);
-            // The exe may be renamed (PoolWatch-selfcontained.exe), so compare with the real path.
+            // Compare with the file name it really runs under, not a fixed one: a copy may have been renamed by hand.
             string ownPath = Environment.ProcessPath ?? "PoolWatch.exe";
             Add("own image name", me.ImageName.Equals(Path.GetFileName(ownPath), StringComparison.OrdinalIgnoreCase), me.ImageName);
             long expectedCreate = self.StartTime.ToUniversalTime().ToFileTimeUtc();
@@ -167,14 +178,12 @@ internal static class SelfTest
             var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), "/c ping -n 2 127.0.0.1 >nul & exit 7") { UseShellExecute = false, CreateNoWindow = true };
             using var child = Process.Start(psi)!;
             child.WaitForExit();
-            var deadline = DateTime.UtcNow.AddSeconds(15);
             List<LifecycleEvent> seen = [];
-            while (DateTime.UtcNow < deadline)
+            WaitForExit(() =>
             {
                 seen.AddRange(reg.DrainEvents());
-                if (seen.Any(e => e.Kind == LifecycleKind.Exit && e.Pid == child.Id)) break;
-                Thread.Sleep(250);
-            }
+                return seen.Any(e => e.Kind == LifecycleKind.Exit && e.Pid == child.Id);
+            });
             var start = seen.FirstOrDefault(e => e.Kind == LifecycleKind.Start && e.Pid == child.Id);
             var exit = seen.FirstOrDefault(e => e.Kind == LifecycleKind.Exit && e.Pid == child.Id);
             Add("ETW session running", etw.Running && etw.EventsSeen > 0, etw.Error ?? $"{etw.EventsSeen} events, mode {etw.Mode}, lost {etw.EventsLost}");
@@ -190,6 +199,6 @@ internal static class SelfTest
             JsonSerializer.Serialize(checks, new JsonSerializerOptions { WriteIndented = true }));
         int failed = checks.Count(c => !c.Pass);
         log.Info($"selftest: {checks.Count - failed}/{checks.Count} passed");
-        return failed == 0 ? 0 : 1;
+        return failed == 0 ? ExitCodes.Done : ExitCodes.ChecksFailed;
     }
 }

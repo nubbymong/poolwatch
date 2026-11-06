@@ -2,6 +2,8 @@ using PoolWatch.Core;
 using PoolWatch.Core.Findings;
 using PoolWatch.Core.Spawn;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
 /// <summary>
@@ -16,13 +18,13 @@ public class StormFindingTests
     public void TheFindingKeepsTheTopFifteenAndTheReportEverything()
     {
         var settings = new Settings { SpawnStormThreshold = 30, SpawnStormWindowSeconds = 30, ShortLivedSeconds = 10 };
-        var registry = new ProcessRegistry();
+        var now = T0;
+        var registry = new ProcessRegistry(clock: () => At(now)); // on the test's clocks, as the tracker is
         var tracker = new SpawnTracker(settings, registry, new GitRootResolver(new FakeProbe()), new([@"C:\Users\me"], [], @"C:\Users"), _ => null);
         registry.OnStart(500, 4, T0.AddHours(-1).ToFileTimeUtc(), "agent.exe", null, "agent.exe", null, T0.AddHours(-1));
         registry.DrainEvents();
         var findings = new List<Finding>();
         Dictionary<string, object?>? report = null;
-        var now = T0;
         int pid = 1000;
         for (int s = 0; s < 20; s++, now = now.AddSeconds(1))
         {
@@ -33,7 +35,7 @@ public class StormFindingTests
                 registry.OnStart(pid, 500, create, image, null, image + " --run", null, now);
                 registry.OnStop(pid++, create, 0, now.AddMilliseconds(50));
             }
-            var (f, toWrite) = tracker.Observe(registry.DrainEvents(), now);
+            var (f, toWrite) = tracker.Observe(registry.DrainEvents(), At(now));
             findings.AddRange(f);
             if (report is null && toWrite.Count > 0) report = tracker.StormData(toWrite[0]); // what its report.json gets now
         }

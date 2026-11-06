@@ -42,8 +42,8 @@ internal sealed class ChangeLedger
         var d = analysis.Diagnostics;
         IChangeSource[] sources =
         [
-            new LogonTaskSource(new Ui.WindowsLogonTasks(engine.Paths)),
-            new SettingsSource(live, records, () => d.Guard.WorkaroundWanted = false),
+            new LogonTaskSource(new Ui.WindowsLogonTasks(engine.Paths), Ui.LogonTask.AtSignIn),
+            new SettingsSource(live, records, d.Guard.TurnOff, d.Guard.Setting),
             new ServicesSource(d.Services, new ProfileStore(live)),
             new RecordedSource(records, new TasksAndStartup(engine.Log), new WindowsClearTaskStore(), live),
         ];
@@ -63,9 +63,14 @@ internal sealed class ChangeLedger
 
     /// <summary>
     /// The command line's ledger (<c>--changes-dump</c>, <c>--uninstall-cleanup</c>), with no PoolWatch running: settings
-    /// are read from and written to settings.json; services through a services controller of its own. A settings.json
-    /// that cannot be read is logged and lists no settings rows, not a row that cannot be undone: those settings act only
-    /// while PoolWatch runs, so an uninstall has nothing of theirs to put back.
+    /// are read from and written to settings.json; services through a services controller of its own; the Windows setting
+    /// the token-leak guard changed in this sign-in from the record in the guard's folder, which turning the guard off puts
+    /// back when Windows allows it. Windows lets a program change that setting only while it may bring a window to the
+    /// front (SystemParametersInfo, SPI_SETFOREGROUNDLOCKTIMEOUT). Being started by the uninstaller gives this step that
+    /// right while the uninstaller is the program in front, but not in every uninstall (one run silently from a script,
+    /// say); when Windows refuses, the step is not done and says so (<see cref="ChangeWords.TokenGuardSettingNotPutBack"/>).
+    /// A settings.json that cannot be read is logged and lists no settings rows, not a row that cannot be undone: those
+    /// settings act only while PoolWatch runs, so an uninstall has nothing of theirs to put back.
     /// </summary>
     public static ChangeLedger ForCommandLine(AppPaths paths, Log log)
     {
@@ -77,8 +82,8 @@ internal sealed class ChangeLedger
         var services = new ServicesController(paths, log, f => log.Info(f.Title), _ => null, _ => null);
         IChangeSource[] sources =
         [
-            new LogonTaskSource(new Ui.WindowsLogonTasks(paths)),
-            new SettingsSource(live, records, tokenGuardOff: null),
+            new LogonTaskSource(new Ui.WindowsLogonTasks(paths), Ui.LogonTask.AtSignIn),
+            new SettingsSource(live, records, tokenGuardOff: null, TokenGuardSetting.ForCommandLine(paths, log)),
             new ServicesSource(services),
             new RecordedSource(records, new TasksAndStartup(log), new WindowsClearTaskStore(), live),
         ];

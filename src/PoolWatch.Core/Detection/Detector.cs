@@ -21,7 +21,13 @@ public sealed record TagStatus(PoolTag Tag, long Bytes, long PagedBytes, long No
 
 /// <summary>A detection result for one evaluation. Growth alerts repeat while the rule holds; the incident
 /// manager de-duplicates them into one open incident per tag.</summary>
-public sealed record Alert(AlertKind Kind, PoolTag Tag, DateTime TimeUtc, string Rule, long Bytes, TimeSpan Window, DateTime OnsetUtc);
+public sealed record Alert(AlertKind Kind, PoolTag Tag, DateTime TimeUtc, string Rule, long Bytes, TimeSpan Window, DateTime OnsetUtc)
+{
+    /// <summary>The alert's sample on the clock that only goes forward (<see cref="History.History.Ms"/>): intervals from it are timed on this.</summary>
+    public required long Ms { get; init; }
+    /// <summary>Its onset's sample on the clock that only goes forward.</summary>
+    public required long OnsetMs { get; init; }
+}
 
 /// <summary>
 /// A retained tag that PoolWatch's own cache clear took under its floor (<see cref="Detector.ClearedRetentions"/>): the clear
@@ -40,7 +46,8 @@ public sealed class Detector
 {
     private readonly Settings _settings;
     private readonly Dictionary<PoolTag, TagStatus> _status = new();
-    private readonly Dictionary<PoolTag, DateTime> _lastRelease = new();
+    /// <summary>Each tag's last release alert, on the clock that only goes forward (<see cref="History.History.Ms"/>).</summary>
+    private readonly Dictionary<PoolTag, long> _lastRelease = new();
     private readonly Dictionary<PoolTag, (DateTime since, long floor)> _retained = new();
     /// <summary>The tags the last evaluation read as released (a release found before a clear stays across it).</summary>
     private readonly HashSet<PoolTag> _wasReleased = new();
@@ -108,14 +115,17 @@ public sealed class Detector
         _clearedRetentions.Clear();
         if (n < 2) return alerts;
         var now = h.Times[n - 1];
-        if (clears.Measuring(now) is not null)
+        long nowMs = h.Ms[n - 1];
+        if (clears.Measuring(nowMs) is not null)
         {
             Holding = true;
             return alerts;
         }
-        int i1 = h.IndexAtOrAfter(now.AddMinutes(-1)), i10 = h.IndexAtOrAfter(now.AddMinutes(-10)), i60 = h.IndexAtOrAfter(now.AddMinutes(-60));
-        var ruleStarts = _settings.GrowthRules.Select(r => (rule: r, from: h.IndexAtOrAfter(now.AddMinutes(-r.WindowMinutes)))).ToList();
-        int iRel = h.IndexAtOrAfter(now.AddMinutes(-_settings.ReleaseWindowMinutes));
+        // Every window ends at the newest sample and is timed on the clock that only goes forward.
+        int Back(double minutes) => h.IndexAtOrAfterMs(nowMs - (long)(minutes * 60_000));
+        int i1 = Back(1), i10 = Back(10), i60 = Back(60);
+        var ruleStarts = _settings.GrowthRules.Select(r => (rule: r, from: Back(r.WindowMinutes))).ToList();
+        int iRel = Back(_settings.ReleaseWindowMinutes);
         int minFrom = Math.Min(i60, Math.Min(iRel, ruleStarts.Count > 0 ? ruleStarts.Min(r => r.from) : i60));
         var spans = clears.SpansIn(h);
         // Where each change to now is measured from: its span's start, or the measurement of the clear whose interval holds it.
@@ -173,12 +183,12 @@ public sealed class Detector
                 if (growth > rule.Bytes)
                 {
                     alerts.Add(new Alert(AlertKind.Growth, tag, now, FormattableString.Invariant($"grew > {Fmt.Bytes(rule.Bytes)} in {rule.WindowMinutes:0.#} min"), growth,
-                        TimeSpan.FromMinutes(rule.WindowMinutes), h.Times[minIdx]));
+                        TimeSpan.FromMinutes(rule.WindowMinutes), h.Times[minIdx]) { Ms = nowMs, OnsetMs = h.Ms[minIdx] });
                 }
             }
             // The rate over the 10-minute window, as for the same curve without a clear (a few seconds after a clear's
             // measurement say nothing about a rate).
-            if (d10 * 10.0 / Math.Max(0.1, Math.Min(10, (now - h.Times[i10]).TotalMinutes)) >= _settings.GrowingDisplayBytesPer10Min)
+            if (d10 * 10.0 / Math.Max(0.1, Math.Min(10, (nowMs - h.Ms[i10]) / 60_000.0)) >= _settings.GrowingDisplayBytesPer10Min)
             {
                 state = TagState.Growing;
             }
@@ -207,11 +217,11 @@ public sealed class Detector
                 {
                     state = TagState.Released;
                     since = h.Times[maxIdx];
-                    if (raise && (!_lastRelease.TryGetValue(tag, out var last) || now - last > TimeSpan.FromMinutes(_settings.ReleaseWindowMinutes)))
+                    if (raise && (!_lastRelease.TryGetValue(tag, out long last) || nowMs - last > (long)(_settings.ReleaseWindowMinutes * 60_000)))
                     {
-                        _lastRelease[tag] = now;
+                        _lastRelease[tag] = nowMs;
                         alerts.Add(new Alert(AlertKind.Release, tag, now, $"dropped {Fmt.Bytes(drop)} within {_settings.ReleaseWindowMinutes:0.#} min", drop,
-                            TimeSpan.FromMinutes(_settings.ReleaseWindowMinutes), h.Times[maxIdx]));
+                            TimeSpan.FromMinutes(_settings.ReleaseWindowMinutes), h.Times[maxIdx]) { Ms = nowMs, OnsetMs = h.Ms[maxIdx] });
                     }
                 }
             }
@@ -254,7 +264,7 @@ public sealed class Detector
             }
             if (best is { } b && bestGrowth >= rise / 4)
                 alerts.Add(new Alert(AlertKind.NonPagedTotal, b, now, $"non-paged pool {Fmt.Bytes((long)totals.CommittedNonPaged)} > {Fmt.Bytes(_settings.NonPagedTotalAlertBytes)} and rising ({Fmt.SignedBytes(rise)} in 10 min)",
-                    bestGrowth, TimeSpan.FromMinutes(10), h.Times[i10]));
+                    bestGrowth, TimeSpan.FromMinutes(10), h.Times[i10]) { Ms = nowMs, OnsetMs = h.Ms[i10] });
         }
         return alerts;
     }
@@ -292,7 +302,7 @@ public sealed class Detector
 
     /// <summary>
     /// The tag view's growth figure: the last value minus the lowest value up to the onset (the pre-growth floor); if that
-    /// is negative (the tag fell since), the plain change over the window. Total for any input (C5): an empty series is 0
+    /// is negative (the tag fell since), the plain change over the window. Total for any input: an empty series is 0
     /// and an onset outside the series is clamped, so a refresh can never index past the end.
     /// </summary>
     public static long GrowthSinceOnset(IReadOnlyList<long> series, int onsetIndex)

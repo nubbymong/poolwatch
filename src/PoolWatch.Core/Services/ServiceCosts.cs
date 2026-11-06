@@ -2,7 +2,7 @@ using System.Globalization;
 
 namespace PoolWatch.Core.Services;
 
-/// <summary>The Cost column of the services page (addendum 4 B): each running service's process CPU and page faults.</summary>
+/// <summary>The Cost column of the services page: each running service's process CPU and page faults.</summary>
 public static class ServiceCosts
 {
     /// <summary>
@@ -34,32 +34,35 @@ public static class ServiceCosts
 }
 
 /// <summary>
-/// "Saved about 1.7 cores" (addendum 4 B): after PoolWatch turns a service off, its cost before the change against the
+/// "Saved about 1.7 cores": after PoolWatch turns a service off, its cost before the change against the
 /// average cost of the service's processes over the hour after it (0 while it does not run; it counts again if it
-/// restarts itself, as some vendor services do every 30-60 min). In memory: a PoolWatch restart within the hour starts measuring
-/// again from the restart. Sampler thread only.
+/// restarts itself, as some vendor services do every 30-60 min). Timed in milliseconds on a clock that only goes forward
+/// (the caller's: Windows' since it started), so setting the system clock neither stretches nor cuts the hour. In memory:
+/// a PoolWatch restart within the hour starts measuring again from the restart. Sampler thread only.
 /// </summary>
 public sealed class ServiceSavings
 {
     public static readonly TimeSpan Span = TimeSpan.FromHours(1);
     /// <summary>A gap longer than this between two observations (sleep, a stalled sampler) is not counted.</summary>
     private static readonly TimeSpan MaxGap = TimeSpan.FromMinutes(2);
+    private static readonly long SpanMs = (long)Span.TotalMilliseconds, MaxGapMs = (long)MaxGap.TotalMilliseconds, DayMs = 24L * 60 * 60 * 1000;
 
     public sealed class Entry
     {
         public required string Service { get; init; }
-        public DateTime ChangedUtc { get; init; }
+        /// <summary>When the change was made, in milliseconds on the caller's clock that only goes forward.</summary>
+        public long StartedMs { get; init; }
         public double BeforeCores { get; init; }
         public long BeforeFaultsPerSec { get; init; }
         public double CoreSeconds { get; set; }
         public double Faults { get; set; }
         public double Seconds { get; set; }
-        public DateTime LastUtc { get; set; }
+        public long LastMs { get; set; }
         public bool Reported { get; set; }
         public double AfterCores => Seconds > 0 ? CoreSeconds / Seconds : 0;
         public long AfterFaultsPerSec => Seconds > 0 ? (long)(Faults / Seconds) : 0;
         public double SavedCores => BeforeCores - AfterCores;
-        public bool Complete(DateTime nowUtc) => nowUtc - ChangedUtc >= Span;
+        public bool Complete(long nowMs) => nowMs - StartedMs >= SpanMs;
     }
 
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.OrdinalIgnoreCase);
@@ -67,37 +70,39 @@ public sealed class ServiceSavings
     public IReadOnlyCollection<Entry> Entries => _entries.Values;
     public Entry? Get(string service) => _entries.GetValueOrDefault(service);
 
-    /// <summary>Starts measuring a change (replaces an earlier one of the same service).</summary>
-    public void Start(string service, DateTime changedUtc, double beforeCores, long beforeFaultsPerSec) =>
-        _entries[service] = new Entry { Service = service, ChangedUtc = changedUtc, BeforeCores = Math.Max(0, beforeCores), BeforeFaultsPerSec = Math.Max(0, beforeFaultsPerSec), LastUtc = changedUtc };
+    /// <summary>Starts measuring a change made at <paramref name="startedMs"/> (replaces an earlier one of the same service).</summary>
+    public void Start(string service, long startedMs, double beforeCores, long beforeFaultsPerSec) =>
+        _entries[service] = new Entry { Service = service, StartedMs = startedMs, BeforeCores = Math.Max(0, beforeCores), BeforeFaultsPerSec = Math.Max(0, beforeFaultsPerSec), LastMs = startedMs };
 
     /// <summary>The change was undone (Restore): nothing more to measure.</summary>
     public void Stop(string service) => _entries.Remove(service);
 
     /// <summary>
-    /// Every sample: adds the time since the last observation at the service's cost now (<paramref name="costOf"/>: zero
-    /// when it is not running). Returns the entries whose hour just ended (each once), for a finding.
+    /// Every sample (<paramref name="nowMs"/>, on the same clock as <see cref="Start"/>): adds the time since the last
+    /// observation at the service's cost now (<paramref name="costOf"/>: zero when it is not running). Returns the entries
+    /// whose hour just ended (each once), for a finding.
     /// </summary>
-    public List<Entry> Observe(DateTime nowUtc, Func<string, (double cores, long faultsPerSec)> costOf)
+    public List<Entry> Observe(long nowMs, Func<string, (double cores, long faultsPerSec)> costOf)
     {
         var done = new List<Entry>();
         foreach (var e in _entries.Values)
         {
             if (e.Reported) continue;
-            var end = nowUtc < e.ChangedUtc + Span ? nowUtc : e.ChangedUtc + Span;
-            var gap = end - e.LastUtc;
-            if (gap > TimeSpan.Zero && gap <= MaxGap)
+            long end = Math.Min(nowMs, e.StartedMs + SpanMs);
+            long gap = end - e.LastMs;
+            if (gap > 0 && gap <= MaxGapMs)
             {
                 var (cores, faults) = costOf(e.Service);
-                e.CoreSeconds += Math.Max(0, cores) * gap.TotalSeconds;
-                e.Faults += Math.Max(0, faults) * gap.TotalSeconds;
-                e.Seconds += gap.TotalSeconds;
+                double seconds = gap / 1000.0;
+                e.CoreSeconds += Math.Max(0, cores) * seconds;
+                e.Faults += Math.Max(0, faults) * seconds;
+                e.Seconds += seconds;
             }
-            if (end > e.LastUtc) e.LastUtc = end;
-            if (e.Complete(nowUtc)) { e.Reported = true; done.Add(e); }
+            if (end > e.LastMs) e.LastMs = end;
+            if (e.Complete(nowMs)) { e.Reported = true; done.Add(e); }
         }
         // Entries reported more than a day ago have done their job.
-        foreach (var k in _entries.Values.Where(e => e.Reported && nowUtc - e.ChangedUtc > TimeSpan.FromDays(1)).Select(e => e.Service).ToList()) _entries.Remove(k);
+        foreach (var k in _entries.Values.Where(e => e.Reported && nowMs - e.StartedMs > DayMs).Select(e => e.Service).ToList()) _entries.Remove(k);
         return done;
     }
 
@@ -105,12 +110,12 @@ public sealed class ServiceSavings
     /// "saved about 1.7 cores over the hour after (before 1.7 cores, 887k page faults/s; after idle)", "saved about 1.7
     /// cores so far (35 min measured; ...)", or that it was idle before, or that there is no saving.
     /// </summary>
-    public static string Text(Entry e, DateTime nowUtc)
+    public static string Text(Entry e, long nowMs)
     {
         string before = ServicePlan.Cost(e.BeforeCores, e.BeforeFaultsPerSec);
         if (e.Seconds < 60) return $"measuring what it saves (before: {before})";
         string after = ServicePlan.Cost(e.AfterCores, e.AfterFaultsPerSec);
-        string span = e.Complete(nowUtc) ? "over the hour after" : $"so far ({(int)(e.Seconds / 60)} min measured)";
+        string span = e.Complete(nowMs) ? "over the hour after" : $"so far ({(int)(e.Seconds / 60)} min measured)";
         if (e.BeforeCores < 0.05 && e.BeforeFaultsPerSec < 1000) return $"no measurable saving: it was idle before the change (after: {after}, {span})";
         double saved = e.SavedCores;
         long savedFaults = e.BeforeFaultsPerSec - e.AfterFaultsPerSec;

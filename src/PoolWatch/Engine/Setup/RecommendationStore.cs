@@ -1,12 +1,15 @@
 using System.Globalization;
 using System.Text.Json;
+using PoolWatch.Core.Model;
 using PoolWatch.Core.Recommendations;
 
 namespace PoolWatch.Engine.Setup;
 
 /// <summary>
 /// What the setup guide remembers between starts, in setup.json in the data root: when the guide was completed, the
-/// suggestions the owner hid (key and when, for 30 days), and the Simple view's feature cards the owner hid (for good).
+/// suggestions the owner hid (key and when, for 30 days on the clock that only goes forward), and the Simple view's feature
+/// cards the owner hid (for good). A hide keeps its time on both clocks within a run; the file keeps its time of day, read
+/// onto the forward clock as the file is loaded.
 /// Thread-safe. The file is read once, as untrusted: a missing, oversize or malformed one counts as empty (the guide opens
 /// again), and only well-formed keys and times are kept (of the feature cards, only the keys of cards there are).
 /// </summary>
@@ -17,15 +20,18 @@ internal sealed class RecommendationStore
 
     private readonly AppPaths _paths;
     private readonly Log _log;
+    private readonly Func<Moment> _clock;
     private readonly object _lock = new();
     private DateTime? _completedUtc;
-    private Dictionary<string, DateTime> _dismissed = new(StringComparer.Ordinal);
+    private Dictionary<string, Moment> _dismissed = new(StringComparer.Ordinal);
     private HashSet<string> _hiddenFeatures = new(StringComparer.Ordinal);
 
-    public RecommendationStore(AppPaths paths, Log log)
+    /// <param name="clock">Reads the two clocks (<see cref="Moment.Now"/>; a test gives its own): the file's hides are read onto the forward clock at it.</param>
+    public RecommendationStore(AppPaths paths, Log log, Func<Moment>? clock = null)
     {
         _paths = paths;
         _log = log;
+        _clock = clock ?? Moment.Now;
         Load();
     }
 
@@ -43,17 +49,17 @@ internal sealed class RecommendationStore
         }
     }
 
-    /// <summary>A copy of the hidden keys and when each was hidden.</summary>
-    public IReadOnlyDictionary<string, DateTime> Dismissed { get { lock (_lock) return new Dictionary<string, DateTime>(_dismissed, StringComparer.Ordinal); } }
+    /// <summary>A copy of the hidden keys and when each was hidden, on both clocks.</summary>
+    public IReadOnlyDictionary<string, Moment> Dismissed { get { lock (_lock) return new Dictionary<string, Moment>(_dismissed, StringComparer.Ordinal); } }
 
-    /// <summary>Hides a suggestion's key for <see cref="RecommendationRules.DismissFor"/>; hides older than that are forgotten.</summary>
-    public void Dismiss(string key, DateTime utc)
+    /// <summary>Hides a suggestion's key at <paramref name="at"/> for <see cref="RecommendationRules.DismissFor"/>; hides older than that are forgotten.</summary>
+    public void Dismiss(string key, Moment at)
     {
         if (key.Length is 0 or > MaxKeyChars) return;
         lock (_lock)
         {
-            _dismissed[key] = utc;
-            _dismissed = Bounded(_dismissed, utc);
+            _dismissed[key] = at;
+            _dismissed = Bounded(_dismissed, at);
             Save();
         }
     }
@@ -85,13 +91,12 @@ internal sealed class RecommendationStore
     }
 
     /// <summary>
-    /// Hides still in force, the newest <see cref="MaxKeys"/>. A time after now (the clock was set back, or the file was
-    /// edited) counts as now, so that hide runs out 30 days from now, not 30 days after a time still to come.
+    /// Hides still in force at <paramref name="now"/> on the clock that only goes forward (each hide's <see cref="Moment.Ms"/>),
+    /// the newest <see cref="MaxKeys"/>.
     /// </summary>
-    private static Dictionary<string, DateTime> Bounded(IEnumerable<KeyValuePair<string, DateTime>> keys, DateTime nowUtc) =>
-        keys.Select(kv => kv.Value > nowUtc ? KeyValuePair.Create(kv.Key, nowUtc) : kv)
-            .Where(kv => kv.Key.Length is > 0 and <= MaxKeyChars && nowUtc - kv.Value < RecommendationRules.DismissFor)
-            .OrderByDescending(kv => kv.Value).Take(MaxKeys).ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
+    private static Dictionary<string, Moment> Bounded(IEnumerable<KeyValuePair<string, Moment>> keys, Moment now) =>
+        keys.Where(kv => kv.Key.Length is > 0 and <= MaxKeyChars && now.Ms - kv.Value.Ms < (long)RecommendationRules.DismissFor.TotalMilliseconds)
+            .OrderByDescending(kv => kv.Value.Ms).Take(MaxKeys).ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
 
     private void Load()
     {
@@ -106,9 +111,15 @@ internal sealed class RecommendationStore
             if (root.TryGetProperty("guideCompletedUtc", out var c) && c.ValueKind == JsonValueKind.String && c.TryGetDateTime(out var completed))
                 _completedUtc = completed.ToUniversalTime();
             if (root.TryGetProperty("dismissed", out var d) && d.ValueKind == JsonValueKind.Object)
+            {
+                // Each hide's time of day is read onto the forward clock as the file loads (Moment.Read): its 30 days go on
+                // from there on the forward clock. A time after now (the system clock was set back, or the file was edited)
+                // is now, so that hide runs out 30 days from now, not 30 days after a time still to come.
+                var loaded = _clock();
                 _dismissed = Bounded(d.EnumerateObject()
                     .Where(p => p.Value.ValueKind == JsonValueKind.String && p.Value.TryGetDateTime(out _))
-                    .Select(p => KeyValuePair.Create(p.Name, p.Value.GetDateTime().ToUniversalTime())), DateTime.UtcNow);
+                    .Select(p => KeyValuePair.Create(p.Name, loaded.Read(p.Value.GetDateTime().ToUniversalTime()))), loaded);
+            }
             if (root.TryGetProperty("hiddenFeatures", out var h) && h.ValueKind == JsonValueKind.Array)
                 // Only the cards' own keys, each once: never longer than the cards, whatever the file holds (a key given twice,
                 // or text that is not valid, is never what drops a real one).
@@ -127,7 +138,7 @@ internal sealed class RecommendationStore
             {
                 version = 1,
                 guideCompletedUtc = _completedUtc?.ToString("o", CultureInfo.InvariantCulture),
-                dismissed = _dismissed.ToDictionary(kv => kv.Key, kv => kv.Value.ToString("o", CultureInfo.InvariantCulture)),
+                dismissed = _dismissed.ToDictionary(kv => kv.Key, kv => kv.Value.Utc.ToString("o", CultureInfo.InvariantCulture)),
                 hiddenFeatures = _hiddenFeatures.Order(StringComparer.Ordinal).ToList(),
             }, new JsonSerializerOptions { WriteIndented = true });
             string file = StoreFile;

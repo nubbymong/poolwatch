@@ -3,8 +3,8 @@ using PoolWatch.Core.Util;
 
 namespace PoolWatch.Tests;
 
-/// <summary>Review Part 3, addendum 2 C: kernel functions in the CPU trace, from local admin-only symbol folders only.</summary>
-public class CpuPartThreeTests
+/// <summary>Kernel functions in the CPU trace, from local admin-only symbol folders only.</summary>
+public class CpuTraceFunctionTests
 {
     private static readonly HashSet<string> Usable = new(StringComparer.OrdinalIgnoreCase) { @"C:\ProgramData\PoolWatch\symbols", @"D:\sym cache", @"C:\pdbs" };
     private static bool IsUsable(string d) => Usable.Contains(d);

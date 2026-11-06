@@ -1,6 +1,7 @@
 using PoolWatch.Core;
 using PoolWatch.Core.History;
 using PoolWatch.Core.Model;
+using static PoolWatch.Tests.Clocks;
 
 namespace PoolWatch.Tests;
 
@@ -15,7 +16,9 @@ internal sealed class ChurnWorld
     public static readonly TimeSpan Interval = TimeSpan.FromSeconds(10);
     public const int CrawlerPid = 900, Sessions = 6;
     public readonly History History = History.ForInterval(Interval.TotalSeconds);
-    public readonly ProcessRegistry Registry = new();
+    /// <summary>The registry, its clock reading the world's time (how long exited records are kept is timed on it).</summary>
+    public readonly ProcessRegistry Registry;
+
     public long TagBytes = 200L << 20;
     public int Index;
     private readonly Random _rnd = new(42);
@@ -37,6 +40,7 @@ internal sealed class ChurnWorld
 
     public ChurnWorld(int longLived = 100)
     {
+        Registry = new(clock: () => Clocks.At(Now));
         long boot = T0.AddHours(-2).ToFileTimeUtc();
         _live[4] = new ProcessSample { Pid = 4, ImageName = "System", CreateTime = boot };
         for (int s = 0; s < Sessions; s++)
@@ -73,7 +77,7 @@ internal sealed class ChurnWorld
         Io(CrawlerPid, tagGrowth > 0 ? tagGrowth / 1000 + _rnd.Next(2000) : _rnd.Next(50));
         TagBytes += tagGrowth;
         var tags = new List<PoolTagEntry> { new(Tag, 10, 1, (ulong)TagBytes, 0, 0, 0), new(PoolTag.Parse("File"), 5, 1, 64UL << 20, 0, 0, 0) };
-        var s = new Sample(Now, new PoolTotals(4UL << 30, 2UL << 30, 4UL << 30, 2UL << 30), tags, _live.Values.ToList());
+        var s = new Sample(Now, new PoolTotals(4UL << 30, 2UL << 30, 4UL << 30, 2UL << 30), tags, _live.Values.ToList()) { TickMs = Clocks.At(Now).Ms };
         Registry.ObserveSnapshot(s.Processes, Now);
         History.Add(s);
         Events = Registry.DrainEvents();

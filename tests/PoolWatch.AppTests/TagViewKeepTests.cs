@@ -82,7 +82,7 @@ public class TagViewKeepTests
     public void AReleasedTagKeepsItsRankingUntilTheWindowHides()
     {
         var now = T0;
-        var rankings = new TagRankings(() => now);
+        var rankings = new TagRankings(() => AppClocks.At(now));
         void Rank(PoolTag[] wanted)
         {
             using var done = new ManualResetEventSlim();
@@ -104,7 +104,7 @@ public class TagViewKeepTests
     [Fact]
     public void ClearDropsEveryRankingAndDiscardsOneStillRunning()
     {
-        var rankings = new TagRankings(() => T0);
+        var rankings = new TagRankings(() => AppClocks.At(T0));
         using var release = new ManualResetEventSlim();
         using var done = new ManualResetEventSlim();
         Assert.Equal(A, rankings.Pump(t => { release.Wait(TimeSpan.FromSeconds(10)); return View(t); }, [A], null, done.Set));

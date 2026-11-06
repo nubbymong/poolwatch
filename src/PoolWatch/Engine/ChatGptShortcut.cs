@@ -28,10 +28,13 @@ internal static class ChatGptShortcut
     /// <summary>Where the shortcut goes, and the folder up to which every folder above it is checked for links.</summary>
     internal sealed record Folders(string Desktop, string Profile);
 
-    /// <summary>The launcher next to PoolWatch.exe, or null (a zip install without it).</summary>
+    /// <summary>
+    /// The launcher script in the install folder (where the installer puts it, beside PoolWatch's own launcher, as it did
+    /// before 1.0, so a shortcut made then still works), or null (a zip install without it).
+    /// </summary>
     public static string? Launcher()
     {
-        string path = Path.Combine(AppContext.BaseDirectory, LauncherName);
+        string path = Path.Combine(LaunchGate.InstallFolder(), LauncherName);
         return File.Exists(path) ? path : null;
     }
 

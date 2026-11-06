@@ -4,6 +4,8 @@ using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
 /// <summary>
@@ -68,8 +70,8 @@ public sealed class ReplayFootprintTests : IDisposable
             if (growing) bytes[Tags[i / 60 % Tags.Length]] += 4L << 20;
             w.Sample(Tags.Select(t => (t, bytes[t])).ToArray());
             var now = w.Now - w.Interval;
-            mgr.AddEvents(summarizer.Process(w.Registry.DrainEvents(), now, p => w.Registry.GetLive(p)?.Image));
-            mgr.Process(w.History, det, det.Evaluate(w.History), now);
+            mgr.AddEvents(summarizer.Process(w.Registry.DrainEvents(), At(now), p => w.Registry.GetLive(p)?.Image), At(now));
+            mgr.Process(w.History, det, det.Evaluate(w.History), At(now));
             if ((i + 1) % PerHour == 0)
             {
                 heap.Add(GC.GetTotalMemory(forceFullCollection: true) - baseline);

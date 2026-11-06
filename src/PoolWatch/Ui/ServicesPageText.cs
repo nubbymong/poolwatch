@@ -81,12 +81,14 @@ internal static class ServicesPageText
 
     /// <summary>
     /// The exception to "will be stopped" in Turn off's question, for one service (<paramref name="one"/>) or several:
-    /// Windows does not stop a service while one that depends on it runs, and PoolWatch never stops a service you did not tick.
+    /// Windows does not stop a service while one that depends on it has not stopped (it runs, or is paused, starting,
+    /// stopping, resuming or pausing), and PoolWatch never stops a service you did not tick.
     /// </summary>
     public static string NotStoppedWhenDependedOn(bool one) => one
-        ? "If a running service you did not tick depends on it, Windows does not stop it: it is set to not start and stops when Windows restarts."
-        : "If a running service you did not tick depends on one of them, Windows does not stop that one: it is set to not start and stops when " +
-          "Windows restarts.";
+        ? "If a service you did not tick depends on it and has not stopped, Windows does not stop it: it is set to not start and stops when " +
+          "Windows restarts."
+        : "If a service you did not tick depends on one of them and has not stopped, Windows does not stop that one: it is set to not start " +
+          "and stops when Windows restarts.";
 
     /// <summary>The end of every question before a service change.</summary>
     public const string SavedFirst = "PoolWatch saves how each one was set first, so you can put it back. Continue?";
@@ -98,6 +100,17 @@ internal static class ServicesPageText
 
     /// <summary>The status line when the services could not be read (it never stays on "Reading services...").</summary>
     public static string ReadFailed(string error) => $"PoolWatch could not read the services: {error.TrimEnd('.')}. Refresh tries again.";
+
+    /// <summary>
+    /// The status line for the background read of the services that failed with <paramref name="error"/> (the task's
+    /// exception, wrapped or not): a <see cref="ServicesNotReadException"/>'s reason alone, so "could not read the services"
+    /// is said once; any other error's message.
+    /// </summary>
+    public static string ReadFailed(Exception error)
+    {
+        var e = error is AggregateException wrapped ? wrapped.GetBaseException() : error;
+        return ReadFailed(e is ServicesNotReadException notRead ? notRead.Why : e.Message);
+    }
 
     /// <summary>"Nothing to put back", for every service (null) or one.</summary>
     public static string NothingToRestoreText(string? service) => service is null

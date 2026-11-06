@@ -18,11 +18,13 @@ internal static class UiRunner
     /// <summary>The longest the CI UI test waits for a window that reads in the background (setup's scan, the list of changes).</summary>
     private static readonly TimeSpan SmokeWait = TimeSpan.FromSeconds(60);
 
-    public static int Run(CommandLineOptions opt)
+    /// <param name="hold">The proof that this thread holds the one-instance mutex (Program.Main runs the tray app only
+    /// through <see cref="ExitSignal.AsTheOneInstance"/>): its start may move data folders.</param>
+    public static int Run(CommandLineOptions opt, ExitSignal.Hold hold)
     {
-        var paths = new AppPaths(opt.OutDir);
+        var paths = new AppPaths(opt.OutDir, hold);
         var log = paths.OpenLog();
-        var settings = HeadlessRunner.LoadSettings(opt, paths, log);
+        var settings = HeadlessRunner.LoadSettings(opt, paths);
         log.Info($"PoolWatch {typeof(UiRunner).Assembly.GetName().Version} UI; data={paths.OutDir ?? paths.DataRoot}");
         HeadlessRunner.LogKnowledgeProblems(log);
         using var engine = new MonitorEngine(settings, paths, log, verboseCsv: false);
@@ -46,13 +48,13 @@ internal static class UiRunner
         using var stopProfile = new CancellationTokenSource();
         analysis.Diagnostics.Services.Profiles = () => live.Running.ServiceProfiles;
         _ = ProfileAtStart.ForApp(live, analysis.Diagnostics.Services, log.Info, smoke, explicitConfig: opt.ConfigFile is not null, CacheHelper.IsElevated,
-            stopProfile.Token, done: (profile, run) => { if (ProfileAtStart.Notice(profile, run, paths.LogFile) is { } text) app.NotifyChanges(text); });
+            stopProfile.Token, done: (profile, run) => { if (ProfileAtStart.Notice(profile, run, log.CurrentPath) is { } text) app.NotifyChanges(text); });
         // The guide for AI assistants in the data folder, written only when missing or older.
         Task.Run(() => AgentsGuide.EnsureInDataRoot(paths, log));
-        // The one-time move of the old per-user data, in the background once the tray and the guard run.
-        if (!smoke && paths.OutDir is null) paths.StartLegacyMigration(log);
-        // An existing logon task that starts PoolWatch from a user-writable folder is shown to the owner,
-        // who may point it at this (verified) exe or remove it.
+        // An existing logon task that is not exactly the one PoolWatch makes (it starts PoolWatch from a user-writable
+        // folder, a program with PoolWatch's name that is not its launcher, or anything PoolWatch cannot check; or it differs
+        // from PoolWatch's own in any other part; or it cannot be read) is shown to the owner, who may replace it with
+        // PoolWatch's own task for this PoolWatch's (verified) launcher, or remove it.
         if (!smoke)
         {
             var ui = SynchronizationContext.Current!;
@@ -116,6 +118,14 @@ internal static class UiRunner
     private static async Task<(List<string> files, object stats)> Smoke(TrayApp app, MonitorEngine engine, AnalysisPipeline analysis, AppPaths paths, string dir)
     {
         app.Form.StopSoakCycle(); // the UI soak's walk: its last step is due with this timer's tick
+        // PoolWatch's own cost as About judges it, read before this walk adds its own (the UI soak checks it).
+        var meter = engine.Meter.Report();
+        var meterBeforeWalk = new
+        {
+            judged = meter.Judged, judgedFromSeconds = meter.JudgedFromSeconds, judgedSeconds = meter.JudgedSeconds,
+            judgedCpuPercentOfOneCore = meter.JudgedCpuPercentOfOneCore, judgedPeakWorkingSetBytes = meter.JudgedPeakWorkingSetBytes,
+            judgedDiskWriteBytesPerHour = meter.JudgedDiskWriteBytesPerHour,
+        };
         var files = app.Form.Screenshots(dir);
         var form = app.Form.SmokeStats(); // hides the main window last
         string Shot(Form window, string name)
@@ -124,7 +134,7 @@ internal static class UiRunner
             return name;
         }
 
-        // Setup as on a first run (its close button does nothing), each of its seven steps once it has read the PC, then
+        // Setup as on a first run (its close button asks first), each of its seven steps once it has read the PC, then
         // "How PoolWatch works". Nothing is applied: the test goes straight to each step, and every change refuses in the
         // test anyway.
         var guide = new SetupWizardForm(app.Setup, firstRun: true, advanced: false);
@@ -189,6 +199,7 @@ internal static class UiRunner
             activeChanges = activeStats,
             report = reportStats,
             about = aboutStats,
+            meterBeforeWalk,
             updateNotice = updateStats,
             openForms = Application.OpenForms.Cast<Form>().Select(f => f.Text).ToList(),
             trayMenu = app.MenuItemTexts(),
@@ -211,12 +222,13 @@ internal static class UiRunner
         var answer = LogonTaskCheck.Answer.Leave;
         ui.Send(_ =>
         {
-            string exe = Environment.ProcessPath ?? "PoolWatch.exe";
+            // Re-pointing makes the task start this PoolWatch's launcher (LogonTask.TaskXml).
+            string start = Environment.ProcessPath is { } exe ? LaunchGate.LauncherOf(exe, LayoutFiles.OnDisk) ?? LaunchGate.ExpectedLauncher(exe) : LaunchGate.LauncherFileNames[0];
             string text = v.Message + "\n\n" + (v.CanRePoint
-                ? $"Yes: point it at this PoolWatch ({exe}), installed in an administrator-only folder.\n" +
-                  "No: remove the task (tick Start at logon again later if you want it).\n" +
+                ? $"Yes: replace it with PoolWatch's own task, for this PoolWatch ({start}), installed in an administrator-only folder{LogonTaskCheck.RePointKeeps(v.On, v.SignInTrigger)}.\n" +
+                  $"No: remove the task (to have it again later, {Core.Setup.SignInStates.TickInSettings}).\n" +
                   "Cancel: leave it for now (PoolWatch asks again at the next start)."
-                : "Yes: remove the task now (install PoolWatch to Program Files, then tick Start at logon again).\n" +
+                : $"Yes: remove the task now (install PoolWatch to Program Files, then {Core.Setup.SignInStates.TickInSettings}).\n" +
                   "No: leave it for now (PoolWatch asks again at the next start).");
             var r = MessageBox.Show(text, "PoolWatch: your logon task is not safe", v.CanRePoint ? MessageBoxButtons.YesNoCancel : MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
             answer = v.CanRePoint

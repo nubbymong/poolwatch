@@ -4,6 +4,7 @@ using PoolWatch.Core.Setup;
 using PoolWatch.Core.TokenGuard;
 using PoolWatch.Engine;
 using PoolWatch.Engine.Setup;
+using PoolWatch.Ui.Setup;
 
 namespace PoolWatch.Ui;
 
@@ -26,8 +27,6 @@ internal interface ISetupSystem
     (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via);
     Task<LeakVerdict?> CheckTokenLeak(CancellationToken stop);
     (bool Ok, string Message) CreateChatGptShortcut(string? iconPath, string via);
-    /// <summary>Starts a full clear now and returns its record (measured 2 minutes later); null when one runs or there is no sample yet.</summary>
-    ClearRecord? StartClear();
     string IncidentsDir { get; }
     /// <summary>A line on the timeline (findings), from any thread.</summary>
     void Timeline(string line);
@@ -40,18 +39,20 @@ internal interface ISetupSystem
 /// </summary>
 internal sealed class RecommendationActions
 {
-    private static readonly TimeSpan MeasurePoll = TimeSpan.FromSeconds(5), MeasureWait = TimeSpan.FromMinutes(4);
     private readonly ISetupSystem _system;
     private readonly LiveSettings _live;
     private readonly IShell _shell;
     private readonly RecommendationStore _store;
     private readonly bool _smoke;
     private readonly Action<IWin32Window, string, string> _showInstructions;
+    private readonly Func<Core.Model.Moment> _clock;
 
     /// <param name="showInstructions">Opens a read-only text (title, text) over a window (default: <see cref="InstructionsDialog"/>).</param>
+    /// <param name="clock">Reads the two clocks (<see cref="Core.Model.Moment.Now"/>; a test gives its own).</param>
     public RecommendationActions(ISetupSystem system, LiveSettings live, IShell shell, RecommendationStore store, bool smoke,
-        Action<IWin32Window, string, string>? showInstructions = null)
+        Action<IWin32Window, string, string>? showInstructions = null, Func<Core.Model.Moment>? clock = null)
     {
+        _clock = clock ?? Core.Model.Moment.Now;
         _system = system;
         _live = live;
         _shell = shell;
@@ -143,30 +144,11 @@ internal sealed class RecommendationActions
         };
     }
 
-    /// <summary>
-    /// "Check if this applies to my PC": one full clear now, measured 2 minutes later like every clear, then what it freed
-    /// and whose records. <paramref name="stop"/>: the setup guide closed (the clear itself still runs and is measured).
-    /// </summary>
-    public async Task<(bool Ok, string Message)> TestClear(CancellationToken stop)
-    {
-        if (_smoke) return (false, Refused);
-        if (!_system.Elevated) return (false, "Clearing the cache needs PoolWatch to run as administrator.");
-        if (_system.StartClear() is not { } clear) return (false, "A cache clear is running already, or PoolWatch has only just started. Try again in a few minutes.");
-        var giveUp = DateTime.UtcNow + MeasureWait;
-        while (!clear.Done)
-        {
-            if (DateTime.UtcNow > giveUp) return (false, "The clear has not been measured yet. Its result will be in the main window.");
-            await Task.Delay(MeasurePoll, stop);
-        }
-        if (clear.Error is { } error) return (false, $"The clear did not run: {error.TrimEnd('.')}.");
-        return (true, new ClearEvidence(!ClearPolicy.FreedLittle(clear), clear).Sentence!);
-    }
-
     private async Task<(bool, string)> StartAtSignIn(string via)
     {
         if (await Task.Run(_system.RegisterLogonTask) is { } why) return (false, "PoolWatch could not set itself to start when you sign in. " + why);
         _system.Timeline($"PoolWatch starts when you sign in now (turned on from {via}).");
-        await Rescan(); // the rules read whether the task exists from the facts
+        await Rescan(); // the rules read from the facts whether PoolWatch starts when you sign in
         return (true, "PoolWatch starts when you sign in.");
     }
 
@@ -221,7 +203,7 @@ internal sealed class RecommendationActions
         // The incident's id is its folder's name; anything else is not opened.
         if (r.Subject is not { Length: > 0 } id || Path.GetFileName(id) != id || id is "." or "..") return (false, "PoolWatch cannot find that incident.");
         _shell.ShowReport(Path.Combine(_system.IncidentsDir, id));
-        _store.Dismiss(r.Key, DateTime.UtcNow);
+        _store.Dismiss(r.Key, _clock());
         return (true, "");
     }
 
@@ -235,60 +217,36 @@ internal sealed class RecommendationActions
 
 /// <summary>
 /// Whether to suggest clearing the cache every hour, by file system and by what clears freed on this PC. With a ReFS volume
-/// or a Dev Drive it applies (ReFS keeps per-file records alive while their pages are cached). With NTFS only it is
-/// suggested once a clear showed that it helps; until then the setup guide offers one test clear instead.
+/// or a Dev Drive it applies (ReFS keeps per-file records alive while their pages are cached), and so it does where the
+/// drives could not all be read or before the scan has read them, as one of them may be such a drive (<see
+/// cref="MayHaveReFs"/>). With NTFS only it is suggested once a clear showed that it helps, or when file records a clear
+/// frees grew in the last day (<see cref="ForSimpleView"/>).
 /// </summary>
 internal static class ClearAdvice
 {
-    /// <summary>The guide's test-clear button: longer than a suggestion's 16 characters on purpose, since it says what the click finds out (the guide has the room).</summary>
-    public const string CheckButton = "Check if this applies to my PC";
-
+    /// <summary>A ReFS drive or a Dev Drive was found on this PC.</summary>
     public static bool HasReFs(EnvironmentFacts? facts) =>
-        facts?.Volumes.Any(v => v.IsDevDrive || v.FileSystem.Equals("ReFS", StringComparison.OrdinalIgnoreCase)) == true;
+        facts?.Volumes.Any(v => v.IsDevDrive == true || v.FileSystem.Equals("ReFS", StringComparison.OrdinalIgnoreCase)) == true;
+
+    /// <summary>
+    /// A ReFS drive or a Dev Drive was found, or may be there: the drives were not read (no facts yet), or not all of them
+    /// (<see cref="EnvironmentFacts.VolumesNotAllRead"/>). Only a scan that read every drive and found none of them on ReFS
+    /// says this PC has NTFS only.
+    /// </summary>
+    public static bool MayHaveReFs(EnvironmentFacts? facts) => facts is null || facts.VolumesNotAllRead || HasReFs(facts);
 
     /// <summary>
     /// The Simple view's cards: <paramref name="current"/> without the hourly clear where it is not shown to help, at most
-    /// <paramref name="max"/>. It is shown with a ReFS drive or a Dev Drive, once a clear here freed enough, or when file
-    /// records a clear frees grew in the last day (<paramref name="fileRecordsGrew"/>): so on an NTFS-only PC where setup's
-    /// "Decide later" left clearing off, PoolWatch still suggests it when the pool shows it would help.
+    /// <paramref name="max"/>. It is shown with a ReFS drive or a Dev Drive, or where the drives could not all be read or
+    /// before the scan has read them (<see cref="MayHaveReFs"/>), once a clear here freed enough, or when file records a
+    /// clear frees grew in the last day (<paramref name="fileRecordsGrew"/>): so on an NTFS-only PC where setup's "Decide
+    /// later" left clearing off, PoolWatch still suggests it when the pool shows it would help.
     /// </summary>
     public static IReadOnlyList<Recommendation> ForSimpleView(IReadOnlyList<Recommendation> current, EnvironmentFacts? facts, ClearEvidence evidence, int max = 3,
         bool fileRecordsGrew = false) =>
-        current.Where(r => r.Id != RecommendationId.HourlyCacheClear || HasReFs(facts) || evidence.Helps == true || fileRecordsGrew)
+        current.Where(r => r.Id != RecommendationId.HourlyCacheClear || MayHaveReFs(facts) || evidence.Helps == true || fileRecordsGrew)
             .Select(r => r.Id == RecommendationId.HourlyCacheClear && evidence is { Helps: true, Sentence: { } shown } ? r with { Why = shown } : r)
             .Take(max).ToList();
-
-    /// <summary>
-    /// The setup guide's hourly row, and whether its button is the test clear: offered with what a clear freed here, or
-    /// because a ReFS drive is there; a plain line when a full clear freed little; else the test clear. Once the automatic
-    /// clear is on, the row confirms what clearing freed here (on a ReFS PC only once a clear helped: a clear an hour after
-    /// the last one can free little there, and the hourly clear still applies).
-    /// </summary>
-    public static (Recommendation Row, bool TestClear) ForGuide(Recommendation row, EnvironmentFacts? facts, ClearEvidence evidence)
-    {
-        if (row.Id != RecommendationId.HourlyCacheClear) return (row, false);
-        if (row.State == RecommendationState.Done)
-            return (evidence.Sentence is { } found && (evidence.Helps == true || !HasReFs(facts)) ? row with { Why = row.Why + " " + found } : row, false);
-        if (row.State != RecommendationState.Offer) return (row, false);
-        if (evidence is { Helps: true, Sentence: { } helped }) return (row with { Why = helped }, false);
-        if (HasReFs(facts)) return (row with { Why = ReFsWhy(facts!) }, false);
-        if (evidence is { Helps: false, Sentence: { } little }) return (row with { Why = little, Button = "", State = RecommendationState.Info }, false);
-        return (row with
-        {
-            Why = "PoolWatch found no ReFS drive or Dev Drive on this PC. On NTFS, clearing the cache often frees little. PoolWatch can " +
-                  "clear it once now and show what it freed (about 2 minutes).",
-            Button = CheckButton,
-        }, true);
-    }
-
-    private static string ReFsWhy(EnvironmentFacts facts)
-    {
-        var letters = facts.Volumes.Where(v => v.IsDevDrive || v.FileSystem.Equals("ReFS", StringComparison.OrdinalIgnoreCase))
-            .Select(v => EnvironmentFacts.Letter(v.Root)).ToList();
-        string drives = letters.Count == 1 ? $"a ReFS drive ({letters[0]})" : $"ReFS drives ({string.Join(", ", letters)})";
-        return $"This PC has {drives}. Windows keeps records of recently used files on ReFS in {PoolName.InText}, and they can grow " +
-               "by gigabytes. An hourly clear frees them; your files are not touched.";
-    }
 }
 
 /// <summary>
@@ -305,7 +263,8 @@ internal static class TokenGuardWords
     public const string Why = Reason + " " + Tested;
     public const string Notice = "Other programs can bring their windows to the front by themselves, even while you're typing somewhere else (for example " +
                                  "a chat app or an installer popping up and taking your keystrokes). Most people find it rare and easy to live with.";
-    public const string Undo = "It lasts until you sign out, and PoolWatch turns it back on each time it starts. To stop it, turn it off in Active changes.";
+    public const string Undo = "It lasts until you sign out, and PoolWatch turns it back on each time it starts. To stop it, turn it off in Active changes, " +
+                               "which also puts back the setting it changed when Windows allows it; one it found already changed lasts until you sign out.";
 
     /// <summary>The lines shown under an offer of the guard: what you will notice, and how to undo it.</summary>
     public static string Details => $"What you'll notice: {Notice}{Environment.NewLine}Undo: {Undo}";

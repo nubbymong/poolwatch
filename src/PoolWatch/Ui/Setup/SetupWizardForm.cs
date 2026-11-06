@@ -2,24 +2,27 @@ namespace PoolWatch.Ui.Setup;
 
 /// <summary>
 /// "Set up PoolWatch": the first-run setup in seven steps, in a window of its own (the main window waits until it is
-/// done). On the first run it cannot be closed: Windows still draws its close button, but the button does nothing
-/// (CS_NOCLOSE, and OnFormClosing cancels a close the user asks for). It ends on the Ready step's "Open PoolWatch", and
-/// when PoolWatch exits before that (or Windows shuts down), the next start opens it again. Opened again from the tray it
-/// can be cancelled (its close button, or Esc). It reads the PC when it opens, and on a Windows build that needs it runs
-/// the token-leak check by itself (not in the CI UI test). As big as the design, cut to the screen's working area when
-/// that is smaller (a page then scrolls), on the screen of the window it opens over, else the one with the mouse; made
-/// again at the new scale when it moves to a monitor scaled otherwise. Created when opened, disposed when closed.
+/// done). It ends on the Ready step's "Open PoolWatch". On the first run its close button (or Esc, or Alt+F4) asks first
+/// (<see cref="ISetupHost.ConfirmCloseFirstRun"/>, No the default): a yes closes it and PoolWatch keeps running in the
+/// tray, with any change already made with Next, and setup opens again when the owner opens PoolWatch and at the next
+/// start, as it does when PoolWatch exits before the end (or Windows shuts down), which closes it without asking. Opened
+/// again from the tray, closing it (its close button, Esc, Alt+F4) cancels it at once, without asking. It reads the PC
+/// when it opens, and on a Windows build that needs it runs the token-leak check by itself (not in the CI UI test). As
+/// big as the design, cut to the screen's working area when that is smaller (a page then scrolls), on the screen of the
+/// window it opens over, else the one with the mouse; made again at the new scale when it moves to a monitor scaled
+/// otherwise. Created when opened, disposed when closed.
 /// </summary>
 internal sealed class SetupWizardForm : Form
 {
     /// <summary>
-    /// CS_NOCLOSE: disables Close in the window menu. Windows still draws the close button; on the first run it does nothing,
-    /// as OnFormClosing also cancels a close the user asks for.
+    /// CS_NOCLOSE, which disables Close in the window menu while Windows still draws the close button. The window never has
+    /// it: it made the first run's close button one that did nothing (<see cref="CloseButtonEnabled"/>).
     /// </summary>
     private const int CsNoClose = 0x200;
 
     private readonly ISetupHost _host;
-    private readonly bool _noClose;
+    /// <summary>Setup was never completed: a close the owner asks for asks first.</summary>
+    private readonly bool _firstRun;
     private readonly float _text;
     private readonly CancellationTokenSource _stop = new();
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -29,7 +32,7 @@ internal sealed class SetupWizardForm : Form
     private HowItWorksForm? _how;
     private bool _mayClose;
 
-    /// <param name="firstRun">Setup was never completed: it cannot be closed or skipped.</param>
+    /// <param name="firstRun">Setup was never completed: closing it asks first.</param>
     /// <param name="advanced">The view the app shows now, which the Welcome step starts with.</param>
     public SetupWizardForm(SetupContext context, bool firstRun, bool advanced) : this(new SetupHost(context), firstRun, advanced) { }
 
@@ -37,7 +40,7 @@ internal sealed class SetupWizardForm : Form
     internal SetupWizardForm(ISetupHost host, bool firstRun, bool advanced, float text = 1f)
     {
         _host = host;
-        _noClose = firstRun;
+        _firstRun = firstRun;
         _text = text;
         Session = new SetupSession(host, firstRun, advanced);
         Text = SetupText.WindowTitle;
@@ -95,21 +98,8 @@ internal sealed class SetupWizardForm : Form
 
     private Size Preferred => new(_scale.S(SetupWindowFit.Design.Width), _scale.S(SetupWindowFit.Design.Height));
 
-    protected override CreateParams CreateParams
-    {
-        get
-        {
-            var cp = base.CreateParams;
-            if (_noClose) cp.ClassStyle |= CsNoClose;
-            return cp;
-        }
-    }
-
-    /// <summary>
-    /// The window's close button works (no CS_NOCLOSE): only a setup opened again. On the first run Windows still draws
-    /// the button, but it does nothing.
-    /// </summary>
-    internal bool CloseButtonWorks => (CreateParams.ClassStyle & CsNoClose) == 0;
+    /// <summary>Windows draws the close button enabled and sends its close (no CS_NOCLOSE), on the first run too.</summary>
+    internal bool CloseButtonEnabled => (CreateParams.ClassStyle & CsNoClose) == 0;
 
     private const int WmKeyDown = 0x100;
     /// <summary>A key-down's lParam bit 30: the key was already down, so Windows is repeating a key held down.</summary>
@@ -128,10 +118,10 @@ internal sealed class SetupWizardForm : Form
         return base.ProcessCmdKey(ref msg, keyData);
     }
 
-    /// <summary>Esc cancels a setup opened again; the first run has no way out but its last step.</summary>
+    /// <summary>Esc closes setup as its close button does: a setup opened again at once, the first run once the owner says yes.</summary>
     protected override bool ProcessDialogKey(Keys keyData)
     {
-        if (keyData == Keys.Escape && !_noClose)
+        if (keyData == Keys.Escape)
         {
             Close();
             return true;
@@ -172,15 +162,27 @@ internal sealed class SetupWizardForm : Form
         FitTo(Screen.FromRectangle(suggested).WorkingArea, suggested);
     }
 
+    /// <summary>
+    /// A close the owner asks for on the first run (the close button, Esc, Alt+F4, the taskbar's Close) asks first, and a
+    /// no keeps setup open; PoolWatch exiting, Windows shutting down, a finished or re-run setup close it without asking
+    /// (<see cref="SetupFlow.MayClose"/>).
+    /// </summary>
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (!_mayClose && !Session.Flow.MayClose(e.CloseReason))
         {
-            e.Cancel = true;
-            return;
+            CloseQuestions++;
+            if (!(_closeAnswer?.Invoke() ?? _host.ConfirmCloseFirstRun(this)))
+            {
+                e.Cancel = true;
+                return;
+            }
         }
         base.OnFormClosing(e);
     }
+
+    /// <summary>How many times a close asked first (the CI reading's close included; tests).</summary>
+    internal int CloseQuestions { get; private set; }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
@@ -225,14 +227,53 @@ internal sealed class SetupWizardForm : Form
         Close();
     }
 
-    /// <summary>The window: its title, whether its close button works, its size and whether it fits the working area.</summary>
+    /// <summary>
+    /// The window: its title, whether its close button is enabled and whether a close asks first (read from the closing
+    /// path, <see cref="CloseAsksFirst"/>), its size and whether it fits the working area.
+    /// </summary>
     internal object WindowStats()
     {
         var area = Screen.FromControl(this).WorkingArea;
-        return new { title = Text, closeButtonWorks = !_noClose, width = Width, height = Height, area = $"{area.Width} x {area.Height}", fits = area.Contains(Bounds) };
+        return new
+        {
+            title = Text, closeButtonEnabled = CloseButtonEnabled, closeAsksFirst = CloseAsksFirst(),
+            width = Width, height = Height, area = $"{area.Width} x {area.Height}", fits = area.Contains(Bounds),
+        };
     }
 
-    /// <summary>The step shown now: its words, its buttons, its rows and choices, and anything clipped.</summary>
+    private const int WmSysCommand = 0x0112, ScClose = 0xF060;
+
+    /// <summary>The answer the probe gives in place of the question (<see cref="CloseAsksFirst"/>); null: the host asks.</summary>
+    private Func<bool>? _closeAnswer;
+
+    /// <summary>
+    /// Whether a close the owner asks for asks first, read from the closing path itself: the window gets the message its
+    /// close button sends (WM_SYSCOMMAND with SC_CLOSE, as Alt+F4 does), with the question answered No by the probe, so
+    /// no box shows. True when the question came once and the window stayed open. A setup opened again, which closes at
+    /// once, is not probed: it would close. It was worked out from <see cref="SetupFlow.MayClose"/> alone, so a close
+    /// button that did nothing again would still have read as one that asks first.
+    /// </summary>
+    private bool CloseAsksFirst() => _firstRun && !Session.Flow.Finished && AsksOnceAndStaysOpen(this, answer => _closeAnswer = answer);
+
+    /// <summary>
+    /// Sends <paramref name="window"/> the message its close button sends, with <paramref name="answerWith"/> given an
+    /// answer of No to put in place of the question for that close (and null after it). True when the question came
+    /// exactly once and the window is still open.
+    /// </summary>
+    internal static bool AsksOnceAndStaysOpen(Form window, Action<Func<bool>?> answerWith)
+    {
+        if (!window.IsHandleCreated) return false;
+        int asked = 0;
+        answerWith(() => { asked++; return false; });
+        try { SendMessage(window.Handle, WmSysCommand, ScClose, 0); }
+        finally { answerWith(null); }
+        return asked == 1 && !window.IsDisposed && window.IsHandleCreated;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SendMessageW")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, nint wParam, nint lParam);
+
+    /// <summary>The step shown now: its words, its buttons, its rows and choices, and anything clipped or overlapping.</summary>
     internal object SmokeStats()
     {
         var view = View;

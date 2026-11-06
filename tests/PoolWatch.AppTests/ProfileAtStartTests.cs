@@ -37,16 +37,17 @@ public sealed class ProfileAtStartTests : IDisposable
         /// <summary>Runs inside each change, before the service is changed (a test holds a change there).</summary>
         public Action? BeforeChange;
 
-        public (string? error, NotDone? notStopped) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
+        public (string? error, NotDone? notStopped, bool? wasRunning) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
         {
             BeforeChange?.Invoke();
             Calls.Add("apply " + op.Option.Service.Name);
             Allowed.Add(allowed);
             InsiderSeen.Add(insiderEnrolled);
             // The live gate as ServiceControl applies it: protected or not offered on this PC is refused.
-            if (ServiceCatalogue.IsProtected(op.Option.Service.Name, insiderEnrolled) || !allowed.Contains(op.Option.Service.Name)) return ("refused by the live gate", null);
+            if (ServiceCatalogue.IsProtected(op.Option.Service.Name, insiderEnrolled) || !allowed.Contains(op.Option.Service.Name)) return ("refused by the live gate", null, null);
+            bool? was = ServicePlan.WasRunning(Live[op.Option.Service.Name]); // what the change saw
             Live[op.Option.Service.Name] = Live[op.Option.Service.Name] with { StartType = op.NewStart, Running = op.NewStart == ServiceStartType.Disabled ? false : Live[op.Option.Service.Name].Running };
-            return (null, null);
+            return (null, null, was);
         }
 
         public (string? error, NotDone? notDone) Restore(ServiceChange change, IReadOnlySet<string> allowed, bool insiderEnrolled)
@@ -205,7 +206,7 @@ public sealed class ProfileAtStartTests : IDisposable
         Assert.Null(Assert.Single(ctl.Apply(["MapsBroker"], "manual")).error);
         svc.Live["MapsBroker"] = svc.Live["MapsBroker"] with { StartType = ServiceStartType.Automatic, Running = true }; // switched back on
         ctl.Profiles = () => new ServiceProfileSet { Profiles = [new("Build box", ["MapsBroker"])], AtStart = "Build box" };
-        ctl.CheckSelfRepair(DateTime.UtcNow + ServicesController.TurnOffAtMost); // when the Turn off can no longer be under way
+        ctl.CheckSelfRepair(); // the Turn off is done
         var warning = Assert.Single(_findings, f => f.Title.StartsWith("Service re-enabled outside PoolWatch", StringComparison.Ordinal));
         Assert.Equal("Service re-enabled outside PoolWatch: MapsBroker is Automatic, running again (you turned it off). Build box, the profile applied when " +
                      "PoolWatch starts, turns it off again then. Turn it off again with Turn off, or keep it this way with Put back on the Services tab.", warning.Title);
@@ -670,7 +671,7 @@ public sealed class ProfileAtStartTests : IDisposable
         Assert.Single(ctl.ApplyProfile(store.Current.Find("Build box")!, ProfileAtStart.Via("Build box")).TurnedOff);
         ctl.Profiles = () => store.Current;
         svc.Live["edgeupdatem"] = svc.Live["edgeupdatem"] with { StartType = ServiceStartType.Manual, Running = false };
-        ctl.CheckSelfRepair(DateTime.UtcNow + ServicesController.TurnOffAtMost); // when the run can no longer be under way
+        ctl.CheckSelfRepair(); // the run is done
         var warning = Assert.Single(_findings, f => f.Title.StartsWith("Service re-enabled outside PoolWatch", StringComparison.Ordinal));
         Assert.DoesNotContain("Build box", warning.Title);
     }
@@ -1004,18 +1005,5 @@ public sealed class ProfileAtStartTests : IDisposable
         click.Closed();                                     // gone (timed out or closed): a click later opens nothing
         click.Clicked();
         Assert.Equal(["Active changes"], opened);
-    }
-
-    // ---------------------------------------------------------------- where a profile may come from
-
-    [Fact]
-    public void TheOldPerUserSettingsNeverBringServiceProfiles()
-    {
-        // That file was one an unelevated program could write; a profile is applied as an administrator at start.
-        string json = AppPaths.LegacySettingsJson("{ \"retentionDays\": 5, \"serviceProfiles\": { \"profiles\": [{ \"name\": \"P\", \"services\": [\"SysMain\"] }], \"atStart\": \"P\", \"delayMinutes\": 3 } }");
-        var s = Core.Settings.Parse(json);
-        Assert.Equal(5, s.RetentionDays);
-        Assert.Empty(s.ServiceProfiles.Profiles);
-        Assert.Null(s.ServiceProfiles.AtStart);
     }
 }

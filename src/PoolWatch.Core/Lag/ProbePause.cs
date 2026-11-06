@@ -1,10 +1,10 @@
 namespace PoolWatch.Core.Lag;
 
 /// <summary>
-/// C1 (review): the lag probe pauses while PoolWatch's own trace or cache clear runs and for <see cref="After"/> after it
+/// The lag probe pauses while PoolWatch's own trace or cache clear runs and for <see cref="After"/> after it
 /// ends, so lag PoolWatch caused itself is never recorded as a pool lag onset. Pure: the caller passes whether one is
 /// running, since when, and when the last one ended, on a monotonic clock (a wall-clock jump must not end or extend a pause).
-/// C1 b (review round 2): a hung capture thread must not pause the probe forever: after <see cref="MaxPause"/> of the
+/// A hung capture thread must not pause the probe forever: after <see cref="MaxPause"/> of the
 /// same work the probe runs again (<see cref="State.Overdue"/>; the caller notes it once).
 /// </summary>
 public static class ProbePause

@@ -87,31 +87,45 @@ public static class ImpactRules
 
     /// <summary>
     /// One rule per known cause, from what the scan of the PC found (the first-run "How your PC is impacted" step). Each
-    /// takes plain values, and a value that could not be read counts as not found: PoolWatch claims no impact it cannot
-    /// see.
+    /// takes plain values, null where a value could not be read or a check could not tell, and gives null (no level: the
+    /// step shows "Not known") when what it needs is not known. None is only for what was read and found clean, or a
+    /// check that ran and found nothing: PoolWatch claims no impact it cannot see, and no absence of one either.
     /// </summary>
     public static class FromFacts
     {
         /// <summary>
         /// ReFS keeps a record in the kernel pool for each file in the standby cache, and Windows rarely empties it:
-        /// <see cref="RefsMetadataLevel"/> when any fixed volume is ReFS or a Dev Drive (every Dev Drive is ReFS), else None.
+        /// <see cref="RefsMetadataLevel"/> when any fixed volume is ReFS or a Dev Drive (every Dev Drive is ReFS), None when
+        /// there is none, and no level when the drives could not be read (null).
         /// </summary>
-        public static ImpactLevel RefsMetadata(bool refsOrDevDrivePresent) => refsOrDevDrivePresent ? RefsMetadataLevel : ImpactLevel.None;
+        public static ImpactLevel? RefsMetadata(bool? refsOrDevDrivePresent) => refsOrDevDrivePresent switch
+        {
+            true => RefsMetadataLevel,
+            false => ImpactLevel.None,
+            null => null,
+        };
 
         /// <summary>
         /// Microsoft Defender checking developer files before they open: when real-time protection is on,
         /// <see cref="DefenderDevDriveLevel"/> if a Dev Drive is scanned first (<see cref="ScannedFirst"/>),
-        /// <see cref="DefenderNoDevDriveLevel"/> if there is no Dev Drive at all; else None (real-time protection off or
-        /// not known, or every Dev Drive already has performance mode).
+        /// <see cref="DefenderNoDevDriveLevel"/> if there is no Dev Drive at all, None if performance mode is on and every
+        /// Dev Drive is trusted; None when real-time protection is off. No level (null) when what decides it could not be
+        /// read: real-time protection, the drives, or, with Dev Drives and none scanned first, performance mode or a drive's
+        /// trust.
         /// </summary>
         /// <param name="realTimeOn">Defender's real-time protection; null when it could not be read (another antivirus, for example).</param>
         /// <param name="performanceModeOn">Defender's Dev Drive performance mode; null when it could not be read.</param>
-        /// <param name="devDrivesTrusted">One value per Dev Drive: whether it is trusted, null when that could not be read. Empty when there is none.</param>
-        public static ImpactLevel DefenderScanning(bool? realTimeOn, bool? performanceModeOn, IReadOnlyCollection<bool?> devDrivesTrusted)
+        /// <param name="devDrivesTrusted">
+        /// One value per Dev Drive: whether it is trusted, null when that could not be read. Empty when there is none; null
+        /// when the drives could not be read.
+        /// </param>
+        public static ImpactLevel? DefenderScanning(bool? realTimeOn, bool? performanceModeOn, IReadOnlyCollection<bool?>? devDrivesTrusted)
         {
-            if (realTimeOn != true) return ImpactLevel.None;
+            if (realTimeOn == false) return ImpactLevel.None;
+            if (realTimeOn is null || devDrivesTrusted is null) return null;
             if (devDrivesTrusted.Count == 0) return DefenderNoDevDriveLevel;
-            return devDrivesTrusted.Any(trusted => ScannedFirst(performanceModeOn, trusted)) ? DefenderDevDriveLevel : ImpactLevel.None;
+            if (devDrivesTrusted.Any(trusted => ScannedFirst(performanceModeOn, trusted))) return DefenderDevDriveLevel;
+            return performanceModeOn == true && devDrivesTrusted.All(trusted => trusted == true) ? ImpactLevel.None : null;
         }
 
         /// <summary>
@@ -121,27 +135,47 @@ public static class ImpactRules
         /// </summary>
         public static bool ScannedFirst(bool? performanceModeOn, bool? trusted) => performanceModeOn == false || trusted == false;
 
-        /// <summary>The Codex GPU shader cache: <see cref="CodexShaderCacheLevel"/> when the ChatGPT (Codex) desktop app is installed, else None.</summary>
-        public static ImpactLevel CodexShaderCache(bool chatGptDesktopInstalled) => chatGptDesktopInstalled ? CodexShaderCacheLevel : ImpactLevel.None;
+        /// <summary>
+        /// The Codex GPU shader cache: <see cref="CodexShaderCacheLevel"/> when the ChatGPT (Codex) desktop app is installed,
+        /// None when it is not, and no level when the installed apps could not be read (null).
+        /// </summary>
+        public static ImpactLevel? CodexShaderCache(bool? chatGptDesktopInstalled) => chatGptDesktopInstalled switch
+        {
+            true => CodexShaderCacheLevel,
+            false => ImpactLevel.None,
+            null => null,
+        };
 
         /// <summary>
         /// Background services: <see cref="BackgroundServicesLevel"/> when any service on PoolWatch's catalogue (one it can
-        /// turn off) is running, else None.
+        /// turn off) is running, None when none is, and no level when the running services could not be read (null).
         /// </summary>
-        /// <param name="catalogueServicesRunning">How many are running (the scan's count of running optional services).</param>
-        public static ImpactLevel BackgroundServices(int catalogueServicesRunning) => catalogueServicesRunning > 0 ? BackgroundServicesLevel : ImpactLevel.None;
+        /// <param name="catalogueServicesRunning">How many are running (the scan's count of running optional services); null when not read.</param>
+        public static ImpactLevel? BackgroundServices(int? catalogueServicesRunning) => catalogueServicesRunning switch
+        {
+            null => null,
+            > 0 => BackgroundServicesLevel,
+            _ => ImpactLevel.None,
+        };
 
         /// <summary>
-        /// The Windows token leak: <see cref="TokenLeakLevel"/> when PoolWatch's check found the leak on this Windows build,
-        /// else None. None covers a check that was unclear or found nothing as well: the caller says PoolWatch is still
-        /// watching for it.
+        /// The Windows token leak: <see cref="TokenLeakLevel"/> when PoolWatch's check found the leak on this Windows build;
+        /// None when it ran and found nothing, or when the leak cannot build up here (a build without it, or the guard on);
+        /// no level (null) when the check could not run (something already working around the leak stops it too) or gave
+        /// no clear answer. The caller says PoolWatch is still watching for it in either of the last two.
         /// </summary>
-        public static ImpactLevel TokenLeak(bool leakFound) => leakFound ? TokenLeakLevel : ImpactLevel.None;
+        public static ImpactLevel? TokenLeak(bool? leakFound) => leakFound switch
+        {
+            true => TokenLeakLevel,
+            false => ImpactLevel.None,
+            null => null,
+        };
     }
 
     /// <summary>
     /// The level to show: the measured one when there is one (<paramref name="measured"/> not null), else the one the facts
-    /// give. What PoolWatch measured on this PC wins over what its facts suggest, in either direction.
+    /// give (null when they could not tell). What PoolWatch measured on this PC wins over what its facts suggest, in either
+    /// direction, and over facts that could not tell.
     /// </summary>
-    public static ImpactLevel Combine(ImpactLevel facts, ImpactLevel? measured) => measured ?? facts;
+    public static ImpactLevel? Combine(ImpactLevel? facts, ImpactLevel? measured) => measured ?? facts;
 }

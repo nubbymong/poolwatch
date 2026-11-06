@@ -4,6 +4,7 @@ using System.Diagnostics.Eventing.Reader;
 using System.Runtime.InteropServices;
 using System.Text;
 using PoolWatch.Core.Filters;
+using PoolWatch.Core.Model;
 
 namespace PoolWatch.Collectors;
 
@@ -20,12 +21,20 @@ internal sealed class EventLogFeed : IDisposable
     private readonly Action<string> _log;
     private readonly string? _stateFile;
     private readonly Func<string, string> _checkWrite;
-    private DateTime _newest = DateTime.MinValue, _saved = DateTime.MinValue, _lastSave = DateTime.MinValue;
+    private DateTime _newest = DateTime.MinValue, _saved = DateTime.MinValue;
+    /// <summary>The state is saved at most every <see cref="SaveEvery"/>, on the clock that only goes forward.</summary>
+    private readonly Every _save = new(SaveEvery);
+    private readonly Func<Moment> _clock;
     private long _dropped;
 
+    /// <summary>How often, at most, the newest record time seen is saved.</summary>
+    internal static readonly TimeSpan SaveEvery = TimeSpan.FromMinutes(10);
+
     /// <param name="stateFile">Where the newest record time seen is kept, so a restart does not replay the same records.</param>
-    public EventLogFeed(Action<string> log, string? stateFile = null, Func<string, string>? checkWrite = null)
+    /// <param name="clock">Reads the two clocks (<see cref="Moment.Now"/>; a test gives its own).</param>
+    public EventLogFeed(Action<string> log, string? stateFile = null, Func<string, string>? checkWrite = null, Func<Moment>? clock = null)
     {
+        _clock = clock ?? Moment.Now;
         _log = log;
         _stateFile = stateFile;
         _checkWrite = checkWrite ?? (p => p);
@@ -50,7 +59,7 @@ internal sealed class EventLogFeed : IDisposable
     }
 
     /// <summary>
-    /// The newest record time the last run saw, or null. C6: this runs in the Diagnostics constructor, so an unreadable state
+    /// The newest record time the last run saw, or null. This runs in the Diagnostics constructor, so an unreadable state
     /// file (locked, access denied, garbage) must never stop PoolWatch from starting: logged, and the history since boot is
     /// read instead.
     /// </summary>
@@ -108,11 +117,15 @@ internal sealed class EventLogFeed : IDisposable
         return new LogEvent((r.TimeCreated ?? DateTime.Now).ToUniversalTime(), channel, r.ProviderName ?? "", r.Id, message, props);
     }
 
-    /// <summary>Drops records beyond <see cref="MaxQueued"/> (the sampler stalled): memory stays bounded.</summary>
-    private void Enqueue(LogEvent e)
+    /// <summary>
+    /// Queues a record with its time read onto the clock that only goes forward as it arrives (<see cref="LogEvent.Ms"/>), so
+    /// the timeline times it on that, whatever the system clock does before the sampler drains it. Drops records beyond
+    /// <see cref="MaxQueued"/> (the sampler stalled): memory stays bounded.
+    /// </summary>
+    internal void Enqueue(LogEvent e)
     {
         if (_queue.Count >= MaxQueued) { Interlocked.Increment(ref _dropped); return; }
-        _queue.Enqueue(e);
+        _queue.Enqueue(e with { Ms = _clock().MsOf(e.TimeUtc) });
     }
 
     /// <summary>Records received since the last call. Sampler thread.</summary>
@@ -124,13 +137,12 @@ internal sealed class EventLogFeed : IDisposable
             list.Add(e);
             if (e.TimeUtc > _newest) _newest = e.TimeUtc;
         }
-        if (_newest > _saved && DateTime.UtcNow - _lastSave >= TimeSpan.FromMinutes(10)) SaveState();
+        if (_newest > _saved && _save.Due(_clock())) SaveState();
         return list;
     }
 
     private void SaveState()
     {
-        _lastSave = DateTime.UtcNow;
         if (_stateFile is null || _newest <= _saved) return;
         try
         {

@@ -11,23 +11,78 @@ namespace PoolWatch.Core.Changes;
 public static class ChangeWords
 {
     public const string LogonTask = "PoolWatch starts when you sign in";
+    /// <summary>The line for PoolWatch's logon task when it is turned off.</summary>
+    public const string LogonTaskOff = "PoolWatch's sign-in task is there, turned off";
+    /// <summary>The line for PoolWatch's logon task when each of its sign-in triggers is turned off.</summary>
+    public const string LogonTaskTriggerOff = "PoolWatch's sign-in task is there, its sign-in trigger turned off";
+    /// <summary>The line for PoolWatch's logon task when it has no sign-in trigger.</summary>
+    public const string LogonTaskNoTrigger = "PoolWatch's sign-in task is there, without a sign-in trigger";
+    /// <summary>The line for PoolWatch's logon task when it runs without highest privileges, which PoolWatch needs at sign-in.</summary>
+    public const string LogonTaskNotHighest = "PoolWatch's sign-in task is there, without highest privileges";
+    /// <summary>The line for PoolWatch's logon task when it could not be read, or the check at start asks about it.</summary>
+    public const string LogonTaskThere = "PoolWatch's sign-in task is there";
     public const string TokenGuard = "The token-leak guard is on";
     /// <summary>
     /// The guard's note in the list: what you notice while it is on, that it is rare, how long it lasts, and what Turn off
-    /// does, with the caveat that the Windows setting it changed stays until you sign out.
+    /// does: it stops that and puts back the Windows setting the guard changed in this sign-in, when Windows allows it
+    /// (<see cref="TokenGuardOffRefused"/> says when it did not); a setting the guard found already changed stays until you
+    /// sign out (<see cref="TokenGuardOffNotOurs"/>).
     /// </summary>
     public const string TokenGuardNote = "While it is on, other programs can bring their windows to the front by themselves and take your keystrokes, " +
                                          "even while you type; most people find that rare and easy to live with. " +
-                                         "PoolWatch turns it on again each time it starts. Turn off stops that, but the Windows setting it changed stays until you sign out.";
-    /// <summary>What Turn off says when it turned the guard off.</summary>
-    public const string TokenGuardOff = "The token-leak guard is off. The Windows setting it changed stays until you sign out.";
-    /// <summary>What the guard's Turn off button does (its tooltip, shown while the guard is still on).</summary>
-    public const string TokenGuardTurnOffTip = "Turns the token-leak guard off. The Windows setting it changed stays until you sign out.";
+                                         "PoolWatch turns it on again each time it starts. Turn off stops that and puts back the Windows setting it changed " +
+                                         "when Windows allows it; one it found already changed stays until you sign out.";
+    /// <summary>What Turn off says when it turned the guard off and there was no Windows setting of the guard's to put back.</summary>
+    public const string TokenGuardOff = "The token-leak guard is off.";
+    /// <summary>What Turn off says when it turned the guard off and put the Windows setting it changed back.</summary>
+    public const string TokenGuardOffPutBack = "The token-leak guard is off, and the Windows setting it changed is back as it was.";
     /// <summary>
-    /// What stays for a while once the guard is turned off, in a sentence that stands on its own: the uninstaller shows it
-    /// under its list and after it put the guard back (<c>putBackCaveat</c> in the command line's list).
+    /// What Turn off says when Windows would not let PoolWatch put the setting back now (it is still 0): the setting then has
+    /// a row of its own in Active changes (<see cref="TokenGuardSettingStill"/>), whose Put back tries again.
+    /// </summary>
+    public const string TokenGuardOffRefused = "The token-leak guard is off. Windows did not let PoolWatch put its setting back just now: " +
+                                               "Active changes lists the setting, and its Put back tries again. Signing out also puts it back.";
+    /// <summary>
+    /// What Turn off says when Windows did not report the setting, so PoolWatch did not put anything back over it: nothing is
+    /// known to list in Active changes then (its row needs the setting reported as still changed).
+    /// </summary>
+    public const string TokenGuardOffUnreported = "The token-leak guard is off. Windows did not report its setting just now, so PoolWatch did not put it back; " +
+                                                  "signing out puts it back.";
+    /// <summary>
+    /// What the uninstaller says when it turned the guard off but did not put its Windows setting back (Windows refused, or
+    /// did not report it): no PoolWatch window lists the setting after an uninstall, so the step is not done, and says why.
+    /// </summary>
+    public const string TokenGuardSettingNotPutBack = "The guard is off, but Windows did not let PoolWatch put back the Windows setting it changed, or did not report it: " +
+                                                      "the setting stays as it is until you sign out.";
+    /// <summary>Whether what Turn off or Put back said (<see cref="TokenGuardOffRefused"/>, <see cref="TokenGuardOffUnreported"/>) means the setting was not put back.</summary>
+    public static bool SettingNotPutBack(string said) => said is TokenGuardOffRefused or TokenGuardOffUnreported;
+    /// <summary>
+    /// What Turn off says when the guard found the setting already changed (when PoolWatch started, or when the guard was
+    /// turned on later) and has no record of changing it itself in this sign-in: another program may have changed it, so
+    /// PoolWatch leaves it as it is.
+    /// </summary>
+    public const string TokenGuardOffNotOurs = "The token-leak guard is off. The guard found the Windows setting already changed and has no record of changing it itself, " +
+                                               "so PoolWatch leaves it as it is until you sign out.";
+    /// <summary>What the guard's Turn off button does (its tooltip, shown while the guard is still on).</summary>
+    public const string TokenGuardTurnOffTip = "Turns the token-leak guard off and puts back the Windows setting it changed when Windows allows it " +
+                                               "(one it found already changed stays until you sign out).";
+    /// <summary>What the Put back button of the guard's Windows setting does (its tooltip, shown once the guard is off).</summary>
+    public const string TokenGuardSettingPutBackTip = "Puts back the Windows setting the token-leak guard changed. The guard is already off.";
+    /// <summary>
+    /// What stays for a while once the uninstaller turned the guard off, in a sentence that stands on its own: the uninstaller
+    /// shows it under its list and after it put the guard back (<c>putBackCaveat</c> in the command line's list), only when
+    /// the guard found its setting already changed and has no record of changing it itself. The setting the guard changed is
+    /// put back by the uninstaller's step, as by Turn off, when Windows allows it; when it does not, that step is not done
+    /// and says so (<see cref="TokenGuardSettingNotPutBack"/>).
     /// </summary>
     public const string TokenGuardSettingStays = "The token-leak guard's Windows setting stays until you sign out.";
+    /// <summary>
+    /// The row of the guard's Windows setting while the guard is off but the setting it changed is still in effect: Windows
+    /// did not let PoolWatch put it back when the guard was turned off. Its Put back tries again.
+    /// </summary>
+    public const string TokenGuardSettingStill = "The token-leak guard's Windows setting is still changed";
+    public const string TokenGuardSettingStillNote = "The guard is off, but Windows did not let PoolWatch put this setting back when it was turned off. " +
+                                                     "Put back tries again; signing out also puts it back.";
     public const string AutoClearKeepsTaskNote = "Your RAMMap task is not put back by this; it has its own row in this list.";
     public const string NotListed = "Not listed: cache clears that already ran (the cache refills by itself) and programs you ended (start them again).";
 
@@ -42,10 +97,13 @@ public static class ChangeWords
     public const string PutAllBack = "Put all back";
     /// <summary>A row's button: a feature is turned off, the shortcut removed, anything else put back.</summary>
     public const string TurnOff = "Turn off", Remove = "Remove", PutBack = "Put back";
-    /// <summary>The window's footer when uninstalling puts every row back.</summary>
-    public const string UninstallPutsAllBack = "Uninstalling puts all of these back.";
+    /// <summary>
+    /// The window's footer when no row says the uninstaller leaves it: each is put back, or the uninstaller says why it
+    /// could not be.
+    /// </summary>
+    public const string UninstallPutsAllBack = "Uninstalling puts each of these back, or says why it could not.";
     /// <summary>The window's footer when a row says uninstalling does not put it back.</summary>
-    public const string UninstallPutsBackTheOthers = "Uninstalling puts all of these back, except where marked.";
+    public const string UninstallPutsBackTheOthers = "Uninstalling puts each of these back, except where marked, or says why it could not.";
     /// <summary>The line on a row PoolWatch cannot put back, before its note (which says why and what to do).</summary>
     public const string CannotPutBack = "PoolWatch cannot put this back.";
 
@@ -86,8 +144,25 @@ public static class ChangeWords
     /// say yes (the setup guide, Settings), so the row says what it does instead.
     /// </summary>
     public const string LogonTaskDetail = "PoolWatch starts in the tray each time you sign in";
+    /// <summary>The row's detail line for a logon task that is turned off.</summary>
+    public const string LogonTaskOffDetail = "It is turned off in Task Scheduler, so PoolWatch does not start when you sign in";
+    /// <summary>The row's detail line for a logon task whose sign-in triggers are turned off.</summary>
+    public const string LogonTaskTriggerOffDetail = "Its sign-in trigger is turned off in Task Scheduler, so PoolWatch does not start when you sign in";
+    /// <summary>The row's detail line for a logon task without a sign-in trigger.</summary>
+    public const string LogonTaskNoTriggerDetail = "It has no sign-in trigger in Task Scheduler, so PoolWatch does not start when you sign in";
+    /// <summary>The row's detail line for a logon task that runs without highest privileges where PoolWatch needs them.</summary>
+    public const string LogonTaskNotHighestDetail = "It runs without highest privileges, so it cannot start PoolWatch when you sign in";
+    /// <summary>The note for a logon task whose state is not known (<see cref="Setup.SignInState.NotKnown"/>).</summary>
+    public const string LogonTaskStateNotRead = "PoolWatch could not read all of this task's settings. Remove, Put all back and uninstalling delete it all the same.";
+    /// <summary>The detail line for a logon task that could not be read, or that the check at start asks about.</summary>
+    public const string LogonTaskThereDetail = "A scheduled task named PoolWatch, in Task Scheduler";
+    /// <summary>The note for a logon task that the check at start asks about.</summary>
+    public const string LogonTaskAskedAbout = "PoolWatch asks about this task at each start (its question and its log say why). Remove deletes it.";
+    /// <summary>What Remove says when it deleted a logon task that did not start PoolWatch when you signed in.</summary>
+    public const string LogonTaskRemoved = "PoolWatch's sign-in task is deleted.";
     public const string AutoClearTitle = "Empty the standby cache";
     public const string TokenGuardTitle = "Token-leak guard";
+    public const string TokenGuardSettingTitle = "Token-leak guard's Windows setting";
 
     /// <summary>
     /// The shortcut's row, in the approved design's words: PoolWatch makes one shortcut only, on your desktop, for the app
@@ -116,13 +191,27 @@ public static class ChangeWords
         };
     }
 
-    /// <summary>"service · was Automatic and running", "service · set to its Windows default · was Manual", with the profile that did it.</summary>
-    public static string ServiceDetail(ServiceStartType originalStart, bool originalRunning, bool turnedOff, string? via = null)
+    /// <summary>
+    /// "service · was Automatic and running", "service · set to its Windows default · was Manual", with the profile that did
+    /// it; "service · was Automatic, not known if it was running" for a record whose running state is not known
+    /// (<paramref name="runningNotKnown"/>: <see cref="ServiceChange.OriginalRunningNotKnown"/>), never the words of one
+    /// that was not running. An original of Disabled says nothing of whether it ran, running, not running or not known, in
+    /// either form ("service · was Disabled", "service · set to its Windows default · was Disabled"): Put back sets that
+    /// one back to Disabled and stops it if it runs, whatever it did before (<see cref="ServicePlan.StartAfterRestore"/> is
+    /// false for it), so "and running" would read as a service Put back starts again.
+    /// </summary>
+    public static string ServiceDetail(ServiceStartType originalStart, bool originalRunning, bool turnedOff, string? via = null, bool runningNotKnown = false)
     {
-        string was = $"was {StartWord(originalStart)}{(originalRunning ? " and running" : "")}";
+        string running = originalStart == ServiceStartType.Disabled ? ""
+            : runningNotKnown ? RunningNotKnownWords
+            : originalRunning ? " and running" : "";
+        string was = $"was {StartWord(originalStart)}{running}";
         string by = via is { } v && v.StartsWith("profile ", StringComparison.Ordinal) ? " · " + v : "";
         return turnedOff ? $"service · {was}{by}" : $"service · set to its Windows default · {was}";
     }
+
+    /// <summary>What a service row adds after its start type when PoolWatch does not know whether it was running.</summary>
+    public const string RunningNotKnownWords = ", not known if it was running";
 
     /// <summary>The start type as Windows' Services console names it.</summary>
     public static string StartWord(ServiceStartType start) => start switch

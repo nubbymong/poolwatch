@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
-    Review round 2 (item 12): tests for the app layer (src/PoolWatch), which PoolWatch.Tests (Core only) cannot reach.
+    Tests for the app layer (src/PoolWatch), which PoolWatch.Tests (Core only) cannot reach.
     Windows only (net10.0-windows, x64 like the app). Nothing here may change a real service, scheduled task, registry
     value or file ACL, or end a real process: the app code under test takes its system access through injected fakes,
     and file-system tests work only inside the test's own TEMP folders.
@@ -18,6 +18,9 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\PoolWatch\PoolWatch.csproj" />
+    <!-- The launcher, built normally (with the JIT) for its tests; it ships compiled ahead of time (ci.yml). Under an alias:
+         it compiles in the program's own Engine/AdminFolderRules.cs, whose types would otherwise be in both. -->
+    <ProjectReference Include="..\..\src\PoolWatch.Launcher\PoolWatch.Launcher.csproj" Aliases="launcher" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />

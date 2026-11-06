@@ -60,8 +60,8 @@ public sealed class UpdateCheckTests : IDisposable
     private static SemVersion V(string text) => SemVersion.TryParse(text, out var v) ? v : throw new ArgumentException(text);
 
     private UpdateCheck NewCheck(FakeGitHub github, string running = "1.0.0", Func<bool>? enabled = null, TimeSpan? timeout = null,
-        Func<DateTime>? clock = null) =>
-        new(_paths, _log, enabled ?? (() => true), () => github, V(running), clock ?? (() => _now), timeout ?? TimeSpan.FromSeconds(30));
+        Func<PoolWatch.Core.Model.Moment>? clock = null) =>
+        new(_paths, _log, enabled ?? (() => true), () => github, V(running), clock ?? (() => AppClocks.At(_now)), timeout ?? TimeSpan.FromSeconds(30));
 
     private string LogFile => Path.Combine(_root, "data", "test.log");
 
@@ -520,28 +520,39 @@ public sealed class UpdateCheckTests : IDisposable
     }
 
     [Fact]
-    public async Task TheDailyCheckFollowsTheClockAlsoOnAPCThatSleeps()
+    public async Task TheDailyCheckIsTimedOnTheForwardClockAlsoOnAPCThatSleeps()
     {
-        var now = _now;
+        // The day between checks is timed on the clock that only goes forward (it goes on while the PC sleeps): setting the
+        // system clock forward or back neither brings a check early nor holds one back.
+        var clocks = new TwoClocks();
         var github = new FakeGitHub(Body(Release("v1.0.0")));
-        using var check = NewCheck(github, clock: () => now);
+        using var check = NewCheck(github, clock: clocks.Now);
 
         await check.RunDue(); // never checked: due at once
         Assert.Single(github.Requests);
 
-        now = now.AddHours(23); // a wake before the day is out: nothing is sent
+        clocks.Pass(TimeSpan.FromHours(23)); // a wake before the day is out: nothing is sent
+        await check.RunDue();
+        Assert.Single(github.Requests);
+        clocks.SetSystemClock(TimeSpan.FromDays(2)); // the system clock set forward two days: still not due
         await check.RunDue();
         Assert.Single(github.Requests);
 
-        now = now.AddHours(2); // a day and an hour after the check, past any jitter
+        clocks.Pass(TimeSpan.FromHours(2)); // a day and an hour after the check, past any jitter
         await check.RunDue();
         Assert.Equal(2, github.Requests.Count);
 
-        now = now.AddDays(3); // three days asleep: checked at the first wake after it
+        clocks.Pass(TimeSpan.FromDays(3)); // three days asleep: checked at the first wake after it
         await check.RunDue();
         Assert.Equal(3, github.Requests.Count);
 
-        now = now.AddDays(-10); // the clock went back: due, not ten days away
+        clocks.SetSystemClock(-TimeSpan.FromDays(10)); // the system clock set back: not due again before its day
+        await check.RunDue();
+        Assert.Equal(3, github.Requests.Count);
+        clocks.Pass(TimeSpan.FromHours(23));
+        await check.RunDue();
+        Assert.Equal(3, github.Requests.Count);
+        clocks.Pass(TimeSpan.FromHours(2));
         await check.RunDue();
         Assert.Equal(4, github.Requests.Count);
     }
@@ -549,9 +560,9 @@ public sealed class UpdateCheckTests : IDisposable
     [Fact]
     public void TheTimerLooksAtTheClockAtLeastEverySixHours()
     {
-        Assert.Equal(TimeSpan.FromMinutes(5), UpdateCheck.NextWake(_now.AddMinutes(5), _now)); // due soon: wakes then
-        Assert.Equal(TimeSpan.FromHours(6), UpdateCheck.NextWake(_now.AddDays(1), _now));      // due in a day
-        Assert.Equal(TimeSpan.FromHours(6), UpdateCheck.NextWake(_now.AddHours(-1), _now));    // due, but the setting is off
+        Assert.Equal(TimeSpan.FromMinutes(5), UpdateCheck.NextWake(AppClocks.Ms(_now.AddMinutes(5)), AppClocks.Ms(_now))); // due soon: wakes then
+        Assert.Equal(TimeSpan.FromHours(6), UpdateCheck.NextWake(AppClocks.Ms(_now.AddDays(1)), AppClocks.Ms(_now)));      // due in a day
+        Assert.Equal(TimeSpan.FromHours(6), UpdateCheck.NextWake(AppClocks.Ms(_now.AddHours(-1)), AppClocks.Ms(_now)));    // due, but the setting is off
     }
 
     [Fact]

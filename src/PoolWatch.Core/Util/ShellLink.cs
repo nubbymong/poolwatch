@@ -5,7 +5,7 @@ namespace PoolWatch.Core.Util;
 
 /// <summary>
 /// Reads a shortcut (.lnk) file's target path and arguments from its bytes ([MS-SHLLINK]): the header's flags, the
-/// LinkInfo local base path + common path suffix, and the COMMAND_LINE_ARGUMENTS string. Part 3 review: the Startup-folder
+/// LinkInfo local base path + common path suffix, and the COMMAND_LINE_ARGUMENTS string. The Startup-folder
 /// shortcuts are files any user can write, and PoolWatch runs elevated, so they are not handed to the shell (WScript.Shell
 /// COM) but read by this small, bounded, pure parser. Anything malformed gives null; nothing is ever executed or resolved.
 /// A shortcut whose target is only in its shell item ID list (no LinkInfo) has no readable target here.

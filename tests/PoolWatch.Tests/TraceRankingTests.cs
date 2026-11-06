@@ -4,11 +4,12 @@ using PoolWatch.Core.Detection;
 using PoolWatch.Core.Identity;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
+using static PoolWatch.Tests.Clocks;
 
 namespace PoolWatch.Tests;
 
-/// <summary>Review Part 3, addendum 1: 2a (the ranking follows the trace), 2b (window by time), 2e (owners by identity), 2f (every alert).</summary>
-public class IncidentPartThreeTests
+/// <summary>The ranking follows the trace, the window is by time, owners are told apart by identity, and every alert is on the timeline.</summary>
+public class TraceRankingTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 6, 34, 0, DateTimeKind.Utc);
     private static readonly PoolTag Reff = PoolTag.Parse("Reff");
@@ -17,21 +18,22 @@ public class IncidentPartThreeTests
     private static Incident Inc(bool open = false, DateTime? end = null, DateTime? captureEnd = null) => new()
     {
         Id = "x", Dir = "x", Tag = Reff, Kind = IncidentKind.Growth, OnsetUtc = T0, LastRiseUtc = T0.AddMinutes(26), EndUtc = end,
+        OnsetMs = At(T0).Ms, LastRiseMs = At(T0.AddMinutes(26)).Ms, EndMs = Ms(end), ClosedMs = open ? null : At(T0.AddMinutes(40)).Ms,
         ClosedUtc = open ? null : T0.AddMinutes(40),
-        Capture = captureEnd is { } ce ? new CaptureResult { StartUtc = ce.AddMinutes(-1), EndUtc = ce } : null,
+        Capture = captureEnd is { } ce ? new CaptureResult().Recorded(At(ce.AddMinutes(-1)), At(ce)) : null,
     };
 
     [Fact]
     public void ProtectedWindowIsTheIncidentWindowPlusTenMinutes()
     {
         Assert.Equal((null, null), IncidentManager.ProtectWindow([]));
-        Assert.Equal((T0.AddMinutes(-10), (DateTime?)null), IncidentManager.ProtectWindow([Inc(open: true)]));             // open: up to now
-        Assert.Equal((T0.AddMinutes(-10), T0.AddMinutes(30)), IncidentManager.ProtectWindow([Inc(end: T0.AddMinutes(20))])); // growth end + 10
-        Assert.Equal((T0.AddMinutes(-10), T0.AddMinutes(36)), IncidentManager.ProtectWindow([Inc()]));                       // last rise + 10
+        Assert.Equal((Ms(T0.AddMinutes(-10)), (long?)null), IncidentManager.ProtectWindow([Inc(open: true)]));             // open: up to now
+        Assert.Equal((Ms(T0.AddMinutes(-10)), Ms(T0.AddMinutes(30))), IncidentManager.ProtectWindow([Inc(end: T0.AddMinutes(20))])); // growth end + 10
+        Assert.Equal((Ms(T0.AddMinutes(-10)), Ms(T0.AddMinutes(36))), IncidentManager.ProtectWindow([Inc()]));                       // last rise + 10
         // A trace taken after the growth ended (held back by the governor) is covered too.
-        Assert.Equal(T0.AddMinutes(65), IncidentManager.ProtectWindow([Inc(end: T0.AddMinutes(20), captureEnd: T0.AddMinutes(55))]).until);
+        Assert.Equal(Ms(T0.AddMinutes(65)), IncidentManager.ProtectWindow([Inc(end: T0.AddMinutes(20), captureEnd: T0.AddMinutes(55))]).untilMs);
         // Any open incident keeps the window open-ended.
-        Assert.Null(IncidentManager.ProtectWindow([Inc(end: T0.AddMinutes(20)), Inc(open: true)]).until);
+        Assert.Null(IncidentManager.ProtectWindow([Inc(end: T0.AddMinutes(20)), Inc(open: true)]).untilMs);
     }
 
     [Fact]
@@ -46,14 +48,14 @@ public class IncidentPartThreeTests
             new() { TimeUtc = T0.AddMinutes(90), Kind = LifecycleKind.Rollup, Owner = "x", OwnerKey = "claude:4000", Count = 999 }, // outside the window
             new() { TimeUtc = T0.AddMinutes(2), Kind = LifecycleKind.Rollup, Owner = "no key", Count = 5 },                     // no identity: not matched
         };
-        var starts = IncidentManager.StartsByOwner(events, T0, T0.AddMinutes(30));
+        var starts = IncidentManager.StartsByOwner(events.Select(e => e with { Ms = At(e.TimeUtc).Ms }), At(T0).Ms, At(T0.AddMinutes(30)).Ms);
         Assert.Equal(312, starts["claude:4000"]);
         Assert.Equal(112, starts["claude:5000"]);
         Assert.Equal(2, starts.Count);
     }
 
     private static Alert A(double minutes, long bytes, double window = 10) =>
-        new(AlertKind.Growth, Reff, T0.AddMinutes(minutes), $"grew > 200 MB in {window} min", bytes, TimeSpan.FromMinutes(window), T0);
+        new(AlertKind.Growth, Reff, T0.AddMinutes(minutes), $"grew > 200 MB in {window} min", bytes, TimeSpan.FromMinutes(window), T0) { Ms = At(T0.AddMinutes(minutes)).Ms, OnsetMs = At(T0).Ms };
 
     [Fact]
     public void EveryAlertIsOnTheTimeline()

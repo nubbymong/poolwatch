@@ -38,6 +38,8 @@ public sealed record Recommendation(RecommendationId Id, string Title, string Wh
 public sealed record RecommendationInputs
 {
     public required DateTime NowUtc { get; init; }
+    /// <summary>Now on the clock that only goes forward (<see cref="Model.Moment.Ms"/>): how long a hidden suggestion stays hidden is timed on it.</summary>
+    public required long NowMs { get; init; }
     public EnvironmentFacts? Facts { get; init; }
     public bool AutoClearOn { get; init; }
     public bool TokenGuardOn { get; init; }
@@ -67,6 +69,6 @@ public sealed record RecommendationInputs
     public bool ChatGptNamedInGrowth { get; init; }
     public bool ChatGptLauncherInstalled { get; init; }
     public bool ChatGptShortcutMade { get; init; }
-    /// <summary>Dismissed keys and when.</summary>
-    public IReadOnlyDictionary<string, DateTime> Dismissed { get; init; } = new Dictionary<string, DateTime>();
+    /// <summary>Dismissed keys and when each was hidden, on both clocks (its age is timed on <see cref="Model.Moment.Ms"/>).</summary>
+    public IReadOnlyDictionary<string, Model.Moment> Dismissed { get; init; } = new Dictionary<string, Model.Moment>();
 }

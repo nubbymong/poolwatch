@@ -246,6 +246,12 @@ internal sealed class LinkText : TextBlock
     protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
     protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
 
+    /// <summary>
+    /// Windows starts or stops showing focus cues (the first Tab, or Alt): a link that has the focus draws or drops its
+    /// rectangle now, as a LinkLabel does. It did so only at its next repaint.
+    /// </summary>
+    protected override void OnChangeUICues(UICuesEventArgs e) { base.OnChangeUICues(e); Invalidate(); }
+
     protected override void OnKeyDown(KeyEventArgs e)
     {
         base.OnKeyDown(e);
@@ -263,9 +269,18 @@ internal sealed class LinkText : TextBlock
             SetupIcons.Draw(e.Graphics, icon, new RectangleF(0, (Math.Min(area.Height, h) - h * 0.9f) / 2, h * 0.9f, h * 0.9f), ForeColor);
             area = Rectangle.FromLTRB(IconWidth, 0, area.Right, area.Bottom);
         }
-        using var font = _hover || Focused ? new Font(Font, FontStyle.Underline) : null;
+        var (underline, focusRect) = Cues(_hover, Focused, ShowFocusCues);
+        using var font = underline ? new Font(Font, FontStyle.Underline) : null;
         TextRenderer.DrawText(e.Graphics, Text, font ?? Font, area, ForeColor, Flags);
+        if (focusRect) ControlPaint.DrawFocusRectangle(e.Graphics, ClientRectangle);
     }
+
+    /// <summary>
+    /// How a link shows the pointer and the keyboard: underlined while the pointer is on it, and framed by the focus
+    /// rectangle while it has the focus and Windows shows focus cues (as a LinkLabel does). The focus underlined it, so
+    /// a window that opened with the focus on a link showed that one link underlined and the others not.
+    /// </summary>
+    internal static (bool Underline, bool FocusRect) Cues(bool hover, bool focused, bool showFocusCues) => (hover, focused && showFocusCues);
 }
 
 /// <summary>
@@ -496,14 +511,16 @@ internal sealed class StepRail : Control
 
 /// <summary>
 /// An impact row's level on the right: a three-segment meter in the level's own colour (yellow Low, orange Medium, red
-/// High; empty for None), the level in words beside it (None in green), and under it where setup fixes it or "Still
-/// watching". Meters and words line up in one column, whatever the level.
+/// High; empty for None and for Not known), the level in words beside it (None in green, Not known in the grey of "Still
+/// watching"), and under it where setup fixes it or "Still watching". Meters and words line up in one column, whatever
+/// the level.
 /// </summary>
 internal sealed class ImpactMeter : Control
 {
     private readonly SetupScale _s;
     private readonly SetupFonts _fonts;
     private ImpactLevel? _level;
+    private bool _notKnown;
     private string? _under;
 
     public ImpactMeter(SetupScale scale, SetupFonts fonts)
@@ -518,9 +535,18 @@ internal sealed class ImpactMeter : Control
         AccessibleRole = AccessibleRole.StaticText;
     }
 
+    /// <summary>The level shown; null while the check runs and for Not known.</summary>
     public ImpactLevel? Level => _level;
-    public string LevelText => _level is { } l ? SetupText.Level(l) : SetupText.CheckingNow;
+    /// <summary>PoolWatch could not tell: the meter reads "Not known", never a level.</summary>
+    public bool NotKnown => _notKnown;
+    public string LevelText => _notKnown ? SetupText.NotKnown : _level is { } l ? SetupText.Level(l) : SetupText.CheckingNow;
     public string? Under => _under;
+
+    /// <summary>The level word's colour: green for None, the grey of "Still watching" for Not known and while checking, else the text's.</summary>
+    internal Color WordColour => _notKnown || _level is null ? SetupTheme.Muted : _level == ImpactLevel.None ? SetupTheme.Good : SetupTheme.Ink;
+
+    /// <summary>The colour of the line under the level: grey for "Still watching" (None and Not known), else the accent of a step to go to.</summary>
+    internal Color UnderColour => _notKnown || _level is ImpactLevel.None ? SetupTheme.Muted : SetupTheme.Accent;
 
     /// <summary>
     /// The design's column, 160 pixels with the meter in its first 50 and the words after it, or wider when the longest
@@ -530,7 +556,8 @@ internal sealed class ImpactMeter : Control
     {
         get
         {
-            int words = new[] { ImpactLevel.High, ImpactLevel.Medium, ImpactLevel.Low, ImpactLevel.None }.Select(SetupText.Level).Append(SetupText.CheckingNow)
+            int words = new[] { ImpactLevel.High, ImpactLevel.Medium, ImpactLevel.Low, ImpactLevel.None }.Select(SetupText.Level)
+                .Append(SetupText.NotKnown).Append(SetupText.CheckingNow)
                 .Max(t => SetupDraw.Line(t, _fonts.Level).Width);
             int under = new[] { SetupText.FixIn(SetupStep.StandbyCache), SetupText.TrimInApp, SetupText.StillWatching }.Max(t => SetupDraw.Line(t, _fonts.Tiny).Width);
             return Math.Max(_s.S(160), _s.S(60) + Math.Max(words, under) + _s.S(2));
@@ -543,30 +570,36 @@ internal sealed class ImpactMeter : Control
     internal bool Fits => SetupDraw.Line(LevelText, _fonts.Level).Width <= Width - _s.S(60) + 1 &&
                           (_under is null || SetupDraw.Line(_under, _fonts.Tiny).Width <= Width - _s.S(60) + 1);
 
-    public void Show(ImpactLevel? level, string? under)
+    /// <param name="level">The level; null while the check runs and when <paramref name="notKnown"/>.</param>
+    /// <param name="notKnown">PoolWatch could not tell (<see cref="ImpactRow.NotKnown"/>).</param>
+    public void Show(ImpactLevel? level, string? under, bool notKnown)
     {
-        if (level == _level && under == _under) return;
+        if (notKnown) level = null;
+        if (level == _level && under == _under && notKnown == _notKnown) return;
         _level = level;
+        _notKnown = notKnown;
         _under = under;
         AccessibleName = under is null ? LevelText : $"{LevelText}. {under}";
         Height = Needed;
         Invalidate();
     }
 
-    protected override void OnPaint(PaintEventArgs e)
+    protected override void OnPaint(PaintEventArgs e) => Draw(e.Graphics);
+
+    /// <summary>Draws the meter, its word and the line under it (the tests draw it into a bitmap, with no window).</summary>
+    internal void Draw(Graphics g)
     {
-        var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         int line = _fonts.Body.Height, textX = _s.S(60);
         float seg = _s.K * 14, gap = _s.K * 3, h = _s.K * 5, y = (line - h) / 2f;
-        // The app's one impact meter, at setup's size (the same colours and bars as Pool causes and the cost meters).
+        // The app's one impact meter, at setup's size (the same colours and bars as Pool causes and the cost meters). With
+        // no level (Not known, or still checking) its three bars are the empty grey.
         ImpactScale.PaintMeter(g, new RectangleF(_s.K * 2, y, seg, h), gap, _level, SystemInformation.HighContrast);
-        var wordColour = _level switch { ImpactLevel.None => SetupTheme.Good, null => SetupTheme.Muted, _ => SetupTheme.Ink };
-        TextRenderer.DrawText(g, LevelText, _fonts.Level, new Rectangle(textX, 0, Width - textX, line), wordColour,
+        TextRenderer.DrawText(g, LevelText, _fonts.Level, new Rectangle(textX, 0, Width - textX, line), WordColour,
             TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
         if (_under is { } under)
             TextRenderer.DrawText(g, under, _fonts.Tiny, new Rectangle(textX, line + _s.S(3), Width - textX, _fonts.Tiny.Height),
-                _level is ImpactLevel.None ? SetupTheme.Muted : SetupTheme.Accent, TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+                UnderColour, TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
     }
 }
 
@@ -942,12 +975,22 @@ internal sealed class SetupButton : Button
 /// <summary>
 /// The Standby cache step's picture: the kernel pool (paged + non-paged) rising, and dropping each time the cache is
 /// emptied, on the hour or at the chosen size (an illustration, the design's shape; its labels carry the values chosen).
+/// The hour is counted from the last clear, as PoolWatch counts it (<c>ClearPolicy.Due</c>): from the left edge
+/// (PoolWatch's start), three clears an hour apart, evenly spaced, then the pool climbs fast to the limit and is emptied
+/// there, before the next hour. The hourly drops were drawn unevenly, an hour one way and less or more the next.
 /// </summary>
 internal sealed class CacheChart : Control
 {
-    private static readonly PointF[] Pool =
-        [new(20, 98), new(150, 76), new(150, 100), new(230, 80), new(262, 36), new(262, 99), new(370, 74), new(370, 100), new(470, 80), new(520, 58), new(520, 99), new(596, 88)];
-    private static readonly float[] Marks = [150, 262, 370, 520];
+    /// <summary>The picture's left edge (PoolWatch starts), an hour along its time axis, and the limit's height (design units).</summary>
+    internal const float Start = 20, Hour = 130, LimitY = 36;
+
+    /// <summary>Where the cache is emptied: the hourly clears, then the one at the chosen size.</summary>
+    internal static readonly IReadOnlyList<(float X, bool AtSize)> Drops =
+        [(Start + Hour, false), (Start + 2 * Hour, false), (Start + 3 * Hour, false), (500, true)];
+
+    /// <summary>The pool's line: a slow rise to each hourly clear, then a fast climb to the limit, emptied there.</summary>
+    internal static readonly PointF[] Pool =
+        [new(Start, 98), new(150, 76), new(150, 100), new(280, 78), new(280, 100), new(410, 80), new(410, 100), new(460, 84), new(500, LimitY), new(500, 99), new(596, 86)];
     private readonly SetupScale _s;
     private string _hours = "1 h", _gb = "8 GB";
 
@@ -991,15 +1034,15 @@ internal sealed class CacheChart : Control
         SetupDraw.AtBaseline(g, SetupText.ChartLegend, font, P(26, 14).X, P(26, 14).Y, SetupTheme.Ink);
         using (var dashed = new Pen(warn, 1.4f * k) { DashPattern = [4f / 1.4f, 3f / 1.4f] }) g.DrawLine(dashed, P(230, 10), P(246, 10));
         SetupDraw.AtBaseline(g, $"your limit, {_gb}", font, P(252, 14).X, P(252, 14).Y, SetupTheme.Muted);
-        using (var limit = new Pen(warn, 1.3f * k) { DashPattern = [5f / 1.3f, 4f / 1.3f] }) g.DrawLine(limit, P(20, 36), P(596, 36));
-        using (var axis = new Pen(SetupTheme.Line, k)) g.DrawLine(axis, P(20, 106), P(596, 106));
+        using (var limit = new Pen(warn, 1.3f * k) { DashPattern = [5f / 1.3f, 4f / 1.3f] }) g.DrawLine(limit, P(Start, LimitY), P(596, LimitY));
+        using (var axis = new Pen(SetupTheme.Line, k)) g.DrawLine(axis, P(Start, 106), P(596, 106));
         using (var line = new Pen(accent, 2.2f * k) { LineJoin = LineJoin.Round }) g.DrawLines(line, Pool.Select(p => P(p.X, p.Y)).ToArray());
         using var dot = new SolidBrush(SetupTheme.Icon);
-        for (int i = 0; i < Marks.Length; i++)
+        foreach (var (x, atSize) in Drops)
         {
-            var c = P(Marks[i], 106);
+            var c = P(x, 106);
             g.FillEllipse(dot, c.X - 3 * k, c.Y - 3 * k, 6 * k, 6 * k);
-            SetupDraw.AtBaseline(g, $"emptied, {(i == 1 ? _gb : _hours)}", small, c.X, P(0, 121).Y, SetupTheme.Muted, centred: true);
+            SetupDraw.AtBaseline(g, $"emptied, {(atSize ? _gb : _hours)}", small, c.X, P(0, 121).Y, SetupTheme.Muted, centred: true);
         }
     }
 

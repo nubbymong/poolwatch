@@ -31,11 +31,11 @@ public class AnalysisDetectTests
         {
             var t = T0.AddSeconds(10 * i);
             long reff = i <= 20 ? 600 * MB : 100 * MB;
-            h.Add(new Sample(t, new PoolTotals(1UL << 30, 1UL << 30, 0, 0), [new PoolTagEntry(PoolTag.Parse("Reff"), 0, 0, 0, 1, 0, (ulong)reff)], []));
+            h.Add(new Sample(t, new PoolTotals(1UL << 30, 1UL << 30, 0, 0), [new PoolTagEntry(PoolTag.Parse("Reff"), 0, 0, 0, 1, 0, (ulong)reff)], []) { TickMs = AppClocks.At(t).Ms });
             alerts.AddRange(AnalysisPipeline.Detect(seen, h, clears));
             holding.Add(seen.Holding);
             blindAlerts.AddRange(AnalysisPipeline.Detect(blind, h, null));
-            if (i == 20) clears.Add(new ClearRecord { TimeUtc = t.AddSeconds(1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default });
+            if (i == 20) clears.Add(new ClearRecord { TimeUtc = t.AddSeconds(1), TickMs = AppClocks.Ms(t.AddSeconds(1)), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = default });
         }
         Assert.Equal(Enumerable.Range(0, 60).Select(i => i is > 20 and < 33), holding); // until 2 minutes after the clear
         Assert.DoesNotContain(alerts, a => a.Kind == AlertKind.Release);

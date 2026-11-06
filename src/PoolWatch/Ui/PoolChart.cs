@@ -14,7 +14,10 @@ namespace PoolWatch.Ui;
 /// </summary>
 internal sealed record ChartClear(DateTime TimeUtc, long FreedBytes, bool Automatic, bool Light, bool Done)
 {
-    public static ChartClear Of(ClearRecord r) => new(r.TimeUtc, r.Freed, r.Automatic, r.Mode == ClearMode.LowPriority, r.Done);
+    /// <summary>When the clear ran on the clock that only goes forward (<see cref="ClearRecord.TickMs"/>): how long ago it was is timed on it.</summary>
+    public long TickMs { get; init; }
+
+    public static ChartClear Of(ClearRecord r) => new(r.TimeUtc, r.Freed, r.Automatic, r.Mode == ClearMode.LowPriority, r.Done) { TickMs = r.TickMs };
 
     /// <summary>Its mark's hover text: "Cache clear at 09:12 (automatic): freed 4.7 GB".</summary>
     public string Text => ClearScheduleText.Mark(TimeUtc, FreedBytes, Automatic, Light, Done);
@@ -416,6 +419,22 @@ internal sealed class PoolChart : Control
 
     /// <summary>How many points the chart holds (CI).</summary>
     internal int PointCount => _points.Count;
+
+    /// <summary>How many clear marks, RAM columns and pointing targets (marks and columns) the chart holds (tests).</summary>
+    internal (int Clears, int Ram, int Targets) Held => (_clears.Count, _ram.Count, _markHits.Count + _ramHits.Count);
+
+    /// <summary>
+    /// The window hid: the pool's points, the clears, the RAM columns and the pointing targets placed from them are
+    /// dropped. The window's first refresh after it shows again sets them anew (MainForm.ReleaseWhileHidden).
+    /// </summary>
+    public void Release()
+    {
+        _points = [];
+        _clears = [];
+        _ram = [];
+        _markHits = [];
+        _ramHits = [];
+    }
 
     /// <summary>The RAM columns drawn at the last paint (CI, tests).</summary>
     internal int RamColumnsDrawn { get; private set; }

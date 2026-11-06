@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using PoolWatch.Core;
+using PoolWatch.Core.Model;
 using PoolWatch.Core.Recommendations;
 using PoolWatch.Core.Setup;
 using PoolWatch.Core.TokenGuard;
@@ -20,11 +21,11 @@ public class RecommendationRulesTests
     {
         ScannedUtc = Now.AddHours(-1), WindowsName = "Windows 11 Pro", DisplayVersion = "25H2", Build = "26220.7344", Architecture = "x64",
         RamBytes = 32L << 30, Volumes = [new(@"C:\", "NTFS", false, null)], TokenLeak = TokenLeakStatus.NotAffected,
-        LogonTaskExists = true, InstalledInProgramFiles = true,
+        SignIn = SignInState.Starts, InstalledInProgramFiles = true,
     };
 
     private static RecommendationInputs Quiet(EnvironmentFacts? facts = null) =>
-        new() { NowUtc = Now, Facts = facts ?? Facts(), AutoClearOn = true, TokenGuardOn = false };
+        new() { NowUtc = Now, NowMs = Clocks.At(Now).Ms, Facts = facts ?? Facts(), AutoClearOn = true, TokenGuardOn = false };
 
     private static List<RecommendationId> Ids(RecommendationInputs i, int max = 100) => RecommendationRules.OnEvidence(i, max).Select(r => r.Id).ToList();
 
@@ -35,7 +36,7 @@ public class RecommendationRulesTests
     [Fact]
     public void TheGuideListsTheFirstRunRowsInOrder()
     {
-        var i = Quiet(Facts() with { LogonTaskExists = false, OptionalServicesRunning = 4, OptionalServiceExamples = ["Fax", "Xbox Live Auth Manager", "Retail Demo"] }) with { AutoClearOn = false };
+        var i = Quiet(Facts() with { SignIn = SignInState.NoTask, OptionalServicesRunning = 4, OptionalServiceExamples = ["Fax", "Xbox Live Auth Manager", "Retail Demo"] }) with { AutoClearOn = false };
         var rows = RecommendationRules.FirstRun(i);
         Assert.Equal([RecommendationId.StartAtSignIn, RecommendationId.HourlyCacheClear, RecommendationId.TokenLeakGuard, RecommendationId.ReviewServices],
             rows.Select(r => r.Id));
@@ -62,7 +63,7 @@ public class RecommendationRulesTests
     public void SignInIsDoneOrOnlyInfoWhenItCannotBeOffered()
     {
         Assert.Equal(RecommendationState.Done, Row(Quiet(), RecommendationId.StartAtSignIn).State);
-        var notInstalled = Row(Quiet(Facts() with { LogonTaskExists = false, InstalledInProgramFiles = false }), RecommendationId.StartAtSignIn);
+        var notInstalled = Row(Quiet(Facts() with { SignIn = SignInState.NoTask, InstalledInProgramFiles = false }), RecommendationId.StartAtSignIn);
         Assert.Equal(RecommendationState.Info, notInstalled.State);
         Assert.Equal("", notInstalled.Button);
         Assert.Contains("installer", notInstalled.Why);
@@ -155,8 +156,50 @@ public class RecommendationRulesTests
     [Fact]
     public void SignInOnlyWhenInstalled()
     {
-        Assert.Equal([RecommendationId.StartAtSignIn], Ids(Quiet(Facts() with { LogonTaskExists = false })));
-        Assert.Empty(Ids(Quiet(Facts() with { LogonTaskExists = false, InstalledInProgramFiles = false })));
+        Assert.Equal([RecommendationId.StartAtSignIn], Ids(Quiet(Facts() with { SignIn = SignInState.NoTask })));
+        Assert.Empty(Ids(Quiet(Facts() with { SignIn = SignInState.NoTask, InstalledInProgramFiles = false })));
+    }
+
+    /// <summary>
+    /// A logon task that a switch of its own keeps from running when you sign in (turned off, by you or kept so when
+    /// PoolWatch pointed it at its launcher; each of its sign-in triggers turned off; no sign-in trigger) is said as such,
+    /// saying which, never as "PoolWatch starts when you sign in", and is not offered again: setting it up again is left to
+    /// you, in Settings.
+    /// </summary>
+    [Theory]
+    [InlineData(SignInState.TaskOff, "Your PoolWatch logon task is turned off, so PoolWatch does not start when you sign in. To turn it on, " +
+                                     "tick Start PoolWatch when I sign in, in Settings.")]
+    [InlineData(SignInState.TriggerOff, "The sign-in trigger of your PoolWatch logon task is turned off, so PoolWatch does not start when you sign in. " +
+                                        "To turn it on, tick Start PoolWatch when I sign in, in Settings.")]
+    [InlineData(SignInState.NoTrigger, "Your PoolWatch logon task has no sign-in trigger, so PoolWatch does not start when you sign in. To have it " +
+                                       "start then, tick Start PoolWatch when I sign in, in Settings.")]
+    public void ALogonTaskKeptOffIsSaidAsSuchAndNotOfferedAgain(SignInState state, string said)
+    {
+        var off = Quiet(Facts() with { SignIn = state });
+        var row = Row(off, RecommendationId.StartAtSignIn);
+        Assert.Equal(RecommendationState.Info, row.State);
+        Assert.Equal(said, row.Why);
+        Assert.Empty(Ids(off));
+    }
+
+    /// <summary>
+    /// A logon task that is there but does not start PoolWatch for another reason (no highest privileges where they are
+    /// needed), or may not (not read; asked about at each start), is offered: the offer says why, and that Turn on
+    /// replaces it.
+    /// </summary>
+    [Theory]
+    [InlineData(SignInState.NotHighest, "Your PoolWatch logon task runs without highest privileges, so it cannot start PoolWatch.")]
+    [InlineData(SignInState.NotKnown, "PoolWatch could not read all of its logon task's settings.")]
+    [InlineData(SignInState.NotSafe, "PoolWatch asks about its logon task at each start; its question says why.")]
+    public void ALogonTaskThereForAnotherReasonIsOfferedSayingTurnOnReplacesIt(SignInState state, string why)
+    {
+        var there = Quiet(Facts() with { SignIn = state });
+        var row = Row(there, RecommendationId.StartAtSignIn);
+        Assert.Equal((RecommendationState.Offer, "Turn on"), (row.State, row.Button));
+        Assert.Equal(why + " Turn on replaces it with one that starts PoolWatch when you sign in.", row.Why);
+        Assert.Equal([RecommendationId.StartAtSignIn], Ids(there));
+        Assert.Equal("So it watches from the moment you sign in, without asking for permission each time.",
+            Row(Quiet(Facts() with { SignIn = SignInState.NoTask }), RecommendationId.StartAtSignIn).Why);
     }
 
     [Fact]
@@ -171,9 +214,9 @@ public class RecommendationRulesTests
         Assert.StartsWith("Kernel pool grew 2.1 GB", r.Why);
 
         // Hiding it hides that incident only.
-        var hidden = i with { Dismissed = new Dictionary<string, DateTime> { [r.Key] = Now.AddDays(-1), ["ReportIncident:another"] = Now } };
+        var hidden = i with { Dismissed = new Dictionary<string, Moment> { [r.Key] = Clocks.At(Now.AddDays(-1)), ["ReportIncident:another"] = Clocks.At(Now) } };
         Assert.Empty(Ids(hidden));
-        Assert.Single(Ids(i with { Dismissed = new Dictionary<string, DateTime> { ["ReportIncident:another"] = Now } }));
+        Assert.Single(Ids(i with { Dismissed = new Dictionary<string, Moment> { ["ReportIncident:another"] = Clocks.At(Now) } }));
     }
 
     [Fact]
@@ -191,6 +234,35 @@ public class RecommendationRulesTests
         Volumes = [new(@"C:\", "NTFS", false, null), new(@"E:\", "ReFS", true, trusted)],
         DefenderRealTimeOn = realTime, DefenderPerformanceModeOn = performanceMode,
     };
+
+    /// <summary>
+    /// A ReFS drive whose Dev Drive state Windows did not give (null) is never counted as a Dev Drive: the Defender advice is
+    /// not offered for it, whatever the evidence, the "Your PC" lines do not name it a Dev Drive, and neither do the
+    /// incident report's System section and its bug report's Environment. The same drive that Windows says is a Dev Drive
+    /// is, in each.
+    /// </summary>
+    [Fact]
+    public void AVolumeNotKnownToBeADevDriveIsNeverCountedAsOne()
+    {
+        var unknown = Facts() with
+        {
+            Volumes = [new(@"C:\", "NTFS", false, null), new(@"E:\", "ReFS", null, null)], DefenderRealTimeOn = true, DefenderPerformanceModeOn = false,
+            AiTools = [],
+        };
+        var known = unknown with { Volumes = [new(@"C:\", "NTFS", false, null), new(@"E:\", "ReFS", true, null)] };
+        RecommendationInputs Busy(EnvironmentFacts f) => Quiet(f) with { FileSystemMetadataGrewLast24h = true, DefenderCoresAvg30Min = 0.5 };
+        Assert.DoesNotContain(RecommendationId.DefenderDevDrive, Ids(Busy(unknown)));
+        Assert.Contains(RecommendationId.DefenderDevDrive, Ids(Busy(known)));
+        Assert.DoesNotContain(unknown.PlainLines(), l => l.Contains("Dev Drive", StringComparison.Ordinal));
+        Assert.Contains("Dev Drive: E: (ReFS)", known.PlainLines());
+
+        var notSaid = new VolumeInfo(@"E:\", "ReFS", "", null, "Fixed");
+        var said = notSaid with { IsDevDrive = true };
+        Assert.Equal(@"- Volume E:\ ReFS Fixed", PoolWatch.Core.Incidents.IncidentWriter.SystemVolume(notSaid));
+        Assert.Equal(@"- Volume E:\ ReFS (Dev Drive) Fixed", PoolWatch.Core.Incidents.IncidentWriter.SystemVolume(said));
+        Assert.Equal(@"- E:\ ReFS", PoolWatch.Core.Incidents.IncidentWriter.EnvironmentVolume(notSaid));
+        Assert.Equal(@"- E:\ ReFS Dev Drive", PoolWatch.Core.Incidents.IncidentWriter.EnvironmentVolume(said));
+    }
 
     [Fact]
     public void DefenderAdviceOnlyWithADevDriveDefenderSlowsAndEvidence()
@@ -240,7 +312,7 @@ public class RecommendationRulesTests
     /// <summary>Every suggestion at once: each rule's evidence is there.</summary>
     private static RecommendationInputs Everything() => Quiet(DevDrive(trusted: false) with
     {
-        TokenLeak = TokenLeakStatus.NeedsTest, LogonTaskExists = false, ChatGptInstalled = true,
+        TokenLeak = TokenLeakStatus.NeedsTest, SignIn = SignInState.NoTask, ChatGptInstalled = true,
     }) with
     {
         AutoClearOn = false, TokenSpawnLast24h = true, FileSystemMetadataGrewLast24h = true, CostlyOptionalServices = ["Fax"],
@@ -262,12 +334,27 @@ public class RecommendationRulesTests
     [Fact]
     public void AHiddenSuggestionStaysHiddenForThirtyDays()
     {
-        var hidden = Everything() with { Dismissed = new Dictionary<string, DateTime> { ["TokenLeakGuard"] = Now.AddDays(-29) } };
+        var hidden = Everything() with { Dismissed = new Dictionary<string, Moment> { ["TokenLeakGuard"] = Clocks.At(Now.AddDays(-29)) } };
         Assert.Equal([RecommendationId.HourlyCacheClear, RecommendationId.CheckTokenLeak, RecommendationId.StartAtSignIn], Ids(hidden, 3));
-        var back = Everything() with { Dismissed = new Dictionary<string, DateTime> { ["TokenLeakGuard"] = Now.AddDays(-31) } };
+        var back = Everything() with { Dismissed = new Dictionary<string, Moment> { ["TokenLeakGuard"] = Clocks.At(Now.AddDays(-31)) } };
         Assert.Equal(RecommendationId.TokenLeakGuard, RecommendationRules.OnEvidence(back)[0].Id);
-        Assert.True(RecommendationRules.Hidden(hidden.Dismissed, "TokenLeakGuard", Now));
-        Assert.False(RecommendationRules.Hidden(hidden.Dismissed, "TokenLeakGuard", Now.AddDays(2)));
+        Assert.True(RecommendationRules.Hidden(hidden.Dismissed, "TokenLeakGuard", Clocks.At(Now).Ms));
+        Assert.False(RecommendationRules.Hidden(hidden.Dismissed, "TokenLeakGuard", Clocks.At(Now.AddDays(2)).Ms));
+    }
+
+    [Fact]
+    public void AHiddenSuggestionsThirtyDaysAreTimedOnTheForwardClock()
+    {
+        // Hidden at the forward clock's 0, the system clock at Now. 29 days on by the forward clock, with the system clock
+        // set forward 40 days more, it is still hidden; 31 days on, with the clock set back 40 days, it is offered again.
+        var hiddenAt = new Dictionary<string, Moment> { ["TokenLeakGuard"] = new(Now, 0) };
+        static long Days(int d) => d * 86_400_000L;
+        var ahead = Everything() with { Dismissed = hiddenAt, NowUtc = Now.AddDays(69), NowMs = Days(29) };
+        Assert.DoesNotContain(RecommendationId.TokenLeakGuard, Ids(ahead));
+        Assert.DoesNotContain(RecommendationRules.Current(ahead), r => r.Id == RecommendationId.TokenLeakGuard);
+        var back = Everything() with { Dismissed = hiddenAt, NowUtc = Now.AddDays(-9), NowMs = Days(31) };
+        Assert.Equal(RecommendationId.TokenLeakGuard, RecommendationRules.OnEvidence(back)[0].Id);
+        Assert.Equal(RecommendationId.TokenLeakGuard, RecommendationRules.Current(back)[0].Id);
     }
 
     // ------------------------------------------------------------------ plain words
@@ -286,11 +373,17 @@ public class RecommendationRulesTests
         foreach (var status in Enum.GetValues<TokenLeakStatus>())
             foreach (var r in RecommendationRules.FirstRun(Quiet(Facts() with
                      {
-                         TokenLeak = status, OptionalServicesRunning = 1, OptionalServiceExamples = [long1, long1], LogonTaskExists = status == TokenLeakStatus.Clean,
+                         TokenLeak = status, OptionalServicesRunning = 1, OptionalServiceExamples = [long1, long1], SignIn = status == TokenLeakStatus.Clean ? SignInState.Starts : SignInState.NoTask,
                          InstalledInProgramFiles = status != TokenLeakStatus.Unknown, OwnClearTasks = status == TokenLeakStatus.Leaks ? ["t"] : [],
                      }) with { AutoClearOn = status == TokenLeakStatus.NotAffected, TokenGuardOn = status == TokenLeakStatus.WorkedAroundAlready })) yield return r;
         foreach (var verdict in Enum.GetValues<LeakVerdict>())
             foreach (var r in RecommendationRules.FirstRun(Quiet(Facts() with { TokenLeak = TokenLeakStatus.NeedsTest }) with { LeakTestNow = verdict })) yield return r;
+        foreach (var state in Enum.GetValues<SignInState>())
+            foreach (bool installed in new[] { true, false })
+            {
+                var i = Quiet(Facts() with { SignIn = state, InstalledInProgramFiles = installed });
+                foreach (var r in RecommendationRules.FirstRun(i).Concat(RecommendationRules.OnEvidence(i, max: 100))) yield return r;
+            }
     }
 
     /// <summary>A camelCase word ("autoClear"), a setting-like name ("AutoClearEnabled"), the CI check of the UI test.</summary>
@@ -338,7 +431,7 @@ public class RecommendationRulesTests
         // Your own clear task is setup's to replace: then no hourly clear is offered either (the two never both run).
         Assert.Empty(RecommendationRules.Current(Quiet(Facts() with { OwnClearTasks = [@"\Empty standby"] }) with { AutoClearOn = false }));
         // A hidden one stays hidden for 30 days here too.
-        var hidden = Everything() with { Dismissed = new Dictionary<string, DateTime> { ["TokenLeakGuard"] = Now.AddDays(-1) } };
+        var hidden = Everything() with { Dismissed = new Dictionary<string, Moment> { ["TokenLeakGuard"] = Clocks.At(Now.AddDays(-1)) } };
         Assert.Equal([RecommendationId.HourlyCacheClear, RecommendationId.ReportIncident], RecommendationRules.Current(hidden).Select(r => r.Id));
     }
 

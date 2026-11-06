@@ -22,7 +22,7 @@ public sealed record ProcessSample
     public long OtherTransferCount { get; init; }
     public long KernelTime { get; init; }
     public long UserTime { get; init; }
-    /// <summary>All page faults the process has taken (soft and hard; cumulative, 32-bit). Addendum 4.</summary>
+    /// <summary>All page faults the process has taken (soft and hard; cumulative, 32-bit).</summary>
     public uint PageFaultCount { get; init; }
 
     public ProcessKey Key => new(Pid, CreateTime);

@@ -38,6 +38,9 @@ public readonly struct ProcessPoints
 /// </summary>
 public sealed record TypedHandles(DateTime TimeUtc, IReadOnlyDictionary<ProcessKey, Dictionary<string, int>> ByProcess)
 {
+    /// <summary>When the scan was taken on the clock that only goes forward (its tick's <see cref="Model.Sample.TickMs"/>): how long it is kept is timed on it.</summary>
+    public required long Ms { get; init; }
+
     /// <summary>Handles of <paramref name="type"/> held by the process; "*" counts all types.</summary>
     public int Count(ProcessKey key, string type)
     {
@@ -54,7 +57,10 @@ public sealed record TypedHandles(DateTime TimeUtc, IReadOnlyDictionary<ProcessK
 /// </summary>
 public sealed class MinutePoint
 {
+    /// <summary>When the minute began, as a time of day (shown, and what the since-boot report's hours are told by).</summary>
     public DateTime TimeUtc { get; init; }
+    /// <summary>When the minute began on the clock that only goes forward: the minutes are cut on it, and how long they are kept is timed on it.</summary>
+    public long Ms { get; init; }
     public PoolTotals Totals { get; init; }
     public SystemCounters System { get; init; }
     public required PoolTag[] Tags { get; init; }
@@ -66,7 +72,11 @@ public sealed class MinutePoint
 /// <summary>
 /// In-memory history. Raw samples (tag usage in KB per tag index, per-process counters) are kept for
 /// <see cref="RawSpan"/> (capped by sample count); one-minute averages of significant tags are kept for
-/// <see cref="MinuteSpan"/> so the since-boot / 24-hour views work without re-reading disk.
+/// <see cref="MinuteSpan"/> so the since-boot / 24-hour views work without re-reading disk. Each sample keeps both its
+/// times: <see cref="Times"/> to show and write, and <see cref="Ms"/> on the clock that only goes forward
+/// (<see cref="Model.Sample.TickMs"/>), on which how long the samples, minutes and handle scans are kept, where a minute
+/// begins, and the windows read by <see cref="IndexAtOrAfterMs"/> are timed, so a system clock set back or forward moves
+/// none of them.
 /// Not thread-safe: the sampler thread writes; readers take <see cref="SyncRoot"/>.
 /// </summary>
 public sealed class History
@@ -80,6 +90,7 @@ public sealed class History
     private readonly Dictionary<PoolTag, int> _tagIndex = new();
     private readonly List<PoolTag> _tags = new();
     private readonly List<DateTime> _times = new();
+    private readonly List<long> _ms = new();
     private readonly List<PoolTotals> _totals = new();
     private readonly List<SystemCounters> _system = new();
     /// <summary>
@@ -108,7 +119,9 @@ public sealed class History
     private readonly Dictionary<ProcessKey, ProcTrack> _procs = new();
     private readonly List<TypedHandles> _handles = new();
     private readonly List<MinutePoint> _minutes = new();
-    private DateTime _minuteStart = DateTime.MinValue;
+    /// <summary>The minute being filled: when it began on the forward clock (null before the first sample) and as a time of day.</summary>
+    private long? _minuteStartMs;
+    private DateTime _minuteStartUtc;
     private int _minuteFromIndex;
 
     private sealed class ProcTrack
@@ -132,7 +145,10 @@ public sealed class History
 
     public DateTime FirstTime { get; private set; } = DateTime.MinValue;
     public int Count => _times.Count;
+    /// <summary>Each raw sample's time of day (<see cref="Model.Sample.TimeUtc"/>), to show and write.</summary>
     public IReadOnlyList<DateTime> Times => _times;
+    /// <summary>Each raw sample's time on the clock that only goes forward (<see cref="Model.Sample.TickMs"/>), on which windows are timed.</summary>
+    public IReadOnlyList<long> Ms => _ms;
     public IReadOnlyList<PoolTotals> Totals => _totals;
     public IReadOnlyList<SystemCounters> System => _system;
     public IReadOnlyList<PoolTag> KnownTags => _tags;
@@ -162,6 +178,7 @@ public sealed class History
         }
         long seq = _firstSeq + _times.Count;
         _times.Add(s.TimeUtc);
+        _ms.Add(s.TickMs);
         _totals.Add(s.Totals);
         _system.Add(s.System);
         _tagRows.Add(row);
@@ -177,21 +194,37 @@ public sealed class History
             track.Points.Add(new ProcPoint(p.HandleCount, p.ReadOperationCount, p.WriteOperationCount, p.OtherOperationCount,
                 (long)p.QuotaPagedPoolUsage, (long)p.QuotaNonPagedPoolUsage));
         }
-        RollMinute(s.TimeUtc);
-        Trim(s.TimeUtc);
+        RollMinute(s);
+        Trim(s.TickMs);
     }
 
     public void AddHandles(TypedHandles h)
     {
         _handles.Add(h);
-        var cutoff = h.TimeUtc - RawSpan;
+        long cutoff = h.Ms - (long)RawSpan.TotalMilliseconds;
         int drop = 0;
-        while (drop < _handles.Count - 1 && _handles[drop].TimeUtc < cutoff) drop++;
+        while (drop < _handles.Count - 1 && _handles[drop].Ms < cutoff) drop++;
         if (drop > 0) _handles.RemoveRange(0, drop);
         if (_handles.Count > 200) _handles.RemoveRange(0, _handles.Count - 200);
     }
 
-    /// <summary>Index of the first raw sample at or after <paramref name="t"/>.</summary>
+    /// <summary>
+    /// Index of the first raw sample at or after <paramref name="ms"/> on the clock that only goes forward (<see cref="Ms"/>):
+    /// a window that ends at a sample and is timed on the forward clock starts here.
+    /// </summary>
+    public int IndexAtOrAfterMs(long ms)
+    {
+        int lo = 0, hi = _ms.Count;
+        while (lo < hi) { int mid = (lo + hi) / 2; if (_ms[mid] < ms) lo = mid + 1; else hi = mid; }
+        return lo;
+    }
+
+    /// <summary>
+    /// Index of the first raw sample at or after <paramref name="t"/> by the samples' times of day (<see cref="Times"/>): for
+    /// the graph's shown window, or a window given only as times of day (a test's). The times are in order only while the
+    /// system clock was not set back among them; every window PoolWatch times from a sample is found on the forward clock
+    /// (<see cref="IndexAtOrAfterMs"/>).
+    /// </summary>
     public int IndexAtOrAfter(DateTime t)
     {
         int lo = 0, hi = _times.Count;
@@ -240,7 +273,7 @@ public sealed class History
         var a = TagCountsAt(tag, from);
         var b = TagCountsAt(tag, to);
         if (a == (0u, 0u) || b == (0u, 0u)) return new TagRates(0, 0, AllocShape.Idle);
-        return LeakShapes.Rates(a, b, (_times[to] - _times[from]).TotalMinutes);
+        return LeakShapes.Rates(a, b, (_ms[to] - _ms[from]) / 60_000.0); // the minutes between them on the forward clock
     }
 
     public (long paged, long nonPaged) TagAt(PoolTag tag, int index)
@@ -275,21 +308,30 @@ public sealed class History
         return _procs.Where(kv => kv.Value.LastSeq >= seq).Select(kv => kv.Key).ToList();
     }
 
-    /// <summary>The most recent handle scan at or before <paramref name="t"/>, else the earliest one.</summary>
-    public TypedHandles? HandlesAtOrBefore(DateTime t)
+    /// <summary>
+    /// The most recent handle scan at or before <paramref name="ms"/> on the clock that only goes forward (each scan's
+    /// <see cref="TypedHandles.Ms"/>), else the earliest one.
+    /// </summary>
+    public TypedHandles? HandlesAtOrBeforeMs(long ms)
     {
         TypedHandles? best = null;
-        foreach (var h in _handles) { if (h.TimeUtc <= t) best = h; else break; }
+        foreach (var h in _handles) { if (h.Ms <= ms) best = h; else break; }
         return best ?? (_handles.Count > 0 ? _handles[0] : null);
     }
 
     public TypedHandles? LatestHandles => _handles.Count > 0 ? _handles[^1] : null;
 
-    private void RollMinute(DateTime now)
+    /// <summary>
+    /// Starts a new minute when the sample is in a later one, closing the one before. The minutes are cut on the forward clock
+    /// (whole minutes of <see cref="Model.Sample.TickMs"/>); each keeps the time of day it began at, by the sample that
+    /// began it, and the minutes are kept for <see cref="MinuteSpan"/> on the forward clock.
+    /// </summary>
+    private void RollMinute(Model.Sample s)
     {
-        var minute = new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerMinute, DateTimeKind.Utc);
-        if (_minuteStart == DateTime.MinValue) { _minuteStart = minute; _minuteFromIndex = _times.Count - 1; return; }
-        if (minute == _minuteStart) return;
+        long minuteMs = s.TickMs - (s.TickMs % 60_000 + 60_000) % 60_000;
+        var minuteUtc = s.TimeUtc.AddMilliseconds(minuteMs - s.TickMs);
+        if (_minuteStartMs is not { } startMs) { (_minuteStartMs, _minuteStartUtc, _minuteFromIndex) = (minuteMs, minuteUtc, _times.Count - 1); return; }
+        if (minuteMs == startMs) return;
         // Close the previous minute: samples [_minuteFromIndex, Count-1).
         int from = Math.Max(0, _minuteFromIndex), to = _times.Count - 1;
         if (to > from)
@@ -322,27 +364,28 @@ public sealed class History
             }
             _minutes.Add(new MinutePoint
             {
-                TimeUtc = _minuteStart, Totals = _totals[to - 1], System = _system[to - 1], Tags = tags.ToArray(), TagBytes = bytes.ToArray(),
+                TimeUtc = _minuteStartUtc, Ms = startMs, Totals = _totals[to - 1], System = _system[to - 1], Tags = tags.ToArray(), TagBytes = bytes.ToArray(),
                 Processes = keys.ToArray(), ProcessOps = ops.ToArray(),
             });
-            var cutoff = now - MinuteSpan;
+            long cutoff = s.TickMs - (long)MinuteSpan.TotalMilliseconds;
             int drop = 0;
-            while (drop < _minutes.Count && _minutes[drop].TimeUtc < cutoff) drop++;
+            while (drop < _minutes.Count && _minutes[drop].Ms < cutoff) drop++;
             if (drop > 0) _minutes.RemoveRange(0, drop);
         }
-        _minuteStart = minute;
-        _minuteFromIndex = _times.Count - 1;
+        (_minuteStartMs, _minuteStartUtc, _minuteFromIndex) = (minuteMs, minuteUtc, _times.Count - 1);
     }
 
-    private void Trim(DateTime now)
+    /// <summary>Drops the raw samples older than <see cref="RawSpan"/> on the forward clock (and beyond <see cref="MaxRawSamples"/>), in batches.</summary>
+    private void Trim(long nowMs)
     {
-        var cutoff = now - RawSpan;
+        long cutoff = nowMs - (long)RawSpan.TotalMilliseconds;
         int drop = 0;
-        while (drop < _times.Count - 1 && (_times[drop] < cutoff || _times.Count - drop > MaxRawSamples)) drop++;
+        while (drop < _times.Count - 1 && (_ms[drop] < cutoff || _times.Count - drop > MaxRawSamples)) drop++;
         if (drop == 0) return;
         if (drop < 32 && _times.Count - MaxRawSamples < 32) return; // trim in batches of 32
 
         _times.RemoveRange(0, drop);
+        _ms.RemoveRange(0, drop);
         _totals.RemoveRange(0, drop);
         _system.RemoveRange(0, drop);
         _tagRows.RemoveRange(0, drop);

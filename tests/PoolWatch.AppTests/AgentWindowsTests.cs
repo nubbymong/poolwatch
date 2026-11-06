@@ -89,11 +89,12 @@ internal sealed class AgentFakeServices : IServiceBackend
 
     public bool InsiderEnrolled() => Insider;
 
-    public (string? error, NotDone? notStopped) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
+    public (string? error, NotDone? notStopped, bool? wasRunning) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
     {
         Calls.Add("apply " + op.Option.Service.Name);
+        bool? was = ServicePlan.WasRunning(Live[op.Option.Service.Name]); // what the change saw
         Live[op.Option.Service.Name] = Live[op.Option.Service.Name] with { StartType = op.NewStart, Running = false };
-        return (null, null);
+        return (null, null, was);
     }
 
     public (string? error, NotDone? notDone) Restore(ServiceChange change, IReadOnlySet<string> allowed, bool insiderEnrolled)
@@ -191,6 +192,9 @@ internal sealed class AgentPc : IDisposable
 /// </summary>
 public sealed class AgentWindowsTests : IDisposable
 {
+    /// <summary>What Turn off says when the services cannot be read (the read failed as the fake's <c>Fail</c> says).</summary>
+    private const string Unread = "PoolWatch could not read the services: The service control manager is not available.";
+
     private readonly AgentPc _pc = new();
     private readonly FakeAgentFiles _files = new();
 
@@ -390,9 +394,10 @@ public sealed class AgentWindowsTests : IDisposable
     }
 
     /// <summary>
-    /// Windows does not stop a service while one that depends on it runs, so the row of a running service that running
-    /// services depend on does not say it is stopped: it says when it is, and that else it stops when Windows restarts. A
-    /// dependent that is stopped is not named; a review read from a file (Load) knows the services too.
+    /// Windows does not stop a service while one that depends on it has not stopped (here: runs; a paused one or one on its
+    /// way is the next test's), so the row of a running service that running services depend on does not say it is
+    /// stopped: it says when it is, and that else it stops when Windows restarts. A dependent that is stopped is not
+    /// named; a review read from a file (Load) knows the services too.
     /// </summary>
     [Fact]
     public void AReviewRowSaysWhenARunningServiceThatDependsOnTheOneItStopsKeepsItRunning()
@@ -590,8 +595,8 @@ public sealed class AgentWindowsTests : IDisposable
 
         Assert.Equal(1, _pc.Backend.Reads);
         Assert.Empty(_pc.Backend.Calls);
-        Assert.Equal([(AgentApply.ServicesFailed, "The service control manager is not available."), ("Example Deck", null), ("Example Power Notice", null)], results);
-        Assert.Equal("The service control manager is not available.\nExample Deck, Example Power Notice: done\n\n" +
+        Assert.Equal([(AgentApply.ServicesFailed, Unread), ("Example Deck", null), ("Example Power Notice", null)], results);
+        Assert.Equal(Unread + "\nExample Deck, Example Power Notice: done\n\n" +
                      "Active changes lists each change, with a way to put it back.", AgentReview.ResultText(results));
     }
 
@@ -645,9 +650,9 @@ public sealed class AgentWindowsTests : IDisposable
         // Nothing is changed for either service, and the message says which service each reason is about.
         Assert.Equal(3, _pc.Backend.Reads);
         Assert.Empty(_pc.Backend.Calls);
-        Assert.Equal([("MapsBroker", "The service control manager is not available."), ("ExampleVendorSvc", "'ExampleVendorSvc' is not an installed service on this PC"),
+        Assert.Equal([("MapsBroker", Unread), ("ExampleVendorSvc", "'ExampleVendorSvc' is not an installed service on this PC"),
             ("Example Deck", null), ("Example Power Notice", null)], results);
-        Assert.Equal("MapsBroker: The service control manager is not available.\nExampleVendorSvc: 'ExampleVendorSvc' is not an installed service on this PC\n" +
+        Assert.Equal("MapsBroker: " + Unread + "\nExampleVendorSvc: 'ExampleVendorSvc' is not an installed service on this PC\n" +
                      "Example Deck, Example Power Notice: done\n\nActive changes lists each change, with a way to put it back.", AgentReview.ResultText(results));
     }
 
@@ -670,7 +675,7 @@ public sealed class AgentWindowsTests : IDisposable
     [Fact]
     public void TheMessageAfterApplyNeverCountsAServiceWhoseStartTypeWasSetAsNotChanged()
     {
-        static string NotStopped(string dependent) => ServicePlan.NotStoppedText(ServiceStartType.Disabled, ServiceControl.Answered(1051, lookedAgain: false).Why!, [dependent]);
+        static string NotStopped(string dependent) => ServicePlan.NotStoppedText(ServiceStartType.Disabled, ServiceControl.Answered(1051, lookedAgain: false).Why!, [new(dependent, ServiceRunState.Running)]);
         var results = Enumerable.Range(0, AgentReview.MaxReasons).Select(i => ($"Vendor{i:00}Svc", (string?)$"'Vendor{i:00}Svc' is not an installed service on this PC")).ToList();
         results.Add(("MapsBroker", NotStopped("AcmeMaps"))); // the eleventh reason
         results.Add(("SysMain", NotStopped("AcmeSync")));

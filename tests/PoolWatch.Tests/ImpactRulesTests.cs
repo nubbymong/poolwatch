@@ -160,14 +160,41 @@ public class ImpactRulesTests
         Assert.Equal(ImpactLevel.None, ImpactRules.FromFacts.RefsMetadata(refsOrDevDrivePresent: false));
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(null)]
-    public void DefenderScanningIsNoneWhenRealTimeProtectionIsOffOrNotKnown(bool? realTimeOn)
+    /// <summary>
+    /// Each rule gives no level (null: setup's "Not known") when what it needs could not be read, never None: None says
+    /// PoolWatch looked and found nothing, which it did not.
+    /// </summary>
+    [Fact]
+    public void ARuleWhoseValueCouldNotBeReadGivesNoLevelNeverNone()
     {
-        Assert.Equal(ImpactLevel.None, ImpactRules.FromFacts.DefenderScanning(realTimeOn, performanceModeOn: false, [false]));
-        Assert.Equal(ImpactLevel.None, ImpactRules.FromFacts.DefenderScanning(realTimeOn, performanceModeOn: null, []));
+        Assert.Null(ImpactRules.FromFacts.RefsMetadata(refsOrDevDrivePresent: null));            // the drives were not read
+        Assert.Null(ImpactRules.FromFacts.CodexShaderCache(chatGptDesktopInstalled: null));      // the installed apps were not read
+        Assert.Null(ImpactRules.FromFacts.BackgroundServices(catalogueServicesRunning: null));   // the running services were not read
+        Assert.Null(ImpactRules.FromFacts.TokenLeak(leakFound: null));                           // the check could not run, or was unclear
     }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, null)]
+    public void DefenderScanningIsNoneWhenRealTimeProtectionIsOff(bool? performanceModeOn, bool? trusted)
+    {
+        Assert.Equal(ImpactLevel.None, ImpactRules.FromFacts.DefenderScanning(false, performanceModeOn, [trusted]));
+        Assert.Equal(ImpactLevel.None, ImpactRules.FromFacts.DefenderScanning(false, performanceModeOn, []));
+        Assert.Equal(ImpactLevel.None, ImpactRules.FromFacts.DefenderScanning(false, performanceModeOn, null)); // off: the drives do not matter
+    }
+
+    /// <summary>Real-time protection that could not be read (another antivirus, for example): not known, whatever the drives.</summary>
+    [Fact]
+    public void DefenderScanningIsNotKnownWhenRealTimeProtectionCouldNotBeRead()
+    {
+        Assert.Null(ImpactRules.FromFacts.DefenderScanning(null, performanceModeOn: false, [false]));
+        Assert.Null(ImpactRules.FromFacts.DefenderScanning(null, performanceModeOn: null, []));
+        Assert.Null(ImpactRules.FromFacts.DefenderScanning(null, performanceModeOn: true, [true]));
+    }
+
+    [Fact]
+    public void DefenderScanningWithRealTimeProtectionIsNotKnownWhenTheDrivesCouldNotBeRead() =>
+        Assert.Null(ImpactRules.FromFacts.DefenderScanning(true, performanceModeOn: true, devDrivesTrusted: null));
 
     [Fact]
     public void DefenderScanningWithRealTimeProtectionAndNoDevDriveIsTheNoDevDriveLevel()
@@ -187,15 +214,27 @@ public class ImpactRulesTests
         Assert.Equal(ImpactRules.DefenderDevDriveLevel, ImpactRules.FromFacts.DefenderScanning(true, performanceModeOn, [trusted]));
     }
 
+    [Fact]
+    public void ADevDriveThatPerformanceModeCoversIsNone()
+    {
+        Assert.False(ImpactRules.FromFacts.ScannedFirst(performanceModeOn: true, trusted: true));
+        Assert.Equal(ImpactLevel.None, ImpactRules.FromFacts.DefenderScanning(true, performanceModeOn: true, [true]));
+        Assert.Equal(ImpactLevel.None, ImpactRules.FromFacts.DefenderScanning(true, performanceModeOn: true, [true, true]));
+    }
+
+    /// <summary>
+    /// With Dev Drives and none scanned first, whether performance mode covers them needs performance mode and each
+    /// drive's trust: either one not read leaves it not known, never None.
+    /// </summary>
     [Theory]
-    [InlineData(true, true)]    // performance mode on a trusted Dev Drive
-    [InlineData(true, null)]    // trust not known: not counted, as the Defender advice reads it
+    [InlineData(true, null)]    // trust not known: not counted as scanned first, as the Defender advice reads it, nor as covered
     [InlineData(null, true)]    // performance mode not known
     [InlineData(null, null)]
-    public void ADevDriveWithPerformanceModeOrUnknownsIsNone(bool? performanceModeOn, bool? trusted)
+    public void ADevDriveWhoseCoverCouldNotBeReadIsNotKnown(bool? performanceModeOn, bool? trusted)
     {
         Assert.False(ImpactRules.FromFacts.ScannedFirst(performanceModeOn, trusted));
-        Assert.Equal(ImpactLevel.None, ImpactRules.FromFacts.DefenderScanning(true, performanceModeOn, [trusted]));
+        Assert.Null(ImpactRules.FromFacts.DefenderScanning(true, performanceModeOn, [trusted]));
+        Assert.Null(ImpactRules.FromFacts.DefenderScanning(true, performanceModeOn, [true, trusted])); // one covered drive is not enough
     }
 
     [Fact]
@@ -224,7 +263,8 @@ public class ImpactRulesTests
     public void TheTokenLeakIsOnlyThereWhenTheCheckFoundIt()
     {
         Assert.Equal(ImpactRules.TokenLeakLevel, ImpactRules.FromFacts.TokenLeak(leakFound: true));
-        Assert.Equal(ImpactLevel.None, ImpactRules.FromFacts.TokenLeak(leakFound: false)); // unclear or clean: still watching
+        Assert.Equal(ImpactLevel.None, ImpactRules.FromFacts.TokenLeak(leakFound: false)); // checked and clean: still watching
+        Assert.Null(ImpactRules.FromFacts.TokenLeak(leakFound: null));                     // not checked or unclear: not known
     }
 
     [Theory]
@@ -233,7 +273,9 @@ public class ImpactRulesTests
     [InlineData(ImpactLevel.High, ImpactLevel.Low, ImpactLevel.Low)] // measured lower than the facts suggest
     [InlineData(ImpactLevel.None, ImpactLevel.High, ImpactLevel.High)]
     [InlineData(ImpactLevel.Medium, ImpactLevel.None, ImpactLevel.None)]
-    public void TheMeasuredLevelWinsWhenThereIsOne(ImpactLevel facts, ImpactLevel? measured, ImpactLevel shown) =>
+    [InlineData(null, ImpactLevel.Low, ImpactLevel.Low)]           // what was measured wins over facts that could not tell
+    [InlineData(null, null, null)]                                 // nothing measured, nothing known: still not known
+    public void TheMeasuredLevelWinsWhenThereIsOne(ImpactLevel? facts, ImpactLevel? measured, ImpactLevel? shown) =>
         Assert.Equal(shown, ImpactRules.Combine(facts, measured));
 
     [Fact]

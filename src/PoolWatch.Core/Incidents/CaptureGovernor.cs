@@ -41,7 +41,7 @@ public readonly record struct CaptureConditions(bool CaptureRunning, int Cores, 
 
 /// <summary>One request for a trace.</summary>
 /// <param name="TimeUtc">When it was asked for (wall clock): for the owner only (timeline, "held back from 11:20:05").</param>
-/// <param name="At">When it was asked for on the governor's monotonic clock: what every rule uses (C1 d, review round 2).</param>
+/// <param name="At">When it was asked for on the governor's monotonic clock: what every rule uses.</param>
 /// <param name="Why">For the log and the timeline ("incident 20261026-112000-Reff: 200 MB in 10 min").</param>
 public sealed record CaptureRequest(CaptureSource Source, DateTime TimeUtc, TimeSpan At, string Why)
 {
@@ -97,7 +97,7 @@ public sealed record CaptureDecision(CaptureVerdict Verdict, CaptureRequest Requ
 }
 
 /// <summary>
-/// C1 (review): the one gate for every confirmation trace. A busy many-core PC lagged while
+/// The one gate for every confirmation trace. A busy many-core PC lagged while
 /// traces ran back to back (a queue of alert captures, Capture now always adding a CPU trace, a 30 s CPU trace with stacks
 /// on every lag trip). Rules:
 /// <list type="bullet">
@@ -113,7 +113,7 @@ public sealed record CaptureDecision(CaptureVerdict Verdict, CaptureRequest Requ
 /// capture runs.</item>
 /// </list>
 /// Pure: the clock and the conditions are the caller's. Not thread-safe: the caller serialises (the history lock).
-/// C1 d (review round 2): the clock is monotonic (the app passes Environment.TickCount64), never the wall clock: an NTP
+/// The clock is monotonic (the app passes Environment.TickCount64), never the wall clock: an NTP
 /// step, a DST change or the owner setting the time must neither lift the hourly cap early nor hold a capture back for
 /// hours. Requests carry their monotonic time (<see cref="CaptureRequest.At"/>) for ordering and the lag trip's 15 min.
 /// </summary>
@@ -199,7 +199,7 @@ public sealed class CaptureGovernor
         return p.Source == r.Source && p.At == r.At && ReferenceEquals(p.Context, r.Context) ? null : p;
     }
 
-    /// <summary>The trace ended (recorded and parsed, or failed: C1 a, the caller calls this whatever happened).</summary>
+    /// <summary>The trace ended (recorded and parsed, or failed: the caller calls this whatever happened).</summary>
     public void Finished() => LastEnd = _clock();
 
     /// <summary>Why an automatic capture may not start now (cap, back-to-back, load, input); null when it may.</summary>

@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using PoolWatch.Core.Model;
 using PoolWatch.Core.Updates;
 
 namespace PoolWatch.Engine;
@@ -65,33 +66,34 @@ internal sealed class UpdateCheck : IDisposable
     private readonly Func<bool> _enabled;
     private readonly Func<HttpMessageHandler> _newHandler;
     private readonly SemVersion _running;
-    private readonly Func<DateTime> _utcNow;
+    /// <summary>Both clocks: a check is stamped with the time of day and scheduled on the clock that only goes forward.</summary>
+    private readonly Func<Moment> _clock;
     private readonly TimeSpan _timeout;
     private readonly CancellationTokenSource _stop = new();
     private readonly object _lock = new();
     private System.Threading.Timer? _timer;
     private bool _disposed;
-    /// <summary>When the next check is due, by the clock. Before <see cref="Start"/> it is due at once.</summary>
-    private DateTime _dueUtc;
+    /// <summary>When the next check is due, on the clock that only goes forward. Before <see cref="Start"/> it is due at once.</summary>
+    private long _dueMs = long.MinValue;
     /// <summary>The latest stable release GitHub reported; kept when a later check fails.</summary>
     private (SemVersion version, string page)? _latest;
     private bool _failureLogged;
 
     public UpdateCheck(AppPaths paths, Log log, Func<bool> enabled)
-        : this(paths, log, enabled, NewHandler, RunningVersion(), () => DateTime.UtcNow, DefaultTimeout) { }
+        : this(paths, log, enabled, NewHandler, RunningVersion(), Moment.Now, DefaultTimeout) { }
 
     /// <param name="enabled">The setting, read at each due time: while it is off nothing is sent.</param>
     /// <param name="newHandler">A new HTTP handler for each check, disposed after it. Tests pass a fake: no test reaches GitHub.</param>
     /// <param name="running">The version running (default: <see cref="RunningVersion"/>).</param>
     internal UpdateCheck(AppPaths paths, Log log, Func<bool> enabled, Func<HttpMessageHandler> newHandler, SemVersion running,
-        Func<DateTime> utcNow, TimeSpan timeout)
+        Func<Moment> clock, TimeSpan timeout)
     {
         _paths = paths;
         _log = log;
         _enabled = enabled;
         _newHandler = newHandler;
         _running = running;
-        _utcNow = utcNow;
+        _clock = clock;
         _timeout = timeout;
     }
 
@@ -137,11 +139,11 @@ internal sealed class UpdateCheck : IDisposable
     }
 
     /// <summary>
-    /// How long the timer waits before it looks at the clock again: until the check is due, but never longer than
-    /// <see cref="MaxWait"/>.
+    /// How long the timer waits before it looks at the clock again: until the check is due (both on the clock that only goes
+    /// forward), but never longer than <see cref="MaxWait"/>.
     /// </summary>
-    internal static TimeSpan NextWake(DateTime dueUtc, DateTime nowUtc) =>
-        dueUtc > nowUtc && dueUtc - nowUtc < MaxWait ? dueUtc - nowUtc : MaxWait;
+    internal static TimeSpan NextWake(long dueMs, long nowMs) =>
+        dueMs > nowMs && dueMs - nowMs < (long)MaxWait.TotalMilliseconds ? TimeSpan.FromMilliseconds(dueMs - nowMs) : MaxWait;
 
     /// <summary>Restores the saved answer and arms the first check. Only the first call does anything, and none after Dispose.</summary>
     public void Start()
@@ -150,32 +152,34 @@ internal sealed class UpdateCheck : IDisposable
         {
             if (_disposed || _timer is not null) return;
             var saved = Load();
-            var now = _utcNow();
-            _dueUtc = now + FirstDelay(saved?.CheckedUtc, now, Random.Shared.NextDouble());
-            _timer = new System.Threading.Timer(_ => _ = RunDue(), null, NextWake(_dueUtc, now), Timeout.InfiniteTimeSpan);
+            var now = _clock();
+            // The last check comes back from the file as a time of day, so how long ago it was is read on the system clock;
+            // the delay that gives is timed on the forward clock.
+            _dueMs = now.Ms + (long)FirstDelay(saved?.CheckedUtc, now.Utc, Random.Shared.NextDouble()).TotalMilliseconds;
+            _timer = new System.Threading.Timer(_ => _ = RunDue(), null, NextWake(_dueMs, now.Ms), Timeout.InfiniteTimeSpan);
         }
     }
 
     /// <summary>
-    /// The timer's work: when a check is due by the clock and the setting allows it, it checks and makes the next one due a
-    /// day later. While the setting is off nothing is sent and the check stays due, so turning it on takes effect at the
-    /// next wake. Then it arms the timer again.
+    /// The timer's work: when a check is due on the clock that only goes forward and the setting allows it, it checks and
+    /// makes the next one due a day later. While the setting is off nothing is sent and the check stays due, so turning it
+    /// on takes effect at the next wake. Then it arms the timer again.
     /// </summary>
     internal async Task RunDue()
     {
         try
         {
-            var now = _utcNow();
-            // Due once its time has passed, or when it is further away than a day can put it (the clock went back).
-            if ((now >= _dueUtc || _dueUtc - now > Interval + IntervalJitter) && _enabled())
+            var now = _clock();
+            // Due once its time has passed on the forward clock, whatever the system clock was set to meanwhile.
+            if (now.Ms >= _dueMs && _enabled())
             {
-                _dueUtc = now + Interval + IntervalJitter * Random.Shared.NextDouble();
+                _dueMs = now.Ms + (long)(Interval + IntervalJitter * Random.Shared.NextDouble()).TotalMilliseconds;
                 await CheckNow(_stop.Token);
             }
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested) { return; }
         catch (Exception ex) { LogFailure($"update check failed: {ex.GetType().Name}: {ex.Message}"); }
-        lock (_lock) if (!_disposed) _timer?.Change(NextWake(_dueUtc, _utcNow()), Timeout.InfiniteTimeSpan);
+        lock (_lock) if (!_disposed) _timer?.Change(NextWake(_dueMs, _clock().Ms), Timeout.InfiniteTimeSpan);
     }
 
     /// <summary>One check: asks GitHub, then updates <see cref="Available"/>, <see cref="LastResult"/> and the saved answer.</summary>
@@ -201,7 +205,7 @@ internal sealed class UpdateCheck : IDisposable
             Available = newer;
             outcome = newer is null ? UpdateOutcome.UpToDate : UpdateOutcome.Newer;
         }
-        var result = new UpdateResult(_utcNow(), outcome);
+        var result = new UpdateResult(_clock().Utc, outcome);
         LastResult = result;
         Save(result);
         if (found is not null)

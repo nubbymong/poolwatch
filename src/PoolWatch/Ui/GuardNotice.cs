@@ -4,14 +4,21 @@ namespace PoolWatch.Ui;
 
 /// <summary>
 /// The token-leak guard's notices: small non-modal windows at the bottom right of the screen, never a
-/// modal box. Clicking a button there makes PoolWatch the foreground program, which is what Windows needs before it
-/// accepts the ForegroundLockTimeout change. All calls marshal to the UI thread.
+/// modal box, shown only when the guard needs the user's click (the "NOT protected" notice and the click prompt; what
+/// needs no click goes to the log and the findings only), and only for the sign-in check and what the user clicked, never
+/// for the background recheck later in a sign-in (the tray icon shows that instead, <see cref="GuardTray"/>), and closed
+/// by the guard when it finds that nothing needs that click, the notice also as a click prompt opens, which asks for the
+/// same click (<see cref="Withdraw"/>). Clicking a
+/// button there makes PoolWatch the foreground program, which is what Windows needs before it accepts the
+/// ForegroundLockTimeout change. All calls marshal to the UI thread, in the order they were made, so a notice the guard
+/// takes back as a prompt opens is closed before that prompt is shown.
 /// </summary>
 internal sealed class GuardNotices : IGuardUi
 {
     private readonly SynchronizationContext _ui;
     private readonly Func<Task<bool>> _turnOn;
-    private Form? _outcome;
+    /// <summary>The open "NOT protected" notice and the open click prompt (each null once its window closed).</summary>
+    private Form? _notProtected, _prompt;
 
     /// <param name="turnOn">What "Turn on" in a "NOT protected" notice does (the guard's one-click path).</param>
     public GuardNotices(SynchronizationContext ui, Func<Task<bool>> turnOn)
@@ -20,12 +27,12 @@ internal sealed class GuardNotices : IGuardUi
         _turnOn = turnOn;
     }
 
-    public void ShowOutcome(string message, bool protectedNow) => _ui.Post(_ =>
+    public void ShowNotProtected(string message) => _ui.Post(_ =>
     {
-        _outcome?.Close(); // ONE outcome notice
-        _outcome = protectedNow
-            ? Notice(message, ("OK", null))
-            : Notice(message, ("Turn on", async f => { f.Close(); await _turnOn(); }), ("Not now", null));
+        _notProtected?.Close(); // ONE such notice
+        var notice = Notice(message, ("Turn on", async f => { f.Close(); await _turnOn(); }), ("Not now", null));
+        notice.FormClosed += (_, _) => { if (_notProtected == notice) _notProtected = null; };
+        _notProtected = notice;
     }, null);
 
     public Task<bool> AskForClick(string message)
@@ -33,12 +40,24 @@ internal sealed class GuardNotices : IGuardUi
         var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _ui.Post(_ =>
         {
-            var f = Notice(message, ("OK", f => { done.TrySetResult(true); f.Close(); return Task.CompletedTask; }),
-                                    ("Cancel", f => { done.TrySetResult(false); f.Close(); return Task.CompletedTask; }));
-            f.FormClosed += (_, _) => done.TrySetResult(false);
+            var prompt = Notice(message, ("OK", f => { done.TrySetResult(true); f.Close(); return Task.CompletedTask; }),
+                                         ("Cancel", f => { done.TrySetResult(false); f.Close(); return Task.CompletedTask; }));
+            prompt.FormClosed += (_, _) =>
+            {
+                done.TrySetResult(false);
+                if (_prompt == prompt) _prompt = null;
+            };
+            _prompt = prompt;
         }, null);
         return done.Task;
     }
+
+    /// <summary>Closes the open "NOT protected" notice and, when <paramref name="prompt"/>, the click prompt (it completes false).</summary>
+    public void Withdraw(bool prompt) => _ui.Post(_ =>
+    {
+        _notProtected?.Close();
+        if (prompt) _prompt?.Close();
+    }, null);
 
     /// <summary>A small top-most window with the text and buttons, shown; a null action just closes it.</summary>
     private static Form Notice(string text, params (string label, Func<Form, Task>? action)[] buttons)

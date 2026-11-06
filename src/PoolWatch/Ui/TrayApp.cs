@@ -8,8 +8,10 @@ using PoolWatch.Ui.Setup;
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// The tray app: an icon coloured by state (grey while starting, then green / amber / red) with the paged + non-paged
-/// totals in its tooltip, a balloon when an incident opens, and the main window on demand. Until the first setup is done,
+/// The tray app: an icon coloured by state (grey while starting, then green / amber / red; amber also while the token-leak
+/// guard says this sign-in is not protected, with a line that says so in the tooltip and at the top of the menu, and a
+/// click on the icon or on that menu line turns it on: <see cref="GuardTray"/>) with the paged + non-paged totals in its
+/// tooltip, a balloon when an incident opens, and the main window on demand. Until the first setup is done,
 /// setup is the way in: it opens by itself at every start, and anything that would show the main window brings setup
 /// instead (<see cref="FirstRunGate"/>). Its menu runs setup again and opens Active changes, says when a newer release is
 /// out (update notices, information only), and holds the tools that are not on the main window (DESIGN.md section 11):
@@ -47,12 +49,18 @@ internal sealed class TrayApp : ApplicationContext, IShell
     private UpdateRelease? _sampleUpdate;
     private bool _markOpen;
     private GuardNotices? _guardNotices;
+    /// <summary>The guard-notices mark of this app's session (<see cref="TokenLeakGuard.HoldGuardNoticesMark"/>), held from the first <see cref="StartTokenGuard"/> until this app exits.</summary>
+    private Mutex? _guardNoticesMark;
     private SetupWizardForm? _guide;
     /// <summary>Where each way into the app leads: setup until it was completed once (never in the CI UI test).</summary>
     private readonly FirstRunGate _gate;
     private ActiveChangesForm? _activeChanges;
     /// <summary>What a click on the balloon showing now opens (Active changes, or the token-leak guard where the window offers it), if anything.</summary>
     private readonly BalloonClick _balloonClick = new();
+    /// <summary>The token-leak guard in the tray while this sign-in is not protected: the amber dot, its line, and a click that turns it on.</summary>
+    private readonly GuardTray _guardTray;
+    /// <summary>Windows' setting-change message, passed to the token-leak guard (<see cref="TokenLeakGuard.SettingChanged"/>).</summary>
+    private readonly Microsoft.Win32.UserPreferenceChangedEventHandler _onSettingChange;
 
     /// <summary>The state the tray icon currently shows.</summary>
     public TrayState IconState => _state;
@@ -74,7 +82,14 @@ internal sealed class TrayApp : ApplicationContext, IShell
             _updates = new UpdateCheck(engine.Paths, engine.Log, () => live.Running.CheckForUpdates);
             _updates.Found += _ => _ui.Post(_ => _form?.ShowUpdate(UpdateToShow), null);
         }
+        var guard = analysis.Diagnostics.Guard;
+        _guardTray = new GuardTray(guard.NotProtectedNow, () => guard.TurnOnFromTray(_guardNotices), UpdateIcon);
         var menu = _menu;
+        // The token-leak guard's line, at the top only while this sign-in is not protected (GuardTray): a click turns it on.
+        var guardLine = new ToolStripMenuItem(GuardTray.Line, null, (_, _) => _ = _guardTray.Clicked()) { Visible = false };
+        var guardRule = new ToolStripSeparator { Visible = false };
+        menu.Items.Add(guardLine);
+        menu.Items.Add(guardRule);
         menu.Items.Add("Open PoolWatch", null, (_, _) => ShowWindow());
         menu.Items.Add(FirstRunGate.MenuItem, null, (_, _) => OpenGuide());
         menu.Items.Add("Active changes...", null, (_, _) => OpenActiveChanges());
@@ -114,6 +129,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         menu.Items.Add("About PoolWatch", null, (_, _) => _actions.About(null));
         menu.Opening += (_, _) =>
         {
+            guardLine.Visible = guardRule.Visible = _guardTray.NotProtected;
             bool active = _analysis.Diagnostics.AnyExperimentActive;
             _experimentItem.Text = active ? "Stop experiment" : "Experiment...";
             clearLag.Enabled = !active;
@@ -127,6 +143,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
         _icon = new NotifyIcon { ContextMenuStrip = menu, Visible = true, Text = "PoolWatch: starting", Icon = TrayIcons.Starting };
         _icon.DoubleClick += (_, _) => ShowWindow();
+        // A click on the icon itself turns the token-leak guard on while this sign-in is not protected (GuardTray); else nothing.
+        _icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) _ = _guardTray.Clicked(); };
         _icon.BalloonTipClicked += (_, _) => _balloonClick.Clicked();
         _icon.BalloonTipClosed += (_, _) => _balloonClick.Closed();
         // Raised on the sampler's thread under the history lock: the notice is worded here, from the incident as it is now,
@@ -143,8 +161,12 @@ internal sealed class TrayApp : ApplicationContext, IShell
         // Shutdown / logoff, and the installer's exit signal: exit cleanly so open incidents are closed and written.
         _onSessionEnding = (_, _) => ExitThread();
         Microsoft.Win32.SystemEvents.SessionEnding += _onSessionEnding;
+        // Windows' setting-change message (WM_SETTINGCHANGE), on the window SystemEvents keeps for this app: the token-leak
+        // guard looks at its setting then, so a set-back is kept with the program in front as PoolWatch saw it.
+        _onSettingChange = (_, _) => guard.SettingChanged();
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged += _onSettingChange;
         _exitSignal = ExitSignal.Listen(() => _ui.Post(_ => ExitThread(), null), engine.Log.Info);
-        // Tray refresh: one cheap state read every 10 s (no painting, no animation).
+        // Tray refresh every 10 s: the pool's state and the guard's setting, two cheap reads (no painting, no animation).
         _timer.Tick += (_, _) => UpdateIcon();
         _timer.Start();
         UpdateIcon();
@@ -189,6 +211,14 @@ internal sealed class TrayApp : ApplicationContext, IShell
         verdict == Core.TokenGuard.LeakVerdict.Leak && !guardOn ? TokenLeakFoundNotice : null;
 
     /// <summary>
+    /// The facts the tray's watch looks at: the last scan's; when there are none once setup was completed (after an
+    /// upgrade, an older PoolWatch's cache is not read), a scan of its own, so the watch does not wait for the window to be
+    /// shown. Before setup was completed, none (setup reads the PC itself).
+    /// </summary>
+    internal static async Task<Core.Setup.EnvironmentFacts?> FactsForWatch(bool setupCompleted, Engine.Setup.EnvironmentProbe probe) =>
+        probe.Last ?? (setupCompleted ? await probe.ScanAsync() : null);
+
+    /// <summary>
     /// The token-leak watch from the tray (<see cref="RecommendationActions.WatchTokenLeak"/>): a check it starts runs in
     /// the background and changes nothing; when it finds the leak, the tray says so and a click opens the window on the
     /// guard (<see cref="ShowTokenGuard"/>). Anything that goes wrong is logged, never shown.
@@ -197,7 +227,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
     {
         try
         {
-            if (!WatchFromTray(Setup.Store.GuideCompleted, Setup.Probe.Last?.TokenLeak)) return;
+            var facts = await FactsForWatch(Setup.Store.GuideCompleted, Setup.Probe);
+            if (!WatchFromTray(Setup.Store.GuideCompleted, facts?.TokenLeak)) return;
             if (Setup.Recommendations.WatchTokenLeak(Setup.Inputs()) is not { } check) return;
             await check;
             if (WatchNotice(Setup.Recommendations.LeakTestNow, _live.Running.TokenGuardEnabled) is { } notice) Balloon(notice, 10_000, ShowTokenGuard);
@@ -282,7 +313,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
     /// <summary>
     /// Setup, one at a time, in a window of its own. When it closes, <see cref="FirstRunGate.SetupClosed"/> decides what
     /// follows: finished ("Open PoolWatch", it has marked itself completed), the app takes its choice and opens;
-    /// cancelled (only possible once it was completed before), nothing more happens.
+    /// cancelled (a re-run closed, or a first run the owner closed after saying yes), nothing more happens: PoolWatch keeps
+    /// running in the tray, and while setup was never completed the next way into the window opens it again.
     /// </summary>
     private void ShowGuide()
     {
@@ -324,13 +356,17 @@ internal sealed class TrayApp : ApplicationContext, IShell
     public void ShowReport(string? incidentDir) => _actions.ReportIssue(MainWindowIfShown, incidentDir);
 
     /// <summary>
-    /// The token-leak guard's sign-in check now, with its notices (one set for the app): true when this sign-in is protected
-    /// (Windows' setting is on) or needs no protection, false when it could not be protected yet (its notice says what to do).
+    /// The token-leak guard's sign-in check now, with its notices (one set for the app; shown only when the guard needs the
+    /// user's click): true when this sign-in is protected (Windows' setting is on) or needs no protection, false when it
+    /// could not be protected yet (its notice says what to do). From the first such check until this app exits it holds the
+    /// guard-notices mark of its session, so a token-leak test helper left running in that session by a PoolWatch that was
+    /// stopped during its test takes its own "turn it on" prompt back: this guard's check asks for that click itself.
     /// </summary>
     public async Task<bool> StartTokenGuard()
     {
         var d = _analysis.Diagnostics;
         _guardNotices ??= new GuardNotices(_ui, () => d.Guard.TurnOnByOwner(_guardNotices!));
+        _guardNoticesMark ??= TokenLeakGuard.HoldGuardNoticesMark(TokenLeakGuard.GuardNoticesMutexName);
         await d.StartTokenGuard(_guardNotices);
         return !d.Guard.WorkaroundWanted || TokenGuardNative.GetForegroundLockTimeout() == 0;
     }
@@ -368,15 +404,20 @@ internal sealed class TrayApp : ApplicationContext, IShell
             ? $"Experiment: {m:0.#} min of lag measurements, then PoolWatch clears the standby cache and measures {m:0.#} min more." : "An experiment is already running.");
     }
 
-    /// <summary>The icon's colour once there is a reading (grey until the first sample), and the totals in its tooltip.</summary>
+    /// <summary>
+    /// The icon's colour once there is a reading (grey until the first sample), amber over green too while the token-leak
+    /// guard says this sign-in is not protected (<see cref="GuardTray"/>), and the totals in its tooltip, with the guard's
+    /// line while it is not protected.
+    /// </summary>
     internal void UpdateIcon()
     {
         var t = _engine.Latest?.Totals;
-        var state = UiData.State(_analysis);
+        bool guardNotProtected = _guardTray.NotProtected;
+        var state = GuardTray.State(UiData.State(_analysis), guardNotProtected);
         if (t is not null && state != _state) { _icon.Icon = TrayIcons.For(state); _state = state; }
         string text = t is { } x ? $"PoolWatch: paged {Fmt.Bytes((long)x.CommittedPaged)}, non-paged {Fmt.Bytes((long)x.CommittedNonPaged)}" : "PoolWatch: starting";
-        if (_analysis.Diagnostics.AnyExperimentActive) text += "\n" + _analysis.Diagnostics.ExperimentStatus().Replace("Experiment: ", "");
-        _icon.Text = text.Length > 127 ? text[..127] : text;
+        string? experiment = _analysis.Diagnostics.AnyExperimentActive ? _analysis.Diagnostics.ExperimentStatus().Replace("Experiment: ", "") : null;
+        _icon.Text = GuardTray.Tooltip(text, guardNotProtected, experiment);
     }
 
     /// <summary>
@@ -405,6 +446,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _analysis.Diagnostics.ExperimentStep -= _onExperiment;
         _hotkey.Dispose();
         Microsoft.Win32.SystemEvents.SessionEnding -= _onSessionEnding;
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged -= _onSettingChange;
         _timer.Stop();
         _timer.Dispose();
         _watchTimer.Stop();
@@ -413,6 +455,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _icon.Dispose();
         _menu.Dispose();
         _form?.Dispose();
+        _guardNoticesMark?.Dispose();
         base.ExitThreadCore();
     }
 }
@@ -421,8 +464,10 @@ internal sealed class TrayApp : ApplicationContext, IShell
 /// The first run, and where each way into the app leads. Until setup was completed once, it is the way in: it opens by
 /// itself at every start (also when started at sign-in), the main window stays hidden, and anything that would show it
 /// (Open PoolWatch, a double-click on the tray icon, a suggestion's way into the Advanced view) brings setup instead.
-/// Setup finished: the app takes its Simple or Advanced choice, the update check starts and the main window opens;
-/// cancelled (only a re-run can be), nothing happens. Never in the CI UI test, which opens the main window at once.
+/// Setup finished: the app takes its Simple or Advanced choice, the update check starts and the main window opens.
+/// Closed unfinished (a re-run closed, or a first run closed after a yes to its question): nothing happens, PoolWatch
+/// keeps running in the tray, and a first run opens again at the next way in and the next start. Never in the CI UI
+/// test, which opens the main window at once.
 /// Without a window: the tray app passes what each of those does, and the tests pass fakes.
 /// </summary>
 /// <param name="completed">Setup was completed once (read each time: finishing setup marks it).</param>
@@ -478,7 +523,7 @@ internal sealed class FirstRunGate(Func<bool> completed, bool smoke, Action open
     /// Setup closed. Finished: its Simple or Advanced choice is kept, the update check starts and the main window opens,
     /// switched to the view chosen now when it differs from the one it showed (an open main window shows the view chosen;
     /// one made now opens in it).
-    /// Cancelled: nothing.
+    /// Cancelled (a re-run closed, or a first run closed after a yes): nothing; PoolWatch keeps running in the tray.
     /// </summary>
     /// <param name="advancedBefore">The app showed its Advanced view when setup opened.</param>
     public void SetupClosed(bool finished, bool advanced, bool advancedBefore)
@@ -489,6 +534,62 @@ internal sealed class FirstRunGate(Func<bool> completed, bool smoke, Action open
         ShowWindow();
         if (advanced && !advancedBefore) switchToAdvanced(0);
         else if (!advanced && advancedBefore) switchToSimple();
+    }
+}
+
+/// <summary>
+/// What the tray shows of the token-leak guard while this sign-in is not protected (<paramref name="notProtected"/>: the
+/// guard's <see cref="TokenLeakGuard.NotProtectedNow"/>): the amber dot (over green; red stays red), <see cref="Line"/> in
+/// the icon's tooltip and at the top of its menu, and a click on that line or on the icon turns the workaround on
+/// (<paramref name="turnOn"/>: the guard's <see cref="TokenLeakGuard.TurnOnFromTray"/>, which tries at once, since the
+/// click is the user's on PoolWatch, and asks for its one click only if Windows still refuses). Once it is on again, the
+/// dot and the line go: at the next refresh of the icon, which a click asks for (<paramref name="refresh"/>) once its
+/// turn-on is done. The guard opens no window for this later in a sign-in; the tray is where it is shown.
+/// </summary>
+internal sealed class GuardTray(Func<bool> notProtected, Func<Task<bool>> turnOn, Action refresh)
+{
+    /// <summary>The line in the tooltip and at the top of the menu.</summary>
+    public const string Line = "Token-leak guard: not protected right now. Click to turn it on.";
+
+    /// <summary>The most a tray icon's tooltip shows (NotifyIcon.Text).</summary>
+    public const int MaxTooltip = 127;
+
+    private int _busy;
+
+    /// <summary>Whether the guard says this sign-in is not protected now (one read of its setting).</summary>
+    public bool NotProtected => notProtected();
+
+    /// <summary>The icon's state: the pool's (<paramref name="pool"/>), and amber over green while the guard is not protected.</summary>
+    public static TrayState State(TrayState pool, bool guardNotProtected) => guardNotProtected && pool == TrayState.Green ? TrayState.Amber : pool;
+
+    /// <summary>
+    /// The tooltip: <paramref name="totals"/>, then <see cref="Line"/> while the guard is not protected, then an
+    /// experiment's status; cut at <see cref="MaxTooltip"/>, so the guard's line, before the experiment's, is the last to go.
+    /// </summary>
+    public static string Tooltip(string totals, bool guardNotProtected, string? experiment)
+    {
+        string text = totals + (guardNotProtected ? "\n" + Line : "") + (experiment is null ? "" : "\n" + experiment);
+        return text.Length > MaxTooltip ? text[..MaxTooltip] : text;
+    }
+
+    /// <summary>
+    /// A click on the icon or on the line: while the guard is not protected, turns it on (one at a time: a click while one
+    /// is under way does nothing), then refreshes the icon; nothing otherwise. Never throws.
+    /// </summary>
+    public async Task Clicked()
+    {
+        if (Interlocked.Exchange(ref _busy, 1) != 0) return;
+        try
+        {
+            if (!notProtected()) return;
+            await turnOn();
+        }
+        catch { /* the guard logs its own failures */ }
+        finally
+        {
+            Volatile.Write(ref _busy, 0);
+            try { refresh(); } catch { }
+        }
     }
 }
 

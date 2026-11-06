@@ -26,7 +26,7 @@ public class HeaderTests
 
     private static ClearRecord Clear(DateTime at, long freed, string? error = null) => new()
     {
-        TimeUtc = at, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals((ulong)(10 * GB), 0, 0, 0),
+        TimeUtc = at, TickMs = AppClocks.Ms(at), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals((ulong)(10 * GB), 0, 0, 0),
         After = new PoolTotals((ulong)(10 * GB - freed), 0, 0, 0), Error = error,
     };
 
@@ -130,7 +130,7 @@ public class HeaderTests
         Assert.Equal("File system metadata (Reff, refs.sys) grew 700 MB in the last hour.",
             MainForm.HeaderNote(lead with { Cause = null }, null, PoolStatusKind.TagGrowing, TrayState.Green).Note);
         Assert.Equal(("Your PC is saturated; busiest: cl.exe.", HeaderTone.Watch), MainForm.HeaderNote(null, "cl.exe", PoolStatusKind.Steady, TrayState.Green));
-        // Amber and red, with nothing else to say: where to look, in the tray icon's colour.
+        // Amber and red, with nothing else to say: where to look, in that state's colour.
         Assert.Equal(HeaderTone.Risk, MainForm.HeaderNote(null, null, PoolStatusKind.Steady, TrayState.Red).Tone);
         Assert.EndsWith("Pool causes in the Advanced view has the details.", MainForm.HeaderNote(null, null, PoolStatusKind.Steady, TrayState.Amber).Note);
     }

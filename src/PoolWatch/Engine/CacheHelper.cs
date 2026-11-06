@@ -6,16 +6,16 @@ using PoolWatch.Native;
 namespace PoolWatch.Engine;
 
 /// <summary>
-/// "Clear cache" (addendum 2). The standby purge needs SeProfileSingleProcessPrivilege (administrators), and PoolWatch
-/// always runs elevated (its manifest asks for it), so it purges in-process: Clear cache now, the automatic rule and the
-/// "lag before / after a clear" experiment alike.
+/// "Clear cache". The standby purge needs SeProfileSingleProcessPrivilege (administrators), and PoolWatch
+/// always runs elevated (it starts as administrator through its launcher), so it purges in-process: Clear cache now, the
+/// automatic rule and the "lag before / after a clear" experiment alike.
 /// <para>
-/// S5 (review round 2, decision reversed): the SYSTEM-task route is removed. It existed for an unelevated PoolWatch, which
+/// The SYSTEM-task route is removed. It existed for an unelevated PoolWatch, which
 /// never runs: a one-time setup wrote a helper DLL into %ProgramFiles%\PoolWatch and registered two on-demand SYSTEM tasks
-/// in \PoolWatch\ that a named standard user could start. Both review rounds recommended removing it (less attack surface:
-/// a SYSTEM payload startable by a non-administrator, plus the setup that wrote it). Nothing creates those tasks any more;
+/// in \PoolWatch\ that a named standard user could start. It was removed for less attack surface:
+/// a SYSTEM payload startable by a non-administrator, plus the setup that wrote it. Nothing creates those tasks any more;
 /// <see cref="RemoveOldTasks"/> removes what a previous build installed: automatically on the first elevated start that finds
-/// it (review round 3, <see cref="OldTaskCleanup"/>), else <c>--remove-clear-cache</c> or the tray menu item that appears when
+/// it, else <c>--remove-clear-cache</c> or the tray menu item that appears when
 /// they are found.
 /// A clear task of your own (a task in the Task Scheduler root that runs Sysinternals RAMMap with one of its -E "empty"
 /// options as SYSTEM or with highest privileges, under any name: <see cref="IsOwnClearAction"/>) is shown, and removed only
@@ -83,7 +83,7 @@ internal static class CacheHelper
     public static readonly IReadOnlyList<string> OldTaskNames = [StandbyTask, LowPriorityTask];
 
     /// <summary>
-    /// Review round 3 (item 7): on an elevated start that finds an older build's two tasks, they are removed automatically
+    /// On an elevated start that finds an older build's two tasks, they are removed automatically
     /// (no longer used: the purge is in-process), with a line for the timeline; the tray menu item stays as the fallback.
     /// Null when there was nothing to do. <paramref name="remove"/> is <see cref="RemoveOldTasks"/> (a fake in tests).
     /// </summary>
@@ -450,7 +450,7 @@ internal sealed class ComScope : IDisposable
     }
 
     /// <summary>
-    /// C6 (review round 2): enumerates a COM collection and tracks every item AND the enumerator behind the
+    /// Enumerates a COM collection and tracks every item AND the enumerator behind the
     /// <c>foreach</c> (the collection's IEnumVARIANT, wrapped by the runtime), which a plain <c>foreach (dynamic x in c)</c>
     /// left to the finalizer.
     /// </summary>

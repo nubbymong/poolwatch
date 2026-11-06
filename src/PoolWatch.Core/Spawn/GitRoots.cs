@@ -91,7 +91,8 @@ public sealed class GitRootResolver
     private const int MaxDepth = 64, MaxCache = 4096;
     private readonly IFileProbe _probe;
     private readonly TimeSpan _cacheFor;
-    private readonly Dictionary<string, (string? root, DateTime until)> _cache = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Each directory looked at, with the root found from it and until when that holds (<see cref="Model.Moment.Ms"/>).</summary>
+    private readonly Dictionary<string, (string? root, long untilMs)> _cache = new(StringComparer.OrdinalIgnoreCase);
 
     public GitRootResolver(IFileProbe probe, TimeSpan? cacheFor = null)
     {
@@ -129,8 +130,12 @@ public sealed class GitRootResolver
         return cur;
     }
 
-    /// <summary>The nearest directory at or above <paramref name="dir"/> that holds a .git folder or file; null if none.</summary>
-    public string? FindRoot(string dir, DateTime nowUtc)
+    /// <summary>
+    /// The nearest directory at or above <paramref name="dir"/> that holds a .git folder or file; null if none. A look is
+    /// kept for the cache time, timed at <paramref name="nowMs"/> on the clock that only goes forward (milliseconds since
+    /// Windows started), so setting the system clock back or forward neither keeps a stale look nor drops a fresh one.
+    /// </summary>
+    public string? FindRoot(string dir, long nowMs)
     {
         dir = WinPath.Normalize(dir);
         if (!WinPath.IsRooted(dir) || WinPath.IsUnc(dir) || !_probe.IsLocalFixed(dir)) return null;
@@ -138,7 +143,7 @@ public sealed class GitRootResolver
         string? cur = dir, found = null;
         for (int depth = 0; cur is not null && depth < MaxDepth; depth++)
         {
-            if (_cache.TryGetValue(cur, out var c) && c.until > nowUtc) { found = c.root; break; }
+            if (_cache.TryGetValue(cur, out var c) && c.untilMs > nowMs) { found = c.root; break; }
             visited.Add(cur);
             ProbeCount++;
             string git = cur.TrimEnd('\\') + "\\.git";
@@ -146,7 +151,7 @@ public sealed class GitRootResolver
             cur = WinPath.Parent(cur);
         }
         if (_cache.Count + visited.Count > MaxCache) _cache.Clear();
-        var until = nowUtc + _cacheFor;
+        long until = nowMs + (long)_cacheFor.TotalMilliseconds;
         foreach (var v in visited) _cache[v] = (found, until);
         return found;
     }

@@ -17,7 +17,7 @@ namespace PoolWatch.Engine.Changes;
 /// </summary>
 internal sealed class ChangeRecords
 {
-    private const string FileName = "applied-changes.json";
+    internal const string FileName = "applied-changes.json";
     /// <summary>Where a removed clear task's definition is saved when PoolWatch cannot put it back by itself: for import in Task Scheduler.</summary>
     private const string ImportFolder = "removed-tasks";
 

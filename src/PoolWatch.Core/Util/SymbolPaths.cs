@@ -7,8 +7,8 @@ namespace PoolWatch.Core.Util;
 public readonly record struct FolderRule(string Sid, bool Allow, int Rights);
 
 /// <summary>
-/// The symbol folders PoolWatch may read to name kernel functions in a CPU trace (addendum 2 C). PoolWatch runs elevated
-/// and the symbol reader parses the PDB files it finds, so (Part 3 review) a folder counts only when it is local (no
+/// The symbol folders PoolWatch may read to name kernel functions in a CPU trace. PoolWatch runs elevated
+/// and the symbol reader parses the PDB files it finds, so a folder counts only when it is local (no
 /// symbol server, no share, no mapped network drive) and admin-only: its owner is Administrators / SYSTEM /
 /// TrustedInstaller and nobody else may write into it. `_NT_SYMBOL_PATH` is not used: an unelevated process can set it for
 /// the user, and the usual C:\symbols is writable by any user. The default folder is `symbols` inside PoolWatch's own

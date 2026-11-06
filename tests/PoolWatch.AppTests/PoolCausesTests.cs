@@ -384,14 +384,14 @@ public class PoolCausesTests
     {
         Finding F(FindingKind kind, FindingSeverity severity, TimeSpan ago) => new() { TimeUtc = Now - ago, Kind = kind, Severity = severity, Title = $"{kind} happened" };
         var hour = TimeSpan.FromHours(1);
-        Assert.True(PoolCauses.Shows(F(FindingKind.CacheClear, FindingSeverity.Info, hour), Now));
-        Assert.True(PoolCauses.Shows(F(FindingKind.SpawnStorm, FindingSeverity.Alert, hour), Now));
-        Assert.True(PoolCauses.Shows(F(FindingKind.ChildAccumulation, FindingSeverity.Warning, hour), Now));
-        Assert.False(PoolCauses.Shows(F(FindingKind.SpawnStorm, FindingSeverity.Info, hour), Now));   // a storm that did not open
-        Assert.False(PoolCauses.Shows(F(FindingKind.Lag, FindingSeverity.Alert, hour), Now));         // not a pool cause
-        Assert.False(PoolCauses.Shows(F(FindingKind.Mark, FindingSeverity.Info, hour), Now));
-        Assert.False(PoolCauses.Shows(F(FindingKind.VersionChange, FindingSeverity.Warning, hour), Now));
-        Assert.False(PoolCauses.Shows(F(FindingKind.CacheClear, FindingSeverity.Info, TimeSpan.FromHours(25)), Now)); // older than a day
+        Assert.True(PoolCauses.Shows(F(FindingKind.CacheClear, FindingSeverity.Info, hour)));
+        Assert.True(PoolCauses.Shows(F(FindingKind.SpawnStorm, FindingSeverity.Alert, hour)));
+        Assert.True(PoolCauses.Shows(F(FindingKind.ChildAccumulation, FindingSeverity.Warning, hour)));
+        Assert.False(PoolCauses.Shows(F(FindingKind.SpawnStorm, FindingSeverity.Info, hour)));   // a storm that did not open
+        Assert.False(PoolCauses.Shows(F(FindingKind.Lag, FindingSeverity.Alert, hour)));         // not a pool cause
+        Assert.False(PoolCauses.Shows(F(FindingKind.Mark, FindingSeverity.Info, hour)));
+        Assert.False(PoolCauses.Shows(F(FindingKind.VersionChange, FindingSeverity.Warning, hour)));
+        // How old a listed finding may be is the log's to say (FindingLog.Within, a day on the clock that only goes forward).
     }
 
     [Fact]
@@ -1050,10 +1050,22 @@ public class PoolCausesTests
     }
 
     /// <summary>
+    /// A row's key as a sample builds it: a new string each time ("inc:" + the report folder's name), equal to the last
+    /// one but never the same object, so the details tell the same row by its key's value, not by which string it is.
+    /// </summary>
+    private static string Fresh(string key)
+    {
+        string fresh = new(key.AsSpan());
+        Assert.False(ReferenceEquals(key, fresh));
+        return fresh;
+    }
+
+    /// <summary>
     /// Another row selected opens its details at their top, the title whole in view, as its words open
-    /// (<c>MainForm.SetText</c>); the same row refreshed by a sample stays where it was scrolled. On a created pane at the
-    /// smallest window's details, scrolled to the last action as the Tab key brings it into view. Kept for every row, a
-    /// row selected after that opened part-way down with its title out of view, and the keyboard could not bring it back.
+    /// (<c>MainForm.SetText</c>); the same row refreshed by a sample, with its key built again, stays where it was
+    /// scrolled. On a created pane at the smallest window's details, scrolled to the last action as the Tab key brings it
+    /// into view. Kept for every row, a row selected after that opened part-way down with its title out of view, and the
+    /// keyboard could not bring it back.
     /// </summary>
     [Theory]
     [InlineData(100)]
@@ -1071,7 +1083,7 @@ public class PoolCausesTests
         int scrolled = d.Pane.AutoScrollPosition.Y;
         Assert.True(scrolled < 0 && content.Top + d.Title.Bottom <= 0, "scrolled to the last action, the title is out of view " + At());
         // The same row refreshed by a sample (its title's numbers move): where it was scrolled.
-        d.Show("inc:a", LongTitle.Replace("+4.9 GB", "+5.0 GB"), LongGreenLines()[0], folder: true, summary: true);
+        d.Show(Fresh("inc:a"), LongTitle.Replace("+4.9 GB", "+5.0 GB"), LongGreenLines()[0], folder: true, summary: true);
         Assert.True((d.Pane.AutoScrollPosition.Y, content.Top) == (scrolled, scrolled), "the same row's refresh moved its details " + At());
         // Another row: at the top, its title whole in view.
         d.Show("tag:Toke", "Pool tag Toke (nt): +1 MB (now 5 MB)", LongGreenLines()[2], folder: false, summary: true);
@@ -1113,7 +1125,7 @@ public class PoolCausesTests
         d.Pane.ScrollControlIntoView(d.Buttons[2]);
         Assert.True(d.Pane.AutoScrollPosition.Y < 0, "the details did not scroll");
         Check("scrolled to the last action");
-        d.Show("inc:a", LongTitle, LongGreenLines()[2], folder: false, summary: true);
+        d.Show(Fresh("inc:a"), LongTitle, LongGreenLines()[2], folder: false, summary: true);
         Assert.True(d.Pane.AutoScrollPosition.Y < 0, "the same row's refresh took the details back to their top");
         Check("the same row refreshed, with a shorter green line and its report folder gone");
         foreach (var (width, height) in new[] { (696, 60), (696, 40), (960, 48), (1216, 120), (696, 48), (960, 300), (696, 48) })

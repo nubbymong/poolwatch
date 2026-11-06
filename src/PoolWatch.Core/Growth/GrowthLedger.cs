@@ -75,11 +75,13 @@ public sealed record GrowthWindow
 /// the series' own. A minute keeps the sum of those own changes, signed, so a window adds them up before saying whether
 /// the series grew or fell (<see cref="GrowthCounts.Of"/>): a pool that wobbles up and down between samples shows no
 /// growth and no fall, whatever the sampling interval. A change PoolWatch did not measure is not counted at all: across a
-/// sleep or other gap (<see cref="ResumeGap.SuspendGap"/> past the interval) or a clock set back, the next sample starts
-/// again from where the series is then (a clear left open across a sleep still has its drop, as the detector says). A
-/// clock set back also drops the minutes that now lie wholly ahead of it (the one it is set back into is kept), so a
-/// window counts at most the step's length twice, and a clear already counted is never counted again when the clock
-/// passes it a second time. The total and each tag of at least
+/// sleep or other gap (<see cref="ResumeGap.SuspendGap"/> past the interval) the next sample starts again from where the
+/// series is then (a clear left open across a sleep still has its drop, as the detector says). Every interval here (the
+/// time measured, the gaps, a clear's place among the samples and its settle time, the minutes and how long they are kept,
+/// each window) is timed on the clock that only goes forward (<see cref="Moment.Ms"/>: the samples'
+/// <see cref="Sample.TickMs"/> and the clears' <see cref="ClearRecord.TickMs"/>), so setting the system clock back or
+/// forward neither counts a change twice nor drops one. The times of day it gives (a window's end, when it started, when
+/// its one clear ran) are for showing. The total and each tag of at least
 /// <see cref="TrackFromBytes"/> (at most <see cref="MaxTags"/>) are counted from the sample they are first seen there. A
 /// tag's minute is kept only once its change reaches <see cref="StoreFromKb"/> (a tag that wobbles by a few kilobytes is
 /// rarely kept, its change carried until then), so a tag's counts over any window are true to that much. Not
@@ -98,8 +100,9 @@ public sealed class GrowthLedger
 
     /// <summary>Each slot keeps two counts: its own change (signed) and what PoolWatch's clears freed of it.</summary>
     private const int Parts = 2;
+    private const long MinuteMs = 60_000;
 
-    private readonly TimeSpan _settle, _gap;
+    private readonly long _settleMs, _gapMs;
 
     // The tracked tags, by slot. A slot is freed once its tag is small again and no kept minute holds it.
     private readonly Dictionary<PoolTag, int> _slots = new();
@@ -108,8 +111,8 @@ public sealed class GrowthLedger
     private readonly Stack<int> _free = new(Enumerable.Range(0, MaxTags).Reverse());
     /// <summary>Each tag's level at the last sample outside a clear's interval, and at this sample.</summary>
     private readonly long[] _last = new long[MaxTags], _now = new long[MaxTags];
-    /// <summary>The minute each slot last counted something in.</summary>
-    private readonly DateTime[] _lastActive = new DateTime[MaxTags];
+    /// <summary>The minute each slot last counted something in (its start on the forward clock).</summary>
+    private readonly long[] _lastActive = new long[MaxTags];
     // A minute keeps kilobytes: what is not kept yet (the rounding, and a change under StoreFromKb) is carried in these
     // running totals, so it is kept in a later minute and nothing is lost.
     private readonly long[] _sumBytes = new long[Parts * MaxTags], _sumKb = new long[Parts * MaxTags];
@@ -121,23 +124,27 @@ public sealed class GrowthLedger
 
     private readonly List<Minute> _minutes = [];
     private bool _started;
-    private DateTime _lastSampleUtc, _lastOutsideUtc;
+    /// <summary>The first sample and the last sample outside a clear's interval, on the forward clock.</summary>
+    private long _startedMs, _lastOutsideMs;
+    /// <summary>The newest sample's moment.</summary>
+    private Moment _lastSample;
     private long _totalLast;
     /// <summary>A gap (a sleep, a stall) lies between the last sample outside a clear's interval and this one.</summary>
     private bool _unmeasured;
-    /// <summary>Clears dated after a time the clock was set back to: counted (or passed) already, never counted again.</summary>
-    private readonly HashSet<DateTime> _passed = new();
 
     /// <param name="settle">How long after a clear its result is measured (as the clearer measures it).</param>
     /// <param name="interval">The sampling interval: two samples further apart than it and a sleep's gap are a gap.</param>
     public GrowthLedger(TimeSpan settle, TimeSpan interval)
     {
-        _settle = settle;
-        _gap = interval + ResumeGap.SuspendGap;
+        _settleMs = (long)settle.TotalMilliseconds;
+        _gapMs = (long)(interval + ResumeGap.SuspendGap).TotalMilliseconds;
     }
 
-    /// <summary>When the first sample was (PoolWatch started); null before it.</summary>
-    public DateTime? StartedUtc { get; private set; }
+    /// <summary>
+    /// When the first sample was (PoolWatch started), as a time of day by the newest sample: its time less how long before
+    /// it, on the forward clock, the first one was; null before the first.
+    /// </summary>
+    public DateTime? StartedUtc => _started ? _lastSample.UtcOf(_startedMs) : null;
 
     /// <summary>The minutes kept (the cost report).</summary>
     public int MinuteCount => _minutes.Count + (_openMinute is null ? 0 : 1);
@@ -148,9 +155,6 @@ public sealed class GrowthLedger
     /// <summary>The kept minutes' tag entries (the cost report).</summary>
     public long TagEntries => _minutes.Sum(m => (long)m.Slots.Length);
 
-    /// <summary>Clears remembered as passed after the clock was set back (tests: let go once the clock passes them again).</summary>
-    internal int PassedClears => _passed.Count;
-
     /// <summary>About what the ledger holds, in bytes: its fixed tables and every kept minute.</summary>
     public long ApproxBytes()
     {
@@ -160,46 +164,42 @@ public sealed class GrowthLedger
     }
 
     /// <summary>
-    /// One sample (the sampler, in sample order): the pool total, the tags, and PoolWatch's clears as the clearer holds
-    /// them now (a failed one is left out, as the detector leaves it out).
+    /// One sample (the sampler, in sample order) at <paramref name="at"/> (<see cref="Moment.Of(Sample)"/>): the pool total,
+    /// the tags, and PoolWatch's clears as the clearer holds them now (a failed one is left out, as the detector leaves it out).
     /// </summary>
-    public void Observe(DateTime timeUtc, long total, IReadOnlyList<PoolTagEntry> tags, IReadOnlyList<ClearRecord> clears)
+    public void Observe(Moment at, long total, IReadOnlyList<PoolTagEntry> tags, IReadOnlyList<ClearRecord> clears)
     {
         if (!_started)
         {
             _started = true;
-            StartedUtc = timeUtc;
-            _lastSampleUtc = _lastOutsideUtc = timeUtc;
-            _openMinute = new Minute(MinuteOf(timeUtc));
+            _startedMs = _lastOutsideMs = at.Ms;
+            _lastSample = at;
+            _openMinute = new Minute(MinuteOf(at.Ms), at.UtcOf(MinuteOf(at.Ms)));
             _totalLast = total;
-            ReadLevels(tags, timeUtc);
+            ReadLevels(tags, at.Ms);
             return;
         }
-        var dt = timeUtc - _lastSampleUtc;
-        if (dt < TimeSpan.Zero)
-        {
-            ClockSetBack(timeUtc, total, tags, clears);
-            return;
-        }
-        _lastSampleUtc = timeUtc;
-        Roll(timeUtc);
+        long dt = Math.Max(0, at.Ms - _lastSample.Ms);
+        _lastSample = at;
+        Roll(at);
         var open = _openMinute!;
-        if (dt > _gap) _unmeasured = true;
-        else open.Measured += dt;
+        if (dt > _gapMs) _unmeasured = true;
+        else open.Measured += TimeSpan.FromMilliseconds(dt);
 
         // PoolWatch's own clears since the last sample outside an interval: inside one until the last of them is measured.
         int count = 0;
-        DateTime? first = null, measuredUtc = null;
+        long? firstMs = null, measuredMs = null;
+        DateTime? first = null;
         for (int i = 0; i < clears.Count; i++) // by index: nothing is allocated per sample
         {
             var c = clears[i];
-            if (c.Error is not null || c.TimeUtc <= _lastOutsideUtc || c.TimeUtc > timeUtc || _passed.Count > 0 && _passed.Contains(c.TimeUtc)) continue;
+            if (c.Error is not null || c.TickMs <= _lastOutsideMs || c.TickMs > at.Ms) continue;
             count++;
-            if (first is null || c.TimeUtc < first) first = c.TimeUtc;
-            var m = c.TimeUtc + _settle;
-            if (measuredUtc is null || m > measuredUtc) measuredUtc = m;
+            if (firstMs is null || c.TickMs < firstMs) (firstMs, first) = (c.TickMs, c.TimeUtc);
+            long m = c.TickMs + _settleMs;
+            if (measuredMs is null || m > measuredMs) measuredMs = m;
         }
-        if (count > 0 && timeUtc < measuredUtc) return; // the clear is still being measured: its interval is its own
+        if (count > 0 && at.Ms < measuredMs) return; // the clear is still being measured: its interval is its own
 
         // Across a clear's interval a drop is the clear's; every other change is the series' own, unless it was not measured.
         bool across = count > 0, unmeasured = _unmeasured;
@@ -208,7 +208,7 @@ public sealed class GrowthLedger
         open.Change += change;
         open.Cleared += cleared;
         _totalLast = total;
-        ReadLevels(tags, timeUtc);
+        ReadLevels(tags, at.Ms);
         for (int k = 0; k < MaxTags; k++)
         {
             if (!_used[k]) continue;
@@ -220,7 +220,7 @@ public sealed class GrowthLedger
             _open[Parts * k] += split.change;
             _open[Parts * k + 1] += split.cleared;
         }
-        _lastOutsideUtc = timeUtc;
+        _lastOutsideMs = at.Ms;
         if (across)
         {
             open.OneClearUtc = first; // read only when the window holds this one clear
@@ -232,44 +232,8 @@ public sealed class GrowthLedger
     private static (long change, long cleared) Split(long d, bool acrossClear, bool unmeasured) =>
         acrossClear && d < 0 ? (0, -d) : unmeasured ? (0, 0) : (d, 0);
 
-    /// <summary>
-    /// The clock went back (a correction, a time zone set wrongly and put right): nothing is measured across the step, the
-    /// minutes after the one the new time is in (now wholly ahead of the clock) are dropped, and every clear dated after
-    /// the new time has been counted or passed already, so it is never counted again. The minute the new time is in keeps
-    /// what it counted (at most the step's length is counted twice); when it was already closed, counting goes on in a new
-    /// minute of the same time. Counting goes on from here. A clear still being measured (its 2 minutes not up) when the
-    /// clock is set back loses its drop, which is then counted nowhere: neither Cleared nor the clear count has it.
-    /// </summary>
-    private void ClockSetBack(DateTime timeUtc, long total, IReadOnlyList<PoolTagEntry> tags, IReadOnlyList<ClearRecord> clears)
-    {
-        for (int i = 0; i < clears.Count; i++)
-            if (clears[i].TimeUtc > timeUtc) _passed.Add(clears[i].TimeUtc);
-        var minute = MinuteOf(timeUtc);
-        if (_openMinute!.Utc > minute)
-        {
-            // The minute being filled lies wholly ahead of the clock now.
-            foreach (int k in _touched)
-            {
-                _isTouched[k] = false;
-                for (int j = 0; j < Parts; j++) _open[Parts * k + j] = 0;
-            }
-            _touched.Clear();
-            int keep = FirstAtOrAfter(minute.AddMinutes(1));
-            if (keep < _minutes.Count) _minutes.RemoveRange(keep, _minutes.Count - keep);
-            _openMinute = new Minute(minute);
-        }
-        // No slot is held by a minute that is no longer kept.
-        for (int k = 0; k < MaxTags; k++)
-            if (_lastActive[k] > minute) _lastActive[k] = minute;
-        if (StartedUtc > timeUtc) StartedUtc = timeUtc;
-        _lastSampleUtc = _lastOutsideUtc = timeUtc;
-        _totalLast = total;
-        ReadLevels(tags, timeUtc);
-        for (int k = 0; k < MaxTags; k++) _last[k] = _now[k];
-    }
-
     /// <summary>This sample's level of every tracked tag (0 when it is gone), and newly tracked tags (their level is where they start).</summary>
-    private void ReadLevels(IReadOnlyList<PoolTagEntry> tags, DateTime timeUtc)
+    private void ReadLevels(IReadOnlyList<PoolTagEntry> tags, long ms)
     {
         for (int k = 0; k < MaxTags; k++) _now[k] = 0;
         for (int i = 0; i < tags.Count; i++)
@@ -284,27 +248,25 @@ public sealed class GrowthLedger
                 _tags[k] = t.Tag;
                 _used[k] = true;
                 _now[k] = _last[k] = bytes; // counted from here
-                _lastActive[k] = MinuteOf(timeUtc);
+                _lastActive[k] = MinuteOf(ms);
                 for (int j = Parts * k; j < Parts * k + Parts; j++) _sumBytes[j] = _sumKb[j] = 0;
             }
         }
     }
 
-    /// <summary>Starts a new minute when the sample is in a later one, keeping 25 hours.</summary>
-    private void Roll(DateTime timeUtc)
+    /// <summary>Starts a new minute when the sample is in a later one, keeping 25 hours (both on the forward clock).</summary>
+    private void Roll(Moment at)
     {
-        var minute = MinuteOf(timeUtc);
-        if (_openMinute is null || minute <= _openMinute.Utc) return;
+        long minute = MinuteOf(at.Ms);
+        if (_openMinute is null || minute <= _openMinute.Ms) return;
         Close(_openMinute);
-        _openMinute = new Minute(minute);
-        var cutoff = timeUtc - Keep;
+        _openMinute = new Minute(minute, at.UtcOf(minute));
+        long cutoff = at.Ms - (long)Keep.TotalMilliseconds;
         int drop = 0;
-        while (drop < _minutes.Count && _minutes[drop].Utc < cutoff) drop++;
+        while (drop < _minutes.Count && _minutes[drop].Ms < cutoff) drop++;
         if (drop > 0) _minutes.RemoveRange(0, drop);
-        // A clear the clock has passed again is left out by its time from here on.
-        if (_passed.Count > 0) _passed.RemoveWhere(t => t <= _lastOutsideUtc);
         // A slot whose tag is small again and that no kept minute holds is free for another tag.
-        var oldest = _minutes.Count > 0 ? _minutes[0].Utc : minute;
+        long oldest = _minutes.Count > 0 ? _minutes[0].Ms : minute;
         for (int k = 0; k < MaxTags; k++)
             if (_used[k] && _now[k] < TrackFromBytes && _lastActive[k] < oldest)
             {
@@ -344,7 +306,7 @@ public sealed class GrowthLedger
                 _sumKb[Parts * k + j] += part[j];
                 kb.Add((int)part[j]);
             }
-            _lastActive[k] = m.Utc;
+            _lastActive[k] = m.Ms;
         }
         _touched.Clear();
         if (slots is not null)
@@ -356,14 +318,16 @@ public sealed class GrowthLedger
     }
 
     /// <summary>
-    /// The last <paramref name="span"/> up to the newest sample: the minutes from the one it starts in, each count's own
-    /// changes added up before they are said as growth or a fall (<see cref="GrowthCounts.Of"/>).
+    /// The last <paramref name="span"/> up to the newest sample, on the forward clock: the minutes from the one it starts in,
+    /// each count's own changes added up before they are said as growth or a fall (<see cref="GrowthCounts.Of"/>). Its end
+    /// and when PoolWatch started are given as times of day by the newest sample (<see cref="StartedUtc"/>), so they are as
+    /// far apart as the forward clock says.
     /// </summary>
     public GrowthWindow Window(TimeSpan span)
     {
-        var now = _lastSampleUtc;
-        if (!_started) return new GrowthWindow { Span = span, NowUtc = now };
-        var from = MinuteOf(now - span);
+        var now = _lastSample;
+        if (!_started) return new GrowthWindow { Span = span, NowUtc = now.Utc };
+        long from = MinuteOf(now.Ms - (long)span.TotalMilliseconds);
         var sums = new long[Parts * MaxTags];
         var measured = TimeSpan.Zero;
         long change = 0, cleared = 0;
@@ -386,7 +350,7 @@ public sealed class GrowthLedger
             for (int e = 0; e < m.Slots.Length; e++)
                 for (int j = 0; j < Parts; j++) sums[Parts * m.Slots[e] + j] += 1024L * m.Kb[Parts * e + j];
         }
-        if (_openMinute is { } open && open.Utc >= from)
+        if (_openMinute is { } open && open.Ms >= from)
         {
             Add(open);
             foreach (int k in _touched)
@@ -398,23 +362,28 @@ public sealed class GrowthLedger
             if (_used[k]) tags[_tags[k]] = GrowthCounts.Of(sums[Parts * k], sums[Parts * k + 1]);
         return new GrowthWindow
         {
-            Span = span, NowUtc = now, Measured = measured > span ? span : measured, Total = GrowthCounts.Of(change, cleared), Clears = clears,
+            Span = span, NowUtc = now.Utc, Measured = measured > span ? span : measured, Total = GrowthCounts.Of(change, cleared), Clears = clears,
             OneClearUtc = clears == 1 ? one : null, StartedUtc = StartedUtc, Tags = tags,
         };
     }
 
-    private int FirstAtOrAfter(DateTime minute)
+    private int FirstAtOrAfter(long minute)
     {
         int lo = 0, hi = _minutes.Count;
-        while (lo < hi) { int mid = (lo + hi) / 2; if (_minutes[mid].Utc < minute) lo = mid + 1; else hi = mid; }
+        while (lo < hi) { int mid = (lo + hi) / 2; if (_minutes[mid].Ms < minute) lo = mid + 1; else hi = mid; }
         return lo;
     }
 
-    private static DateTime MinuteOf(DateTime utc) => new(utc.Ticks - utc.Ticks % TimeSpan.TicksPerMinute, DateTimeKind.Utc);
+    /// <summary>The start of the forward clock's minute that <paramref name="ms"/> is in.</summary>
+    private static long MinuteOf(long ms) => ms - ((ms % MinuteMs) + MinuteMs) % MinuteMs;
 
-    /// <summary>One minute's counts: the total's exactly, each tag's in kilobytes (a slot and its two counts per entry).</summary>
-    private sealed class Minute(DateTime utc)
+    /// <summary>
+    /// One minute's counts: the total's exactly, each tag's in kilobytes (a slot and its two counts per entry). It begins at
+    /// <see cref="Ms"/> on the forward clock, <see cref="Utc"/> as a time of day.
+    /// </summary>
+    private sealed class Minute(long ms, DateTime utc)
     {
+        public long Ms { get; } = ms;
         public DateTime Utc { get; } = utc;
         public TimeSpan Measured { get; set; }
         /// <summary>The total's own change in the minute, signed (a rise across a clear's interval included).</summary>

@@ -42,11 +42,11 @@ public static class Marks
     /// <summary>Reads and deletes pending requests (oldest first), in one pass. Returns (time, text) pairs. The running
     /// instance uses a <see cref="MarkInbox"/> (no listing every tick; files it cannot delete never block new marks).</summary>
     public static List<(DateTime timeUtc, string text)> TakeRequests(string dir, Func<string, string> checkWrite) =>
-        new MarkInbox(dir, checkWrite).Take(DateTime.UtcNow);
+        new MarkInbox(dir, checkWrite).Take(Environment.TickCount64);
 }
 
 /// <summary>
-/// The running instance's view of the mark requests folder (C6, review Part 2). The folder is listed only when its
+/// The running instance's view of the mark requests folder. The folder is listed only when its
 /// last-write time changed (a file was added or removed), when a request is waiting for a retry, or once every
 /// <see cref="RelistEvery"/> as a safety net, not on every tick. A request whose file cannot be deleted is still recorded,
 /// once, and then skipped by name, so twenty undeletable files can no longer fill the per-tick budget and block every new
@@ -62,7 +62,8 @@ public sealed class MarkInbox
     private readonly HashSet<string> _skip = new(StringComparer.OrdinalIgnoreCase);     // handled, but the file stayed
     private readonly Dictionary<string, int> _attempts = new(StringComparer.OrdinalIgnoreCase);
     private DateTime? _lastStamp;
-    private DateTime _lastList = DateTime.MinValue;
+    /// <summary>When the folder was last listed, on the clock that only goes forward; null: not yet.</summary>
+    private long? _lastListMs;
     private bool _relist = true;
 
     /// <param name="folderStamp">Test seam: the folder's last-write time, null when it does not exist.</param>
@@ -76,16 +77,19 @@ public sealed class MarkInbox
     /// <summary>How many times the folder has been listed (for tests and the overhead report).</summary>
     public int Listings { get; private set; }
 
-    /// <summary>New requests (oldest first, at most <see cref="Marks.MaxPerTick"/>), each recorded once.</summary>
-    public List<(DateTime timeUtc, string text)> Take(DateTime nowUtc)
+    /// <summary>
+    /// New requests (oldest first, at most <see cref="Marks.MaxPerTick"/>), each recorded once. <paramref name="nowMs"/> is now
+    /// on the clock that only goes forward (the sample's <see cref="Model.Sample.TickMs"/>): the safety-net relist is timed on it.
+    /// </summary>
+    public List<(DateTime timeUtc, string text)> Take(long nowMs)
     {
         var found = new List<(DateTime, string)>();
         DateTime? stamp;
         try { stamp = _stamp(_dir); } catch { stamp = null; }
         if (stamp is null) { _lastStamp = null; return found; }
-        if (!_relist && _attempts.Count == 0 && stamp == _lastStamp && nowUtc - _lastList < RelistEvery) return found;
+        if (!_relist && _attempts.Count == 0 && stamp == _lastStamp && _lastListMs is { } listed && nowMs - listed < (long)RelistEvery.TotalMilliseconds) return found;
         _lastStamp = stamp;
-        _lastList = nowUtc;
+        _lastListMs = nowMs;
         _relist = false;
         Listings++;
         var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

@@ -7,19 +7,25 @@ namespace PoolWatch.Core.Findings;
 
 /// <summary>
 /// The findings recorded in this run (the most recent <see cref="MaxKept"/> are kept in memory). Thread-safe;
-/// <see cref="Added"/> is raised on the caller's thread, outside the lock. C6 (review Part 2): the high-volume event-log
+/// <see cref="Added"/> is raised on the caller's thread, outside the lock. The high-volume event-log
 /// findings (package activations from the AppModel-Runtime channel, subscribed with "*", and plain filter load / unload
 /// events) are kept in their own buffer of <see cref="MaxKeptEvents"/>, so a burst of them can never evict the other
-/// findings (alerts, crashes, storms, marks). Snapshots merge the two in the order they were added.
+/// findings (alerts, crashes, storms, marks). Snapshots merge the two in the order they were added. Each finding's time is
+/// read onto the clock that only goes forward as it is added (<see cref="Model.Moment.MsOf"/>): how old it is
+/// (<see cref="Within"/>) is timed on it.
 /// </summary>
 public sealed class FindingLog
 {
     public const int MaxKept = 1000;
     public const int MaxKeptEvents = 300;
     private readonly object _lock = new();
-    private readonly List<(long seq, Finding f)> _items = new();
-    private readonly List<(long seq, Finding f)> _events = new();
+    private readonly List<(long seq, long ms, Finding f)> _items = new();
+    private readonly List<(long seq, long ms, Finding f)> _events = new();
     private long _seq;
+    private readonly Func<Model.Moment> _clock;
+
+    /// <param name="clock">Both clocks (<see cref="Model.Moment.Now"/>; a test gives its own).</param>
+    public FindingLog(Func<Model.Moment>? clock = null) => _clock = clock ?? Model.Moment.Now;
 
     public event Action<Finding>? Added;
 
@@ -29,33 +35,39 @@ public sealed class FindingLog
 
     public void Add(Finding f)
     {
+        long ms = _clock().MsOf(f.TimeUtc);
         lock (_lock)
         {
             var list = IsHighVolume(f) ? _events : _items;
             int cap = ReferenceEquals(list, _events) ? MaxKeptEvents : MaxKept;
-            list.Add((++_seq, f));
+            list.Add((++_seq, ms, f));
             if (list.Count > cap) list.RemoveRange(0, list.Count - cap);
         }
         Added?.Invoke(f);
     }
 
-    public List<Finding> Snapshot() { lock (_lock) return Merged().ToList(); }
+    public List<Finding> Snapshot() { lock (_lock) return Merged().Select(x => x.f).ToList(); }
 
-    public List<Finding> Between(DateTime fromUtc, DateTime toUtc)
+    /// <summary>
+    /// The findings of the last <paramref name="span"/> before <paramref name="now"/> on the clock that only goes forward,
+    /// in the order they were added.
+    /// </summary>
+    public List<Finding> Within(TimeSpan span, Model.Moment now)
     {
-        lock (_lock) return Merged().Where(f => f.TimeUtc >= fromUtc && f.TimeUtc <= toUtc).ToList();
+        long from = now.Ms - (long)span.TotalMilliseconds;
+        lock (_lock) return Merged().Where(x => x.ms >= from && x.ms <= now.Ms).Select(x => x.f).ToList();
     }
 
     public int Count { get { lock (_lock) return _items.Count + _events.Count; } }
 
     /// <summary>Both buffers in the order the findings were added (lock held).</summary>
-    private IEnumerable<Finding> Merged()
+    private IEnumerable<(long seq, long ms, Finding f)> Merged()
     {
         int i = 0, j = 0;
         while (i < _items.Count || j < _events.Count)
         {
-            if (j >= _events.Count || (i < _items.Count && _items[i].seq < _events[j].seq)) yield return _items[i++].f;
-            else yield return _events[j++].f;
+            if (j >= _events.Count || (i < _items.Count && _items[i].seq < _events[j].seq)) yield return _items[i++];
+            else yield return _events[j++];
         }
     }
 
@@ -98,7 +110,7 @@ public static class FindingReport
         Directory.CreateDirectory(checkWrite(dir));
         var md = new StringBuilder();
         md.AppendLine($"# {Md(f.Title)}").AppendLine();
-        md.AppendLine($"> {Incidents.Exporter.UnredactedNotice}").AppendLine(); // M1
+        md.AppendLine($"> {Incidents.Exporter.UnredactedNotice}").AppendLine(); // first, that the report is not redacted
         md.AppendLine($"- Finding `{f.Kind}` ({f.Severity}), {Fmt.Stamp(f.TimeUtc)}");
         foreach (var d in f.Details) md.AppendLine($"- {Md(d)}");
         md.AppendLine().Append(markdownBody);
@@ -129,10 +141,9 @@ public static class FindingReport
         return sb.Length > 40 ? sb.ToString(0, 40) : sb.ToString();
     }
 
-    /// <summary>Markdown-safe text (same rules as the incident writer).</summary>
-    public static string Md(string s) =>
-        s.Replace("|", "\\|").Replace("\r", " ").Replace("\n", " ").Replace("\0", " ").Replace("<", "&lt;");
+    /// <summary>Markdown-safe text (the incident writer's rules: <see cref="Util.MdText.Text"/>).</summary>
+    public static string Md(string s) => Util.MdText.Text(s);
 
-    /// <summary>Text inside a `code span`.</summary>
-    public static string MdCode(string s) => s.Replace("`", "'").Replace("\r", " ").Replace("\n", " ").Replace("\0", " ");
+    /// <summary>Text inside a `code span` (<see cref="Util.MdText.Code"/>).</summary>
+    public static string MdCode(string s) => Util.MdText.Code(s);
 }

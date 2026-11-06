@@ -3,6 +3,7 @@ using PoolWatch.Core;
 using PoolWatch.Core.Boot;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
+using static PoolWatch.Tests.Clocks;
 
 namespace PoolWatch.Tests;
 
@@ -16,7 +17,7 @@ public class BootTests : IDisposable
     private static Sample S(DateTime t, long npMb, long fileMb) =>
         new(t, new PoolTotals(500UL << 20, (ulong)npMb << 20, 0, 0),
             [new PoolTagEntry(PoolTag.Parse("File"), 0, 0, 0, 10, 1, (ulong)fileMb << 20), new PoolTagEntry(PoolTag.Parse("MmSt"), 1, 0, 300UL << 20, 0, 0, 0)], [])
-        { System = new SystemCounters(8UL << 30, 32UL << 30, 0, 0, 90_000, 250) };
+        { System = new SystemCounters(8UL << 30, 32UL << 30, 0, 0, 90_000, 250), TickMs = Clocks.At(t).Ms };
 
     [Fact]
     public void BaselineOncePerBootSummaryAcrossRestartsAndBoots()
@@ -29,7 +30,7 @@ public class BootTests : IDisposable
         Assert.Equal(400L << 20, tr.Baseline.NonPaged);
         Assert.Equal("File", tr.Baseline.Tags[1].Tag);
         tr.Observe(S(boot1.AddHours(5), 2400, 1900), TimeSpan.FromHours(5).Add(TimeSpan.FromSeconds(20)), 2); // uptime jitter: same boot
-        tr.Save(boot1.AddHours(5), ended: true);
+        tr.Save(ended: true);
         Assert.Single(Directory.GetDirectories(_dir));
 
         // PoolWatch restarts in the same boot: the baseline is not retaken, the summary continues.
@@ -38,20 +39,20 @@ public class BootTests : IDisposable
         Assert.Equal(boot1.AddMinutes(3), tr2.Baseline!.TimeUtc);
         Assert.Equal(2400L << 20, tr2.Current!.PeakNonPaged);
         Assert.Equal(2, tr2.Current.Incidents);
-        tr2.Save(boot1.AddHours(6), ended: true);
+        tr2.Save(ended: true);
 
         // Another restart whose boot time computes one minute later (minute boundary, clock correction): still the same boot.
         var tr3 = new BootTracker(_dir, p => p);
         tr3.Observe(S(boot1.AddHours(7), 2000, 1500), TimeSpan.FromHours(7) - TimeSpan.FromSeconds(70), 3);
         Assert.Single(Directory.GetDirectories(_dir));
         Assert.Equal(5, tr3.Current!.Incidents); // 2 from the first run + 3 from this one
-        tr3.Save(boot1.AddHours(7), ended: true);
+        tr3.Save(ended: true);
 
         // Next boot.
         var boot2 = boot1.AddDays(1);
         tr2.Observe(S(boot2.AddMinutes(50), 420, 85), TimeSpan.FromMinutes(50), 0);
         Assert.False(tr2.Baseline!.NearBoot);
-        tr2.Save(boot2.AddMinutes(50));
+        tr2.Save();
         var all = tr2.All();
         Assert.Equal(2, all.Count);
         Assert.Equal(6.98, all[0].UptimeHoursAtLastSeen);

@@ -39,23 +39,23 @@ public class FooterTests
     {
         var t0 = new DateTime(2026, 10, 30, 9, 0, 0, DateTimeKind.Utc);
         var s = new ChangeCountSchedule();
-        Assert.True(s.Start(t0));                                     // never read: read now
-        Assert.False(s.Start(t0.AddMinutes(6)));                      // one read at a time
+        Assert.True(s.Start(AppClocks.At(t0)));                                     // never read: read now
+        Assert.False(s.Start(AppClocks.At(t0.AddMinutes(6))));                      // one read at a time
         s.Done();
-        Assert.False(s.Start(t0.AddMinutes(4)));                      // read 4 minutes ago
-        Assert.True(s.Start(t0.AddMinutes(5)));                       // every 5 minutes
+        Assert.False(s.Start(AppClocks.At(t0.AddMinutes(4))));                      // read 4 minutes ago
+        Assert.True(s.Start(AppClocks.At(t0.AddMinutes(5))));                       // every 5 minutes
         s.Done();
 
         var t1 = t0.AddMinutes(5);
-        s.Activated(t1.AddSeconds(20));                               // back to the front at once: the read is fresh
-        Assert.False(s.Start(t1.AddSeconds(20)));
-        s.Activated(t1.AddSeconds(40));                               // back from Active changes later: read again
-        Assert.True(s.Start(t1.AddSeconds(40)));
+        s.Activated(AppClocks.At(t1.AddSeconds(20)));                               // back to the front at once: the read is fresh
+        Assert.False(s.Start(AppClocks.At(t1.AddSeconds(20))));
+        s.Activated(AppClocks.At(t1.AddSeconds(40)));                               // back from Active changes later: read again
+        Assert.True(s.Start(AppClocks.At(t1.AddSeconds(40))));
         s.Done();
 
         s.Soon();                                                     // a card made a change, or the window showed again
-        Assert.True(s.Start(t1.AddSeconds(41)));
-        Assert.False(s.Start(t1.AddSeconds(42)));
+        Assert.True(s.Start(AppClocks.At(t1.AddSeconds(41))));
+        Assert.False(s.Start(AppClocks.At(t1.AddSeconds(42))));
         s.Done();
         Assert.Equal((TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(30)), (ChangeCountSchedule.Every, ChangeCountSchedule.AgainAfter));
     }

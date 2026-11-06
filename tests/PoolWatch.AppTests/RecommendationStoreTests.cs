@@ -1,3 +1,4 @@
+using PoolWatch.Core.Model;
 using PoolWatch.Core.Recommendations;
 using PoolWatch.Engine;
 using PoolWatch.Engine.Setup;
@@ -21,44 +22,79 @@ public sealed class RecommendationStoreTests : IDisposable
 
     private string File_ => Path.Combine(_paths.DataRoot, RecommendationStore.FileName);
 
+    /// <summary>The moment <paramref name="t"/> before <paramref name="c"/>'s now, on both clocks.</summary>
+    private static Moment Ago(TwoClocks c, TimeSpan t) => new(c.Utc - t, c.Ms - (long)t.TotalMilliseconds);
+
     [Fact]
     public void RoundTrip()
     {
-        var now = DateTime.UtcNow;
-        var store = new RecommendationStore(_paths, _log);
+        var c = new TwoClocks();
+        var store = new RecommendationStore(_paths, _log, c.Now);
         Assert.False(store.GuideCompleted);
         Assert.Empty(store.Dismissed);
         Assert.False(File.Exists(File_)); // nothing is written until something changed
 
-        store.MarkGuideCompleted(now);
-        store.Dismiss("TokenLeakGuard", now.AddDays(-2));
-        store.Dismiss("ReportIncident:20261028-0712-Reff", now);
+        store.MarkGuideCompleted(c.Utc);
+        store.Dismiss("TokenLeakGuard", Ago(c, TimeSpan.FromDays(2)));
+        store.Dismiss("ReportIncident:20261028-0712-Reff", c.Now());
 
-        var again = new RecommendationStore(_paths, _log);
+        // Read back at the same moment: each hide's time of day, read onto the forward clock as the file loads.
+        var again = new RecommendationStore(_paths, _log, c.Now);
         Assert.True(again.GuideCompleted);
         Assert.Equal(2, again.Dismissed.Count);
-        Assert.Equal(now.AddDays(-2), again.Dismissed["TokenLeakGuard"]);
-        Assert.Equal(now, again.Dismissed["ReportIncident:20261028-0712-Reff"]);
+        Assert.Equal(Ago(c, TimeSpan.FromDays(2)), again.Dismissed["TokenLeakGuard"]);
+        Assert.Equal(c.Now(), again.Dismissed["ReportIncident:20261028-0712-Reff"]);
     }
 
     [Fact]
     public void HidesOlderThanThirtyDaysAreForgotten()
     {
-        var now = DateTime.UtcNow;
-        var store = new RecommendationStore(_paths, _log);
-        store.Dismiss("HourlyCacheClear", now.AddDays(-40));
-        store.Dismiss("StartAtSignIn", now);
-        Assert.Equal(["StartAtSignIn"], new RecommendationStore(_paths, _log).Dismissed.Keys);
+        var c = new TwoClocks();
+        var store = new RecommendationStore(_paths, _log, c.Now);
+        store.Dismiss("HourlyCacheClear", Ago(c, TimeSpan.FromDays(40)));
+        store.Dismiss("StartAtSignIn", c.Now());
+        Assert.Equal(["StartAtSignIn"], new RecommendationStore(_paths, _log, c.Now).Dismissed.Keys);
     }
 
     [Fact]
     public void AHideDatedAfterNowRunsOutThirtyDaysFromNow()
     {
         File.WriteAllText(File_, """{ "dismissed": { "TokenLeakGuard": "2099-01-01T00:00:00Z" } }""");
-        var now = DateTime.UtcNow;
-        var hidden = new RecommendationStore(_paths, _log).Dismissed;
-        Assert.InRange(hidden["TokenLeakGuard"], now.AddMinutes(-1), DateTime.UtcNow);
-        Assert.False(RecommendationRules.Hidden(hidden, "TokenLeakGuard", now.AddDays(31)));
+        var c = new TwoClocks();
+        var hidden = new RecommendationStore(_paths, _log, c.Now).Dismissed;
+        Assert.Equal(c.Now(), hidden["TokenLeakGuard"]);
+        Assert.True(RecommendationRules.Hidden(hidden, "TokenLeakGuard", c.Ms + (long)TimeSpan.FromDays(29).TotalMilliseconds));
+        Assert.False(RecommendationRules.Hidden(hidden, "TokenLeakGuard", c.Ms + (long)TimeSpan.FromDays(31).TotalMilliseconds));
+    }
+
+    [Fact]
+    public void AHidesThirtyDaysAreTimedOnTheForwardClockFromWhenItWasHiddenOrLoaded()
+    {
+        // setup.json as an earlier start left it: a hide 29 days old by the system clock, read onto the forward clock as the
+        // file loads. Half a day on, with the system clock set forward 40 days, it is still hidden; a day and a half on, with
+        // the clock set back 80 days, it is not.
+        var c = new TwoClocks();
+        File.WriteAllText(File_, $$"""{ "dismissed": { "TokenLeakGuard": "{{c.Utc.AddDays(-29):O}}" } }""");
+        var store = new RecommendationStore(_paths, _log, c.Now);
+        var hidden = store.Dismissed;
+        Assert.Equal(c.Ms - (long)TimeSpan.FromDays(29).TotalMilliseconds, hidden["TokenLeakGuard"].Ms);
+        c.Pass(TimeSpan.FromHours(12));
+        c.SetSystemClock(TimeSpan.FromDays(40));
+        Assert.True(RecommendationRules.Hidden(hidden, "TokenLeakGuard", c.Ms));
+        c.Pass(TimeSpan.FromDays(1));
+        c.SetSystemClock(-TimeSpan.FromDays(80));
+        Assert.False(RecommendationRules.Hidden(hidden, "TokenLeakGuard", c.Ms));
+        // A hide made in this run is kept, and forgotten, by its own time on the forward clock: 29 days on, with the system
+        // clock set forward 60 days, it is kept; 31 days on, with the clock set back 120 days, it is forgotten.
+        store.Dismiss("HourlyCacheClear", c.Now());
+        c.Pass(TimeSpan.FromDays(29));
+        c.SetSystemClock(TimeSpan.FromDays(60));
+        store.Dismiss("StartAtSignIn", c.Now());
+        Assert.Contains("HourlyCacheClear", store.Dismissed.Keys);
+        c.Pass(TimeSpan.FromDays(2));
+        c.SetSystemClock(-TimeSpan.FromDays(120));
+        store.Dismiss("CheckTokenLeak", c.Now());
+        Assert.Equal(["CheckTokenLeak", "StartAtSignIn"], store.Dismissed.Keys.Order());
     }
 
     [Fact]
@@ -89,13 +125,13 @@ public sealed class RecommendationStoreTests : IDisposable
         File.WriteAllText(File_, "{ \"guideCompletedUtc\": \"2026-10-28T09:00:00Z\", \"pad\": \"" + new string('x', 70_000) + "\" }");
         Assert.False(new RecommendationStore(_paths, _log).GuideCompleted);
 
-        var now = DateTime.UtcNow;
-        var store = new RecommendationStore(_paths, _log);
-        store.Dismiss("", now);
-        store.Dismiss(new string('k', 201), now);
+        var c = new TwoClocks();
+        var store = new RecommendationStore(_paths, _log, c.Now);
+        store.Dismiss("", c.Now());
+        store.Dismiss(new string('k', 201), c.Now());
         Assert.Empty(store.Dismissed);
-        for (int i = 0; i < 250; i++) store.Dismiss($"ReportIncident:{i}", now.AddMinutes(-i));
-        var kept = new RecommendationStore(_paths, _log).Dismissed;
+        for (int i = 0; i < 250; i++) store.Dismiss($"ReportIncident:{i}", Ago(c, TimeSpan.FromMinutes(i)));
+        var kept = new RecommendationStore(_paths, _log, c.Now).Dismissed;
         Assert.Equal(200, kept.Count);
         Assert.Contains("ReportIncident:0", kept.Keys);      // the newest are kept
         Assert.DoesNotContain("ReportIncident:249", kept.Keys);
@@ -110,7 +146,7 @@ public sealed class RecommendationStoreTests : IDisposable
         store.HideFeature(marks.Key);
         store.HideFeature("TokenLeakGuard");          // not a feature card's key: an offer is hidden for 30 days, not for good
         store.HideFeature(DiscoveryCard.KeyPrefix);      // no card
-        store.Dismiss("ReportIncident:x", DateTime.UtcNow);
+        store.Dismiss("ReportIncident:x", Moment.Now());
 
         var again = new RecommendationStore(_paths, _log);
         Assert.Equal([marks.Key], again.HiddenFeatures);
@@ -145,7 +181,7 @@ public sealed class RecommendationStoreTests : IDisposable
         Assert.Equal(Discovery.All.Select(c => c.Key).Order(), store.HiddenFeatures.Order());
         store.HideFeature("feature:Other");
         Assert.DoesNotContain("feature:Other", store.HiddenFeatures);
-        store.Dismiss("ReportIncident:y", DateTime.UtcNow); // saves the file again
+        store.Dismiss("ReportIncident:y", Moment.Now()); // saves the file again
         using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(File_));
         Assert.Equal(Discovery.All.Count, doc.RootElement.GetProperty("hiddenFeatures").GetArrayLength());
     }

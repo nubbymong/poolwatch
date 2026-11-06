@@ -53,22 +53,30 @@ internal sealed record ActiveChange(string Id, ChangeKind Kind, DateTime? Change
         : null;
 
     /// <summary>
-    /// What stays for a while after this change is put back, or null: the token-leak guard's Windows setting lasts until
-    /// you sign out. Written in the command line's list (<see cref="ChangeLedger.ToJson"/>), where the uninstaller reads it
-    /// and says it with the changes it puts back; the window says it on the guard's own row.
+    /// What stays for a while after the uninstaller put this change back, or null. Set only on the token-leak guard's row,
+    /// and only when the guard found its Windows setting already changed and has no record of changing it in this sign-in:
+    /// turning the guard off then leaves that setting until you sign out (<see cref="TokenGuardSetting.StaysAfterTurnOff"/>).
+    /// The setting the guard changed itself is put back by the uninstaller's step as by Turn off, when Windows allows it
+    /// (<see cref="TokenGuardSetting.PutBack"/>); when it does not, the step is not done and says so
+    /// (<see cref="ChangeWords.TokenGuardSettingNotPutBack"/>). Written in the command line's list
+    /// (<see cref="ChangeLedger.ToJson"/>), where the uninstaller reads it and says it with the changes it puts back.
     /// </summary>
-    public string? PutBackCaveat => Kind == ChangeKind.TokenGuard && CanUndo ? ChangeWords.TokenGuardSettingStays : null;
+    public string? PutBackCaveat { get; init; }
 
     /// <summary>A feature PoolWatch turned on (the logon task, its settings, its shortcut), or something it turned off.</summary>
     internal static ChangeGroup GroupOf(ChangeKind kind) =>
         kind is ChangeKind.LogonTask or ChangeKind.AutoClear or ChangeKind.TokenGuard or ChangeKind.Shortcut ? ChangeGroup.Feature : ChangeGroup.TurnedOff;
 
     /// <summary>
-    /// The row's button, and what the timeline says it did: a feature is turned off (the shortcut removed); anything else
-    /// is put back. A method, not a property, so the command line's list does not carry it.
+    /// The row's button, and what the timeline says it did: a feature is turned off; the shortcut is removed, and so is the
+    /// logon task when it does not start PoolWatch when you sign in (its row lists it as there, not as PoolWatch starting
+    /// then, and the button deletes it); anything else is put back. A method, not a property, so the command line's list
+    /// does not carry it.
     /// </summary>
     internal static string ButtonOf(ActiveChange c) =>
-        c.Group != ChangeGroup.Feature ? ChangeWords.PutBack : c.Kind == ChangeKind.Shortcut ? ChangeWords.Remove : ChangeWords.TurnOff;
+        c.Group != ChangeGroup.Feature ? ChangeWords.PutBack
+        : c.Kind == ChangeKind.Shortcut || (c.Kind == ChangeKind.LogonTask && c.What != ChangeWords.LogonTask) ? ChangeWords.Remove
+        : ChangeWords.TurnOff;
 }
 
 /// <summary>A service the profile applied at start lists: <see cref="ActiveChange.AtStart"/>.</summary>
@@ -76,7 +84,17 @@ internal sealed record AtStartHold(string Profile, string Service);
 
 /// <param name="Done">The change is no longer in effect: put back now, or nothing was left to put back. False: it still is.</param>
 /// <param name="Message">What happened, in plain words.</param>
-internal sealed record UndoResult(bool Done, string Message);
+internal sealed record UndoResult(bool Done, string Message)
+{
+    /// <summary>
+    /// For a change that is put back (<see cref="Done"/>), what did not happen all the same, in plain words; null when
+    /// nothing is left to say. Today a service whose start type is back but that was not started again (Windows did not
+    /// start it, or PoolWatch does not know whether it was running when it was turned off), or that is not known to have
+    /// stopped. The uninstaller's summary then says the change was put back only in part, with this
+    /// (<see cref="Program.UninstallSummary"/>), never a plain "Put back".
+    /// </summary>
+    public string? Caveat { get; init; }
+}
 
 /// <summary>Where a kind of change is kept, and how it is put back. Called off the UI thread (COM, the SCM, the registry).</summary>
 internal interface IChangeSource

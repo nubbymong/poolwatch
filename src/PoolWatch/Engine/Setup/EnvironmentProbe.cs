@@ -12,9 +12,10 @@ using PoolWatch.Native;
 namespace PoolWatch.Engine.Setup;
 
 /// <summary>
-/// The setup guide's look at this PC (<see cref="EnvironmentFacts"/>): run at the first start, on demand, and when the main
-/// window opens with facts older than a day or from another Windows build. Never on a timer. One scan at a time, on a
-/// worker thread; the result is kept in memory and in cache\environment.json.
+/// The setup guide's look at this PC (<see cref="EnvironmentFacts"/>): run at the first start, on demand, when the main
+/// window opens with facts older than a day or from another Windows build, and by the tray's token-leak watch while there
+/// are no facts at all (after an upgrade, an older PoolWatch's cache is not read). Once there are facts, never on a timer.
+/// One scan at a time, on a worker thread; the result is kept in memory and in cache\environment.json.
 /// <para>
 /// PoolWatch runs as the account that elevated it. When a standard user elevates with another administrator's password, the
 /// per-user facts (the AI tools in the profile, the Store packages) are that administrator's.
@@ -37,6 +38,15 @@ internal sealed class EnvironmentProbe
     private readonly IEnvironmentReads _reads;
     private readonly object _lock = new();
     private EnvironmentFacts? _last;
+    /// <summary>
+    /// When <see cref="_last"/> was scanned, on the clock that only goes forward: read as the scan ended, or, for facts read
+    /// back from cache\environment.json (which keeps the time of day only: docs/DESIGN.md, section 4), read onto it as the
+    /// file was read (<see cref="Moment.MsOf"/>). Null when the file's time is after now (the clock was set back, or the
+    /// file was edited: they would otherwise never age).
+    /// </summary>
+    private long? _lastMs;
+    /// <summary>Both clocks (<see cref="Moment.Now"/>; the tests set it): how old the facts are is timed on the forward one.</summary>
+    private readonly Func<Moment> _now;
     private bool _cacheRead;
     private Task<EnvironmentFacts>? _scan;
     /// <summary>When the running scan started (<see cref="_clock"/>).</summary>
@@ -48,12 +58,14 @@ internal sealed class EnvironmentProbe
         : this(engine.Paths, engine.Log, reads ?? new WindowsEnvironmentReads(engine, analysis)) { }
 
     /// <param name="clock">The tests: a clock they move on (<see cref="Stopwatch"/> ticks); <see cref="Stopwatch.GetTimestamp"/> otherwise.</param>
-    internal EnvironmentProbe(AppPaths paths, Log log, IEnvironmentReads reads, Func<long>? clock = null)
+    /// <param name="now">The tests: the two clocks they set; <see cref="Moment.Now"/> otherwise.</param>
+    internal EnvironmentProbe(AppPaths paths, Log log, IEnvironmentReads reads, Func<long>? clock = null, Func<Moment>? now = null)
     {
         _paths = paths;
         _log = log;
         _reads = reads;
         _clock = clock ?? Stopwatch.GetTimestamp;
+        _now = now ?? Moment.Now;
     }
 
     private string CacheFile => _paths.Guard.CheckReal(Path.Combine(_paths.EnsureDir(_paths.CacheDir), FileName));
@@ -69,6 +81,8 @@ internal sealed class EnvironmentProbe
                 {
                     _cacheRead = true;
                     _last = ReadCache();
+                    var at = _now();
+                    _lastMs = _last is { } f && f.ScannedUtc <= at.Utc ? at.MsOf(f.ScannedUtc) : null;
                 }
                 return _last;
             }
@@ -94,7 +108,7 @@ internal sealed class EnvironmentProbe
             return _scan = Task.Run(() =>
             {
                 var facts = Scan();
-                lock (_lock) _last = facts;
+                lock (_lock) (_last, _lastMs) = (facts, _now().Ms);
                 WriteCache(facts);
                 return facts;
             });
@@ -123,10 +137,17 @@ internal sealed class EnvironmentProbe
     }
 
     /// <summary>
-    /// The facts are missing, older than 24 hours, dated after now (the clock was set back, or the file was edited: they
-    /// would otherwise never age), or from another Windows build (one registry read).
+    /// The facts are missing, older than 24 hours on the clock that only goes forward (<see cref="_lastMs"/>), read back from
+    /// a file dated after now (the clock was set back, or the file was edited: they would otherwise never age), or from
+    /// another Windows build (one registry read).
     /// </summary>
-    public bool Stale(DateTime nowUtc) => Last is not { } f || f.ScannedUtc > nowUtc || nowUtc - f.ScannedUtc > StaleAfter || f.Build != Build();
+    public bool Stale()
+    {
+        if (Last is not { } f) return true;
+        long? scanned;
+        lock (_lock) scanned = _lastMs;
+        return scanned is not { } ms || _now().Ms - ms > (long)StaleAfter.TotalMilliseconds || f.Build != Build();
+    }
 
     private string Build()
     {
@@ -140,12 +161,25 @@ internal sealed class EnvironmentProbe
         // ProductName still says "Windows 10" on Windows 11 (it was never changed): build 22000 and later is Windows 11.
         string name = Read(() => _reads.CurrentVersion("ProductName"), null) is { Length: > 0 } product ? product : "Windows";
         if (TokenLeakRule.Major(build) >= 22000 && name.StartsWith("Windows 10", StringComparison.OrdinalIgnoreCase)) name = "Windows 11" + name[10..];
-        var volumes = Read(_reads.Volumes, []).Where(v => v.DriveType == "Fixed" && v.FileSystem.Length > 0)
-            .Select(v => new VolumeFact(v.Root, v.FileSystem, v.IsDevDrive == true, v.IsDevDrive == true ? Read(() => _reads.DevDriveTrusted(v.Root), null) : null))
+        // The volumes, the Store apps and the running services: a read that fails is recorded (null here), so setup says it
+        // could not tell instead of "none".
+        var allVolumes = Read<IReadOnlyList<VolumeInfo>?>(_reads.Volumes, null);
+        // The fixed volumes, and the volumes whose drive type Windows could not tell (which may be fixed ones). One whose file
+        // system could not be read is named as not read, never left out as a drive with no Dev Drive and no ReFS. One whose
+        // file system was read counts by it, whatever its drive type: a ReFS volume Windows could not say is a Dev Drive or
+        // not is not known to be one either way, and every Dev Drive is ReFS, so a volume of another file system is not one.
+        var looked = (allVolumes ?? []).Where(v => v.DriveType is "Fixed" or "Unknown").ToList();
+        bool Whole(VolumeInfo v) => v.FileSystem.Length > 0;
+        var volumes = looked.Where(Whole)
+            .Select(v => (v, dev: v.IsDevDrive ?? (v.FileSystem.Equals("ReFS", StringComparison.OrdinalIgnoreCase) ? null : false)))
+            .Select(x => new VolumeFact(x.v.Root, x.v.FileSystem, x.dev, x.dev == true ? Read(() => _reads.DevDriveTrusted(x.v.Root), null) : null))
             .ToList();
-        string? chatGpt = ChatGptPackage(Read(_reads.PackageFullNames, []));
-        var optional = Read(_reads.RunningOptionalServices, []);
+        var unreadVolumes = looked.Where(v => !Whole(v)).Select(v => v.Root).ToList();
+        var packages = Read<IReadOnlyList<string>?>(_reads.PackageFullNames, null);
+        string? chatGpt = ChatGptPackage(packages ?? []);
+        var optional = Read<IReadOnlyList<string>?>(_reads.RunningOptionalServices, null);
         var (realTime, performanceMode) = Read(_reads.Defender, (null, null));
+        var signIn = Read(_reads.SignInTask, SignInState.NotKnown);
         var facts = new EnvironmentFacts
         {
             ScannedUtc = DateTime.UtcNow, WindowsName = name, DisplayVersion = Read(() => _reads.CurrentVersion("DisplayVersion"), null), Build = build,
@@ -153,15 +187,18 @@ internal sealed class EnvironmentProbe
             Architecture = Read(_reads.NativeMachine, null) == ImageFileMachineArm64 ? "ARM64" : "x64",
             RamBytes = Read(_reads.RamBytes, 0), Volumes = volumes, AiTools = AiTools(chatGpt is not null),
             TokenLeak = TokenLeakRule.Judge(build, Read(_reads.SavedGuardState, null), Read(_reads.LiveForegroundLockTimeout, null)),
-            OwnClearTasks = Read(_reads.OwnClearTasks, []), LogonTaskExists = Read(_reads.LogonTaskExists, false),
+            OwnClearTasks = Read(_reads.OwnClearTasks, []),
+            SignIn = signIn,
             InstalledInProgramFiles = Read(_reads.InstalledInProgramFiles, false),
-            OptionalServicesRunning = optional.Count, OptionalServiceExamples = optional.Take(5).ToList(),
+            OptionalServicesRunning = optional?.Count ?? 0, OptionalServiceExamples = (optional ?? []).Take(5).ToList(),
             DefenderRealTimeOn = realTime, DefenderPerformanceModeOn = performanceMode,
             ChatGptInstalled = chatGpt is not null, ChatGptIconPath = chatGpt is null ? null : IconPath(chatGpt),
+            VolumesNotRead = allVolumes is null, UnreadVolumes = unreadVolumes, PackagesNotRead = packages is null, ServicesNotRead = optional is null,
         };
         _log.Info($"setup: scanned this PC: {facts.WindowsName} {facts.DisplayVersion} build {build}, {facts.Architecture}, " +
-                  $"{volumes.Count(v => v.IsDevDrive)} Dev Drive(s), {facts.AiTools.Count} AI tool(s), token leak {facts.TokenLeak}, " +
-                  $"{facts.OwnClearTasks.Count} own clear task(s), {optional.Count} optional service(s) running");
+                  $"{volumes.Count(v => v.IsDevDrive == true)} Dev Drive(s), {unreadVolumes.Count + volumes.Count(v => v.IsDevDrive is null)} drive(s) not read whole, " +
+                  $"{facts.AiTools.Count} AI tool(s), token leak {facts.TokenLeak}, " +
+                  $"{facts.OwnClearTasks.Count} own clear task(s), {optional?.Count ?? 0} optional service(s) running");
         return facts;
     }
 
@@ -258,7 +295,8 @@ internal interface IEnvironmentReads
     uint? LiveForegroundLockTimeout();
     /// <summary>Your own RAMMap clear tasks' paths (Task Scheduler, elevated).</summary>
     IReadOnlyList<string> OwnClearTasks();
-    bool LogonTaskExists();
+    /// <summary>Whether PoolWatch starts when you sign in (its logon task, as Task Scheduler has it and as the check at start judges it).</summary>
+    SignInState SignInTask();
     bool InstalledInProgramFiles();
     /// <summary>Display names of the running services on the optional-services catalogue.</summary>
     IReadOnlyList<string> RunningOptionalServices();
@@ -295,7 +333,7 @@ internal sealed class WindowsEnvironmentReads(MonitorEngine engine, AnalysisPipe
 
     /// <summary>The versions of the last check, or a read of its own before the first (a few seconds after start).</summary>
     public IReadOnlyDictionary<string, string> Versions() =>
-        analysis.Diagnostics.Versions is { Count: > 0 } v ? v : VersionCollector.Read(engine.Settings, null, engine.Log.Info);
+        analysis.Diagnostics.Versions is { Count: > 0 } v ? v : VersionCollector.Read(engine.Settings, [], engine.Log.Info);
 
     public IReadOnlyList<string> PackageFullNames()
     {
@@ -317,14 +355,31 @@ internal sealed class WindowsEnvironmentReads(MonitorEngine engine, AnalysisPipe
 
     public IReadOnlyList<string> OwnClearTasks() => CacheHelper.IsElevated ? CacheHelper.FindLegacy().Select(t => t.Path).ToList() : [];
 
-    public bool LogonTaskExists() => Ui.LogonTask.Read() is not null;
+    public SignInState SignInTask() => Ui.LogonTask.AtSignIn();
 
-    public bool InstalledInProgramFiles() => Environment.ProcessPath is { } exe && InstallGuard.IsTrustedInstallPath(exe);
+    public bool InstalledInProgramFiles() => IsInstalledInProgramFiles(Environment.ProcessPath, AdminPlaces.OfThisPc());
+
+    /// <summary>
+    /// In Program Files and admin-only there by the full check at start (its folders, its own rules and every file next to
+    /// it: <see cref="InstallGuard.WhyNotFrom"/>), not by its place alone.
+    /// </summary>
+    internal static bool IsInstalledInProgramFiles(string? exe, AdminPlaces places) => exe is not null && InstallGuard.WhyNotFrom(exe, places) is null;
 
     /// <summary>From the engine's running services, or a query of its own before the engine's first services refresh.</summary>
-    public IReadOnlyList<string> RunningOptionalServices() => (engine.Services.Count > 0 ? engine.Services : ServiceCollector.Query())
-        .Where(s => analysis.Diagnostics.Services.Catalogue.Find(s.Name) is not null)
-        .Select(s => s.DisplayName).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+    public IReadOnlyList<string> RunningOptionalServices() => OptionalOf(engine.Services.Count > 0 ? engine.Services : ServiceCollector.Query(),
+        name => analysis.Diagnostics.Services.Catalogue.Find(name) is not null);
+
+    /// <summary>
+    /// The display names of the running services <paramref name="onCatalogue"/> knows, once each, in order. Windows always
+    /// runs services of its own, so no running service at all means the service control manager could not be read (its
+    /// query gives an empty list when it cannot be opened): that throws, and the scan records the services as not read
+    /// instead of none running.
+    /// </summary>
+    internal static IReadOnlyList<string> OptionalOf(IReadOnlyList<ServiceEntry> running, Func<string, bool> onCatalogue) =>
+        running.Count == 0
+            ? throw new InvalidOperationException("no running service was listed")
+            : running.Where(s => onCatalogue(s.Name)).Select(s => s.DisplayName).Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
 
     /// <summary>
     /// MSFT_MpComputerStatus.RealTimeProtectionEnabled and MSFT_MpPreference.PerformanceModeStatus (0 is on). Never the

@@ -15,11 +15,22 @@ public sealed class ProcessRecord
     public string? CommandLine { get; set; }
     public string? User { get; set; }
     public DateTime StartUtc => Key.CreateTimeUtc;
+    /// <summary>
+    /// The create time on the clock that only goes forward, read onto it when PoolWatch first saw the process
+    /// (<see cref="Moment.MsOf"/>): its lifetime and its start beside a growth are timed on it.
+    /// </summary>
+    public long StartMs { get; set; }
     public DateTime FirstSeenUtc { get; set; }
+    /// <summary>When PoolWatch first saw it, on the clock that only goes forward.</summary>
+    public long FirstSeenMs { get; set; }
     public DateTime? ExitUtc { get; set; }
+    /// <summary>The exit on the clock that only goes forward, its time read onto it as the exit arrived (<see cref="Moment.MsOf"/>): how long the record is kept is timed on it.</summary>
+    public long? ExitMs { get; set; }
     public int? ExitCode { get; set; }
     /// <summary>Set when the parent is gone (exited, or its PID now belongs to a newer process).</summary>
     public DateTime? OrphanedUtc { get; set; }
+    /// <summary><see cref="OrphanedUtc"/> on the clock that only goes forward.</summary>
+    public long? OrphanedMs { get; set; }
     public bool SeenStartEvent { get; set; }
     /// <summary>Enrichment retries left (a process opened in its ETW start callback may not be queryable yet).</summary>
     internal int EnrichRetries { get; set; } = 2;
@@ -49,6 +60,8 @@ public sealed class ProcessRecord
 
     /// <summary>When the parent exited (the child is an orphan only if it is still running <see cref="ProcessRegistry.OrphanGrace"/> later).</summary>
     public DateTime? ParentExitedUtc { get; set; }
+    /// <summary><see cref="ParentExitedUtc"/> on the clock that only goes forward: the <see cref="ProcessRegistry.OrphanGrace"/> is timed from it.</summary>
+    public long? ParentExitedMs { get; set; }
 
     public bool IsAlive => ExitUtc is null;
     public bool IsOrphan => OrphanedUtc is not null;
@@ -70,24 +83,28 @@ public sealed class ProcessRegistry
     private readonly int _maxRecords;
     private readonly Queue<LifecycleEvent> _pending = new();
     private bool _initialized;
-    private readonly Dictionary<ProcessKey, DateTime> _vanished = new();
+    /// <summary>Each live process missing from the snapshots, with the snapshot it first went missing at (both clocks).</summary>
+    private readonly Dictionary<ProcessKey, Moment> _vanished = new();
 
     /// <summary>
     /// How long a process may be missing from snapshots before it is marked exited without an ETW stop
-    /// (real-time ETW delivery lags by about a second; the stop event carries the exit code).
+    /// (real-time ETW delivery lags by about a second; the stop event carries the exit code). Timed on the clock that only
+    /// goes forward.
     /// </summary>
     public TimeSpan ExitGrace { get; set; } = TimeSpan.FromSeconds(4);
 
     /// <summary>Exited processes that lived less than <see cref="EventSummarizer.LongLived"/> (shell pipelines, git calls) are
     /// forgotten after this long: a busy PC starts tens of thousands a day and they were most of PoolWatch's memory.</summary>
     public TimeSpan KeepShortLived { get; set; } = TimeSpan.FromMinutes(15);
-    private DateTime _nextPrune = DateTime.MinValue;
+    /// <summary>When the next full prune is due, on the forward clock.</summary>
+    private long _nextPruneMs = long.MinValue;
+    private readonly Func<Moment> _clock;
     private readonly Dictionary<int, string> _lastImage = new();
     private readonly HashSet<ProcessKey> _orphanCandidates = new();
 
     /// <summary>
     /// A child counts as an orphan only when it outlives its parent by this much: a shell pipeline whose bash exits a
-    /// moment before its last grep is normal, not an orphan.
+    /// moment before its last grep is normal, not an orphan. Timed on the clock that only goes forward.
     /// </summary>
     public static readonly TimeSpan OrphanGrace = TimeSpan.FromSeconds(30);
 
@@ -95,8 +112,12 @@ public sealed class ProcessRegistry
     public static readonly IReadOnlySet<string> KnownDaemons = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { "scdaemon.exe", "gpg-agent.exe", "ssh-agent.exe", "keyboxd.exe", "dirmngr.exe", "pageant.exe", "gpg-connect-agent.exe", "tpm2daemon.exe" };
 
-    public ProcessRegistry(TimeSpan? keepExited = null, int maxRecords = 20_000)
+    /// <param name="clock">Reads the two clocks (<see cref="Moment.Now"/>; a test gives its own): how long exited records are
+    /// kept, the prunes' minute, <see cref="ExitGrace"/>, <see cref="OrphanGrace"/> and the protected window are timed on its
+    /// forward clock, and the times Windows gives are read onto it.</param>
+    public ProcessRegistry(TimeSpan? keepExited = null, int maxRecords = 20_000, Func<Moment>? clock = null)
     {
+        _clock = clock ?? Moment.Now;
         _keepExited = keepExited ?? TimeSpan.FromHours(24);
         _maxRecords = maxRecords;
     }
@@ -158,10 +179,11 @@ public sealed class ProcessRegistry
         bool created = rec is null;
         if (created)
         {
+            var at = _clock();
             rec = new ProcessRecord
             {
-                Key = key, ParentPid = parentPid, Image = image, FirstSeenUtc = nowUtc, ImagePath = imagePath, CommandLine = commandLine, User = user,
-                CreateTimeEstimated = createTimeEstimated,
+                Key = key, ParentPid = parentPid, Image = image, FirstSeenUtc = nowUtc, FirstSeenMs = at.MsOf(nowUtc), StartMs = at.MsOf(key.CreateTimeUtc),
+                ImagePath = imagePath, CommandLine = commandLine, User = user, CreateTimeEstimated = createTimeEstimated,
             };
             Enrich(rec); // outside the lock: opens the process
         }
@@ -228,9 +250,14 @@ public sealed class ProcessRegistry
         foreach (var r in retry) Enrich(r);
 
         // Enrich unseen processes first, outside the lock (it opens each process).
+        var at = _clock();
+        long snapshotMs = at.MsOf(snapshotUtc);
         List<ProcessRecord> fresh;
         lock (_lock) fresh = processes.Where(p => !_all.ContainsKey(p.Key))
-            .Select(p => new ProcessRecord { Key = p.Key, ParentPid = p.ParentPid, Image = p.ImageName, FirstSeenUtc = snapshotUtc }).ToList();
+            .Select(p => new ProcessRecord
+            {
+                Key = p.Key, ParentPid = p.ParentPid, Image = p.ImageName, FirstSeenUtc = snapshotUtc, FirstSeenMs = snapshotMs, StartMs = at.MsOf(p.Key.CreateTimeUtc),
+            }).ToList();
         foreach (var rec in fresh) Enrich(rec);
 
         long snapshotFt = snapshotUtc.ToFileTimeUtc();
@@ -271,21 +298,22 @@ public sealed class ProcessRegistry
                 if (_initialized) _pending.Enqueue(StartEvent(rec, snapshotUtc));
             }
             // Anything live that is missing has exited, unless it was created after the snapshot was taken
-            // (an ETW start that raced the query). Wait ExitGrace for the ETW stop, which has the exit code.
+            // (an ETW start that raced the query). Wait ExitGrace for the ETW stop, which has the exit code; the wait is
+            // timed on the clock that only goes forward.
             foreach (var key in _livePid.Values.ToList())
             {
                 if (present.Contains(key)) { _vanished.Remove(key); continue; }
                 if (key.CreateTime >= snapshotFt) continue;
-                if (!_vanished.TryGetValue(key, out var since)) _vanished[key] = since = snapshotUtc;
-                if (snapshotUtc - since >= ExitGrace)
+                if (!_vanished.TryGetValue(key, out var since)) _vanished[key] = since = new Moment(snapshotUtc, snapshotMs);
+                if (snapshotMs - since.Ms >= (long)ExitGrace.TotalMilliseconds)
                 {
                     _vanished.Remove(key);
-                    MarkExited(_all[key], since, null);
+                    MarkExited(_all[key], since.Utc, null, since.Ms);
                 }
             }
             _initialized = true;
-            PromoteOrphans(snapshotUtc);
-            Prune(snapshotUtc);
+            PromoteOrphans(snapshotMs);
+            Prune();
         }
     }
 
@@ -335,7 +363,8 @@ public sealed class ProcessRegistry
             if (k.Pid == rec.ParentPid && k != rec.Key && k.CreateTime <= rec.Key.CreateTime && (best is null || k.CreateTime > best.Value.CreateTime))
                 best = k;
         }
-        if (best is { } b && _all[b].ExitUtc is { } exit && exit < rec.Key.CreateTimeUtc) best = null; // exited before the child started: PID reuse
+        // Exited before the child started (on the clock that only goes forward): PID reuse.
+        if (best is { } b && _all[b].ExitMs is { } exit && exit < rec.StartMs) best = null;
         rec.ParentKey = best;
         if (!IsRootPid(rec.ParentPid) && (best is null || !_all[best.Value].IsAlive))
         {
@@ -344,7 +373,8 @@ public sealed class ProcessRegistry
             else
             {
                 // Same 30 s grace as a live exit: a grep first seen just after its bash ended is not an orphan.
-                rec.ParentExitedUtc = best is { } dk && _all[dk].ExitUtc is { } pe ? pe : rec.FirstSeenUtc;
+                (rec.ParentExitedUtc, rec.ParentExitedMs) = best is { } dk && _all[dk] is { ExitUtc: { } pe, ExitMs: { } peMs }
+                    ? (pe, peMs) : (rec.FirstSeenUtc, rec.FirstSeenMs);
                 _orphanCandidates.Add(rec.Key);
             }
         }
@@ -358,11 +388,11 @@ public sealed class ProcessRegistry
         exact.ImagePath ??= estimated.ImagePath;
         exact.CommandLine ??= estimated.CommandLine;
         exact.User ??= estimated.User;
-        exact.OrphanedUtc = estimated.OrphanedUtc;
-        exact.ParentExitedUtc = estimated.ParentExitedUtc;
+        (exact.OrphanedUtc, exact.OrphanedMs) = (estimated.OrphanedUtc, estimated.OrphanedMs);
+        (exact.ParentExitedUtc, exact.ParentExitedMs) = (estimated.ParentExitedUtc, estimated.ParentExitedMs);
         if (_orphanCandidates.Remove(estimated.Key)) _orphanCandidates.Add(exact.Key);
         exact.SeenStartEvent = estimated.SeenStartEvent;
-        exact.FirstSeenUtc = estimated.FirstSeenUtc;
+        (exact.FirstSeenUtc, exact.FirstSeenMs) = (estimated.FirstSeenUtc, estimated.FirstSeenMs);
         exact.Services = estimated.Services;
         exact.Label ??= estimated.Label;
         if (!string.IsNullOrEmpty(estimated.Image)) exact.Image = estimated.Image;
@@ -380,10 +410,13 @@ public sealed class ProcessRegistry
         if (rec.Image.Length > 0) _lastImage[rec.Pid] = rec.Image;
     }
 
-    private void MarkExited(ProcessRecord rec, DateTime exitUtc, int? exitCode)
+    /// <param name="exitMs">The exit on the clock that only goes forward when it is known (the snapshot it went missing at);
+    /// else <paramref name="exitUtc"/> is read onto it now.</param>
+    private void MarkExited(ProcessRecord rec, DateTime exitUtc, int? exitCode, long? exitMs = null)
     {
         if (rec.ExitUtc is not null) { rec.ExitCode ??= exitCode; return; }
         rec.ExitUtc = exitUtc;
+        rec.ExitMs = exitMs ?? _clock().MsOf(exitUtc);
         rec.ExitCode = exitCode;
         if (_livePid.TryGetValue(rec.Pid, out var k) && k == rec.Key) _livePid.Remove(rec.Pid);
         _pending.Enqueue(new LifecycleEvent
@@ -396,28 +429,36 @@ public sealed class ProcessRegistry
         {
             var child = _all[childKey];
             if (child.ParentKey != rec.Key || child.OrphanedUtc is not null || child.ParentExitedUtc is not null) continue;
-            child.ParentExitedUtc = exitUtc;
+            (child.ParentExitedUtc, child.ParentExitedMs) = (exitUtc, rec.ExitMs);
             if (KnownDaemons.Contains(child.Image)) child.Label ??= $"background service started by {rec.Image}";
             else _orphanCandidates.Add(childKey);
         }
         _orphanCandidates.Remove(rec.Key);
     }
 
-    /// <summary>Children whose parent exited at least <see cref="OrphanGrace"/> ago and that still run are orphans now.</summary>
-    private void PromoteOrphans(DateTime nowUtc)
+    /// <summary>
+    /// Children whose parent exited at least <see cref="OrphanGrace"/> ago and that still run are orphans now, timed on the
+    /// clock that only goes forward (<paramref name="nowMs"/>, the parent's and the child's exits as the registry read them).
+    /// </summary>
+    private void PromoteOrphans(long nowMs)
     {
         if (_orphanCandidates.Count == 0) return;
+        long grace = (long)OrphanGrace.TotalMilliseconds;
         foreach (var key in _orphanCandidates.ToList())
         {
-            if (!_all.TryGetValue(key, out var child) || child.ParentExitedUtc is not { } pe) { _orphanCandidates.Remove(key); continue; }
-            bool outlived = child.ExitUtc is { } x ? x - pe >= OrphanGrace : nowUtc - pe >= OrphanGrace;
+            if (!_all.TryGetValue(key, out var child) || child.ParentExitedUtc is not { } pe || child.ParentExitedMs is not { } peMs)
+            {
+                _orphanCandidates.Remove(key);
+                continue;
+            }
+            bool outlived = child.ExitUtc is not null ? child.ExitMs - peMs >= grace : nowMs - peMs >= grace;
             if (!outlived)
             {
                 if (child.ExitUtc is not null) _orphanCandidates.Remove(key); // ended with its pipeline: not an orphan
                 continue;
             }
             _orphanCandidates.Remove(key);
-            child.OrphanedUtc = pe;
+            (child.OrphanedUtc, child.OrphanedMs) = (pe, peMs);
             var parent = child.ParentKey is { } pk ? _all.GetValueOrDefault(pk) : null;
             _pending.Enqueue(new LifecycleEvent
             {
@@ -452,13 +493,14 @@ public sealed class ProcessRegistry
     }
 
     /// <summary>
-    /// Records of processes that exited in [<see cref="ProtectSince"/>, <see cref="ProtectUntil"/>] are not pruned by age:
-    /// the incident window plus 10 minutes on each side (2b: sized by time, not by a count). Set by the incident manager
-    /// from the open and recently closed incidents; null when nothing needs them. Any thread.
+    /// Records of processes that exited in [<see cref="ProtectSinceMs"/>, <see cref="ProtectUntilMs"/>] on the clock that
+    /// only goes forward (each record's <see cref="ProcessRecord.ExitMs"/>) are not pruned by age: the incident window plus
+    /// 10 minutes on each side (Sized by time, not by a count). Set by the incident manager from the open and recently
+    /// closed incidents; null when nothing needs them. Any thread.
     /// </summary>
-    public DateTime? ProtectSince { get; set; }
-    /// <summary>The end of the protected window; null while an incident is still open (up to now).</summary>
-    public DateTime? ProtectUntil { get; set; }
+    public long? ProtectSinceMs { get; set; }
+    /// <summary>The end of the protected window on the forward clock; null while an incident is still open (up to now).</summary>
+    public long? ProtectUntilMs { get; set; }
 
     /// <summary>
     /// The newest this many protected short-lived processes keep their full record; older ones in the window are kept as a
@@ -469,13 +511,17 @@ public sealed class ProcessRegistry
     /// <summary>A hard ceiling on compact start records (about 130 bytes each), oldest dropped first.</summary>
     public const int MaxCompact = 100_000;
 
-    /// <summary>A short-lived process kept only so an incident's trace can name it (2b).</summary>
-    private sealed record CompactRecord(ProcessKey Key, int ParentPid, ProcessKey? ParentKey, string Image, string? ImagePath, DateTime ExitUtc, int? ExitCode)
+    /// <summary>A short-lived process kept only so an incident's trace can name it.</summary>
+    private sealed record CompactRecord(ProcessKey Key, int ParentPid, ProcessKey? ParentKey, string Image, string? ImagePath, DateTime ExitUtc, long ExitMs,
+        long StartMs, int? ExitCode)
     {
+        public static CompactRecord Of(ProcessRecord r) =>
+            new(r.Key, r.ParentPid, r.ParentKey, r.Image, r.ImagePath, r.ExitUtc!.Value, r.ExitMs ?? r.StartMs, r.StartMs, r.ExitCode);
+
         public ProcessRecord ToRecord() => new()
         {
-            Key = Key, ParentPid = ParentPid, ParentKey = ParentKey, Image = Image, ImagePath = ImagePath, ExitUtc = ExitUtc, ExitCode = ExitCode,
-            FirstSeenUtc = Key.CreateTimeUtc, SeenStartEvent = true,
+            Key = Key, ParentPid = ParentPid, ParentKey = ParentKey, Image = Image, ImagePath = ImagePath, ExitUtc = ExitUtc, ExitMs = ExitMs, ExitCode = ExitCode,
+            FirstSeenUtc = Key.CreateTimeUtc, FirstSeenMs = StartMs, StartMs = StartMs, SeenStartEvent = true,
         };
     }
 
@@ -484,23 +530,25 @@ public sealed class ProcessRegistry
     /// <summary>Compact start records held for incident windows.</summary>
     public int CompactCount { get { lock (_lock) return _compact.Count; } }
 
-    private bool Protected(DateTime exitUtc) => ProtectSince is { } ps && exitUtc >= ps && (ProtectUntil is not { } pu || exitUtc <= pu);
+    private bool Protected(long exitMs) => ProtectSinceMs is { } ps && exitMs >= ps && (ProtectUntilMs is not { } pu || exitMs <= pu);
 
     /// <summary>A full record, else a compact one rebuilt as a record (a new object: changing it changes nothing here).</summary>
     private ProcessRecord? Lookup(ProcessKey key) =>
         _all.TryGetValue(key, out var r) ? r : _compact.TryGetValue(key, out var c) ? c.ToRecord() : null;
 
     /// <summary>
-    /// The record of one process instance: by PID and create time when the create time is known (within a second: the
-    /// trace's start timestamp and the kernel's create time differ slightly), else the instance of that PID alive at
-    /// <paramref name="atUtc"/>. Null when PoolWatch no longer holds it.
+    /// The record of one process instance: by PID and create time when the create time is known (exactly, else within 2 s:
+    /// the trace's start timestamp and the kernel's create time differ slightly), else the instance of that PID alive at
+    /// <paramref name="atUtc"/>, read onto the clock that only goes forward now (<see cref="Moment.MsOf"/>, as
+    /// <see cref="Pick"/> compares). Null when PoolWatch no longer holds it.
     /// </summary>
     public ProcessRecord? FindInstance(int pid, long createTime, DateTime atUtc)
     {
         lock (_lock)
         {
             if (createTime > 0 && Lookup(new ProcessKey(pid, createTime)) is { } exact) return exact;
-            return Pick(_all.Values.Where(r => r.Pid == pid).Concat(_compact.Values.Where(c => c.Key.Pid == pid).Select(c => c.ToRecord())).ToList(), createTime, atUtc);
+            return Pick(_all.Values.Where(r => r.Pid == pid).Concat(_compact.Values.Where(c => c.Key.Pid == pid).Select(c => c.ToRecord())).ToList(), createTime,
+                _clock().MsOf(atUtc));
         }
     }
 
@@ -521,9 +569,12 @@ public sealed class ProcessRegistry
 
     /// <summary>
     /// Among one PID's records: the one with this create time (within 2 s: the trace's start timestamp and the kernel's
-    /// create time differ slightly, and estimated create times differ more), else the one alive at <paramref name="atUtc"/>.
+    /// create time differ slightly, and estimated create times differ more), else the one alive at <paramref name="atMs"/>,
+    /// within a second, on the clock that only goes forward (each record's <see cref="ProcessRecord.StartMs"/> and
+    /// <see cref="ProcessRecord.ExitMs"/>), the latest started first: a system clock set back or forward between a process's
+    /// start or exit and that moment does not pick another instance of its PID.
     /// </summary>
-    public static ProcessRecord? Pick(List<ProcessRecord>? candidates, long createTime, DateTime atUtc)
+    public static ProcessRecord? Pick(List<ProcessRecord>? candidates, long createTime, long atMs)
     {
         if (candidates is null || candidates.Count == 0) return null;
         if (createTime > 0)
@@ -532,8 +583,8 @@ public sealed class ProcessRegistry
         ProcessRecord? best = null;
         foreach (var r in candidates)
         {
-            bool alive = r.StartUtc <= atUtc.AddSeconds(1) && (r.ExitUtc is not { } x || x >= atUtc.AddSeconds(-1));
-            if (alive && (best is null || r.StartUtc > best.StartUtc)) best = r;
+            bool alive = r.StartMs <= atMs + 1000 && (r.ExitMs is not { } x || x >= atMs - 1000);
+            if (alive && (best is null || r.StartMs > best.StartMs)) best = r;
         }
         return best;
     }
@@ -542,22 +593,28 @@ public sealed class ProcessRegistry
     private void PruneCompact()
     {
         if (_compact.Count == 0) return;
-        foreach (var k in _compact.Values.Where(c => !Protected(c.ExitUtc)).Select(c => c.Key).ToList()) _compact.Remove(k);
+        foreach (var k in _compact.Values.Where(c => !Protected(c.ExitMs)).Select(c => c.Key).ToList()) _compact.Remove(k);
         if (_compact.Count > MaxCompact)
-            foreach (var k in _compact.Values.OrderBy(c => c.ExitUtc).Take(_compact.Count - MaxCompact).Select(c => c.Key).ToList()) _compact.Remove(k);
+            foreach (var k in _compact.Values.OrderBy(c => c.ExitMs).Take(_compact.Count - MaxCompact).Select(c => c.Key).ToList()) _compact.Remove(k);
     }
 
-    private DateTime _nextCompactPrune = DateTime.MinValue;
+    private long _nextCompactPruneMs = long.MinValue;
 
-    private void Prune(DateTime nowUtc)
+    /// <summary>
+    /// Drops exited records no longer needed. The minute between full passes and how long an exited record is kept are timed
+    /// on the clock that only goes forward (each record's <see cref="ProcessRecord.ExitMs"/>), so a system clock set back
+    /// neither keeps records past their time nor, set forward, drops them early.
+    /// </summary>
+    private void Prune()
     {
+        long nowMs = _clock().Ms;
         // The compact records go with their window even while the full registry is small.
-        if (_compact.Count > 0 && nowUtc >= _nextCompactPrune) { _nextCompactPrune = nowUtc.AddMinutes(1); PruneCompact(); }
+        if (_compact.Count > 0 && nowMs >= _nextCompactPruneMs) { _nextCompactPruneMs = nowMs + 60_000; PruneCompact(); }
         if (_all.Count <= 256) return;
-        if (nowUtc < _nextPrune && _all.Count <= _maxRecords) return; // a full pass once a minute, not every sample
-        _nextPrune = nowUtc.AddMinutes(1);
-        var cutoff = nowUtc - _keepExited;
-        var shortCutoff = nowUtc - KeepShortLived;
+        if (nowMs < _nextPruneMs && _all.Count <= _maxRecords) return; // a full pass once a minute, not every sample
+        _nextPruneMs = nowMs + 60_000;
+        long cutoff = nowMs - (long)_keepExited.TotalMilliseconds;
+        long shortCutoff = nowMs - (long)KeepShortLived.TotalMilliseconds;
         // Every dead ancestor of a live process stays: the whole chain up to claude.exe / AICC is the evidence.
         var keep = new HashSet<ProcessKey>();
         foreach (var k in _livePid.Values)
@@ -570,16 +627,17 @@ public sealed class ProcessRegistry
         var protectedShort = new List<ProcessRecord>();
         foreach (var r in _all.Values)
         {
-            if (r.ExitUtc is not { } e || keep.Contains(r.Key)) continue;
-            bool shortLived = r.Key.CreateTime > 0 && e - r.StartUtc < EventSummarizer.LongLived;
+            if (r.ExitUtc is null || keep.Contains(r.Key)) continue;
+            long exitMs = r.ExitMs ?? nowMs;
+            bool shortLived = r.Key.CreateTime > 0 && exitMs - r.StartMs < (long)EventSummarizer.LongLived.TotalMilliseconds;
             // Processes that ran inside an incident's window (plus 10 min each side) are its evidence: the trace names them
-            // by PID and create time. Kept, by time, until the incident no longer needs them (2b).
-            if (Protected(e))
+            // by PID and create time. Kept, by time, until the incident no longer needs them.
+            if (Protected(exitMs))
             {
                 if (shortLived) protectedShort.Add(r);
                 continue;
             }
-            if (e < cutoff || (shortLived && e < shortCutoff)) dead.Add(r.Key);
+            if (exitMs < cutoff || (shortLived && exitMs < shortCutoff)) dead.Add(r.Key);
             else if (shortLived) shortLivedKept.Add(r);
         }
         // A long incident on a busy PC would hold every short command it saw as a full record: the newest
@@ -587,10 +645,10 @@ public sealed class ProcessRegistry
         // count: the window is sized by time).
         if (protectedShort.Count > MaxProtectedShortLived)
         {
-            protectedShort.Sort((a, b) => b.ExitUtc!.Value.CompareTo(a.ExitUtc!.Value));
+            protectedShort.Sort((a, b) => (b.ExitMs ?? nowMs).CompareTo(a.ExitMs ?? nowMs));
             foreach (var r in protectedShort.Skip(MaxProtectedShortLived))
             {
-                _compact[r.Key] = new CompactRecord(r.Key, r.ParentPid, r.ParentKey, r.Image, r.ImagePath, r.ExitUtc!.Value, r.ExitCode);
+                _compact[r.Key] = CompactRecord.Of(r);
                 dead.Add(r.Key);
             }
             protectedShort.RemoveRange(MaxProtectedShortLived, protectedShort.Count - MaxProtectedShortLived);
@@ -604,12 +662,12 @@ public sealed class ProcessRegistry
             // (each time over is a full pass), short-lived ones first (those outside an incident window before those inside
             // it), oldest exit first.
             int excess = _all.Count - _maxRecords * 4 / 5;
-            var victims = shortLivedKept.OrderBy(r => Protected(r.ExitUtc!.Value)).ThenBy(r => r.ExitUtc)
-                .Concat(_all.Values.Where(r => !r.IsAlive && !keep.Contains(r.Key) && !(r.Key.CreateTime > 0 && r.ExitUtc - r.StartUtc < EventSummarizer.LongLived)).OrderBy(r => r.ExitUtc))
+            var victims = shortLivedKept.OrderBy(r => Protected(r.ExitMs ?? nowMs)).ThenBy(r => r.ExitMs)
+                .Concat(_all.Values.Where(r => !r.IsAlive && !keep.Contains(r.Key) && !(r.Key.CreateTime > 0 && (r.ExitMs ?? nowMs) - r.StartMs < (long)EventSummarizer.LongLived.TotalMilliseconds)).OrderBy(r => r.ExitMs))
                 .Take(excess).ToList();
             foreach (var r in victims)
             {
-                if (Protected(r.ExitUtc!.Value)) _compact[r.Key] = new CompactRecord(r.Key, r.ParentPid, r.ParentKey, r.Image, r.ImagePath, r.ExitUtc!.Value, r.ExitCode);
+                if (Protected(r.ExitMs ?? nowMs)) _compact[r.Key] = CompactRecord.Of(r);
                 _all.Remove(r.Key);
             }
         }

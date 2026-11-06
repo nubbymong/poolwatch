@@ -1,3 +1,5 @@
+using System.ComponentModel;
+
 namespace PoolWatch.Ui;
 
 /// <summary>
@@ -10,6 +12,7 @@ internal class PaintedLabel : Control
 {
     private const TextFormatFlags Flags = TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl;
     private readonly TextFormatFlags _paintFlags;
+    private bool _focusCue;
 
     /// <param name="centerVertically">Centres the text vertically (the status line); otherwise it starts at the top.</param>
     public PaintedLabel(bool centerVertically = false)
@@ -20,6 +23,22 @@ internal class PaintedLabel : Control
         SetStyle(ControlStyles.Selectable, false);
         TabStop = false;
         AccessibleRole = AccessibleRole.StaticText;
+    }
+
+    /// <summary>
+    /// A focus rectangle round the text: the control this label names has the keyboard focus and shows its focus cues
+    /// (the Pool causes details pane, whose title this is, <see cref="DetailsPane"/>). The label itself never takes the focus.
+    /// </summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)] // set in code, never by a designer
+    public bool FocusCue
+    {
+        get => _focusCue;
+        set
+        {
+            if (_focusCue == value) return;
+            _focusCue = value;
+            Invalidate();
+        }
     }
 
     /// <summary>The height <paramref name="text"/> needs at <paramref name="width"/> pixels, wrapped as this control draws it.</summary>
@@ -36,5 +55,6 @@ internal class PaintedLabel : Control
     {
         var area = Rectangle.FromLTRB(Padding.Left, Padding.Top, ClientSize.Width - Padding.Right, ClientSize.Height - Padding.Bottom);
         TextRenderer.DrawText(e.Graphics, Text, Font, area, ForeColor, _paintFlags);
+        if (_focusCue) ControlPaint.DrawFocusRectangle(e.Graphics, ClientRectangle);
     }
 }

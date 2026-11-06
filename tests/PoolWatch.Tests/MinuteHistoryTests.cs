@@ -4,6 +4,7 @@ using PoolWatch.Core.History;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
+using static PoolWatch.Tests.Clocks;
 
 namespace PoolWatch.Tests;
 
@@ -96,7 +97,7 @@ public class MinuteHistoryTests
                 if (busy) live[pid] = (p with { OtherOperationCount = p.OtherOperationCount + 100 }, left == int.MaxValue ? left : left - 1);
             }
             h.Add(new Sample(now, new PoolTotals(1UL << 30, 1UL << 30, 1UL << 30, 1UL << 30), [new(PoolTag.Parse("Reff"), 1, 0, 64UL << 20, 0, 0, 0)],
-                live.Values.Select(v => v.p).ToList()));
+                live.Values.Select(v => v.p).ToList()) { TickMs = Clocks.At(now).Ms });
             foreach (var pid in live.Where(kv => kv.Value.left == 1).Select(kv => kv.Key).ToList()) live.Remove(pid);
         }
         Assert.InRange(h.Minutes.Count, 1490, 1501); // 25 hours of minutes: the history is full

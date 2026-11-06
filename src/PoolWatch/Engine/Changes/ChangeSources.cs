@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using PoolWatch.Core.Changes;
 using PoolWatch.Core.Services;
+using PoolWatch.Core.Setup;
 using PoolWatch.Core.Util;
 
 namespace PoolWatch.Engine.Changes;
@@ -18,21 +19,62 @@ internal interface ITaskToggles
     bool StartupExists(string location, string name);
 }
 
-/// <summary>The "start at sign-in" task: listed while it exists in Task Scheduler, undone by removing it.</summary>
-internal sealed class LogonTaskSource(ILogonTasks tasks) : IChangeSource
+/// <summary>
+/// The "start at sign-in" task: listed while it exists in Task Scheduler, undone by removing it, and said as Settings says
+/// it (<c>atSignIn</c>: whether the task starts PoolWatch when you sign in, <see cref="Ui.LogonTask.AtSignIn(LogonTaskPolicy.ExistingTask?)"/>
+/// on this PC). A task that is there but could not be read is listed too, with why: removing it needs no reading, so Put
+/// all back and uninstalling still remove it.
+/// </summary>
+internal sealed class LogonTaskSource(ILogonTasks tasks, Func<LogonTaskPolicy.ExistingTask, SignInState> atSignIn) : IChangeSource
 {
-    public IEnumerable<ActiveChange> List() =>
-        tasks.Read() is null ? [] :
+    public IEnumerable<ActiveChange> List()
+    {
+        // As Settings and the setup guide say it (LogonTaskPolicy.AtSignIn): "starts when you sign in" only for a task that
+        // does; one kept from running by a switch of its own, or without highest privileges, as there, saying which; one
+        // that was not read, or that the check at start asks about, as there, with why.
+        var state = SignInState.Starts;
+        string? note = null;
+        try
+        {
+            if (tasks.Read() is not { } task) return [];
+            state = atSignIn(task);
+        }
+        catch (Exception ex)
+        {
+            state = SignInState.NotKnown;
+            note = "PoolWatch could not read its sign-in task (" + ex.Message + "). Remove, Put all back and uninstalling delete it all the same.";
+        }
+        var (what, detail) = Words(state);
+        note ??= state switch
+        {
+            SignInState.NotKnown => ChangeWords.LogonTaskStateNotRead,
+            SignInState.NotSafe => ChangeWords.LogonTaskAskedAbout,
+            _ => null,
+        };
+        return
         [
-            new ActiveChange(ChangeIds.LogonTask, ChangeKind.LogonTask, null, ChangeWords.LogonTask, CanUndo: true, Note: null)
+            new ActiveChange(ChangeIds.LogonTask, ChangeKind.LogonTask, null, what, CanUndo: true, Note: note)
             {
-                Title = ChangeWords.LogonTaskTitle, Detail = ChangeWords.LogonTaskDetail,
+                Title = ChangeWords.LogonTaskTitle, Detail = detail,
             },
         ];
+    }
 
+    /// <summary>Pure: the row's line and detail line for a task in <paramref name="state"/>.</summary>
+    internal static (string What, string Detail) Words(SignInState state) => state switch
+    {
+        SignInState.TaskOff => (ChangeWords.LogonTaskOff, ChangeWords.LogonTaskOffDetail),
+        SignInState.TriggerOff => (ChangeWords.LogonTaskTriggerOff, ChangeWords.LogonTaskTriggerOffDetail),
+        SignInState.NoTrigger => (ChangeWords.LogonTaskNoTrigger, ChangeWords.LogonTaskNoTriggerDetail),
+        SignInState.NotHighest => (ChangeWords.LogonTaskNotHighest, ChangeWords.LogonTaskNotHighestDetail),
+        SignInState.NotKnown or SignInState.NotSafe => (ChangeWords.LogonTaskThere, ChangeWords.LogonTaskThereDetail),
+        _ => (ChangeWords.LogonTask, ChangeWords.LogonTaskDetail),
+    };
+
+    /// <summary>Removes the task: said as PoolWatch no longer starting when you sign in only for a task that started it (its row's Turn off).</summary>
     public UndoResult Undo(ActiveChange change, bool confirmed) => tasks.Remove() is { } error
-        ? new(false, "PoolWatch could not stop starting when you sign in: " + error)
-        : new(true, "PoolWatch no longer starts when you sign in.");
+        ? new(false, (change.What == ChangeWords.LogonTask ? "PoolWatch could not stop starting when you sign in: " : "PoolWatch could not delete its sign-in task: ") + error)
+        : new(true, change.What == ChangeWords.LogonTask ? "PoolWatch no longer starts when you sign in." : ChangeWords.LogonTaskRemoved);
 
     public ActiveChange Unread(string error) =>
         new("unread:" + ChangeIds.LogonTask, ChangeKind.LogonTask, null, ChangeWords.Unread("whether it starts when you sign in"), false, ChangeWords.UnreadNote(error));
@@ -40,12 +82,19 @@ internal sealed class LogonTaskSource(ILogonTasks tasks) : IChangeSource
 
 /// <summary>
 /// The automatic clear and the token-leak guard, listed while they are on in the running settings and turned off at once
-/// through <see cref="LiveSettings"/>. Turning the guard off leaves the Windows setting it changed until you sign out, and
-/// its row and its result say so.
+/// through <see cref="LiveSettings"/>. Turning the guard off also puts back the Windows setting it changed in this
+/// sign-in, when Windows lets it (<see cref="TokenGuardSetting.PutBack"/>), and its result says what happened. While the
+/// guard is off but the setting it changed is still in effect (Windows did not let PoolWatch put it back then), that
+/// setting has a row of its own, whose Put back tries again. On the command line (the uninstaller's step), a setting
+/// Windows did not let it put back makes the step not done (<see cref="ChangeWords.TokenGuardSettingNotPutBack"/>).
 /// </summary>
 /// <param name="records">Says whether a clear task of your own was replaced (the automatic clear's row then notes it has a row of its own).</param>
-/// <param name="tokenGuardOff">The app's guard stops keeping its workaround on (null on the command line, where no guard runs).</param>
-internal sealed class SettingsSource(LiveSettings live, ChangeRecords records, Action? tokenGuardOff) : IChangeSource
+/// <param name="tokenGuardOff">The app's guard stops keeping its workaround on and puts the Windows setting back when Windows
+/// allows it; it returns the sentence that says what happened (null on the command line, where no guard runs:
+/// <paramref name="setting"/> puts it back there).</param>
+/// <param name="setting">The value the guard replaced in this sign-in (the app's guard's, or the record in the data folder
+/// on the command line). Null: no setting row, and nothing said about the setting.</param>
+internal sealed class SettingsSource(LiveSettings live, ChangeRecords records, Func<string>? tokenGuardOff, TokenGuardSetting? setting = null) : IChangeSource
 {
     public IEnumerable<ActiveChange> List()
     {
@@ -60,6 +109,13 @@ internal sealed class SettingsSource(LiveSettings live, ChangeRecords records, A
             yield return new ActiveChange(ChangeIds.TokenGuard, ChangeKind.TokenGuard, null, ChangeWords.TokenGuard, true, ChangeWords.TokenGuardNote)
             {
                 Title = ChangeWords.TokenGuardTitle,
+                // Only when the guard found the setting already changed, not by itself: then turning it off leaves it.
+                PutBackCaveat = setting?.StaysAfterTurnOff == true ? ChangeWords.TokenGuardSettingStays : null,
+            };
+        else if (setting?.StillChanged == true)
+            yield return new ActiveChange(ChangeIds.TokenGuardSetting, ChangeKind.TokenGuard, null, ChangeWords.TokenGuardSettingStill, true, ChangeWords.TokenGuardSettingStillNote)
+            {
+                Title = ChangeWords.TokenGuardSettingTitle, Group = ChangeGroup.Other,
             };
     }
 
@@ -70,10 +126,21 @@ internal sealed class SettingsSource(LiveSettings live, ChangeRecords records, A
             case ChangeKind.AutoClear:
                 live.Apply("automatic cache clearing off (Active changes)", s => s.AutoClearEnabled = false);
                 return new(true, "Automatic cache clearing is off.");
+            case ChangeKind.TokenGuard when change.Id == ChangeIds.TokenGuardSetting:
+            {
+                string back = setting?.PutBack() ?? ChangeWords.TokenGuardOff;
+                bool done = !ChangeWords.SettingNotPutBack(back);
+                return new(done, done || tokenGuardOff is not null ? back : ChangeWords.TokenGuardSettingNotPutBack);
+            }
             case ChangeKind.TokenGuard:
+            {
                 live.Apply("token-leak guard off (Active changes)", s => s.TokenGuardEnabled = false);
-                tokenGuardOff?.Invoke();
-                return new(true, ChangeWords.TokenGuardOff);
+                if (tokenGuardOff is not null) return new(true, tokenGuardOff());
+                // The command line (the uninstaller's step): no window lists the setting afterwards, so a setting Windows did
+                // not let it put back makes the step not done, in words for an uninstall.
+                string said = setting?.PutBack() ?? ChangeWords.TokenGuardOff;
+                return ChangeWords.SettingNotPutBack(said) ? new(false, ChangeWords.TokenGuardSettingNotPutBack) : new(true, said);
+            }
             default:
                 return new(false, "This is not a setting.");
         }
@@ -104,7 +171,7 @@ internal sealed class ServicesSource(ServicesController services, ProfileStore? 
                 CanUndo: true, Note: null)
             {
                 Title = ChangeWords.ServiceTitle(c.DisplayName, c.Service),
-                Detail = ChangeWords.ServiceDetail(c.OriginalStart, c.OriginalRunning, turnedOff, c.Via),
+                Detail = ChangeWords.ServiceDetail(c.OriginalStart, c.OriginalRunning, turnedOff, c.Via, c.OriginalRunningNotKnown),
                 Group = turnedOff ? ChangeGroup.TurnedOff : ChangeGroup.Other,
                 Warning = atStart is null ? null : ChangeWords.KeptOffAtStart(atStart, ChangeWords.ServiceName(c.DisplayName, c.Service)),
                 AtStart = atStart is null ? null : new AtStartHold(atStart, c.Service),
@@ -145,7 +212,9 @@ internal sealed class ServicesSource(ServicesController services, ProfileStore? 
         // memory too when the file could not be saved: the service is back either way).
         bool back = Find(services.Changes, change.Id) is null;
         if (!back) return new(false, $"PoolWatch could not put back {name}: {error ?? "it is still changed"}.");
-        return new(true, (error is null ? $"{name} is back to how it was." : $"{name}: {error}.") + profileSaid);
+        // Put back, but with more to say ("the start type is back to Automatic, but it was not started again: ..."): the
+        // uninstaller's summary carries it too.
+        return new(true, (error is null ? $"{name} is back to how it was." : $"{name}: {error}.") + profileSaid) { Caveat = error };
     }
 
     private static ServiceChange? Find(IReadOnlyList<ServiceChange> changes, string id) => changes.FirstOrDefault(c => ChangeIds.Service(c.Service) == id);

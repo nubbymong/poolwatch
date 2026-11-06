@@ -7,7 +7,9 @@ namespace PoolWatch.Core.Detection;
 /// interval runs from the last raw sample before it to the first sample at or after the clear plus its settle time (the
 /// sample its result is measured at, as the clearer measures it): whatever a series does in between is the clear's
 /// result, never the pool's. Clears less than the settle time apart (the button pressed again while a clear
-/// is measured) are one interval, measured once the last of them is. Only clears that ran (no error) count. Immutable;
+/// is measured) are one interval, measured once the last of them is. Only clears that ran (no error) count. A clear and its
+/// settle time are placed on the samples by the clock that only goes forward (<see cref="ClearRecord.TickMs"/>,
+/// <see cref="History.History.Ms"/>), so a system clock set back or forward moves neither. Immutable;
 /// <see cref="None"/> is the detector without clears, exactly as before.
 /// </summary>
 public sealed class OwnClears
@@ -20,14 +22,19 @@ public sealed class OwnClears
     /// <param name="settle">How long after a clear its result is measured (the cache refills meanwhile).</param>
     public OwnClears(IEnumerable<ClearRecord> clears, TimeSpan settle)
     {
-        _ran = clears.Where(c => c.Error is null).OrderBy(c => c.TimeUtc).ToArray();
+        _ran = clears.Where(c => c.Error is null).OrderBy(c => c.TickMs).ToArray();
         Settle = settle;
     }
 
     public TimeSpan Settle { get; }
 
-    /// <summary>The clear still being measured at <paramref name="nowUtc"/> (it ran, and its settle time has not passed), or null.</summary>
-    public ClearRecord? Measuring(DateTime nowUtc) => _ran.LastOrDefault(c => c.TimeUtc <= nowUtc && nowUtc < c.TimeUtc + Settle);
+    /// <summary>
+    /// The clear still being measured at <paramref name="nowMs"/> on the clock that only goes forward (it ran, and its settle
+    /// time has not passed), or null.
+    /// </summary>
+    public ClearRecord? Measuring(long nowMs) => _ran.LastOrDefault(c => c.TickMs <= nowMs && nowMs < c.TickMs + SettleMs);
+
+    private long SettleMs => (long)Settle.TotalMilliseconds;
 
     /// <summary>
     /// The intervals of the clears that ran by <paramref name="h"/>'s newest sample, placed on its samples, oldest first,
@@ -40,16 +47,16 @@ public sealed class OwnClears
         if (_ran.Length == 0 || h.Count == 0) return ClearSpans.None;
         var spans = new List<ClearSpan>();
         var times = new List<DateTime?>();
-        var newest = h.Times[^1];
+        long newest = h.Ms[^1];
         foreach (var c in _ran)
         {
-            if (c.TimeUtc > newest) break;      // not run yet at this history's time (the clock was set back since)
-            var measuredUtc = c.TimeUtc + Settle;
-            int measured = measuredUtc > newest ? h.Count : h.IndexAtOrAfter(measuredUtc);
+            if (c.TickMs > newest) break;      // not run yet at this history's newest sample
+            long measuredMs = c.TickMs + SettleMs;
+            int measured = measuredMs > newest ? h.Count : h.IndexAtOrAfterMs(measuredMs);
             // All of it before the history: it holds no sample. Left out, so that a history no clear touches has no span and
             // every reader skips its work at once (Count 0), as without clears.
             if (measured == 0) continue;
-            var span = new ClearSpan(h.IndexAtOrAfter(c.TimeUtc) - 1, measured);
+            var span = new ClearSpan(h.IndexAtOrAfterMs(c.TickMs) - 1, measured);
             // A clear that ran inside the previous one's interval extends it: the earlier measurement lies in this one's
             // dip, so the two are one interval, measured once both are (and said as clears, with no one time).
             if (spans.Count > 0 && span.Before < spans[^1].Measured)
@@ -215,7 +222,7 @@ public sealed class ClearSpans
             if (x == (0u, 0u) || y == (0u, 0u)) return;
             allocs += unchecked(y.allocs - x.allocs);
             frees += unchecked(y.frees - x.frees);
-            minutes += (h.Times[j] - h.Times[i]).TotalMinutes;
+            minutes += (h.Ms[j] - h.Ms[i]) / 60_000.0; // the minutes between them on the forward clock
         }
     }
 }

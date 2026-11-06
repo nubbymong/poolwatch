@@ -16,9 +16,15 @@ public sealed record ServiceView
     public bool NeitherRunningNorStopped { get; init; }
     /// <summary>
     /// Windows could not give its state when it was read (<see cref="NeitherRunningNorStopped"/> is true then too): Turn
-    /// off asks for its stop only if Windows can say by then that it runs or is paused.
+    /// off asks for its stop only if Windows can say by then that it runs or is paused. Also when PoolWatch could not open
+    /// the service at all (its start type is <see cref="ServiceStartType.Unknown"/> then too): "could not read".
     /// </summary>
     public bool StateUnknown { get; init; }
+    /// <summary>
+    /// Which state it was in when it was neither running nor stopped and Windows gave the state (starting, stopping,
+    /// resuming, pausing or paused), so the page says "paused", never "stopped" or "off"; null otherwise.
+    /// </summary>
+    public ServiceRunState? Between { get; init; }
     public bool MicrosoftSigned { get; init; }
     public bool IsWin32 { get; init; } = true;
     public string? BinaryPath { get; init; }
@@ -33,7 +39,8 @@ public sealed record ServiceView
     public int SharedWith { get; init; }
     /// <summary>
     /// The services this one needs, as Windows lists its dependencies (load-order groups left out). Windows does not stop
-    /// a service while one that depends on it runs, and does not start one while a service it needs is Disabled.
+    /// a service while one that depends on it has not stopped (it runs, or is paused, starting, stopping, resuming or
+    /// pausing), and does not start one while a service it needs is Disabled.
     /// </summary>
     public IReadOnlyList<string> DependsOn { get; init; } = [];
 }
@@ -47,14 +54,29 @@ public sealed record NotDone(string Why, NotDoneCause Cause = NotDoneCause.Other
 {
     /// <summary>Windows refused the stop of a service that was paused: it is still paused, so neither running nor stopped.</summary>
     public bool Paused { get; init; }
+    /// <summary>
+    /// For a stop Windows refused because services that depend on it have not stopped (<see cref="NotDoneCause.DependentsRunning"/>):
+    /// those services and their states as Windows listed them right then (running, paused, starting...); null when that
+    /// list could not be read.
+    /// </summary>
+    public IReadOnlyList<DependentService>? Dependents { get; init; }
 }
+
+/// <summary>A service's state as Windows gives it (the SERVICE_* values); <see cref="NotRead"/>: Windows could not give it.</summary>
+public enum ServiceRunState { NotRead = 0, Stopped = 1, Starting = 2, Stopping = 3, Running = 4, Resuming = 5, Pausing = 6, Paused = 7 }
+
+/// <summary>A service that depends on another, and its state.</summary>
+public sealed record DependentService(string Name, ServiceRunState State);
 
 /// <summary>What a <see cref="NotDone"/> lets the result say besides its reason.</summary>
 public enum NotDoneCause
 {
     /// <summary>Any other answer, or none in time: the reason alone (a stop not done leaves the service running, or paused: <see cref="NotDone.Paused"/>).</summary>
     Other,
-    /// <summary>Windows refused the stop because a service that depends on it is running (Windows error 1051).</summary>
+    /// <summary>
+    /// Windows refused the stop because services that depend on it have not stopped (Windows error 1051): running, or
+    /// paused, starting, stopping, resuming or pausing (<see cref="NotDone.Dependents"/> names them).
+    /// </summary>
     DependentsRunning,
     /// <summary>
     /// Windows refused the stop because the service does not take one (Windows error 1052): asking again is not said to
@@ -91,7 +113,7 @@ public sealed record ServiceOption
 }
 
 /// <summary>
-/// The presets: a preset only TICKS boxes; nothing changes until Apply (addendum 4 B controls). <see cref="AgenticCodingPc"/>
+/// The presets: a preset only TICKS boxes; nothing changes until Apply. <see cref="AgenticCodingPc"/>
 /// is the built-in "Agentic coding PC" profile (<see cref="ServiceProfileRules.AgenticCodingPc"/>).
 /// </summary>
 public enum Preset { TelemetryOnly, AgenticCodingPc, Custom }
@@ -112,7 +134,7 @@ public static class ServicePlan
     /// <summary>
     /// The services as options, grouped and annotated. <paramref name="knownDefaultsOff"/>: services Windows ships Disabled.
     /// <paramref name="changes"/>: PoolWatch's own saved changes, so a service PoolWatch turned off never reads "changed
-    /// outside PoolWatch" (Part 3 review).
+    /// outside PoolWatch".
     /// </summary>
     public static List<ServiceOption> Options(IEnumerable<ServiceView> services, ServiceCatalogue catalogue, bool insiderEnrolled, IReadOnlySet<string> knownDefaultsOff,
         IReadOnlyCollection<ServiceChange>? changes = null)
@@ -144,11 +166,16 @@ public static class ServicePlan
     /// The State column: PoolWatch's own change ("off (turned off by PoolWatch 2026-10-26 11:40)"; one Apply set to Manual,
     /// which it does not stop, "set to Manual, running (turned off by PoolWatch ...)"; one Apply set to Disabled but could
     /// not stop, while it keeps running, "set to Disabled, still running (...)"; one set to Disabled that is starting,
-    /// stopping, resuming, pausing or paused, "set to Disabled, not known to have stopped (...)"), off outside PoolWatch (an
-    /// owner choice or a Windows default) once it is seen stopped, else running / the start type. One Disabled outside
-    /// PoolWatch that is not seen stopped is not off (<see cref="IsOff"/>): "set to Disabled, still running (changed outside
-    /// PoolWatch)", or "set to Disabled, not known to have stopped (Windows default)" while it is starting, stopping,
-    /// resuming, pausing or paused, or Windows could not say. Its <see cref="ServiceOption.OffOutsidePoolWatch"/> stays.
+    /// stopping, resuming, pausing or paused, "set to Disabled, paused (...)", or "set to Disabled, not known to have
+    /// stopped (...)" when Windows could not say), off outside PoolWatch (an owner choice or a Windows default) once it is
+    /// seen stopped, else the state and the start type ("running", "Manual, stopped", "Disabled, paused", "off" for a
+    /// Disabled one seen stopped, "Automatic, state not known"). One Disabled outside PoolWatch that is not seen stopped is
+    /// not off (<see cref="IsOff"/>): "set to Disabled, still running (changed outside PoolWatch)", or "set to Disabled,
+    /// paused (Windows default)" while it is starting, stopping, resuming, pausing or paused ("not known to have stopped"
+    /// when Windows could not say). Its <see cref="ServiceOption.OffOutsidePoolWatch"/> stays. A service PoolWatch could not
+    /// open is "could not read", and nothing is said of what happened to it since PoolWatch's change. One whose record a
+    /// Put back began on, and that is as a Put back leaves it (<see cref="LeftByItsPutBack"/>), is "Automatic, stopped
+    /// (PoolWatch began to put back its change of 2026-10-26 11:40; Put back finishes it)", never "switched back on outside it".
     /// </summary>
     public static string StateText(ServiceOption o)
     {
@@ -156,35 +183,83 @@ public static class ServicePlan
         if (o.PoolWatchChange is { } c)
         {
             string when = c.ChangedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+            if (s.StartType == ServiceStartType.Unknown) // its start type could not be read: not known whether it was changed since
+                return $"{Live(s)} ({(c.Via == ViaWindowsDefault ? "put back to its Windows default" : "turned off")} by PoolWatch {when})";
+            if (LeftByItsPutBack(c, s)) // a Put back began on the record, and the service is as one leaves it: never "changed outside PoolWatch"
+                return $"{Live(s)} (PoolWatch began to put back its change of {when}; Put back finishes it)";
             if (c.Via == ViaWindowsDefault)
                 return s.StartType == c.NewStart ? $"{Live(s)} (put back to its Windows default by PoolWatch {when})"
                     : $"{Live(s)} (changed outside PoolWatch after PoolWatch put back its Windows default {when})";
             if (s.StartType == c.NewStart && c.NewStart == ServiceStartType.Manual)
-                return $"set to Manual, {(s.Running ? "running" : "stopped")} (turned off by PoolWatch {when})"; // as Apply left it: it does not stop these
+                return $"set to Manual, {StateWord(s)} (turned off by PoolWatch {when})"; // as Apply left it: it does not stop these
             if (KeptRunning(c, s))
                 return $"set to {c.NewStart}, still running (turned off by PoolWatch {when}; it stops when Windows restarts)";
             if (s.StartType == c.NewStart && c.NewStart == ServiceStartType.Disabled && !s.Running && s.NeitherRunningNorStopped)
-                return $"set to Disabled, not known to have stopped (turned off by PoolWatch {when})"; // not off: it is starting, stopping, paused...
+                return $"set to Disabled, {NotStopped(s)} (turned off by PoolWatch {when})"; // not off: it is starting, stopping, paused...
             if (s.StartType == c.NewStart && !s.Running)
                 return $"{(c.NewStart == ServiceStartType.Disabled ? "off" : $"{c.NewStart}, stopped")} (turned off by PoolWatch {when})";
             return $"{Live(s)} (turned off by PoolWatch {when}, then switched back on outside it)";
         }
         if (o.OffOutsidePoolWatch is not { } outside) return Live(s);
         if (s is { Running: false, NeitherRunningNorStopped: false }) return outside;
-        return $"set to Disabled, {(s.Running ? "still running" : "not known to have stopped")} {(outside == OffOutside ? OutsideWhy : WindowsDefaultWhy)}";
+        return $"set to Disabled, {(s.Running ? "still running" : NotStopped(s))} {(outside == OffOutside ? OutsideWhy : WindowsDefaultWhy)}";
     }
 
-    private static string Live(ServiceView s) => s.Running ? "running" : s.StartType switch
+    /// <summary>What the page says of a service PoolWatch could not open: neither its start type nor its state is known.</summary>
+    public const string CouldNotRead = "could not read";
+
+    /// <summary>
+    /// The service as it is: "running"; "off" (Disabled, seen stopped); "Manual, stopped"; "Disabled, paused" (starting,
+    /// stopping, resuming, pausing or paused: never "stopped" or "off"); "Automatic, state not known" when Windows could not
+    /// give its state; <see cref="CouldNotRead"/> when PoolWatch could not open it.
+    /// </summary>
+    private static string Live(ServiceView s)
     {
-        ServiceStartType.Disabled => "off",
-        ServiceStartType.Unknown => "stopped",
-        var t => $"{t}, stopped",
+        if (s.StartType == ServiceStartType.Unknown && s.StateUnknown) return CouldNotRead;
+        if (s.Running) return "running";
+        if (s.NeitherRunningNorStopped) return s.StartType == ServiceStartType.Unknown ? StateWord(s) : $"{s.StartType}, {StateWord(s)}";
+        return s.StartType switch
+        {
+            ServiceStartType.Disabled => "off",
+            ServiceStartType.Unknown => "stopped",
+            var t => $"{t}, stopped",
+        };
+    }
+
+    /// <summary>
+    /// Its state in a word: "running", "stopped", "paused", "starting", "stopping", "resuming", "pausing", or "state not
+    /// known" when Windows could not give it (also when only "neither running nor stopped" is known).
+    /// </summary>
+    public static string StateWord(ServiceView s) =>
+        s.Running ? "running" : s.StateUnknown ? "state not known" : s.Between is { } b ? Word(b) : s.NeitherRunningNorStopped ? "state not known" : "stopped";
+
+    /// <summary>A Disabled service not seen stopped: "paused", "starting"..., or "not known to have stopped" when Windows could not say which.</summary>
+    private static string NotStopped(ServiceView s) => !s.StateUnknown && s.Between is { } b ? Word(b) : "not known to have stopped";
+
+    /// <summary>A state in a word ("paused"); one Windows could not give is "in a state Windows could not give".</summary>
+    public static string Word(ServiceRunState state) => state switch
+    {
+        ServiceRunState.Stopped => "stopped",
+        ServiceRunState.Starting => "starting",
+        ServiceRunState.Stopping => "stopping",
+        ServiceRunState.Running => "running",
+        ServiceRunState.Resuming => "resuming",
+        ServiceRunState.Pausing => "pausing",
+        ServiceRunState.Paused => "paused",
+        _ => "in a state Windows could not give",
     };
 
-    /// <summary>The Cost column: "1.7 cores, 887k page faults/s" for the service's process, "not running"; a shared host says so.</summary>
+    /// <summary>
+    /// The Cost column of a service that is not running: "not running" (seen stopped), "paused", "starting"..., "state not
+    /// known", or <see cref="CouldNotRead"/>.
+    /// </summary>
+    public static string NotRunningCost(ServiceView s) =>
+        s.StartType == ServiceStartType.Unknown && s.StateUnknown ? CouldNotRead : s.NeitherRunningNorStopped || s.StateUnknown ? StateWord(s) : "not running";
+
+    /// <summary>The Cost column: "1.7 cores, 887k page faults/s" for the service's process, <see cref="NotRunningCost"/>; a shared host says so.</summary>
     public static string CostText(ServiceView s)
     {
-        if (!s.Running) return "not running";
+        if (!s.Running) return NotRunningCost(s);
         if (s.ProcessId == 0) return "";
         string cost = Cost(s.Cores, s.PageFaultsPerSec);
         return s.SharedWith > 0 ? $"{cost} (host shared with {s.SharedWith} other service{(s.SharedWith == 1 ? "" : "s")})" : cost;
@@ -244,14 +319,46 @@ public static class ServicePlan
             Gate(o, insiderEnrolled);
             if (!IsValidStartType(o.Service.StartType)) throw new InvalidOperationException(StartTypeUnread(o.Service.Name));
             var newStart = OffStart(o);
-            ops.Add(new Operation(o, newStart, new ServiceChange
+            ops.Add(new Operation(o, newStart, WithOriginalRunning(new ServiceChange
             {
                 Service = o.Service.Name, DisplayName = o.Service.DisplayName, OriginalStart = o.Service.StartType,
-                OriginalRunning = o.Service.Running, NewStart = newStart, ChangedUtc = nowUtc, Via = via,
-            }));
+                OriginalRunning = false, NewStart = newStart, ChangedUtc = nowUtc, Via = via,
+            }, RunningBeforeTheChange(o.Service))));
         }
         return ops;
     }
+
+    /// <summary>
+    /// What the record saved before a Turn off says of whether the service was running, until the change says what it saw
+    /// (<see cref="WasRunning(ServiceRunState)"/>): running when it was read running, paused, starting, resuming or pausing
+    /// (<see cref="WasRunning(ServiceView)"/>); else not known (null), never "not running", since the service may start
+    /// between the read and the change. So a record whose end of change could not be saved (or whose PoolWatch stopped
+    /// before then) never says "was not running" of a service the change found running: Put back then says it could not
+    /// know.
+    /// </summary>
+    public static bool? RunningBeforeTheChange(ServiceView s) => WasRunning(s) == true ? true : null;
+
+    /// <summary>
+    /// Whether the service was running as it was read: true when it runs, is paused, or is starting, resuming or pausing
+    /// (Put back starts it again); false when it was seen stopped or stopping; null when Windows could not give its state.
+    /// </summary>
+    public static bool? WasRunning(ServiceView s) =>
+        s.Running ? true : s.StateUnknown ? null : s.Between is { } b ? WasRunning(b) : s.NeitherRunningNorStopped ? null : false;
+
+    /// <summary>
+    /// Whether a service in <paramref name="state"/> when PoolWatch changed it was running, as Put back reads it: running,
+    /// paused, starting, resuming or pausing is; stopped or stopping is not; a state Windows could not give: not known.
+    /// </summary>
+    public static bool? WasRunning(ServiceRunState state) => state switch
+    {
+        ServiceRunState.Running or ServiceRunState.Paused or ServiceRunState.Starting or ServiceRunState.Resuming or ServiceRunState.Pausing => true,
+        ServiceRunState.Stopped or ServiceRunState.Stopping => false,
+        _ => null,
+    };
+
+    /// <summary><paramref name="record"/> saying it was running (<paramref name="running"/>), was not, or that this is not known (null).</summary>
+    public static ServiceChange WithOriginalRunning(ServiceChange record, bool? running) =>
+        record with { OriginalRunning = running == true, OriginalRunningNotKnown = running is null };
 
     /// <summary>
     /// What Apply sets a service to: Manual where the catalogue says so, else Disabled; never looser than it is now, so a
@@ -323,18 +430,19 @@ public static class ServicePlan
     /// <summary>
     /// What Turn off says of a service it set to <paramref name="newStart"/> that is not known to have stopped, never
     /// "done": "set to Disabled, but still running: XblGameSave depends on it and is running. It stops when Windows
-    /// restarts, or when you turn it off again after that service has stopped." The running dependents
-    /// (<paramref name="runningDependents"/>, which PoolWatch never stops: nobody asked it to) are named only when Windows
-    /// refused the stop because of them (<see cref="NotDoneCause.DependentsRunning"/>); for any other answer the result
-    /// gives that answer, and when Windows could not say whether the service runs, it says so. One that was still
-    /// starting, stopping, resuming, pausing or paused (<see cref="NotDoneCause.NotSettled"/>) is never said to be running:
-    /// "set to Disabled, not stopped yet: it was still stopping 20 seconds after Windows took the stop. It stops when
-    /// Windows restarts, if not before". One that was paused when Windows refused its stop (<see cref="NotDone.Paused"/>)
-    /// is "still paused", never "still running". Until it is seen stopped it is not off (<see cref="IsOff"/>), so turning it
-    /// off again tries to stop it again; but one that does not take a stop (<see cref="NotDoneCause.TakesNoStop"/>) is said
-    /// to stop only when Windows restarts.
+    /// restarts, or when you turn it off again after that service has stopped." The services that depend on it and have not
+    /// stopped (which PoolWatch never stops: nobody asked it to) are named, each with its state, only when Windows refused
+    /// the stop because of them (<see cref="NotDoneCause.DependentsRunning"/>): as Windows listed them right then
+    /// (<see cref="NotDone.Dependents"/>), else as the services were read (<paramref name="listedDependents"/>). For any
+    /// other answer the result gives that answer, and when Windows could not say whether the service runs, it says so. One
+    /// that was still starting, stopping, resuming, pausing or paused (<see cref="NotDoneCause.NotSettled"/>) is never said
+    /// to be running: "set to Disabled, not stopped yet: it was still stopping 20 seconds after Windows took the stop. It
+    /// stops when Windows restarts, if not before". One that was paused when Windows refused its stop
+    /// (<see cref="NotDone.Paused"/>) is "still paused", never "still running". Until it is seen stopped it is not off
+    /// (<see cref="IsOff"/>), so turning it off again tries to stop it again; but one that does not take a stop
+    /// (<see cref="NotDoneCause.TakesNoStop"/>) is said to stop only when Windows restarts.
     /// </summary>
-    public static string NotStoppedText(ServiceStartType newStart, NotDone why, IReadOnlyList<string> runningDependents)
+    public static string NotStoppedText(ServiceStartType newStart, NotDone why, IReadOnlyList<DependentService> listedDependents)
     {
         if (why.Cause == NotDoneCause.StateUnknown)
             return $"{NotStoppedLead}{newStart}, but {why.Why}, so it is not known to have stopped. If it is still running, it stops when Windows " +
@@ -343,11 +451,31 @@ public static class ServicePlan
             return $"{NotStoppedLead}{newStart}, not stopped yet: {why.Why}. {StopsAtRestartIfNotBefore}";
         if (why.Cause == NotDoneCause.TakesNoStop)
             return $"{NotStoppedLead}{newStart}, but {Still(why)}: {why.Why}. It stops when Windows restarts";
-        if (why.Cause != NotDoneCause.DependentsRunning || runningDependents.Count == 0)
+        var dependents = DependentsOf(why, listedDependents);
+        if (dependents.Count == 0)
             return $"{NotStoppedLead}{newStart}, but {Still(why)}: {why.Why}. It stops when Windows restarts, or when you turn it off again";
-        bool one = runningDependents.Count == 1;
-        return $"{NotStoppedLead}{newStart}, but {Still(why)}: {string.Join(", ", runningDependents)} {(one ? "depends on it and is" : "depend on it and are")} running. " +
-               $"It stops when Windows restarts, or when you turn it off again after {(one ? "that service has" : "those have")} stopped";
+        return $"{NotStoppedLead}{newStart}, but {Still(why)}: {DependentsText(dependents)}. " +
+               $"It stops when Windows restarts, or when you turn it off again after {(dependents.Count == 1 ? "that service has" : "those have")} stopped";
+    }
+
+    /// <summary>
+    /// The services that kept a stop from being done (<see cref="NotDoneCause.DependentsRunning"/>): as Windows listed them
+    /// at the refusal, else <paramref name="listed"/>; none for any other answer.
+    /// </summary>
+    private static IReadOnlyList<DependentService> DependentsOf(NotDone why, IReadOnlyList<DependentService> listed) =>
+        why.Cause != NotDoneCause.DependentsRunning ? [] : why.Dependents is { Count: > 0 } fromWindows ? fromWindows : listed;
+
+    /// <summary>
+    /// "XblGameSave depends on it and is running"; "A, B depend on it and are paused"; with different states, "A (running),
+    /// B (paused) depend on it and have not stopped".
+    /// </summary>
+    public static string DependentsText(IReadOnlyList<DependentService> dependents)
+    {
+        bool one = dependents.Count == 1;
+        var states = dependents.Select(d => d.State).Distinct().ToList();
+        if (states.Count == 1)
+            return $"{string.Join(", ", dependents.Select(d => d.Name))} {(one ? "depends on it and is" : "depend on it and are")} {Word(states[0])}";
+        return $"{string.Join(", ", dependents.Select(d => $"{d.Name} ({Word(d.State)})"))} depend on it and have not stopped";
     }
 
     /// <summary>A service whose stop Windows refused, as it was: "still paused" (<see cref="NotDone.Paused"/>), else "still running".</summary>
@@ -365,15 +493,17 @@ public static class ServicePlan
     private const string StopsAtRestartIfNotBefore = "It stops when Windows restarts, if not before";
 
     /// <summary>
-    /// What putting back an original of Disabled says when the service did not stop: "it is still running: a service that
-    /// depends on it is running. It stops when Windows restarts" (the start type is back all the same); "it is not stopped
-    /// yet: ..." for one that was still starting, stopping, resuming, pausing or paused; "it is still paused: ..." for one
-    /// that was paused when Windows refused its stop.
+    /// What putting back an original of Disabled says when the service did not stop: "it is still running: AcmeMaps
+    /// depends on it and is running. It stops when Windows restarts" (the start type is back all the same; the services
+    /// that kept it from stopping named as for <see cref="NotStoppedText"/>); "it is not stopped yet: ..." for one that was
+    /// still starting, stopping, resuming, pausing or paused; "it is still paused: ..." for one that was paused when
+    /// Windows refused its stop.
     /// </summary>
-    public static string StillRunningAfterPutBack(NotDone why) => why.Cause switch
+    public static string StillRunningAfterPutBack(NotDone why, IReadOnlyList<DependentService>? listedDependents = null) => why.Cause switch
     {
         NotDoneCause.StateUnknown => $"{why.Why}, so it is not known to have stopped. If it is still running, it stops when Windows restarts",
         NotDoneCause.NotSettled => $"it is not stopped yet: {why.Why}. {StopsAtRestartIfNotBefore}",
+        _ when DependentsOf(why, listedDependents ?? []) is { Count: > 0 } d => $"it is {Still(why)}: {DependentsText(d)}. It stops when Windows restarts",
         _ => $"it is {Still(why)}: {why.Why}. It stops when Windows restarts",
     };
 
@@ -402,6 +532,30 @@ public static class ServicePlan
     /// </summary>
     public static bool KeptRunning(ServiceChange change, ServiceView live) =>
         change.NotStoppedPid is { } pid && live.StartType == change.NewStart && live.Running && (pid == 0 || live.ProcessId == pid);
+
+    /// <summary>
+    /// A Put back began on <paramref name="change"/> (its record carries a Put back's mark, <see cref="ChangeUnderWay.PutBack"/>,
+    /// whether that PoolWatch still runs or not) and the service is as a Put back leaves it: at the original start type,
+    /// and seen stopped when that is Disabled. This reads the mark and the service as it is now, never who set that start
+    /// type. Such a record may be one whose Put back is still under way; or is done but could not remove the record (its
+    /// save failed, or that PoolWatch stopped first); or whose PoolWatch stopped after marking it and before acting; or
+    /// whose Put back failed and could not take its mark off. In any of these the service may also have been set to its
+    /// original outside PoolWatch: that is the start type the Put back was asked for, so it is read the same. The
+    /// self-repair check never reports the service as switched back on outside PoolWatch then, however long that Put back
+    /// takes (Windows starts the services it depends on first), and the State column says a Put back began; the next Put
+    /// back finishes it (<see cref="AlreadyRestored"/> removes the record, or it starts the service as the record says).
+    /// </summary>
+    public static bool LeftByItsPutBack(ServiceChange change, ServiceView live) =>
+        change.UnderWay is { PutBack: true } && live.StartType == change.OriginalStart
+        && (change.OriginalStart != ServiceStartType.Disabled || live is { Running: false, NeitherRunningNorStopped: false });
+
+    /// <summary>
+    /// The read of <paramref name="live"/> does not say whether it is on: its start type could not be read (or is not one
+    /// Windows defines), or Windows could not give its state (<see cref="ServiceView.StateUnknown"/>), as for a service
+    /// PoolWatch could not open. The self-repair check reads nothing from such a read: it reports nothing, takes no mark
+    /// off and forgets nothing it reported, until the service reads again.
+    /// </summary>
+    public static bool NotRead(ServiceView live) => !IsValidStartType(live.StartType) || live.StateUnknown;
 
     /// <summary>
     /// <paramref name="items"/> (services, by <paramref name="nameOf"/>) in the order Windows can act on them, else as
@@ -444,8 +598,25 @@ public static class ServicePlan
     /// <summary>The restore operation for a saved change: back to exactly the original start type.</summary>
     public static ServiceStartType RestoreTarget(ServiceChange change) => change.OriginalStart;
 
-    /// <summary>Restore starts the service again when it was running before PoolWatch changed it (and is not put back to Disabled).</summary>
-    public static bool StartAfterRestore(ServiceChange change) => change.OriginalRunning && change.OriginalStart != ServiceStartType.Disabled;
+    /// <summary>
+    /// Restore starts the service again when it was running before PoolWatch changed it (and is not put back to Disabled).
+    /// Not when that is not known (<see cref="ServiceChange.OriginalRunningNotKnown"/>): Put back then says so
+    /// (<see cref="RunningNotKnownText"/>) when <see cref="RunningNotKnown"/> holds.
+    /// </summary>
+    public static bool StartAfterRestore(ServiceChange change) =>
+        change.OriginalRunning && !change.OriginalRunningNotKnown && change.OriginalStart != ServiceStartType.Disabled;
+
+    /// <summary>
+    /// Put back's start type is back, but it could not know whether to start the service: a record whose running state is
+    /// not known (<see cref="ServiceChange.OriginalRunningNotKnown"/>), whose original is not Disabled, and the service is
+    /// not running now.
+    /// </summary>
+    public static bool RunningNotKnown(ServiceChange change, ServiceView live) =>
+        change.OriginalRunningNotKnown && change.OriginalStart != ServiceStartType.Disabled && !live.Running;
+
+    /// <summary>What Put back adds then: it says plainly that it could not know, and what to do.</summary>
+    public const string RunningNotKnownText =
+        "it was not started again: PoolWatch does not know whether it was running when it was turned off. Start it from Services (services.msc) if you need it running";
 
     /// <summary>
     /// "Restore to Windows default" for a service that is off outside PoolWatch: through the SAME gate as Apply (catalogue or
@@ -462,11 +633,11 @@ public static class ServicePlan
         if (o.WindowsDefault is not ({ } d and (ServiceStartType.Automatic or ServiceStartType.Manual)))
             throw new InvalidOperationException($"'{o.Service.Name}': PoolWatch does not know its Windows default start type");
         if (!IsValidStartType(o.Service.StartType)) throw new InvalidOperationException(StartTypeUnread(o.Service.Name));
-        return new Operation(o, d, new ServiceChange
+        return new Operation(o, d, WithOriginalRunning(new ServiceChange
         {
-            Service = o.Service.Name, DisplayName = o.Service.DisplayName, OriginalStart = o.Service.StartType, OriginalRunning = o.Service.Running,
+            Service = o.Service.Name, DisplayName = o.Service.DisplayName, OriginalStart = o.Service.StartType, OriginalRunning = false,
             NewStart = d, ChangedUtc = nowUtc, Via = ViaWindowsDefault,
-        });
+        }, WasRunning(o.Service)));
     }
 
     /// <summary>Why a service whose start type could not be read is not changed: it would be the original Restore puts back.</summary>
@@ -488,25 +659,37 @@ public static class ServicePlan
     }
 
     /// <summary>
-    /// Restore (S1): a record read back from service-changes.json is untrusted. It goes through the SAME gate as Apply,
+    /// Restore: a record read back from service-changes.json is untrusted. It goes through the SAME gate as Apply,
     /// against the service as it is live now, and its saved original start type must be a value PoolWatch could have
-    /// written. Anything else (a service now protected, a driver, one no longer in a changeable group, or a tampered
-    /// start type) is refused.
+    /// written. Anything else (a service now protected, a driver, one no longer in a changeable group, a tampered start
+    /// type, or a service whose start type PoolWatch could not read now, which is said as that) is refused.
     /// </summary>
     public static void GateRestore(ServiceOption live, ServiceChange record, bool insiderEnrolled)
     {
         Gate(live, insiderEnrolled);
         if (!IsValidStartType(record.OriginalStart))
             throw new InvalidOperationException($"'{record.Service}': the saved original start type ({record.OriginalStart}) is not valid");
-        // Part 3 review: the service must still be as PoolWatch left it (or already back to the original). A record that does
-        // not match the live service (changed since, or not written by this change) is not acted on.
+        // The service must still be as PoolWatch left it (or already back to the original). A record that does
+        // not match the live service (changed since, or not written by this change) is not acted on. One whose start type
+        // could not be read (PoolWatch could not open it, say) cannot be checked: not acted on either, and never said to
+        // have been changed since.
+        if (!IsValidStartType(live.Service.StartType))
+            throw new InvalidOperationException($"'{record.Service}': PoolWatch could not read its start type now, so it cannot tell whether it is " +
+                                                $"still {record.NewStart} as PoolWatch left it. Nothing was changed: Put back tries again when it can read it");
         if (Drifted(live.Service.StartType, record))
             throw new InvalidOperationException($"'{record.Service}' is {live.Service.StartType} now, not {record.NewStart} as PoolWatch left it: " +
                                                 "it was changed since, so PoolWatch does not put it back (turn it off again on the Services tab, then Put back; " +
                                                 $"or set it to {record.OriginalStart} in services.msc)");
     }
 
-    /// <summary>The service is already at its saved original start type: Restore only drops the record (nothing to change).</summary>
+    /// <summary>
+    /// The service is already as its record says it was: Restore only drops the record (nothing to change). At its saved
+    /// original start type, and: for an original of Disabled, seen stopped (a Disabled service that runs, is paused, or is
+    /// starting, stopping, resuming or pausing goes through Put back, which stops it); for one that was running, or whose
+    /// running state is not known, running; else as it is.
+    /// </summary>
     public static bool AlreadyRestored(ServiceOption live, ServiceChange record) =>
-        live.Service.StartType == record.OriginalStart && (!StartAfterRestore(record) || live.Service.Running);
+        live.Service.StartType == record.OriginalStart && (record.OriginalStart == ServiceStartType.Disabled
+            ? live.Service is { Running: false, NeitherRunningNorStopped: false }
+            : live.Service.Running || !(StartAfterRestore(record) || record.OriginalRunningNotKnown));
 }

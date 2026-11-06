@@ -21,8 +21,9 @@ internal interface IShell
     /// <summary>Opens Report an issue, with that incident's summary offered when a folder is given.</summary>
     void ShowReport(string? incidentDir);
     /// <summary>
-    /// Runs the token-leak guard's sign-in check now, with its notices: true when this sign-in is protected or needs no
-    /// protection, false when it could not be protected yet (its notice says what to do).
+    /// Runs the token-leak guard's sign-in check now, with its notices (shown only when the guard needs the user's click):
+    /// true when this sign-in is protected or needs no protection, false when it could not be protected yet (its notice
+    /// says what to do).
     /// </summary>
     Task<bool> StartTokenGuard();
 }
@@ -76,7 +77,7 @@ internal sealed class SetupContext
 
     /// <summary>The rules' inputs, from memory and the cached facts (nothing is scanned): cheap enough for a once-a-minute refresh.</summary>
     public RecommendationInputs Inputs() => RecommendationInputsBuilder.Build(Engine, Analysis, Probe.Last, Store, Ledger.Records.Has(RecordKind.Shortcut),
-        LauncherInstalled, Recommendations.LeakTestNow, DateTime.UtcNow);
+        LauncherInstalled, Recommendations.LeakTestNow, Core.Model.Moment.Now());
 
     /// <summary>Whether clearing the cache frees kernel pool on this PC, from the clears so far.</summary>
     public ClearEvidence ClearEvidence() => Analysis.Diagnostics.Cache.Evidence();
@@ -138,11 +139,6 @@ internal sealed class WindowsSetupSystem(SetupContext c) : ISetupSystem
         ClearTaskReplacer.Replace(c.Ledger.Records, live, via);
     public Task<LeakVerdict?> CheckTokenLeak(CancellationToken stop) => c.Analysis.Diagnostics.Guard.TestOnly(stop);
     public (bool Ok, string Message) CreateChatGptShortcut(string? iconPath, string via) => ChatGptShortcut.Create(c.Engine.Paths, c.Ledger.Records, iconPath, via);
-
-    public ClearRecord? StartClear() =>
-        // Request adds the clear's record before it returns, and only one clear runs at a time: the last record is this one.
-        Cache.Request(ClearMode.Standby, ClearTrigger.Manual) ? Cache.History()[^1] : null;
-
     public string IncidentsDir => c.Engine.Paths.IncidentsDir;
     public void Timeline(string line) => c.Analysis.Diagnostics.RecordOwnerChange(line, null);
 }

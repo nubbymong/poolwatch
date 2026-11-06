@@ -52,7 +52,11 @@ public class TrayIconsTests
         using (var f = new ChangeFixture())
         using (var advanced = new AdvancedSettingsDialog(new SettingsEditor(analysis: null!, actions: null!, f.Live(), shell: null!)))
             Assert.Same(TrayIcons.App, advanced.Icon);
-        using (var notice = GuardNotices.NewNotice("The token-leak guard is on.", ("OK", null))) Assert.Same(TrayIcons.App, notice.Icon);
+        // The token-leak guard's not-protected notice, with its text and buttons (its click prompt is the same window with
+        // OK and Cancel).
+        using (var notice = GuardNotices.NewNotice("Token-leak guard: NOT protected (Windows refused the change): click to turn it on.",
+                   ("Turn on", null), ("Not now", null)))
+            Assert.Same(TrayIcons.App, notice.Icon);
         Assert.False(TrayIcons.App.Size.IsEmpty);
         // The main window needs the whole app to build: its source sets the same icon. No window anywhere in the UI sets a
         // state's icon (only the tray icon itself, TrayApp's _icon, shows a state), and each window that sets one sets the app's.

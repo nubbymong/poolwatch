@@ -7,6 +7,8 @@ using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
 /// <summary>Builds a synthetic world: a tag series plus processes with scripted I/O, quota and handles.</summary>
@@ -14,16 +16,23 @@ internal sealed class World
 {
     public static readonly DateTime T0 = new(2026, 10, 20, 6, 0, 0, DateTimeKind.Utc);
     public readonly History History = new();
-    public readonly ProcessRegistry Registry = new();
+    /// <summary>The registry, its clock reading the world's two clocks (how long exited records are kept is timed on it).</summary>
+    public readonly ProcessRegistry Registry;
+
+    public World() => Registry = new(clock: () => new Moment(Wall, Clocks.At(Now).Ms));
     public readonly Dictionary<int, ProcessSample> Procs = new();
     private readonly Dictionary<int, Dictionary<string, int>> _handles = new();
     public int Index;
     public TimeSpan Interval = TimeSpan.FromSeconds(2);
     public DateTime Now => T0 + Interval * Index;
+    /// <summary>How far the system clock is set from <see cref="Now"/> at a sample (none unless a test sets it back or forward).</summary>
+    public Func<int, TimeSpan> Shift = _ => TimeSpan.Zero;
+    /// <summary>The system clock at the current sample: <see cref="Now"/> moved by <see cref="Shift"/>; the forward clock stays at <see cref="Now"/>.</summary>
+    public DateTime Wall => Now + Shift(Index);
 
     public ProcessSample AddProcess(int pid, int ppid, string image, int startIndex = -1000)
     {
-        var p = new ProcessSample { Pid = pid, ParentPid = ppid, ImageName = image, CreateTime = (T0 + Interval * startIndex).ToFileTimeUtc() };
+        var p = new ProcessSample { Pid = pid, ParentPid = ppid, ImageName = image, CreateTime = (T0 + Interval * startIndex + Shift(startIndex)).ToFileTimeUtc() };
         Procs[pid] = p;
         return p;
     }
@@ -49,8 +58,8 @@ internal sealed class World
     {
         var entries = tags.Select(t => new PoolTagEntry(PoolTag.Parse(t.tag), 0, 0, 0, 1, 0, (ulong)t.bytes)).ToList();
         entries.Add(new PoolTagEntry(PoolTag.Parse("Toke"), 0, 0, 0, 1, 0, 2_000_000));
-        var s = new Sample(Now, new PoolTotals(400_000_000, 300_000_000, 350_000_000, 250_000_000), entries, Procs.Values.ToList());
-        Registry.ObserveSnapshot(s.Processes, Now);
+        var s = new Sample(Wall, new PoolTotals(400_000_000, 300_000_000, 350_000_000, 250_000_000), entries, Procs.Values.ToList()) { TickMs = Clocks.At(Now).Ms };
+        Registry.ObserveSnapshot(s.Processes, Wall);
         History.Add(s);
         Index++;
     }
@@ -58,7 +67,7 @@ internal sealed class World
     public void ScanHandles()
     {
         var by = Procs.Values.ToDictionary(p => p.Key, p => new Dictionary<string, int>(_handles.GetValueOrDefault(p.Pid) ?? new()));
-        History.AddHandles(new TypedHandles(T0 + Interval * (Index - 1), by)); // same tick as the last sample, as in the engine
+        History.AddHandles(new TypedHandles(T0 + Interval * (Index - 1) + Shift(Index - 1), by) { Ms = Clocks.At(T0 + Interval * (Index - 1)).Ms }); // same tick as the last sample, as in the engine
     }
 }
 
@@ -115,7 +124,7 @@ public class DetectionTests
     }
 }
 
-public class ReviewRegressionTests
+public class AnalysisRegressionTests
 {
     [Fact]
     public void NewProcessAtMinuteBoundaryDoesNotThrow()
@@ -150,11 +159,11 @@ public class ReviewRegressionTests
                 long total = (6L << 30) + rnd.Next(-20, 20) * (1L << 20);
                 var tags = Enumerable.Range(0, 50).Select(k => ($"T{k:D3}", 50L * (1 << 20) + rnd.Next(-200_000, 200_000))).ToArray();
                 var entries = tags.Select(t => new PoolTagEntry(PoolTag.Parse(t.Item1), 0, 0, 0, 1, 0, (ulong)t.Item2)).ToList();
-                var s = new Sample(w.Now, new PoolTotals(1L << 30, (ulong)total, 1L << 30, (ulong)total), entries, w.Procs.Values.ToList());
+                var s = new Sample(w.Now, new PoolTotals(1L << 30, (ulong)total, 1L << 30, (ulong)total), entries, w.Procs.Values.ToList()) { TickMs = Clocks.At(w.Now).Ms };
                 w.Registry.ObserveSnapshot(s.Processes, w.Now);
                 w.History.Add(s);
                 w.Index++;
-                mgr.Process(w.History, det, det.Evaluate(w.History), s.TimeUtc);
+                mgr.Process(w.History, det, det.Evaluate(w.History), At(s.TimeUtc));
             }
             Assert.Empty(mgr.All);
         }
@@ -309,7 +318,7 @@ public class IncidentTests
             void Step()
             {
                 w.Sample(("File", file));
-                mgr.Process(w.History, det, det.Evaluate(w.History), w.Now - w.Interval);
+                mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval));
             }
             for (int i = 0; i < 15; i++) Step();
             w.ScanHandles();

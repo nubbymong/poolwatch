@@ -8,7 +8,7 @@ using PoolWatch.Engine.Changes;
 namespace PoolWatch.Engine;
 
 /// <summary>
-/// The background-services page's engine side (addendum 4 B): enumerate the installed services, classify them against
+/// The background-services page's engine side: enumerate the installed services, classify them against
 /// the catalogue and the protected gate, apply and restore changes through the gated <see cref="ServiceControl"/>, and
 /// keep the change log (service-changes.json) so Restore puts back exactly the original. Every change (Apply, Restore,
 /// Restore to Windows default) goes through <see cref="ServicePlan"/>'s gate and then the live gate; there is no other
@@ -33,17 +33,23 @@ internal sealed class ServicesController
     private readonly object _opLock = new();
     private int _version;
     private List<ServiceChange> _changes = new();
-    private DateTime _nextSelfRepairCheck = DateTime.MinValue;
+    /// <summary>When the next self-repair check is due, on <see cref="IServicesHost.NowMs"/> (a clock that only goes forward).</summary>
+    private long _nextSelfRepairCheckMs = long.MinValue;
+    /// <summary>The last self-repair check could not read the services (logged once, until they are read again).</summary>
+    private bool _checkCouldNotRead;
     private readonly ServiceSavings _savings = new();
     private readonly Func<int, (double cores, long faultsPerSec)?> _liveCost, _recentCost;
     private readonly IServiceBackend _backend;
+    private readonly IServicesHost _host;
 
     /// <param name="liveCost">A PID's cost in the latest window (the Cost column, the after-cost).</param>
     /// <param name="recentCost">A PID's average cost over the last minutes (the before-cost of a change), else the live one.</param>
     /// <param name="backend">The live services (reading, and the gated change); null: Windows. Tests pass a fake, so no test
-    /// changes a real service (review round 2, item 12).</param>
+    /// changes a real service.</param>
+    /// <param name="host">The clock, this process and the other PoolWatch processes (<see cref="IServicesHost"/>); null:
+    /// Windows. Tests pass a fake.</param>
     public ServicesController(AppPaths paths, Log log, Action<Finding> finding, Func<int, (double, long)?> liveCost, Func<int, (double, long)?> recentCost,
-        IServiceBackend? backend = null)
+        IServiceBackend? backend = null, IServicesHost? host = null)
     {
         _paths = paths;
         _log = log;
@@ -51,9 +57,10 @@ internal sealed class ServicesController
         _liveCost = liveCost;
         _recentCost = recentCost;
         _backend = backend ?? new WindowsServiceBackend();
-        // S2: the embedded catalogue only. An elevated PoolWatch must not take its "optional vs protected" decision from a
-        // file an unelevated user could write; the hard protected gate is hard-coded regardless. (An admin-only override
-        // can be reintroduced once the data root is admin-only, S3.)
+        _host = host ?? new WindowsServicesHost();
+        // The embedded catalogue only. An elevated PoolWatch must not take its "optional vs protected" decision from a
+        // file an unelevated user could write; the hard protected gate is hard-coded regardless. (An override that only
+        // administrators could change would have to be read from the admin-only data folder; there is none.)
         Catalogue = DefaultCatalogue.Load();
         Load();
     }
@@ -100,10 +107,13 @@ internal sealed class ServicesController
     private readonly List<ServiceChange> _restoredNotRemoved = new();
 
     /// <summary>
-    /// Always in the admin-only data root (Part 3 review), never under a headless --out folder, which can be one anyone may
+    /// Always in the admin-only data root, never under a headless --out folder, which can be one anyone may
     /// write: Restore acts on these records as an administrator.
     /// </summary>
-    private string ChangeFile => _paths.Guard.CheckReal(Path.Combine(_paths.EnsureDir(_paths.DataRoot), "service-changes.json"));
+    private string ChangeFile => _paths.Guard.CheckReal(Path.Combine(_paths.EnsureDir(_paths.DataRoot), ChangeFileName));
+
+    /// <summary>The file in the data root that holds the service changes (<see cref="ChangeFile"/>).</summary>
+    internal const string ChangeFileName = "service-changes.json";
 
     /// <summary>The PC is enrolled in Windows Insider (wisvc is then protected).</summary>
     public static bool InsiderEnrolled()
@@ -127,35 +137,51 @@ internal sealed class ServicesController
     /// The page's options: every installed service, grouped and annotated with the catalogue, its state (PoolWatch's own
     /// changes never read "changed outside PoolWatch") and the live cost of its process.
     /// </summary>
+    /// <exception cref="ServicesNotReadException">The services could not be read (<see cref="ReadServices"/>).</exception>
     public List<ServiceOption> Options()
     {
         // A change the command line made meanwhile then reads as PoolWatch's own. A file that cannot be read is reported
         // where it matters: Apply and Restore refuse, Active changes lists it, and RecordError (the page's status line) says why.
         try { lock (_lock) Read(); }
         catch (Exception) { }
-        var services = ServiceCosts.Fill(_backend.Enumerate(), _liveCost);
+        var services = ServiceCosts.Fill(ReadServices(), _liveCost);
         bool insider = _backend.InsiderEnrolled();
         return ServicePlan.Options(services, Catalogue, insider, WindowsDefaultsOff, Changes);
+    }
+
+    /// <summary>
+    /// The installed services, as the backend reads them. Throws <see cref="ServicesNotReadException"/> when they cannot be
+    /// read, or Windows listed none (a Windows PC always has services): a list that could not be read is never "nothing is
+    /// installed", so no profile says "not installed", no Put back says "no longer installed", and the self-repair check
+    /// neither reports nor forgets anything.
+    /// </summary>
+    private IReadOnlyList<ServiceView> ReadServices()
+    {
+        IReadOnlyList<ServiceView> services;
+        try { services = _backend.Enumerate(); }
+        catch (Exception ex) { throw new ServicesNotReadException(ex.Message, ex); }
+        return services.Count > 0 ? services : throw new ServicesNotReadException("Windows listed no services", null);
     }
 
     /// <summary>"saved about 1.7 cores over the hour after (...)" for a service PoolWatch turned off, while it is measured.</summary>
     public string? SavingsText(string service)
     {
-        lock (_lock) return _savings.Get(service) is { } e ? ServiceSavings.Text(e, DateTime.UtcNow) : null;
+        lock (_lock) return _savings.Get(service) is { } e ? ServiceSavings.Text(e, _host.NowMs) : null;
     }
 
     /// <summary>
     /// Sampler thread, every sample: the after-cost of each service PoolWatch turned off in the last hour (its share of its
-    /// host process when it runs again, else zero), and a finding when its hour is up.
+    /// host process when it runs again, else zero), and a finding when its hour is up (timed on <see cref="IServicesHost.NowMs"/>).
     /// </summary>
-    public void ObserveSavings(DateTime nowUtc, IReadOnlyList<Core.Model.ServiceEntry> running)
+    public void ObserveSavings(IReadOnlyList<Core.Model.ServiceEntry> running)
     {
         List<ServiceSavings.Entry> done;
+        long now = _host.NowMs;
         lock (_lock)
         {
             if (_savings.Entries.Count == 0) return;
             var perPid = running.Where(s => s.ProcessId > 0).GroupBy(s => s.ProcessId).ToDictionary(g => g.Key, g => g.Count());
-            done = _savings.Observe(nowUtc, name =>
+            done = _savings.Observe(now, name =>
             {
                 var svc = running.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && s.ProcessId > 0);
                 if (svc is null || _liveCost(svc.ProcessId) is not { } host) return (0, 0);
@@ -164,7 +190,7 @@ internal sealed class ServicesController
         }
         foreach (var e in done)
         {
-            string msg = $"Service turned off an hour ago: {e.Service}: {ServiceSavings.Text(e, nowUtc)}";
+            string msg = $"Service turned off an hour ago: {e.Service}: {ServiceSavings.Text(e, now)}";
             _finding(Finding(msg, FindingSeverity.Info, e.Service));
             _log.Info(msg);
         }
@@ -188,7 +214,9 @@ internal sealed class ServicesController
     {
         lock (_opLock)
         {
-            var options = Options();
+            List<ServiceOption> options;
+            try { options = Options(); }
+            catch (ServicesNotReadException ex) { _log.Info("services: nothing turned off: " + ex.Message); return [("(services)", ex.Message)]; }
             bool insider = _backend.InsiderEnrolled();
             List<ServicePlan.Operation> ops;
             try { ops = ServicePlan.BuildApply(ticked, options, insider, via, DateTime.UtcNow); }
@@ -249,7 +277,8 @@ internal sealed class ServicesController
     /// passes Apply's own gate (<see cref="ServicePlan.BuildApply"/>, so a protected service and the Insider rules hold)
     /// and is back on goes through exactly Apply's path (<see cref="Run"/>: its original recorded first, then the live
     /// gate, a log line and a finding each, and an Active changes row). Every other one is left as it is, with why in the
-    /// log. While PoolWatch's record of its changes cannot be read nothing is changed, since no original could be saved.
+    /// log. While PoolWatch's record of its changes cannot be read nothing is changed, since no original could be saved;
+    /// nor while the services cannot be read (each is left as it is, never said to be "not installed").
     /// </summary>
     public ProfileRun ApplyProfile(ServiceProfile profile, string via)
     {
@@ -259,7 +288,13 @@ internal sealed class ServicesController
     private ProfileRun ApplyProfileNow(ServiceProfile profile, string via)
     {
         string who = $"Service profile {ServiceProfileRules.Shown(profile.Name)} at start";
-        var options = Options();
+        List<ServiceOption> options;
+        try { options = Options(); }
+        catch (ServicesNotReadException ex)
+        {
+            _log.Info($"{who}: nothing turned off: {ex.Message}");
+            return new([], [], profile.Services.Distinct(StringComparer.OrdinalIgnoreCase).Select(s => (s, ex.Message)).ToList(), []);
+        }
         if (RecordError is { } unread)
         {
             _log.Info($"{who}: nothing turned off: PoolWatch cannot read how the services were set: {unread}");
@@ -295,11 +330,16 @@ internal sealed class ServicesController
     /// Apply's path for each operation, the one every turn-off takes: the original saved first (a service whose record
     /// cannot be saved is not changed), then the live gate and the change, a record taken back when the change fails, and a
     /// log line and a finding for each. A service another of <paramref name="ops"/> depends on is changed after it, so that
-    /// one is stopped first. One whose start type was set but that did not stop (one that depends on it runs, say) keeps its
-    /// record, which says so, and its result says why and when it stops: never done (<c>notStopped</c>). From the save of a
+    /// one is stopped first. One whose start type was set but that did not stop (one that depends on it has not, say)
+    /// keeps its record, which says so, and its result says why and when it stops: never done (<c>notStopped</c>). From the save of a
     /// service's record until its change is done (its mark saved, for one that did not stop), the self-repair check skips
     /// it (<see cref="_applying"/>), so a check in between never reads PoolWatch's own change, still under way, as switched
-    /// back on outside it.
+    /// back on outside it; and the record says the change is under way in this process (<see cref="ServiceChange.UnderWay"/>),
+    /// so another PoolWatch's check skips it too. The record saved before the change says the service was running only when
+    /// the services were read so, else that this is not known (<see cref="ServicePlan.RunningBeforeTheChange"/>). Once the
+    /// change is done, one save gives the record what the change saw (whether the service was running, for a first record:
+    /// a stop asked for means it was), its mark, and takes the under-way mark off (<see cref="Finish"/>); when that save
+    /// fails, the record still never says "was not running" of a service the change found running.
     /// </summary>
     /// <param name="options">The services as read for these operations (their dependencies, and the live gate's allow-list).</param>
     private List<(string service, string? error, bool notStopped)> Run(List<ServicePlan.Operation> ops, IReadOnlyList<ServiceOption> options, bool insider)
@@ -311,7 +351,7 @@ internal sealed class ServicesController
         var results = new List<(string, string?, bool)>();
         foreach (var op in ops)
         {
-            // S1: keep the FIRST saved original if PoolWatch already changed this service (a re-Apply must not record
+            // Keep the FIRST saved original if PoolWatch already changed this service (a re-Apply must not record
             // the already-off state as the "original"), as the file holds it now. The record is saved BEFORE the change
             // so Restore works even if PoolWatch dies mid-apply; when it cannot be saved, the service is not changed. If
             // the change then fails, the record is taken back.
@@ -330,8 +370,8 @@ internal sealed class ServicesController
                     {
                         prior = now.FirstOrDefault(x => Is(x, op.Option.Service.Name));
                         record = (prior is null ? op.Record
-                            : op.Record with { OriginalStart = prior.OriginalStart, OriginalRunning = prior.OriginalRunning })
-                            with { BeforeCores = before.cores, BeforePageFaultsPerSec = before.faultsPerSec };
+                            : op.Record with { OriginalStart = prior.OriginalStart, OriginalRunning = prior.OriginalRunning, OriginalRunningNotKnown = prior.OriginalRunningNotKnown })
+                            with { BeforeCores = before.cores, BeforePageFaultsPerSec = before.faultsPerSec, UnderWay = UnderWayHere() };
                         return ServiceChangeLog.Upsert(now, record);
                     });
                 }
@@ -339,18 +379,20 @@ internal sealed class ServicesController
                 if (err is null)
                 {
                     NotDone? why;
-                    (err, why) = _backend.Apply(op, allowed, insider);
+                    bool? wasRunning;
+                    (err, why, wasRunning) = _backend.Apply(op, allowed, insider);
                     if (err is not null) TakeBack(record, prior); // the record from before is back: what the check reported of it holds (_repairWarned)
-                    else if (why is not null)
-                    {
-                        // The start type is set, so the record stays (Put back works); it says the service went on running.
-                        notStopped = ServicePlan.NotStoppedText(op.NewStart, why, RunningDependents(op.Option.Service.Name, options, stopped));
-                        MarkNotStopped(record, op.Option.Service.ProcessId);
-                    }
                     else
                     {
-                        stopped.Add(op.Option.Service.Name);
-                        lock (_lock) _savings.Start(op.Option.Service.Name, DateTime.UtcNow, before.cores, before.faultsPerSec);
+                        // The start type is set, so the record stays (Put back works); one not stopped says it went on running.
+                        if (why is not null)
+                            notStopped = ServicePlan.NotStoppedText(op.NewStart, why, DependentsNotStopped(op.Option.Service.Name, options, stopped));
+                        else
+                        {
+                            stopped.Add(op.Option.Service.Name);
+                            lock (_lock) _savings.Start(op.Option.Service.Name, _host.NowMs, before.cores, before.faultsPerSec);
+                        }
+                        Finish(record, firstRecord: prior is null, sawRunning: wasRunning, notStoppedPid: why is null ? null : op.Option.Service.ProcessId);
                     }
                 }
             }
@@ -378,24 +420,71 @@ internal sealed class ServicesController
         name => views.TryGetValue(name, out var s) ? s.DependsOn : [];
 
     /// <summary>
-    /// The services that depend on <paramref name="service"/> and ran when the services were read, but those this run
-    /// stopped: why Windows did not stop it, when it refused because of them. PoolWatch never stops them: nobody asked it to.
+    /// The services that depend on <paramref name="service"/> and were not seen stopped when the services were read
+    /// (running, paused, starting, stopping, resuming or pausing, or in a state Windows could not give), but those this run
+    /// stopped, each with its state: why Windows did not stop it, when it refused because of them and could not list them
+    /// itself right then. PoolWatch never stops them: nobody asked it to.
     /// </summary>
-    private static List<string> RunningDependents(string service, IReadOnlyList<ServiceOption> options, IReadOnlySet<string> stopped) =>
-        options.Where(o => o.Service.Running && !stopped.Contains(o.Service.Name)
+    private static List<DependentService> DependentsNotStopped(string service, IReadOnlyList<ServiceOption> options, IReadOnlySet<string> stopped) =>
+        options.Where(o => (o.Service.Running || o.Service.NeitherRunningNorStopped) && !stopped.Contains(o.Service.Name)
                            && o.Service.DependsOn.Contains(service, StringComparer.OrdinalIgnoreCase))
-            .Select(o => o.Service.Name).Order(StringComparer.OrdinalIgnoreCase).ToList();
+            .OrderBy(o => o.Service.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(o => new DependentService(o.Service.Name, o.Service.Running ? ServiceRunState.Running : o.Service.StateUnknown ? ServiceRunState.NotRead
+                : o.Service.Between ?? ServiceRunState.NotRead))
+            .ToList();
+
+    /// <summary>No service: Put back stops none of the services that depend on the one it puts back.</summary>
+    private static readonly HashSet<string> NoneStopped = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>This process, now: the mark a record carries while this PoolWatch's change of its service is under way.</summary>
+    private ChangeUnderWay UnderWayHere()
+    {
+        var (pid, started) = _host.Self;
+        return new ChangeUnderWay { Pid = pid, ProcessStarted = started, TickMs = _host.NowMs };
+    }
 
     /// <summary>
-    /// Records that the change set the start type but the service went on running, in process <paramref name="pid"/> (0:
-    /// not known), so the self-repair check does not read it as switched back on outside PoolWatch
-    /// (<see cref="ServicePlan.KeptRunning"/>). Only while the record there is still the one saved for this change; a save
-    /// that fails is logged (the check may then warn about it).
+    /// A Turn off's change is done (its start type set): its record says what the change saw, for a first record
+    /// (<paramref name="firstRecord"/>: whether the service was running when the change acted on it,
+    /// <paramref name="sawRunning"/>; when the change could not tell, null, what was saved before the change stands:
+    /// running when the services were read so, else not known; a record kept from an earlier change keeps its first
+    /// original); that the service went
+    /// on running, in process <paramref name="notStoppedPid"/> (0: not known; null: it stopped), so the self-repair check
+    /// does not read it as switched back on outside PoolWatch (<see cref="ServicePlan.KeptRunning"/>); and the change is no
+    /// longer under way. Only while the record there is still the one saved for this change; a save that fails is logged
+    /// (the check may then warn about it; another PoolWatch's check reads the change as under way only while this process
+    /// runs).
     /// </summary>
-    private void MarkNotStopped(ServiceChange saved, int pid)
+    private void Finish(ServiceChange saved, bool firstRecord, bool? sawRunning, int? notStoppedPid)
     {
-        try { Edit(now => now.Any(x => SameSave(x, saved)) ? now.Select(x => SameSave(x, saved) ? x with { NotStoppedPid = pid } : x).ToList() : null); }
-        catch (Exception ex) { _log.Info($"service-changes.json: {saved.Service} did not stop, and that was not saved: {ex.Message}"); }
+        try
+        {
+            Edit(now => now.Any(x => SameSave(x, saved))
+                ? now.Select(x => SameSave(x, saved)
+                    ? (firstRecord && sawRunning is { } ran ? ServicePlan.WithOriginalRunning(x, ran) : x) with { NotStoppedPid = notStoppedPid, UnderWay = null }
+                    : x).ToList()
+                : null);
+        }
+        catch (Exception ex)
+        {
+            _log.Info($"service-changes.json: {saved.Service} was turned off{(notStoppedPid is null ? "" : " but did not stop")}, and that was not saved: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Puts or takes off (<paramref name="underWay"/> null) the under-way mark on the record <paramref name="saved"/>, before
+    /// and after a Put back that does not remove it, only while the record there is still that one. A save that fails is
+    /// logged: the Put back goes ahead (it must work also when the file cannot be written, as for the uninstaller).
+    /// </summary>
+    private void MarkUnderWay(ServiceChange saved, ChangeUnderWay? underWay)
+    {
+        try
+        {
+            Edit(now => now.Any(x => SameSave(x, saved) && x.UnderWay != underWay)
+                ? now.Select(x => SameSave(x, saved) ? x with { UnderWay = underWay } : x).ToList()
+                : null);
+        }
+        catch (Exception ex) { _log.Info($"service-changes.json: the Put back of {saved.Service} was not marked as under way: {ex.Message}"); }
     }
 
     /// <summary>
@@ -408,7 +497,7 @@ internal sealed class ServicesController
         catch (Exception ex) { _log.Info($"service-changes.json: {c.Service} is no longer as its change left it, but that was not saved: {ex.Message}"); }
     }
 
-    /// <summary>Restores one service (or all) to its saved original start type. Every record is re-gated (S1).</summary>
+    /// <summary>Restores one service (or all) to its saved original start type. Every record is re-gated.</summary>
     public List<(string service, string? error)> Restore(string? service) => Restore(service, out _);
 
     /// <param name="putBack">The records whose start type this Restore put back (their records are gone).</param>
@@ -443,7 +532,14 @@ internal sealed class ServicesController
 
     private List<(string service, string? error)> RestoreNow(string? service, List<ServiceChange> putBack)
     {
-        var options = Options();
+        List<ServiceOption> options;
+        try { options = Options(); }
+        catch (ServicesNotReadException ex)
+        {
+            // Not known whether they are installed: nothing is put back, and every record is kept.
+            _log.Info("Services not put back: " + ex.Message);
+            return [(service ?? "(services)", ex.Message)];
+        }
         var byName = options.ToDictionary(o => o.Service.Name, StringComparer.OrdinalIgnoreCase);
         bool insider = _backend.InsiderEnrolled();
         var allowed = Allowed(options);
@@ -461,11 +557,11 @@ internal sealed class ServicesController
         var results = new List<(string, string?)>();
         foreach (var c in todo)
         {
-            // S1: the record from service-changes.json is untrusted. Re-validate it through the same gate as Apply,
+            // The record from service-changes.json is untrusted. Re-validate it through the same gate as Apply,
             // against the service as it is live now, before changing anything.
             string? err = null, after = null;
             NotDone? notDone = null;
-            bool already = false;
+            bool already = false, marked = false;
             lock (_lock) _restoring.Add(c.Service); // the self-repair check must not read PoolWatch's own undo as "outside"
             try
             {
@@ -474,11 +570,23 @@ internal sealed class ServicesController
                 {
                     ServicePlan.GateRestore(live, c, insider);
                     if (ServicePlan.AlreadyRestored(live, c)) already = true; // back to the original already: only the record goes
-                    else (err, notDone) = _backend.Restore(c, allowed, insider);
-                    if (err is null && notDone is not null) after = AfterPutBack(c, notDone, NeededDisabled(live, byName, backOn));
+                    else
+                    {
+                        // Another PoolWatch's self-repair check (the app's, while this runs from the command line) reads
+                        // the record as under way until it is removed, so it never reads this Put back as switched on
+                        // outside; the mark says it is a Put back, so neither does a check once this process is gone or the
+                        // bound on a change is over, should the record not be removed (ServicePlan.LeftByItsPutBack).
+                        MarkUnderWay(c, UnderWayHere() with { PutBack = true });
+                        marked = true;
+                        (err, notDone) = _backend.Restore(c, allowed, insider);
+                    }
+                    if (err is null && notDone is not null)
+                        after = AfterPutBack(c, notDone, NeededDisabled(live, byName, backOn), DependentsNotStopped(c.Service, options, NoneStopped));
+                    else if (err is null && !already && ServicePlan.RunningNotKnown(c, live.Service)) after = ServicePlan.RunningNotKnownText;
                 }
             }
             catch (Exception ex) { err = ex.Message; }
+            if (err is not null && marked) MarkUnderWay(c, null); // not put back: the record stays, no longer under way
             // The start type is back (even if starting it again failed): the record and the savings measure go.
             if (err is null)
             {
@@ -504,9 +612,11 @@ internal sealed class ServicesController
     /// named, <paramref name="neededDisabled"/>), or for an original of Disabled (putting back your own setting after "Set
     /// to its Windows default"), stopping it, which happens when Windows restarts.
     /// </summary>
-    private string AfterPutBack(ServiceChange c, NotDone why, string? neededDisabled) =>
+    /// <param name="dependents">The services that depend on it and were not seen stopped when the services were read, for a
+    /// stop Windows refused because of them and could not list itself.</param>
+    private string AfterPutBack(ServiceChange c, NotDone why, string? neededDisabled, IReadOnlyList<DependentService> dependents) =>
         c.OriginalStart == ServiceStartType.Disabled
-            ? ServicePlan.StillRunningAfterPutBack(why)
+            ? ServicePlan.StillRunningAfterPutBack(why, dependents)
             : ServicePlan.NotStartedText(c.Service, why, neededDisabled, neededDisabled is not null && CanPutBackOn(neededDisabled));
 
     /// <summary>PoolWatch holds a change of <paramref name="service"/> whose Put back leaves it at a start type that is not Disabled.</summary>
@@ -532,7 +642,7 @@ internal sealed class ServicesController
     {
         if (items.Count < 2) return items.ToList();
         Dictionary<string, ServiceView> views;
-        try { views = Views(_backend.Enumerate()); }
+        try { views = Views(ReadServices()); }
         catch (Exception ex) { _log.Info("services: put back in the order listed, as the services could not be read: " + ex.Message); return items.ToList(); }
         return ServicePlan.InDependencyOrder(items, serviceOf, DependsOn(views), dependentsFirst: false);
     }
@@ -570,7 +680,9 @@ internal sealed class ServicesController
     private List<(string service, string? error)> RestoreToDefaultNow(string service, out ServiceOption? setDefault)
     {
         setDefault = null;
-        var options = Options();
+        List<ServiceOption> options;
+        try { options = Options(); }
+        catch (ServicesNotReadException ex) { _log.Info("services: restore to default refused: " + ex.Message); return [(service, ex.Message)]; }
         bool insider = _backend.InsiderEnrolled();
         var allowed = Allowed(options);
         ServicePlan.Operation op;
@@ -611,31 +723,72 @@ internal sealed class ServicesController
     }
 
     /// <summary>
-    /// Sampler thread, every few minutes: did something switch a service the owner turned off back on? Not one that has
-    /// kept running since PoolWatch's own change set it to Disabled but could not stop it (<see cref="ServicePlan.KeptRunning"/>):
-    /// once it is seen stopped (STOPPED: not starting, stopping, resuming, pausing or paused), in another process or at
-    /// another start type, it is read as any other. Not one whose Turn off or Put back is under way, nor one whose record
-    /// has no mark and was saved less than <see cref="TurnOffAtMost"/> before the check (<see cref="MayBeUnderWay"/>). The
-    /// record is read again first, so a Turn off from the command line meanwhile is read as it left the service.
+    /// Sampler thread, every few minutes (<see cref="SelfRepairEveryMs"/>, on a clock that only goes forward, so setting
+    /// the system clock back or forward neither holds a check back nor runs one early): did something switch a service the
+    /// owner turned off back on? Not one that has kept running since PoolWatch's own change set it to Disabled but could not
+    /// stop it (<see cref="ServicePlan.KeptRunning"/>): once it is seen stopped (STOPPED: not starting, stopping, resuming,
+    /// pausing or paused), in another process or at another start type, it is read as any other. Not one whose Turn off or
+    /// Put back is under way, here (<see cref="_applying"/>, <see cref="_restoring"/>) or in another PoolWatch that still
+    /// runs (<see cref="UnderWayElsewhere"/>: one from the command line marks its record before it acts and takes the mark
+    /// off, or removes the record, once it is done); while one is, the check looks again within
+    /// <see cref="LookAgainMs"/>, so a switch-on right after that change is reported then, not a whole check later. Nor one
+    /// whose record a Put back began on and that is as a Put back leaves it (<see cref="ServicePlan.LeftByItsPutBack"/>),
+    /// whether or not that PoolWatch still runs: a Put back whose start takes long, whose record could not be removed, or
+    /// that stopped or failed after marking it, while the service is at the start type it was asked for, whoever set it. The
+    /// record is read first, and again once the services are read, so a change another PoolWatch made meanwhile (a Put back
+    /// from the command line, say) is read as it left the record. When the services cannot be read, nothing is reported or
+    /// forgotten (what was reported stays reported); so too for a service whose start type or state could not be read
+    /// (<see cref="ServicePlan.NotRead"/>: one PoolWatch could not open, say), which is read again within
+    /// <see cref="LookAgainMs"/> the first time.
     /// </summary>
-    public void CheckSelfRepair(DateTime nowUtc)
+    public void CheckSelfRepair()
     {
-        if (nowUtc < _nextSelfRepairCheck) return;
-        _nextSelfRepairCheck = nowUtc.AddMinutes(5);
+        long now = _host.NowMs;
+        if (now < _nextSelfRepairCheckMs) return;
+        _nextSelfRepairCheckMs = now + SelfRepairEveryMs;
         List<ServiceChange> changed;
         lock (_lock)
         {
             try { Read(); }
             catch (Exception) { } // as last read; RecordError says why
-            changed = _changes.Where(c => c.NewStart == ServiceStartType.Disabled && !_restoring.Contains(c.Service) && !_applying.Contains(c.Service)
-                                          && !MayBeUnderWay(c, nowUtc)).ToList();
+            var off = _changes.Where(c => c.NewStart == ServiceStartType.Disabled).ToList();
+            changed = off.Where(c => !_restoring.Contains(c.Service) && !_applying.Contains(c.Service) && !UnderWayElsewhere(c, now)).ToList();
+            if (changed.Count < off.Count) LookAgainSoon(now);
         }
         if (changed.Count == 0) return;
-        var live = _backend.Enumerate().ToDictionary(s => s.Name, StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, ServiceView> live;
+        try { live = Views(ReadServices()); }
+        catch (ServicesNotReadException ex)
+        {
+            if (!_checkCouldNotRead) _log.Info("services: the self-repair check could not read the services (it reads them again at the next check): " + ex.Message);
+            _checkCouldNotRead = true;
+            return;
+        }
+        _checkCouldNotRead = false;
+        lock (_lock)
+        {
+            try { Read(); }
+            catch (Exception) { }
+        }
+        var notRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var c in changed)
-            if (live.TryGetValue(c.Service, out var s) && (s.StartType != ServiceStartType.Disabled || s.Running) && !BeingChanged(c.Service) && StillRecorded(c))
+        {
+            bool recorded = StillRecorded(c), changing = BeingChanged(c.Service);
+            if (!recorded || changing) LookAgainSoon(now); // changed since it was read, or a change of it under way now: read it again soon
+            live.TryGetValue(c.Service, out var s);
+            if (s is not null && ServicePlan.NotRead(s))
+            {
+                // Its start type or its state could not be read (one PoolWatch could not open, say): what it is now is not
+                // known, so nothing is reported, no mark is taken off and nothing reported is forgotten. It is read again
+                // soon, once: one that stays unreadable is read at the usual pace.
+                notRead.Add(c.Service);
+                if (!_notReadAtLastCheck.Contains(c.Service)) LookAgainSoon(now);
+                continue;
+            }
+            if (s is not null && (s.StartType != ServiceStartType.Disabled || s.Running) && !changing && recorded)
             {
                 if (ServicePlan.KeptRunning(c, s)) continue; // as PoolWatch's change left it: not switched back on
+                if (ServicePlan.LeftByItsPutBack(c, s)) continue; // a Put back began on its record, and it is as one leaves it
                 if (c.NotStoppedPid is not null) Unmark(c); // another process or start type: switched back on like any other
                 // Once per state it is switched back to, for this record of it (not every 5 min while it stays so).
                 var state = (c.ChangedUtc, c.Via, s.StartType, s.Running);
@@ -656,48 +809,72 @@ internal sealed class ServicesController
                 // Seen stopped: if it runs again, that is a switch-on like any other. Not yet while it is starting, stopping,
                 // resuming, pausing or paused: one of those may still run on as PoolWatch's change left it.
                 if (c.NotStoppedPid is not null && s is { StartType: ServiceStartType.Disabled, Running: false, NeitherRunningNorStopped: false }
-                    && !BeingChanged(c.Service) && StillRecorded(c)) Unmark(c);
-                // Off again (or gone): a later switch-on is reported again. Not merely because a Turn off is under way: one
+                    && !changing && recorded) Unmark(c);
+                // Seen off again (Disabled and STOPPED: not paused, starting, stopping, resuming or pausing), or gone from a
+                // list that was read: a later switch-on is reported again. Not merely because a Turn off is under way: one
                 // whose change fails takes its record back, and what was reported of that record still holds.
-                if (s is null || s is { StartType: ServiceStartType.Disabled, Running: false }) lock (_lock) _repairWarned.Remove(c.Service);
+                if (s is null || s is { StartType: ServiceStartType.Disabled, Running: false, NeitherRunningNorStopped: false })
+                    lock (_lock) _repairWarned.Remove(c.Service);
             }
+        }
+        _notReadAtLastCheck = notRead;
+    }
+
+    /// <summary>The services whose start type or state the last check that read the services could not read (<see cref="ServicePlan.NotRead"/>).</summary>
+    private HashSet<string> _notReadAtLastCheck = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>How often the self-repair check runs: every 5 minutes.</summary>
+    internal const long SelfRepairEveryMs = 5 * 60 * 1000;
+
+    /// <summary>How soon the check looks again when it left a service whose change was under way (or changed while it read).</summary>
+    internal const long LookAgainMs = 15 * 1000;
+
+    private void LookAgainSoon(long now) => _nextSelfRepairCheckMs = Math.Min(_nextSelfRepairCheckMs, now + LookAgainMs);
+
+    /// <summary>
+    /// The longest the self-repair check reads another PoolWatch's change as under way (<see cref="UnderWayElsewhere"/>):
+    /// the longest a Turn off can take, including Windows' wait on a busy service, from the save of its record until it
+    /// is done: the wait for the service to settle and the wait for its stop (<see cref="ServiceControl.StopWaitSeconds"/>
+    /// each), each stop request Windows can hold (<see cref="ServiceControl.StopRequestsAtMost"/> times
+    /// <paramref name="controlWaitSeconds"/>, Windows' wait on a busy service on this PC:
+    /// <see cref="ServiceControl.ControlWaitSeconds()"/>), and <see cref="ChangeMarginSeconds"/>. Built from those parts,
+    /// so it follows them when one changes. A Put back's start can take longer (Windows first starts the stopped services
+    /// it depends on), so a Put back's mark does not rest on this bound: a service as its Put back leaves it is never read
+    /// as switched back on outside PoolWatch, however long that takes (<see cref="ServicePlan.LeftByItsPutBack"/>).
+    /// </summary>
+    internal static TimeSpan ChangeAtMost(int controlWaitSeconds) => TimeSpan.FromSeconds(
+        ServiceControl.StopWaitSeconds + ServiceControl.StopWaitSeconds
+        + ServiceControl.StopRequestsAtMost * (long)controlWaitSeconds + ChangeMarginSeconds);
+
+    /// <summary>
+    /// A margin for the rest of a change: the looks between its waits (<see cref="ServiceControl.StopLookMs"/> each),
+    /// opening the service, setting its start type, and saving its record and its marks.
+    /// </summary>
+    internal const int ChangeMarginSeconds = 5;
+
+    /// <summary>
+    /// The record's change is under way in another PoolWatch process (<see cref="ServiceChange.UnderWay"/>): that process
+    /// still runs (the same process: its number and its start time), and the change began less than
+    /// <see cref="ChangeAtMost"/> ago on the clock Windows keeps since it started, so a process that hangs, or whose save of
+    /// the end of its change failed, holds the check back no longer than a Turn off can take (a Put back's mark is read
+    /// by what that Put back left, <see cref="ServicePlan.LeftByItsPutBack"/>). This PoolWatch's own mark is not read
+    /// here: <see cref="_applying"/> and <see cref="_restoring"/> say whether its own change is under way.
+    /// </summary>
+    private bool UnderWayElsewhere(ServiceChange c, long nowMs)
+    {
+        if (c.UnderWay is not { } u || (u.Pid, u.ProcessStarted) == _host.Self) return false;
+        long since = nowMs - u.TickMs;
+        return since >= 0 && since < (long)ChangeAtMost(_host.ControlWaitSeconds).TotalMilliseconds && _host.Runs(u.Pid, u.ProcessStarted);
     }
 
     /// <summary>
-    /// The longest a Turn off can take, including Windows' wait on a busy service, from the save of its record until its
-    /// change is done (its mark saved, for one that did not stop): the wait for the service to settle and the wait for its
-    /// stop (<see cref="ServiceControl.StopWaitSeconds"/> each), each stop request Windows can hold
-    /// (<see cref="ServiceControl.StopRequestsAtMost"/> times <see cref="ServiceControl.BusyServiceWaitSeconds"/>), and
-    /// <see cref="TurnOffMarginSeconds"/>. Built from those parts, so it follows them when one changes.
-    /// </summary>
-    internal static readonly TimeSpan TurnOffAtMost = TimeSpan.FromSeconds(
-        ServiceControl.StopWaitSeconds + ServiceControl.StopWaitSeconds
-        + ServiceControl.StopRequestsAtMost * ServiceControl.BusyServiceWaitSeconds + TurnOffMarginSeconds);
-
-    /// <summary>
-    /// A margin for the rest of a Turn off: the looks between its waits (<see cref="ServiceControl.StopLookMs"/> each),
-    /// opening the service, setting its start type, and saving its record and its mark.
-    /// </summary>
-    internal const int TurnOffMarginSeconds = 5;
-
-    /// <summary>
-    /// A record with no mark that was saved less than <see cref="TurnOffAtMost"/> from <paramref name="nowUtc"/>: its Turn
-    /// off may still be under way in another PoolWatch (one from the command line, <c>--service-off</c>, saves its record
-    /// before it sets the start type, and saves a mark on it only if the stop is given up, at the end; one whose stop is
-    /// done saves none), which this one's own skip (<see cref="_applying"/>) cannot see. The check leaves it until then, so
-    /// that change is not read as switched back on outside PoolWatch; a switch-on in that time is reported by the first
-    /// check after it, up to one check (5 minutes) later than it would be otherwise.
-    /// </summary>
-    private static bool MayBeUnderWay(ServiceChange c, DateTime nowUtc) =>
-        c.NotStoppedPid is null && (nowUtc - c.ChangedUtc).Duration() < TurnOffAtMost;
-
-    /// <summary>
     /// The state each re-enabled service was last reported in, with the record it was reported for (self-repair warns once
-    /// per state of each record, not every check). A service's entry goes once the check finds it Disabled and not running
-    /// again, or no longer installed. A Turn off that set its start type (in this PoolWatch or from the command line) saved
-    /// a new record, so an entry for the one before no longer holds, also one a check under way at that moment writes; a
-    /// Turn off whose change failed took its record back, so its entry still holds, also when a check ran while it was
-    /// under way.
+    /// per state of each record, not every check). A service's entry goes once the check finds it Disabled and stopped
+    /// again (not paused, starting, stopping, resuming or pausing), or no longer installed in a list that was read; never
+    /// on a read that does not say whether it is on (<see cref="ServicePlan.NotRead"/>), which writes no entry either. A
+    /// Turn off that set its start type (in this PoolWatch or from the command line) saved a new record, so an entry for
+    /// the one before no longer holds, also one a check under way at that moment writes; a Turn off whose change failed
+    /// took its record back, so its entry still holds, also when a check ran while it was under way.
     /// </summary>
     private readonly Dictionary<string, (DateTime changedUtc, string via, ServiceStartType start, bool running)> _repairWarned = new(StringComparer.OrdinalIgnoreCase);
 
@@ -853,17 +1030,19 @@ internal sealed class ServicesController
 /// <summary>
 /// The live services behind the page: reading them, and the gated change (<see cref="ServiceControl"/>, whose own live gate
 /// runs after <see cref="ServicePlan"/>'s). An interface so the controller's record-keeping is tested without touching a
-/// real service (review round 2, item 12).
+/// real service.
 /// </summary>
 internal interface IServiceBackend
 {
+    /// <summary>The installed services; throws when they cannot be read (as <see cref="ServiceControl.Enumerate"/>).</summary>
     IReadOnlyList<ServiceView> Enumerate();
     bool InsiderEnrolled();
     /// <summary>
     /// <c>error</c>: not changed. <c>notStopped</c>: the start type is set, but the service is not known to have stopped,
-    /// and why (as <see cref="ServiceControl.Apply"/>).
+    /// and why. <c>wasRunning</c>: whether it was running when the change acted on it, as the change saw it; null when that
+    /// is not known (as <see cref="ServiceControl.Apply"/>).
     /// </summary>
-    (string? error, NotDone? notStopped) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled);
+    (string? error, NotDone? notStopped, bool? wasRunning) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled);
     /// <summary>
     /// <c>error</c>: not put back. <c>notDone</c>: the start type is back, but starting it again, or for an original of
     /// Disabled stopping it, did not happen, and why (as <see cref="ServiceControl.Restore"/>).
@@ -877,7 +1056,74 @@ internal sealed class WindowsServiceBackend : IServiceBackend
 {
     public IReadOnlyList<ServiceView> Enumerate() => ServiceControl.Enumerate();
     public bool InsiderEnrolled() => ServicesController.InsiderEnrolled();
-    public (string? error, NotDone? notStopped) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled) => ServiceControl.Apply(op, allowed, insiderEnrolled);
+    public (string? error, NotDone? notStopped, bool? wasRunning) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled) =>
+        ServiceControl.Apply(op, allowed, insiderEnrolled);
     public (string? error, NotDone? notDone) Restore(ServiceChange change, IReadOnlySet<string> allowed, bool insiderEnrolled) => ServiceControl.Restore(change, allowed, insiderEnrolled);
     public string? SetDefault(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled) => ServiceControl.SetDefault(op, allowed, insiderEnrolled);
+}
+
+/// <summary>
+/// The installed services could not be read: not known, never "none installed" (<see cref="ServicesController"/>). Its
+/// message says so ("PoolWatch could not read the services: ..."); <see cref="Why"/> is the reason alone, for a line that
+/// says "could not read the services" itself (Ui.ServicesPageText.ReadFailed).
+/// </summary>
+internal sealed class ServicesNotReadException(string why, Exception? inner)
+    : InvalidOperationException("PoolWatch could not read the services: " + why, inner)
+{
+    /// <summary>Why the services could not be read: the read's own error, or "Windows listed no services".</summary>
+    public string Why { get; } = why;
+}
+
+/// <summary>
+/// What the services controller reads besides the services: a clock that only goes forward, this process, whether another
+/// PoolWatch process that marked a change still runs, and Windows' wait on a busy service. An interface so the self-repair
+/// check's timing and its reading of another PoolWatch's change are tested without a real clock or process.
+/// </summary>
+internal interface IServicesHost
+{
+    /// <summary>
+    /// Milliseconds since Windows started (GetTickCount64): the same in every process, and it only goes forward, whatever
+    /// the system clock does.
+    /// </summary>
+    long NowMs { get; }
+
+    /// <summary>This process: its number and when it started (FILETIME, UTC).</summary>
+    (int Pid, long Started) Self { get; }
+
+    /// <summary>
+    /// The process <paramref name="pid"/> that started at <paramref name="started"/> still runs (one given the same number
+    /// later is not it). True also when that cannot be told (it cannot be opened, say): the bound on a change then decides.
+    /// </summary>
+    bool Runs(int pid, long started);
+
+    /// <summary>How long Windows holds a control request on a busy service on this PC, in seconds (<see cref="ServiceControl.ControlWaitSeconds()"/>).</summary>
+    int ControlWaitSeconds { get; }
+}
+
+/// <summary>The real host: GetTickCount64, this process, OpenProcess / GetProcessTimes / GetExitCodeProcess, and the registry.</summary>
+internal sealed class WindowsServicesHost : IServicesHost
+{
+    private const int ERROR_INVALID_PARAMETER = 87, STILL_ACTIVE = 259;
+
+    private static readonly (int Pid, long Started) Me =
+        (Environment.ProcessId, Native.NativeMethods.GetProcessTimes(Native.NativeMethods.GetCurrentProcess(), out long created, out _, out _, out _) ? created : 0);
+
+    public long NowMs => Environment.TickCount64;
+
+    public (int Pid, long Started) Self => Me;
+
+    public bool Runs(int pid, long started)
+    {
+        var h = Native.NativeMethods.OpenProcess(Native.NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (h == IntPtr.Zero) return System.Runtime.InteropServices.Marshal.GetLastWin32Error() != ERROR_INVALID_PARAMETER; // 87: no such process
+        try
+        {
+            if (!Native.NativeMethods.GetProcessTimes(h, out long created, out _, out _, out _)) return true;
+            if (created != started) return false; // the number is another process's now
+            return !Native.NativeMethods.GetExitCodeProcess(h, out int code) || code == STILL_ACTIVE;
+        }
+        finally { Native.NativeMethods.CloseHandle(h); }
+    }
+
+    public int ControlWaitSeconds => ServiceControl.ControlWaitSeconds();
 }

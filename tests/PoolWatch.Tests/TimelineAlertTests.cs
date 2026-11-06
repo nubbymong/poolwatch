@@ -3,20 +3,22 @@ using PoolWatch.Core.Detection;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Tags;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
 /// <summary>
-/// 2f (review round 2): every alert reaches the timeline, also the ones for an incident that has closed and the releases,
+/// Every alert reaches the timeline, also the ones for an incident that has closed and the releases,
 /// and an alert whose counted entry was evicted (the timeline keeps 500) starts a new entry instead of vanishing.
 /// </summary>
-public class TimelineRoundTwoTests
+public class TimelineAlertTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 6, 34, 0, DateTimeKind.Utc);
     private static readonly PoolTag Reff = PoolTag.Parse("Reff");
     private const long MB = 1L << 20;
 
     private static Alert A(double minutes, long bytes, double window) =>
-        new(AlertKind.Growth, Reff, T0.AddMinutes(minutes), $"grew > 200 MB in {window} min", bytes, TimeSpan.FromMinutes(window), T0);
+        new(AlertKind.Growth, Reff, T0.AddMinutes(minutes), $"grew > 200 MB in {window} min", bytes, TimeSpan.FromMinutes(window), T0) { Ms = At(T0.AddMinutes(minutes)).Ms, OnsetMs = At(T0).Ms };
 
     [Fact]
     public void AnAlertWhoseEntryWasEvictedStartsANewEntry()
@@ -50,7 +52,7 @@ public class TimelineRoundTwoTests
             w.AddProcess(4, 0, "System");
             w.AddProcess(100, 4, "leaker.exe");
             long file = 50 * Settings.MB;
-            void Step() { w.Sample(("File", file)); mgr.Process(w.History, det, det.Evaluate(w.History), w.Now - w.Interval); }
+            void Step() { w.Sample(("File", file)); mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval)); }
             for (int i = 0; i < 15; i++) Step();
             for (int i = 0; i < 20; i++) { w.Io(100, other: 2000, handles: 2000); file += 800_000; Step(); }
             Assert.Single(mgr.Open);

@@ -6,7 +6,7 @@ using PoolWatch.Core.Incidents;
 namespace PoolWatch.Core.Boot;
 
 /// <summary>
-/// "Export vendor bundle" (item 13): one zip in the shape the public report asked maintainers to request: app
+/// "Export vendor bundle": one zip in the shape the public report asked maintainers to request: app
 /// packages and the Windows build; the clean-boot baseline; timestamped samples (commit, paged / non-paged, handles,
 /// process counts); tag snapshots before launch, during growth, after exit and after reboot; the filter list and
 /// container state; git roots and the spawn trace; crash metadata. Every file is text and is redacted by default
@@ -48,7 +48,7 @@ public static class VendorBundle
     }
 
     /// <summary>
-    /// C6: the bundle entry for a tag's table at an incident's peak. Raw tag names collided on case-only differences (Reff
+    /// The bundle entry for a tag's table at an incident's peak. Raw tag names collided on case-only differences (Reff
     /// and RefF are one file once extracted on Windows) and broke on characters Windows forbids; the name is now the
     /// readable tag with anything but letters and digits replaced, plus the hex of its 4 raw bytes
     /// (<see cref="PoolTag.ToFileSafe"/>), and the peak's local date and minute.

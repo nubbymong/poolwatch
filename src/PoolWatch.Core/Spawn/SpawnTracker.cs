@@ -15,14 +15,22 @@ public sealed class SpawnRecord
     public required string Image { get; init; }
     public string? CommandLine { get; init; }
     public DateTime StartUtc { get; init; }
+    /// <summary>The start on the clock that only goes forward: the registry's (<see cref="ProcessRecord.StartMs"/>, read as it
+    /// arrived), else read onto it at the tick that brought its event (<see cref="Moment.MsOf"/>).</summary>
+    public long StartMs { get; init; }
     public DateTime? ExitUtc { get; set; }
+    /// <summary>The exit on the clock that only goes forward: the registry's (<see cref="ProcessRecord.ExitMs"/>, read as it
+    /// arrived), else read onto it at the tick that brought its event; never before the start; null while it runs.</summary>
+    public long? ExitMs { get; set; }
     public int? ExitCode { get; set; }
-    /// <summary>For git.exe: the directory it worked in and where that came from ("-C", "cwd", "parent cwd").</summary>
+    /// <summary>For git.exe: the directory it worked in and where that came from ("git -C", "cwd", "parent cwd"; none starts with a
+    /// character a spreadsheet reads as a formula, so spawns.csv holds them as they are).</summary>
     public string? WorkDir { get; set; }
     public string? WorkDirSource { get; set; }
     public string? GitRoot { get; set; }
 
-    public TimeSpan? Lifetime => ExitUtc is { } e ? e - StartUtc : null;
+    /// <summary>How long it ran, on the clock that only goes forward; null while it runs.</summary>
+    public TimeSpan? Lifetime => ExitMs is { } e ? TimeSpan.FromMilliseconds(Math.Max(0, e - StartMs)) : null;
     public bool ShortLived(TimeSpan limit) => Lifetime is { } l && l <= limit;
 }
 
@@ -36,8 +44,13 @@ public sealed class SpawnStorm
     public string? ParentCommandLine { get; init; }
     public string ParentChain { get; init; } = "";
     public DateTime OpenedUtc { get; init; }
-    public DateTime LastAboveUtc { get; set; }
+    /// <summary>When it opened, on the clock that only goes forward.</summary>
+    public long OpenedMs { get; init; }
+    /// <summary>When its short-lived starts were last at half the threshold or more (<see cref="Moment.Ms"/>).</summary>
+    public long LastAboveMs { get; set; }
     public DateTime? ClosedUtc { get; set; }
+    /// <summary>When it closed, on the clock that only goes forward; null while open.</summary>
+    public long? ClosedMs { get; set; }
     public int PeakShortLived { get; set; }
     public int PeakStarts { get; set; }
     public int TotalStarts { get; private set; }
@@ -48,7 +61,8 @@ public sealed class SpawnStorm
     public Dictionary<string, (GitRootInfo Info, int Count)> GitRoots { get; } = new(StringComparer.OrdinalIgnoreCase);
     public List<SpawnRecord> Trace { get; } = new();
     public string? ReportDir { get; set; }
-    public DateTime LastWriteUtc { get; set; }
+    /// <summary>When its report was last written (<see cref="Moment.Ms"/>; null: never).</summary>
+    public long? LastWriteMs { get; set; }
     /// <summary>Trace rows already in spawns.csv (the file is rewritten only when this changes).</summary>
     public int TraceWritten { get; set; } = -1;
     /// <summary>The most recent finding about this storm (gets the report folder once it is written).</summary>
@@ -80,7 +94,9 @@ public sealed class SpawnStorm
 /// short-lived children within <see cref="Settings.SpawnStormWindowSeconds"/> opens a spawn storm, which stays
 /// open until the rate falls below half the threshold for a minute. For git.exe starts the repository root is
 /// resolved and flagged when it is a user profile, a OneDrive folder, a volume root or an empty repository.
-/// Sampler thread only.
+/// The window, how long a child ran, when a storm closes and when its report is due again are timed on the clock that
+/// only goes forward (<see cref="Moment"/>): an event's system time is read onto it as the event arrives, so setting the
+/// system clock back or forward neither stretches nor shrinks the window. Sampler thread only.
 /// </summary>
 public sealed class SpawnTracker
 {
@@ -92,7 +108,7 @@ public sealed class SpawnTracker
     private readonly Dictionary<ProcessKey, SpawnRecord> _recent = new();
     private readonly Dictionary<ProcessKey, SpawnStorm> _open = new();
     private readonly Dictionary<string, GitRootInfo> _rootInfo = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, DateTime> _rootReported = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, long> _rootReported = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan CloseQuiet = TimeSpan.FromSeconds(60);
     private const int MaxRecent = 20_000;
 
@@ -111,29 +127,34 @@ public sealed class SpawnTracker
     public long GitStartsSeen { get; private set; }
     public int RecentCount => _recent.Count;
 
-    private TimeSpan Window => TimeSpan.FromSeconds(_settings.SpawnStormWindowSeconds);
+    private long WindowMs => (long)(_settings.SpawnStormWindowSeconds * 1000);
     private TimeSpan ShortLived => TimeSpan.FromSeconds(_settings.ShortLivedSeconds);
 
     /// <summary>Feeds this tick's lifecycle events; returns findings and the storms whose report should be (re)written.</summary>
-    public (List<Finding> findings, List<SpawnStorm> toWrite) Observe(IReadOnlyList<LifecycleEvent> events, DateTime nowUtc)
+    public (List<Finding> findings, List<SpawnStorm> toWrite) Observe(IReadOnlyList<LifecycleEvent> events, Moment now)
     {
         var findings = new List<Finding>();
         var toWrite = new List<SpawnStorm>();
         foreach (var e in events)
         {
-            if (e.Kind == LifecycleKind.Start && e.Pid > 4) OnStart(e, nowUtc, findings);
-            else if (e.Kind == LifecycleKind.Exit && _recent.TryGetValue(e.Key, out var r)) { r.ExitUtc ??= e.TimeUtc; r.ExitCode ??= e.ExitCode; }
+            if (e.Kind == LifecycleKind.Start && e.Pid > 4) OnStart(e, now, findings);
+            else if (e.Kind == LifecycleKind.Exit && _recent.TryGetValue(e.Key, out var r))
+            {
+                r.ExitMs ??= Math.Max(r.StartMs, _registry.Get(e.Key)?.ExitMs ?? now.MsOf(e.TimeUtc));
+                r.ExitUtc ??= e.TimeUtc;
+                r.ExitCode ??= e.ExitCode;
+            }
         }
-        Evaluate(nowUtc, findings, toWrite);
-        Prune(nowUtc);
+        Evaluate(now, findings, toWrite);
+        Prune(now);
         return (findings, toWrite.Distinct().ToList());
     }
 
     /// <summary>Starts per (parent, child image) in the current window, busiest first (for the UI).</summary>
-    public List<(string Parent, int ParentPid, string Image, int Starts, int ShortLived)> Rates(DateTime nowUtc, int top = 10)
+    public List<(string Parent, int ParentPid, string Image, int Starts, int ShortLived)> Rates(Moment now, int top = 10)
     {
-        var from = nowUtc - Window;
-        return _recent.Values.Where(r => r.StartUtc >= from)
+        long from = now.Ms - WindowMs;
+        return _recent.Values.Where(r => r.StartMs >= from)
             .GroupBy(r => (r.Parent, r.ParentPid, r.Image))
             .Select(g => (ParentName(g.Key.Parent, g.Key.ParentPid), g.Key.ParentPid, g.Key.Image, g.Count(), g.Count(r => r.ShortLived(ShortLived))))
             .OrderByDescending(x => x.Item4).Take(top).ToList();
@@ -141,26 +162,30 @@ public sealed class SpawnTracker
 
     private string ParentName(ProcessKey? key, int pid) => (key is { } k ? _registry.Get(k)?.Image : null) ?? _registry.GetLive(pid)?.Image ?? "?";
 
-    private void OnStart(LifecycleEvent e, DateTime nowUtc, List<Finding> findings)
+    private void OnStart(LifecycleEvent e, Moment now, List<Finding> findings)
     {
         if (_recent.ContainsKey(e.Key)) return;
         StartsSeen++;
         var rec = _registry.Get(e.Key);
+        // On the forward clock as the registry read them (its record's StartMs and ExitMs, each read as it arrived), else
+        // the start read onto it now: a start seen after the process exited is not timed by the system clock's times.
+        long startMs = rec?.StartMs ?? now.MsOf(e.TimeUtc);
         var r = new SpawnRecord
         {
             Child = e.Key, Parent = rec?.ParentKey, ParentPid = e.ParentPid, Image = e.Image, CommandLine = e.CommandLine ?? rec?.CommandLine,
-            StartUtc = e.TimeUtc, ExitUtc = rec?.ExitUtc, ExitCode = rec?.ExitCode,
+            StartUtc = e.TimeUtc, StartMs = startMs, ExitUtc = rec?.ExitUtc, ExitMs = rec?.ExitMs is { } x ? Math.Max(startMs, x) : null,
+            ExitCode = rec?.ExitCode,
         };
         _recent[e.Key] = r;
         GitRootInfo? info = null;
         if (IsGit(e.Image))
         {
             GitStartsSeen++;
-            info = ResolveGit(r, rec, nowUtc);
-            if (info is { Suspicious: true } && (!_rootReported.TryGetValue(info.Root, out var last) || nowUtc - last >= TimeSpan.FromHours(1)))
+            info = ResolveGit(r, rec, now);
+            if (info is { Suspicious: true } && (!_rootReported.TryGetValue(info.Root, out long last) || now.Ms - last >= (long)TimeSpan.FromHours(1).TotalMilliseconds))
             {
-                _rootReported[info.Root] = nowUtc;
-                findings.Add(GitRootFinding(info, r, nowUtc));
+                _rootReported[info.Root] = now.Ms;
+                findings.Add(GitRootFinding(info, r, now.Utc));
             }
         }
         if (_open.TryGetValue(ParentKeyOf(r), out var storm)) storm.Add(r, info);
@@ -168,7 +193,10 @@ public sealed class SpawnTracker
 
     private static bool IsGit(string image) => image.Equals("git.exe", StringComparison.OrdinalIgnoreCase);
 
-    private GitRootInfo? ResolveGit(SpawnRecord r, ProcessRecord? rec, DateTime nowUtc)
+    /// <summary>The working directory came from git's own -C option (<see cref="SpawnRecord.WorkDirSource"/>).</summary>
+    public const string GitDashC = "git -C";
+
+    private GitRootInfo? ResolveGit(SpawnRecord r, ProcessRecord? rec, Moment now)
     {
         // -C / --work-tree first, then the child's own cwd (cwd-only PEB read in the ETW start callback, rate-limited, when
         // the process was still there), then the parent's.
@@ -178,8 +206,8 @@ public sealed class SpawnTracker
         string? dir = GitRootResolver.WorkingDirectory(r.CommandLine, cwd, out bool viaC);
         if (dir is null) return null;
         r.WorkDir = dir;
-        r.WorkDirSource = viaC ? "-C" : source;
-        if (_git.FindRoot(dir, nowUtc) is not { } root) return null;
+        r.WorkDirSource = viaC ? GitDashC : source;
+        if (_git.FindRoot(dir, now.Ms) is not { } root) return null;
         r.GitRoot = root;
         if (!_rootInfo.TryGetValue(root, out var info) || _rootInfo.Count > 1000)
         {
@@ -191,10 +219,10 @@ public sealed class SpawnTracker
 
     private static ProcessKey ParentKeyOf(SpawnRecord r) => r.Parent ?? new ProcessKey(r.ParentPid, 0);
 
-    private void Evaluate(DateTime nowUtc, List<Finding> findings, List<SpawnStorm> toWrite)
+    private void Evaluate(Moment now, List<Finding> findings, List<SpawnStorm> toWrite)
     {
-        var from = nowUtc - Window;
-        var groups = _recent.Values.Where(r => r.StartUtc >= from).GroupBy(ParentKeyOf).ToDictionary(g => g.Key, g => g.ToList());
+        long from = now.Ms - WindowMs;
+        var groups = _recent.Values.Where(r => r.StartMs >= from).GroupBy(ParentKeyOf).ToDictionary(g => g.Key, g => g.ToList());
         foreach (var (pk, list) in groups)
         {
             int shortLived = list.Count(r => r.ShortLived(ShortLived));
@@ -202,7 +230,7 @@ public sealed class SpawnTracker
             bool opened = false;
             if (shortLived > _settings.SpawnStormThreshold && storm is null)
             {
-                storm = Open(pk, list, nowUtc);
+                storm = Open(pk, list, now);
                 _open[pk] = storm;
                 opened = true;
             }
@@ -212,63 +240,64 @@ public sealed class SpawnTracker
             foreach (var g in list.GroupBy(r => r.Image, StringComparer.OrdinalIgnoreCase))
                 if (storm.PeakByImage.ContainsKey(g.Key) || storm.PeakByImage.Count < SpawnStorm.MaxKeys)
                     storm.PeakByImage[g.Key] = Math.Max(storm.PeakByImage.GetValueOrDefault(g.Key), g.Count());
-            if (shortLived >= _settings.SpawnStormThreshold / 2) storm.LastAboveUtc = nowUtc;
+            if (shortLived >= _settings.SpawnStormThreshold / 2) storm.LastAboveMs = now.Ms;
             if (opened)
             {
-                findings.Add(storm.LastFinding = StormFinding(storm, nowUtc, opened: true));
+                findings.Add(storm.LastFinding = StormFinding(storm, now, opened: true));
                 toWrite.Add(storm);
             }
             // Disk budget: an open storm's report is refreshed at most every 30 minutes (and at close / exit).
-            else if (nowUtc - storm.LastWriteUtc >= TimeSpan.FromMinutes(30)) toWrite.Add(storm);
+            else if (storm.LastWriteMs is not { } wrote || now.Ms - wrote >= (long)TimeSpan.FromMinutes(30).TotalMilliseconds) toWrite.Add(storm);
         }
         foreach (var storm in _open.Values.ToList())
         {
-            if (nowUtc - storm.LastAboveUtc < CloseQuiet) continue;
-            storm.ClosedUtc = nowUtc;
+            if (now.Ms - storm.LastAboveMs < (long)CloseQuiet.TotalMilliseconds) continue;
+            storm.ClosedUtc = now.Utc;
+            storm.ClosedMs = now.Ms;
             _open.Remove(storm.ParentKey);
-            findings.Add(storm.LastFinding = StormFinding(storm, nowUtc, opened: false));
+            findings.Add(storm.LastFinding = StormFinding(storm, now, opened: false));
             toWrite.Add(storm);
         }
     }
 
-    private SpawnStorm Open(ProcessKey pk, List<SpawnRecord> list, DateTime nowUtc)
+    private SpawnStorm Open(ProcessKey pk, List<SpawnRecord> list, Moment now)
     {
         var parent = _registry.Get(pk) ?? _registry.GetLive(pk.Pid);
         var chain = parent is null ? "" : string.Join(" › ", _registry.Ancestry(parent.Key).Select(p => p.DisplayName));
         var storm = new SpawnStorm
         {
             ParentKey = pk, ParentPid = pk.Pid, ParentImage = parent?.DisplayName ?? "?", ParentCommandLine = parent?.CommandLine,
-            ParentChain = chain, OpenedUtc = nowUtc, LastAboveUtc = nowUtc,
+            ParentChain = chain, OpenedUtc = now.Utc, OpenedMs = now.Ms, LastAboveMs = now.Ms,
         };
-        foreach (var r in list.OrderBy(r => r.StartUtc))
+        foreach (var r in list.OrderBy(r => r.StartMs))
             storm.Add(r, r.GitRoot is { } g ? _rootInfo.GetValueOrDefault(g) : null);
         return storm;
     }
 
-    private void Prune(DateTime nowUtc)
+    private void Prune(Moment now)
     {
-        var cutoff = nowUtc - Window - ShortLived - TimeSpan.FromSeconds(60);
-        if (_recent.Count < 64 && _recent.Values.All(r => r.StartUtc >= cutoff)) return;
-        foreach (var k in _recent.Where(kv => kv.Value.StartUtc < cutoff).Select(kv => kv.Key).ToList()) _recent.Remove(k);
+        long cutoff = now.Ms - WindowMs - (long)ShortLived.TotalMilliseconds - 60_000;
+        if (_recent.Count < 64 && _recent.Values.All(r => r.StartMs >= cutoff)) return;
+        foreach (var k in _recent.Where(kv => kv.Value.StartMs < cutoff).Select(kv => kv.Key).ToList()) _recent.Remove(k);
         if (_recent.Count > MaxRecent)
-            foreach (var k in _recent.Values.OrderBy(r => r.StartUtc).Take(_recent.Count - MaxRecent).Select(r => r.Child).ToList()) _recent.Remove(k);
+            foreach (var k in _recent.Values.OrderBy(r => r.StartMs).Take(_recent.Count - MaxRecent).Select(r => r.Child).ToList()) _recent.Remove(k);
     }
 
     // ---- findings and report text ----
 
-    private Finding StormFinding(SpawnStorm s, DateTime nowUtc, bool opened)
+    private Finding StormFinding(SpawnStorm s, Moment now, bool opened)
     {
         var top = s.ByImage.OrderByDescending(kv => kv.Value).Take(3).Select(kv => $"{kv.Value} {kv.Key}");
         string title = opened
             ? $"Spawn storm: {s.ParentImage} (PID {s.ParentPid}) started {s.PeakShortLived} short-lived children in {_settings.SpawnStormWindowSeconds:0} s ({string.Join(", ", top)})"
-            : $"Spawn storm ended: {s.ParentImage} (PID {s.ParentPid}) started {s.TotalStarts} processes in {Fmt.Duration((s.ClosedUtc ?? nowUtc) - s.OpenedUtc)} (peak {s.PeakShortLived} short-lived per {_settings.SpawnStormWindowSeconds:0} s)";
+            : $"Spawn storm ended: {s.ParentImage} (PID {s.ParentPid}) started {s.TotalStarts} processes in {Fmt.Duration(TimeSpan.FromMilliseconds((s.ClosedMs ?? now.Ms) - s.OpenedMs))} (peak {s.PeakShortLived} short-lived per {_settings.SpawnStormWindowSeconds:0} s)";
         var details = new List<string>();
         foreach (var (pattern, n) in s.Patterns.OrderByDescending(kv => kv.Value).Take(3)) details.Add($"{n}× {pattern}");
         foreach (var (root, (info, n)) in s.GitRoots.OrderByDescending(kv => kv.Value.Count).Take(3))
             details.Add($"git root {root} ({n} starts){(info.Suspicious ? ": " + string.Join(", ", info.Flags) : "")}");
         return new Finding
         {
-            TimeUtc = nowUtc, Kind = FindingKind.SpawnStorm, Severity = opened ? FindingSeverity.Alert : FindingSeverity.Info, Title = title,
+            TimeUtc = now.Utc, Kind = FindingKind.SpawnStorm, Severity = opened ? FindingSeverity.Alert : FindingSeverity.Info, Title = title,
             Details = details, Pid = s.ParentPid, Image = s.ParentImage, Data = StormData(s, FindingKeys),
         };
     }
@@ -327,12 +356,12 @@ public sealed class SpawnTracker
             sb.AppendLine($"| {FindingReport.Md(img)} | {n:N0} | {s.PeakByImage.GetValueOrDefault(img)} |");
         sb.AppendLine().AppendLine("## Top command-line patterns").AppendLine().AppendLine("| Count | Pattern |").AppendLine("|---:|---|");
         foreach (var (p, n) in s.Patterns.OrderByDescending(kv => kv.Value).Take(15))
-            sb.AppendLine($"| {n:N0} | `{FindingReport.MdCode(p)}` |");
+            sb.AppendLine($"| {n:N0} | `{Util.MdText.CodeCell(p)}` |");
         if (s.GitRoots.Count > 0)
         {
             sb.AppendLine().AppendLine("## Git repository roots").AppendLine().AppendLine("| Root | git starts | Tracked files | Flags |").AppendLine("|---|---:|---:|---|");
             foreach (var (root, (info, n)) in s.GitRoots.OrderByDescending(kv => kv.Value.Count))
-                sb.AppendLine($"| `{FindingReport.MdCode(root)}` | {n:N0} | {info.TrackedFiles?.ToString("N0", CultureInfo.InvariantCulture) ?? "?"} | {FindingReport.Md(info.Flags.Count > 0 ? string.Join(", ", info.Flags) : "none")} |");
+                sb.AppendLine($"| `{Util.MdText.CodeCell(root)}` | {n:N0} | {info.TrackedFiles?.ToString("N0", CultureInfo.InvariantCulture) ?? "?"} | {FindingReport.Md(info.Flags.Count > 0 ? string.Join(", ", info.Flags) : "none")} |");
             if (s.GitRoots.Values.Any(g => g.Info.Suspicious))
                 sb.AppendLine().AppendLine("A flagged root (user profile, OneDrive, volume root, empty repository) makes each `git status` / `ls-files` walk far more " +
                                            "than a project. Check for a stray `.git` folder there.");

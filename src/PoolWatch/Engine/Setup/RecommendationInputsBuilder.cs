@@ -41,14 +41,17 @@ internal static class RecommendationInputsBuilder
     /// <param name="chatGptShortcutMade">The change list holds a ChatGPT shortcut PoolWatch made.</param>
     /// <param name="chatGptLauncherInstalled">The ChatGPT launcher script is installed next to PoolWatch.</param>
     /// <param name="leakTestNow">This session's token-leak check, when one ran.</param>
+    /// <param name="now">Both clocks now: the last day's findings and incidents, the last week's reportable one and how long a hidden
+    /// suggestion stays hidden are timed on the forward one; the rules are given both.</param>
     public static RecommendationInputs Build(MonitorEngine engine, AnalysisPipeline analysis, EnvironmentFacts? facts, RecommendationStore store,
-        bool chatGptShortcutMade, bool chatGptLauncherInstalled, LeakVerdict? leakTestNow, DateTime nowUtc)
+        bool chatGptShortcutMade, bool chatGptLauncherInstalled, LeakVerdict? leakTestNow, Moment now)
     {
         var d = analysis.Diagnostics;
+        var nowUtc = now.Utc;
         var dismissed = store.Dismissed;
         facts = WithClearTasksNow(facts, d.Cache.HelperStatus);
         var saved = d.Guard.ReadState();
-        var lastDay = d.Findings.Between(nowUtc - TimeSpan.FromDays(1), nowUtc);
+        var lastDay = d.Findings.Within(TimeSpan.FromDays(1), now);
         // What the token leak's known issue is matched against, read before the history's lock (as Pool causes reads it).
         var clears = d.Cache.History();
         var running = engine.Registry.LiveRecords();
@@ -60,25 +63,32 @@ internal static class RecommendationInputsBuilder
         lock (analysis.History.SyncRoot)
         {
             var incidents = analysis.Incidents.All.Where(i => i.Kind is IncidentKind.Growth or IncidentKind.NonPagedTotal).ToList();
-            metadataGrew = incidents.Any(i => FileSystemMetadataTags.Contains(i.Tag) && i.OpenedUtc >= nowUtc - TimeSpan.FromDays(1))
+            metadataGrew = MetadataGrewLastDay(incidents, now)
                            || analysis.Detector.Status.Values.Any(s => s.State == TagState.Growing && FileSystemMetadataTags.Contains(s.Tag));
             chatGptNamed = incidents.Any(NamesChatGpt);
-            reportable = Reportable(incidents, dismissed, nowUtc);
+            reportable = Reportable(incidents, dismissed, now);
         }
         var inputs = new RecommendationInputs
         {
-            NowUtc = nowUtc, Facts = facts, AutoClearOn = engine.Settings.AutoClearEnabled, TokenGuardOn = engine.Settings.TokenGuardEnabled,
+            NowUtc = nowUtc, NowMs = now.Ms, Facts = facts, AutoClearOn = engine.Settings.AutoClearEnabled, TokenGuardOn = engine.Settings.TokenGuardEnabled,
             LeakTestNow = leakTestNow, SavedVerdictBuild = saved?.Build, SavedVerdict = saved?.Result,
             TokenSpawnLast24h = lastDay.Any(f => f.Kind == FindingKind.TokenSpawn && f.Severity >= FindingSeverity.Warning),
             SaturationOfferedTurnOffLast24h = lastDay.Any(f => f.Kind == FindingKind.Saturation && f.Data.TryGetValue("offerTurnOff", out var offer) && offer is true),
             FileSystemMetadataGrewLast24h = metadataGrew,
             DefenderCoresAvg30Min = running.FirstOrDefault(r => r.Image.Equals("MsMpEng.exe", StringComparison.OrdinalIgnoreCase)) is { } defender
-                ? CoresOverWhole(d.Costs, defender.Key, CostWindow, nowUtc) : null,
-            CostlyOptionalServices = CostlyOptionalServices(engine, d, nowUtc), ReportableIncident = reportable, ChatGptNamedInGrowth = chatGptNamed,
+                ? CoresOverWhole(d.Costs, defender.Key, CostWindow, ProcessCostHistory.ClockNow()) : null,
+            CostlyOptionalServices = CostlyOptionalServices(engine, d, ProcessCostHistory.ClockNow()), ReportableIncident = reportable, ChatGptNamedInGrowth = chatGptNamed,
             ChatGptLauncherInstalled = chatGptLauncherInstalled, ChatGptShortcutMade = chatGptShortcutMade, Dismissed = dismissed,
         };
         return WithTokenLeakSeen(inputs, analysis.History, clears, lockTimeout, running);
     }
+
+    /// <summary>
+    /// A file-system metadata tag's growth incident opened in the last day before <paramref name="now"/>, on the clock that
+    /// only goes forward (<see cref="Incident.OpenedMs"/>).
+    /// </summary>
+    internal static bool MetadataGrewLastDay(IEnumerable<Incident> incidents, Moment now) =>
+        incidents.Any(i => FileSystemMetadataTags.Contains(i.Tag) && now.Ms - i.OpenedMs <= (long)TimeSpan.FromDays(1).TotalMilliseconds);
 
     /// <summary>
     /// <paramref name="inputs"/> with <see cref="RecommendationInputs.TokenLeakSeen"/> set: the token leak's known issue
@@ -112,23 +122,24 @@ internal static class RecommendationInputsBuilder
     /// <summary>
     /// A process's average cores over the whole of the last <paramref name="span"/>, or null when it was not tracked that
     /// long (idle, or busy only for a while): a minute's burst is not "over the last half hour". Takes the history's lock.
+    /// <paramref name="now"/> is on the history's clock (<see cref="ProcessCostHistory.ClockNow"/>).
     /// </summary>
-    internal static double? CoresOverWhole(ProcessCostHistory costs, ProcessKey key, TimeSpan span, DateTime nowUtc)
+    internal static double? CoresOverWhole(ProcessCostHistory costs, ProcessKey key, TimeSpan span, TimeSpan now)
     {
         lock (costs)
-            return costs.Average(key, span, nowUtc) is { } avg && avg.covered >= span - ProcessCostHistory.Step ? avg.cores : null;
+            return costs.Average(key, span, now) is { } avg && avg.covered >= span - ProcessCostHistory.Step ? avg.cores : null;
     }
 
     /// <summary>
-    /// The newest growth incident closed in the last 7 days whose likely cause has at least some evidence, and not hidden:
-    /// its id (also its folder name), folder and a plain headline. History lock held.
+    /// The newest growth incident closed in the last 7 days (on the clock that only goes forward) whose likely cause has at
+    /// least some evidence, and not hidden: its id (also its folder name), folder and a plain headline. History lock held.
     /// </summary>
-    internal static (string Id, string Dir, string Headline)? Reportable(IEnumerable<Incident> incidents, IReadOnlyDictionary<string, DateTime> dismissed, DateTime nowUtc)
+    internal static (string Id, string Dir, string Headline)? Reportable(IEnumerable<Incident> incidents, IReadOnlyDictionary<string, Moment> dismissed, Moment now)
     {
-        foreach (var i in incidents.Where(i => i.ClosedUtc is { } c && nowUtc - c <= ReportableFor).OrderByDescending(i => i.ClosedUtc))
+        foreach (var i in incidents.Where(i => i.ClosedMs is { } c && now.Ms - c <= (long)ReportableFor.TotalMilliseconds).OrderByDescending(i => i.ClosedMs))
         {
             if (UiData.CauseOf(i) is not { level: >= Confidence.Correlated } cause) continue;
-            if (RecommendationRules.Hidden(dismissed, Recommendation.KeyOf(RecommendationId.ReportIncident, i.Id), nowUtc)) continue;
+            if (RecommendationRules.Hidden(dismissed, Recommendation.KeyOf(RecommendationId.ReportIncident, i.Id), now.Ms)) continue;
             string at = i.OnsetUtc.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture);
             // What PoolWatch's own clears freed of it is their result: the growth counts it, and says so. A clear that emptied
             // more of the tag than it grew freed it "of the tag that grew", not of the growth.
@@ -158,7 +169,7 @@ internal static class RecommendationInputsBuilder
     /// The running optional services (on the catalogue) whose share of their process averaged at least 0.1 core over the
     /// whole of the last 30 minutes: all of it in a process of its own, an even part of a shared host. Costliest first.
     /// </summary>
-    private static List<string> CostlyOptionalServices(MonitorEngine engine, Analysis.Diagnostics d, DateTime nowUtc)
+    private static List<string> CostlyOptionalServices(MonitorEngine engine, Analysis.Diagnostics d, TimeSpan now)
     {
         var services = engine.Services;
         var perPid = services.Where(s => s.ProcessId > 0).GroupBy(s => s.ProcessId).ToDictionary(g => g.Key, g => g.Count());
@@ -166,7 +177,7 @@ internal static class RecommendationInputsBuilder
         foreach (var s in services)
         {
             if (s.ProcessId <= 0 || d.Services.Catalogue.Find(s.Name) is null || engine.Registry.GetLive(s.ProcessId) is not { } host) continue;
-            if (CoresOverWhole(d.Costs, host.Key, CostWindow, nowUtc) is not { } cores) continue;
+            if (CoresOverWhole(d.Costs, host.Key, CostWindow, now) is not { } cores) continue;
             double share = ServiceCosts.Share((cores, 0), perPid[s.ProcessId]).cores;
             if (share >= 0.1) costly.Add((s.DisplayName, share));
         }

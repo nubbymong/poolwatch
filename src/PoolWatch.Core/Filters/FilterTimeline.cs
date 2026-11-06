@@ -5,7 +5,14 @@ using PoolWatch.Core.Model;
 namespace PoolWatch.Core.Filters;
 
 /// <summary>An event-log record, reduced to what the timeline needs (read with the native EvtQuery / EvtSubscribe API).</summary>
-public sealed record LogEvent(DateTime TimeUtc, string Channel, string Provider, int Id, string? Message, IReadOnlyList<string> Properties);
+public sealed record LogEvent(DateTime TimeUtc, string Channel, string Provider, int Id, string? Message, IReadOnlyList<string> Properties)
+{
+    /// <summary>
+    /// <see cref="TimeUtc"/> (the system time Windows stamped the record with) on the clock that only goes forward, read onto
+    /// it as PoolWatch received the record (<see cref="Moment.MsOf"/>); null on a record not read so.
+    /// </summary>
+    public long? Ms { get; init; }
+}
 
 /// <summary>A minifilter instance (fltlib FilterInstanceFindFirst): which filter is attached to which volume.</summary>
 public sealed record FilterInstance(string Filter, string Volume, string? Altitude, string? Instance);
@@ -15,7 +22,8 @@ public sealed record FilterInstance(string Filter, string Volume, string? Altitu
 /// AppModel-Runtime package activations, the start / stop of vmmem, vmmemCmZygote, vmcompute, vmwp and
 /// CoworkVMService (processes and services), and changes in the minifilter instances per volume. A filter that loads
 /// within a few seconds of a package activation (bindflt with the Store-packaged app, in one report) gets its own
-/// warning. Sampler thread only.
+/// warning. That pairing, the minute between two entries of one package and the two minutes a load or an activation is
+/// kept for it are timed on the clock that only goes forward (each record's <see cref="LogEvent.Ms"/>). Sampler thread only.
 /// </summary>
 public sealed partial class FilterTimeline
 {
@@ -29,10 +37,14 @@ public sealed partial class FilterTimeline
     /// <summary>Services (and filter drivers) whose running state is tracked.</summary>
     public static readonly IReadOnlyList<string> WatchedServices = ["vmcompute", "CoworkVMService", "hns", "bindflt", "wcifs"];
 
-    private static readonly TimeSpan PairWindow = TimeSpan.FromSeconds(5);
-    private readonly List<(DateTime t, string filter)> _recentLoads = new();
-    private readonly List<(DateTime t, string package)> _recentActivations = new();
-    private readonly Dictionary<string, DateTime> _activationSeen = new(StringComparer.OrdinalIgnoreCase);
+    private const long PairWindowMs = 5_000, ActivationOnceMs = 60_000, KeepMs = 120_000;
+    // Each with its time on the forward clock (to time the pairing on) and its time of day (to say).
+    private readonly List<(long ms, DateTime t, string filter)> _recentLoads = new();
+    private readonly List<(long ms, DateTime t, string package)> _recentActivations = new();
+    private readonly Dictionary<string, long> _activationSeen = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The filter loads and package activations kept for pairing (the last two minutes on the forward clock).</summary>
+    internal int RecentCount => _recentLoads.Count + _recentActivations.Count;
     private Dictionary<string, bool>? _services;
     private List<FilterInstance>? _instances;
     private bool _initialProcesses;
@@ -47,15 +59,17 @@ public sealed partial class FilterTimeline
     public static string Bare(string image) => image.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? image[..^4] : image;
 
     /// <summary>An event-log record: a filter load / unload or a package activation (others are ignored).</summary>
-    public List<Finding> OnLogEvent(LogEvent e)
+    /// <param name="now">The sample's moment: a record without its <see cref="LogEvent.Ms"/> is read onto the forward clock at it.</param>
+    public List<Finding> OnLogEvent(LogEvent e, Moment now)
     {
+        long ms = e.Ms ?? now.MsOf(e.TimeUtc);
         var findings = new List<Finding>();
         if (e.Provider.Equals(FilterManagerProvider, StringComparison.OrdinalIgnoreCase))
         {
             FilterEvents++;
             string msg = e.Message ?? "";
             string filter = FilterName(e) ?? "?";
-            // C6: by event ID, not by the (localised) message text: "unload" was only recognised in English, and event 14
+            // By event ID, not by the (localised) message text: "unload" was only recognised in English, and event 14
             // ("... successfully loaded filter attach policy ...") read as a filter load.
             bool unload = e.Id == UnloadedEventId;
             bool load = e.Id == LoadedEventId;
@@ -68,8 +82,8 @@ public sealed partial class FilterTimeline
             });
             if (load)
             {
-                _recentLoads.Add((e.TimeUtc, filter));
-                foreach (var (t, pkg) in _recentActivations.Where(a => (a.t - e.TimeUtc).Duration() <= PairWindow)) findings.Add(Pair(filter, e.TimeUtc, pkg, t));
+                _recentLoads.Add((ms, e.TimeUtc, filter));
+                foreach (var (aMs, t, pkg) in _recentActivations.Where(a => Math.Abs(a.ms - ms) <= PairWindowMs)) findings.Add(Pair(filter, e.TimeUtc, ms, pkg, t, aMs));
             }
         }
         else if (e.Channel.Equals(AppModelChannel, StringComparison.OrdinalIgnoreCase))
@@ -78,8 +92,8 @@ public sealed partial class FilterTimeline
             string? package = PackageName(msg) ?? e.Properties.Select(PackageName).FirstOrDefault(p => p is not null);
             if (package is null) return findings;
             // One entry per package per minute: an app launch logs several records.
-            if (_activationSeen.TryGetValue(package, out var last) && e.TimeUtc - last < TimeSpan.FromMinutes(1)) return findings;
-            _activationSeen[package] = e.TimeUtc;
+            if (_activationSeen.TryGetValue(package, out long lastMs) && ms - lastMs < ActivationOnceMs) return findings;
+            _activationSeen[package] = ms;
             PackageEvents++;
             findings.Add(new Finding
             {
@@ -87,24 +101,26 @@ public sealed partial class FilterTimeline
                 Details = msg.Length > 0 ? [Trim(msg)] : [], Image = package,
                 Data = new Dictionary<string, object?> { ["package"] = package, ["eventId"] = e.Id },
             });
-            _recentActivations.Add((e.TimeUtc, package));
-            foreach (var (t, filter) in _recentLoads.Where(l => (l.t - e.TimeUtc).Duration() <= PairWindow)) findings.Add(Pair(filter, t, package, e.TimeUtc));
+            _recentActivations.Add((ms, e.TimeUtc, package));
+            foreach (var (lMs, t, filter) in _recentLoads.Where(l => Math.Abs(l.ms - ms) <= PairWindowMs)) findings.Add(Pair(filter, t, lMs, package, e.TimeUtc, ms));
         }
-        Trim(_recentLoads, e.TimeUtc);
-        Trim(_recentActivations, e.TimeUtc);
+        Trim(_recentLoads, ms);
+        Trim(_recentActivations, ms);
         return findings;
     }
 
-    private static Finding Pair(string filter, DateTime loaded, string package, DateTime activated) => new()
+    /// <summary>A load beside an activation: how far apart, and which came first, by the forward clock; their times of day are said.</summary>
+    private static Finding Pair(string filter, DateTime loaded, long loadedMs, string package, DateTime activated, long activatedMs) => new()
     {
-        TimeUtc = loaded > activated ? loaded : activated, Kind = FindingKind.FilterEvent, Severity = FindingSeverity.Warning,
-        Title = $"Filter {filter} loaded {Math.Abs((loaded - activated).TotalSeconds):0} s {(loaded >= activated ? "after" : "before")} package {package} was activated",
+        TimeUtc = loadedMs > activatedMs ? loaded : activated, Kind = FindingKind.FilterEvent, Severity = FindingSeverity.Warning,
+        Title = $"Filter {filter} loaded {Math.Abs(loadedMs - activatedMs) / 1000.0:0} s {(loadedMs >= activatedMs ? "after" : "before")} package {package} was activated",
         Details = ["An on-demand filter load at app activation means the app's file activity now passes through that filter (bindflt, wcifs: container / package isolation)."],
         Image = filter,
         Data = new Dictionary<string, object?> { ["filter"] = filter, ["package"] = package, ["loaded"] = loaded, ["activated"] = activated },
     };
 
-    private static void Trim<T>(List<(DateTime t, T v)> list, DateTime now) => list.RemoveAll(x => now - x.t > TimeSpan.FromMinutes(2) && x.t < now);
+    /// <summary>Lets go of what is more than two minutes older than <paramref name="nowMs"/> on the forward clock.</summary>
+    private static void Trim<T>(List<(long ms, DateTime t, T v)> list, long nowMs) => list.RemoveAll(x => nowMs - x.ms > KeepMs);
 
     /// <summary>
     /// Microsoft-Windows-FilterManager event IDs (the provider's manifest, <c>wevtutil gp Microsoft-Windows-FilterManager

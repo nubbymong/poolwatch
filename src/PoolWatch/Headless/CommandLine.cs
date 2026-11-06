@@ -1,4 +1,5 @@
 using System.Globalization;
+using PoolWatch.Engine;
 
 namespace PoolWatch.Headless;
 
@@ -20,17 +21,20 @@ internal sealed class CommandLineOptions
     public bool ExportBundle { get; private set; }
     public bool NoRedact { get; private set; }
     /// <summary>"remove" (the old SYSTEM tasks a previous build installed), "enable-auto" or "remove-legacy" (a clear task
-    /// of your own: RAMMap in a scheduled task). S5 (review round 2): there is no setup any more.</summary>
+    /// of your own: RAMMap in a scheduled task). There is no setup any more.</summary>
     public string? CacheSetup { get; private set; }
     /// <summary>The answer to "remove your own clear task?" given on the command line (else the step asks in a dialog).</summary>
     public bool? LegacyAnswer { get; private set; }
     /// <summary>The hidden leak-test helper: <c>--token-leak-test n file</c> (started by the token-leak guard).</summary>
     public (int n, string file)? TokenLeakTest { get; private set; }
-    /// <summary>M3 (review S2): the PID of the PoolWatch that started the helper, so the helper can see it die mid-test.</summary>
-    public int? TokenTestParent { get; private set; }
+    /// <summary>
+    /// The PoolWatch that started the helper (<c>--token-test-parent pid creation-time</c>), so the helper can
+    /// see it die mid-test; the creation time tells it from a later process given the same ID.
+    /// </summary>
+    public Engine.HelperParent? TokenTestParent { get; private set; }
     /// <summary>Headless: run the token-leak guard's logon check too.</summary>
     public bool TokenGuard { get; private set; }
-    /// <summary>Background services (addendum 4): dump the enumerated services to this file, then exit.</summary>
+    /// <summary>Background services: dump the enumerated services to this file, then exit.</summary>
     public string? ServicesDump { get; private set; }
     /// <summary>Turn a catalogue/unknown service off (gated), then exit.</summary>
     public string? ServiceOff { get; private set; }
@@ -42,7 +46,7 @@ internal sealed class CommandLineOptions
     public string? ClearCache { get; private set; }
     /// <summary>Headless: a "Capture now" (pool + CPU) this many seconds after start.</summary>
     public double? CaptureNowAfter { get; private set; }
-    /// <summary>S4: run elevated from a folder that is not administrator-only (CI and development only: the build output).</summary>
+    /// <summary>Run elevated from a folder that is not administrator-only (CI and development only: the build output).</summary>
     public bool AllowAnyLocation { get; private set; }
     /// <summary>Ask a running PoolWatch to exit (the installer, before it replaces the files), then exit.</summary>
     public bool StopRunning { get; private set; }
@@ -50,11 +54,16 @@ internal sealed class CommandLineOptions
     public bool UninstallCleanup { get; private set; }
     /// <summary>With <see cref="UninstallCleanup"/>: put back only the logon task and the desktop shortcut.</summary>
     public bool KeepChanges { get; private set; }
+    /// <summary>
+    /// With <see cref="UninstallCleanup"/>: add what it did to uninstall-summary.txt instead of replacing it (the uninstaller
+    /// passes it to a second cleanup of the same uninstall, after the first wrote the file).
+    /// </summary>
+    public bool AppendSummary { get; private set; }
     /// <summary>Write the list of changes PoolWatch made (Active changes) to this file, then exit.</summary>
     public string? ChangesDump { get; private set; }
     public List<string> Errors { get; } = [];
 
-    public static string Usage => """
+    public static string Usage => $"""
         PoolWatch.exe                       tray app (opens the window)
         PoolWatch.exe --tray                tray app without opening the window (used by the logon task)
         PoolWatch.exe --ui-smoke <seconds> --out <dir>  open the UI, save screenshots of each tab, exit (CI)
@@ -73,24 +82,53 @@ internal sealed class CommandLineOptions
           --token-guard          also run the token-leak guard's logon check (as the tray app does at logon)
         PoolWatch.exe --services-dump <file>   write the installed services, grouped, to <file>
         PoolWatch.exe --service-off <name>     (elevated) turn an optional/third-party service off (gated)
+                                             (exit {ExitCodes.NotAllTurnedOff}: not turned off, or not stopped; the line says why)
         PoolWatch.exe --service-restore <name|all>  (elevated) restore a service PoolWatch changed
+                                             (exit {ExitCodes.NotAllPutBack}: something was not put back, or no change of it is
+                                             recorded; the line says why)
         PoolWatch.exe --tasks-dump <file>      write the non-Microsoft scheduled tasks and startup entries to <file>
         PoolWatch.exe --remove-clear-cache   (elevated) remove the two "\PoolWatch\Clear cache" SYSTEM tasks and the helper
                                              files an older PoolWatch installed (Clear cache runs in-process now)
         PoolWatch.exe --enable-auto-clear [--yes|--no]  (elevated) find your own clear task (a task in the Task Scheduler
                                              root that runs RAMMap with an -E option), show it, remove it on a yes
-                                             (exit 4: kept, so the automatic clear stays off)
+                                             (exit {ExitCodes.ClearTaskKept}: kept, so the automatic clear stays off)
         PoolWatch.exe --remove-legacy-clear-task [--yes|--no]  (elevated) the same step
         PoolWatch.exe --changes-dump <file>  write the changes PoolWatch made (the Active changes list) to <file>
-        PoolWatch.exe --stop-running         ask a running PoolWatch to exit and wait up to 60 s (exit 7: still running)
-        PoolWatch.exe --uninstall-cleanup [--keep-changes]  (elevated; run by the uninstaller) stop PoolWatch, put back
-                                             what it changed (--keep-changes: only the logon task and the desktop
-                                             shortcut) and write uninstall-summary.txt in the data folder
-                                             (exit 7: still running, nothing changed; 8: something was not put back)
+        PoolWatch.exe --stop-running         (elevated; run by the setup) ask a running PoolWatch to exit and wait up to
+                                             60 s, then end the token-leak test helpers still running from this exe
+                                             (exit {ExitCodes.StillRunning}: still running; {ExitCodes.NamesNotSafe}: its private names could not be opened)
+        PoolWatch.exe --uninstall-cleanup [--keep-changes] [--append-summary]  (elevated; run by the uninstaller) stop
+                                             PoolWatch, end the token-leak test helpers still running from this exe,
+                                             put back what it changed (--keep-changes: only the logon task and the
+                                             desktop shortcut) and write uninstall-summary.txt in the data folder
+                                             (--append-summary: add to it, after an earlier cleanup of the same
+                                             uninstall) (exit {ExitCodes.DataNotSafe}: its data folder could not be made safe, nothing
+                                             changed; {ExitCodes.StillRunning}: still running, nothing changed; {ExitCodes.NotAllPutBack}: something was not put back;
+                                             {ExitCodes.NamesNotSafe}: its private names could not be opened, nothing changed; {ExitCodes.OtherDataFolder}: done on a
+                                             folder of its own, used in place of the usual data folder)
         PoolWatch.exe --selftest --out <dir>  native sanity checks, writes selftest.json
+        Every one of these is started as the install folder's PoolWatch.exe, PoolWatch's launcher, which asks for
+        administrator rights and starts PoolWatch (app\PoolWatch.exe) with the same options and an environment it builds.
+        app\PoolWatch.exe started by itself hands its start to the launcher.
         Any mode: --allow-any-location      run elevated from a folder that is not administrator-only (CI / development;
                                              without it an elevated PoolWatch refuses to run outside %ProgramFiles%)
         """;
+
+    /// <summary>
+    /// Every file or folder named on the command line made a full path against <paramref name="folder"/> (the folder
+    /// PoolWatch was started in), so it stays the one meant after PoolWatch makes its own folder its current one
+    /// (Program.Main). One already full stays as it is.
+    /// </summary>
+    public void ResolvePaths(string folder)
+    {
+        string? Full(string? path) => string.IsNullOrEmpty(path) ? path : Path.GetFullPath(path, folder);
+        OutDir = Full(OutDir);
+        ConfigFile = Full(ConfigFile);
+        ServicesDump = Full(ServicesDump);
+        TasksDump = Full(TasksDump);
+        ChangesDump = Full(ChangesDump);
+        if (TokenLeakTest is { } tl) TokenLeakTest = (tl.n, Full(tl.file)!);
+    }
 
     public static CommandLineOptions Parse(string[] args)
     {
@@ -139,7 +177,15 @@ internal sealed class CommandLineOptions
                         else o.Errors.Add("--token-leak-test: <children 1-1000> <result file>");
                         break;
                     }
-                case "--token-test-parent": if (int.TryParse(Next(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int pp) && pp > 0) o.TokenTestParent = pp; break;
+                case "--token-test-parent":
+                    {
+                        string? pid = Next(), created = Next();
+                        if (int.TryParse(pid, NumberStyles.None, CultureInfo.InvariantCulture, out int pp) && pp > 0 &&
+                            long.TryParse(created, NumberStyles.None, CultureInfo.InvariantCulture, out long ct) && ct > 0)
+                            o.TokenTestParent = new Engine.HelperParent(pp, ct);
+                        else o.Errors.Add("--token-test-parent: <process id> <creation time>");
+                        break;
+                    }
                 case "--token-guard": o.TokenGuard = true; break;
                 case "--services-dump": o.ServicesDump = Next(); break;
                 case "--service-off": o.ServiceOff = Next(); break;
@@ -152,6 +198,7 @@ internal sealed class CommandLineOptions
                 case "--stop-running": o.StopRunning = true; break;
                 case "--uninstall-cleanup": o.UninstallCleanup = true; break;
                 case "--keep-changes": o.KeepChanges = true; break;
+                case "--append-summary": o.AppendSummary = true; break;
                 case "--changes-dump": o.ChangesDump = Next(); break;
                 case "--clear-cache":
                     o.ClearCache = Next();
@@ -161,6 +208,7 @@ internal sealed class CommandLineOptions
             }
         }
         if (o.KeepChanges && !o.UninstallCleanup) o.Errors.Add("--keep-changes goes with --uninstall-cleanup");
+        if (o.AppendSummary && !o.UninstallCleanup) o.Errors.Add("--append-summary goes with --uninstall-cleanup");
         return o;
     }
 }

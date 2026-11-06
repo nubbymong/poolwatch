@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using PoolWatch.Core.Model;
 
 namespace PoolWatch.Ui;
 
@@ -61,29 +62,32 @@ internal sealed class ToggleSwitch : CheckBox
 /// When the count beside Active changes is read (the window reads it off the UI thread: the list reads Task Scheduler, the
 /// service manager and the registry): when the window shows, when it comes back to the front at least
 /// <see cref="AgainAfter"/> after the last read (back from Active changes, which may have put a change back), after a card
-/// made a change, and every <see cref="Every"/> while it shows; never two reads at once. Pure; the window gives the time.
+/// made a change, and every <see cref="Every"/> while it shows; never two reads at once. Pure; the window gives the moment,
+/// and the schedule is timed on its clock that only goes forward (<see cref="Moment.Ms"/>), so setting the system clock back
+/// or forward neither holds a read back nor brings one early.
 /// </summary>
 internal sealed class ChangeCountSchedule
 {
     public static readonly TimeSpan Every = TimeSpan.FromMinutes(5), AgainAfter = TimeSpan.FromSeconds(30);
-    private DateTime _readUtc = DateTime.MinValue;
+    /// <summary>When the last read started, on the forward clock; null: a read is due at the next refresh.</summary>
+    private long? _readMs;
     private bool _reading;
 
     /// <summary>Read at the next refresh: the window showed, or a card made a change.</summary>
-    public void Soon() => _readUtc = DateTime.MinValue;
+    public void Soon() => _readMs = null;
 
     /// <summary>The window came back to the front: read at the next refresh, unless the last read is newer than <see cref="AgainAfter"/>.</summary>
-    public void Activated(DateTime nowUtc)
+    public void Activated(Moment now)
     {
-        if (nowUtc - _readUtc > AgainAfter) _readUtc = DateTime.MinValue;
+        if (_readMs is { } read && now.Ms - read > (long)AgainAfter.TotalMilliseconds) _readMs = null;
     }
 
     /// <summary>A refresh: true when a read is due and none is running (the caller reads, then calls <see cref="Done"/>).</summary>
-    public bool Start(DateTime nowUtc)
+    public bool Start(Moment now)
     {
-        if (_reading || nowUtc - _readUtc < Every) return false;
+        if (_reading || _readMs is { } read && now.Ms - read < (long)Every.TotalMilliseconds) return false;
         _reading = true;
-        _readUtc = nowUtc;
+        _readMs = now.Ms;
         return true;
     }
 

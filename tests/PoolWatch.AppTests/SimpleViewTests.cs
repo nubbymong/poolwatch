@@ -88,11 +88,11 @@ public class SimpleViewTests
         for (int m = -20; m <= 0; m++)
         {
             long pool = m < -5 ? 8 * GB : m < -4 ? 6 * GB : 5 * GB + (m + 4) * 75 * MB;
-            h.Add(new Sample(end.AddMinutes(m), new PoolTotals((ulong)pool, 0, 0, 0), [], []));
+            h.Add(new Sample(end.AddMinutes(m), new PoolTotals((ulong)pool, 0, 0, 0), [], []) { TickMs = AppClocks.At(end.AddMinutes(m)).Ms });
         }
         var clear = new ClearRecord
         {
-            TimeUtc = end.AddMinutes(-6), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals((ulong)(8 * GB), 0, 0, 0),
+            TimeUtc = end.AddMinutes(-6), TickMs = AppClocks.Ms(end.AddMinutes(-6)), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals((ulong)(8 * GB), 0, 0, 0),
             After = new PoolTotals((ulong)(5 * GB), 0, 0, 0),
         };
         var totals = UiData.Totals(h, [clear]);
@@ -100,7 +100,7 @@ public class SimpleViewTests
         Assert.Equal(ChartClear.Of(clear), totals.Clear);
         Assert.Equal(-2.7, UiData.Totals(h, []).Change10Min / (double)GB, 1);         // without it, the drop would read as the pool falling
 
-        var measuring = new ClearRecord { TimeUtc = end.AddMinutes(-1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = new PoolTotals((ulong)(5 * GB), 0, 0, 0) };
+        var measuring = new ClearRecord { TimeUtc = end.AddMinutes(-1), TickMs = AppClocks.Ms(end.AddMinutes(-1)), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = new PoolTotals((ulong)(5 * GB), 0, 0, 0) };
         Assert.Equal(0, UiData.Totals(h, [clear, measuring]).Change10Min);           // no change is told while a clear is measured
     }
 
@@ -121,9 +121,9 @@ public class SimpleViewTests
         {
             long tag = 2 * GB + i * 3 * MB - (i > clearAfter ? 1536 * MB : 0);
             var t = start.AddSeconds(10 * i);
-            h.Add(new Sample(t, new PoolTotals((ulong)(4 * GB + tag), 0, 0, 0), [new PoolTagEntry(reff, 0, 0, 0, 1, 0, (ulong)tag)], []));
+            h.Add(new Sample(t, new PoolTotals((ulong)(4 * GB + tag), 0, 0, 0), [new PoolTagEntry(reff, 0, 0, 0, 1, 0, (ulong)tag)], []) { TickMs = AppClocks.At(t).Ms });
             if (i == clearAfter)
-                clears.Add(new ClearRecord { TimeUtc = t.AddSeconds(1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = h.Totals[^1] });
+                clears.Add(new ClearRecord { TimeUtc = t.AddSeconds(1), TickMs = AppClocks.Ms(t.AddSeconds(1)), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = h.Totals[^1] });
         }
         var detector = new Core.Detection.Detector(new Core.Settings());
         detector.Evaluate(h, new Core.Detection.OwnClears(clears, Analysis.CacheClearer.MeasureAfter));
@@ -154,11 +154,11 @@ public class SimpleViewTests
         {
             var h = Core.History.History.ForInterval(10);
             var clears = new List<ClearRecord>();
-            for (int i = 0; i <= 420; i++) h.Add(new Sample(At(i), new PoolTotals((ulong)pool(i), 0, 0, 0), [], []));
+            for (int i = 0; i <= 420; i++) h.Add(new Sample(At(i), new PoolTotals((ulong)pool(i), 0, 0, 0), [], []) { TickMs = AppClocks.At(At(i)).Ms });
             foreach (var (k, freed) in clearsAt)
                 clears.Add(new ClearRecord
                 {
-                    TimeUtc = At(k).AddSeconds(1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule,
+                    TimeUtc = At(k).AddSeconds(1), TickMs = AppClocks.Ms(At(k).AddSeconds(1)), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule,
                     Before = new PoolTotals((ulong)pool(k), 0, 0, 0), After = new PoolTotals((ulong)(pool(k) - freed), 0, 0, 0),
                 });
             return ReportIssueDialog.KernelLine(UiData.Totals(h, clears));
@@ -184,10 +184,10 @@ public class SimpleViewTests
         Assert.EndsWith(", up 360 MB in the last hour", Line(Grow, (300, 100 << 10)));
         // A clear whose purge failed after its measurement was taken: not PoolWatch's clear, so it freed nothing of the hour.
         var flat = Core.History.History.ForInterval(10);
-        for (int i = 0; i <= 420; i++) flat.Add(new Sample(At(i), new PoolTotals((ulong)Flat(i), 0, 0, 0), [], []));
+        for (int i = 0; i <= 420; i++) flat.Add(new Sample(At(i), new PoolTotals((ulong)Flat(i), 0, 0, 0), [], []) { TickMs = AppClocks.At(At(i)).Ms });
         var failedLate = new ClearRecord
         {
-            TimeUtc = At(300).AddSeconds(1), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals((ulong)Flat(300), 0, 0, 0),
+            TimeUtc = At(300).AddSeconds(1), TickMs = AppClocks.Ms(At(300).AddSeconds(1)), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals((ulong)Flat(300), 0, 0, 0),
             After = new PoolTotals((ulong)(Flat(300) - 300 * MB), 0, 0, 0), Error = "the purge failed",
         };
         Assert.Equal((0L, (DateTime?)null), UiData.Totals(flat, [failedLate]).ClearedHour);
@@ -212,9 +212,9 @@ public class SimpleViewTests
         for (int m = -20; m <= 0; m++)
         {
             long pool = m < -11 ? 8 * GB : m == -11 ? 5 * GB : m == -10 ? 5 * GB + 512 * MB : 6 * GB + (m + 9) * 50 * MB;
-            h.Add(new Sample(end.AddMinutes(m), new PoolTotals((ulong)pool, 0, 0, 0), [], []));
+            h.Add(new Sample(end.AddMinutes(m), new PoolTotals((ulong)pool, 0, 0, 0), [], []) { TickMs = AppClocks.At(end.AddMinutes(m)).Ms });
         }
-        var clear = new ClearRecord { TimeUtc = end.AddMinutes(-11), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals((ulong)(8 * GB), 0, 0, 0) };
+        var clear = new ClearRecord { TimeUtc = end.AddMinutes(-11), TickMs = AppClocks.Ms(end.AddMinutes(-11)), Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals((ulong)(8 * GB), 0, 0, 0) };
         Assert.Equal(450 * MB, UiData.Totals(h, [clear]).Change10Min);
     }
 
@@ -239,17 +239,17 @@ public class SimpleViewTests
     // ------------------------------------------------------------------ the Simple view's cards
 
     /// <summary>The guard's offer as the suggestions make it.</summary>
-    private static readonly Recommendation Guard = RecommendationRules.Current(new RecommendationInputs { NowUtc = DateTime.UtcNow, TokenSpawnLast24h = true }).Single();
+    private static readonly Recommendation Guard = RecommendationRules.Current(new RecommendationInputs { NowUtc = DateTime.UtcNow, NowMs = Core.Model.Moment.Now().Ms, TokenSpawnLast24h = true }).Single();
     private static readonly Recommendation Report = new(RecommendationId.ReportIncident, "Report what PoolWatch found", "It grew.", "Report",
         RecommendationAction.ReportIssue, 50) { Subject = "20261028-0412-Reff" };
     private static readonly Recommendation Hourly = new(RecommendationId.HourlyCacheClear, "Clear the cache every hour", "It frees what the kernel pool keeps of recently used files.",
         "Turn on", RecommendationAction.Apply, 30);
     private static IReadOnlyList<DiscoveryCard> Features => Discovery.All;
 
-    private static (Form Host, SimpleView View) View(int width, int height, Func<DateTime>? utcNow = null)
+    private static (Form Host, SimpleView View) View(int width, int height, Func<Moment>? clock = null)
     {
         var host = new Form { ClientSize = new Size(width, height) };
-        var view = new SimpleView(utcNow) { Dock = DockStyle.Fill };
+        var view = new SimpleView(clock) { Dock = DockStyle.Fill };
         host.Controls.Add(view);
         view.SetChart(new PoolChart());
         return (host, view);
@@ -286,6 +286,43 @@ public class SimpleViewTests
             Assert.Equal(1, texts.Sum(t => t.Split("to the front").Length - 1));
             Assert.DoesNotContain(SimpleSettings.ClearStutter, texts); // no card here clears the cache
         }
+    }
+
+    /// <summary>
+    /// The Simple view's own layout check, which the CI UI test asserts, sees its parts on each other, with each still whole
+    /// and inside its parent: two cards in the row, and a card's words over its title. Laid out by the view, none is.
+    /// </summary>
+    [Fact]
+    public void TheLayoutCheckSeesTheViewsPartsOnEachOther()
+    {
+        var (host, view) = View(1068, 640);
+        using var _ = host;
+        view.ShowCards([Guard, Report], Features);
+        Assert.Equal(3, view.ShownCards.Count);
+        Assert.Empty(view.LayoutProblems());
+        var cards = All<Panel>(view).Where(p => p.GetType().Name == "Card").ToList();
+        Assert.Equal(3, cards.Count);
+
+        cards[1].Left = cards[0].Left + cards[0].Width / 2; // the second card half over the first
+        Assert.Contains(view.LayoutProblems(), p => p.StartsWith("Card ", StringComparison.Ordinal) && p.Contains(" overlap by ", StringComparison.Ordinal));
+        host.ClientSize = new Size(1068, 641); // laid out again
+        Assert.Empty(view.LayoutProblems());
+
+        var texts = All<WrapLabel>(cards[0]).ToList();
+        texts[1].Top = texts[0].Top + 2; // the words over the title
+        Assert.Contains(view.LayoutProblems(), p => p.Contains($"\"{Guard.Title}\"", StringComparison.Ordinal) && p.Contains(" overlap by ", StringComparison.Ordinal));
+
+        // A card's action on its Hide link is named once, by the card's own check, which takes even a pixel of one on the
+        // other (they share one line): the general check, which allows a pixel each way, leaves that pair to it.
+        host.ClientSize = new Size(1068, 640); // laid out again
+        Assert.Empty(view.LayoutProblems());
+        var hide = cards[0].Controls.OfType<LinkLabel>().Single(l => l.Text == "Hide");
+        var action = cards[0].Controls.Cast<Control>().Single(c => c is not WrapLabel && c != hide);
+        string once = $"the card \"{Guard.Title}\": \"{action.Text}\" and Hide overlap";
+        action.Location = new Point(hide.Left - action.Width + 5, hide.Top); // five pixels of it over Hide
+        Assert.Equal([once], view.LayoutProblems().Where(p => p.Contains("Hide", StringComparison.Ordinal)));
+        action.Location = new Point(hide.Left - action.Width + 1, hide.Top); // one pixel
+        Assert.Equal([once], view.LayoutProblems().Where(p => p.Contains("Hide", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -378,8 +415,10 @@ public class SimpleViewTests
     [Fact]
     public void AnAnswerStaysForAMinuteAfterItsCardHasGone()
     {
-        var now = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
-        var (host, view) = View(1068, 640, () => now);
+        // The minute is timed on the clock that only goes forward: the system clock set back an hour and then forward a
+        // day while the answer shows neither keeps it longer nor takes it away early.
+        var clocks = new TwoClocks();
+        var (host, view) = View(1068, 640, clocks.Now);
         using var _ = host;
         view.ShowCards([Hourly], Features);
 
@@ -390,10 +429,15 @@ public class SimpleViewTests
         Assert.Equal(Features.Select(f => f.Key), view.ShownCards.Select(c => c.Key));
         Assert.Empty(view.LayoutProblems());
 
-        now = now.AddSeconds(59);
+        clocks.SetSystemClock(-TimeSpan.FromHours(1));
+        clocks.Pass(TimeSpan.FromSeconds(30));
         view.ShowCards([], Features);
         Assert.NotNull(view.ShownAnswer);
-        now = now.AddSeconds(1);
+        clocks.SetSystemClock(TimeSpan.FromDays(1));
+        clocks.Pass(TimeSpan.FromSeconds(29));
+        view.ShowCards([], Features);
+        Assert.NotNull(view.ShownAnswer);
+        clocks.Pass(TimeSpan.FromSeconds(1));
         view.ShowCards([], Features);                                      // the refresh a minute later
         Assert.Null(view.ShownAnswer);
         Assert.Empty(view.LayoutProblems());
@@ -472,5 +516,46 @@ public class SimpleViewTests
         Assert.Equal(3, cards.Count);
         Assert.All(cards, c => Assert.Equal(1, c.GetProperty("buttons").GetArrayLength()));
         Assert.Equal(12, doc.RootElement.GetProperty("tiles").GetArrayLength()); // four tiles: caption, value and line each
+    }
+
+    /// <summary>
+    /// The cards' actions line up across the row: each card is as tall as the tallest, and its action (a button for an
+    /// offer, a link for a feature) and Hide sit in one band along its bottom, so every Hide, every link and every button
+    /// is centred on the same line, whatever each card says. Under each card's own words, a card with fewer words had its
+    /// link higher than the next card's (the README's Simple view showed it). At the window's own size and a narrower one,
+    /// with offers and features, and with features alone.
+    /// </summary>
+    [Theory]
+    [InlineData(1068, 640, true)]
+    [InlineData(1068, 640, false)]
+    [InlineData(900, 640, true)]
+    public void TheCardsActionsAndHideLineUpAcrossTheRow(int width, int height, bool offers)
+    {
+        var (host, view) = View(width, height);
+        using var _ = host;
+        view.ShowCards(offers ? [Guard, Report] : [], Features);
+        Assert.True(view.ShownCards.Count >= 2, $"{view.ShownCards.Count} cards at {width} x {height}");
+        var cards = All<Panel>(view).Where(p => p.Controls.OfType<LinkLabel>().Any(l => l.Text == "Hide")).Take(view.ShownCards.Count).ToList(); // in order; the shown ones first
+        Assert.Equal(view.ShownCards.Count, cards.Count);
+        var texts = cards.Select(c => c.Controls.OfType<WrapLabel>().Where(l => l.Text.Length > 0).Max(l => l.Bottom)).ToList();
+        Assert.True(texts.Distinct().Count() > 1, "the cards' words end at the same height: nothing to line up");
+
+        // Centre lines in the cards' own row (every card has the same top).
+        Assert.Single(cards.Select(c => c.Top).Distinct());
+        Assert.Single(cards.Select(c => c.Height).Distinct());
+        double Centre(Control c) => c.Top + c.Height / 2.0;
+        var hides = cards.Select(c => c.Controls.OfType<LinkLabel>().Single(l => l.Text == "Hide")).ToList();
+        var actions = cards.Select(c => c.Controls.Cast<Control>().Single(a => a is Button || (a is LinkLabel l && l.Text != "Hide"))).ToList();
+        Assert.Single(hides.Select(h => h.Top).Distinct());
+        foreach (var a in actions)
+            Assert.True(Math.Abs(Centre(a) - Centre(hides[0])) <= 1, $"\"{a.Text}\" is centred at {Centre(a)}, Hide at {Centre(hides[0])}");
+        Assert.True(actions.OfType<LinkLabel>().Select(a => a.Top).Distinct().Count() <= 1, "the links are not on one line");
+        // Each band is at the card's bottom, below its own words.
+        for (int i = 0; i < cards.Count; i++)
+        {
+            Assert.True(hides[i].Top >= texts[i], $"the card \"{view.ShownCards[i].Title}\": Hide at {hides[i].Top} over its words (to {texts[i]})");
+            Assert.True(actions[i].Bottom <= cards[i].Height && hides[i].Bottom <= cards[i].Height);
+        }
+        Assert.Empty(view.LayoutProblems());
     }
 }

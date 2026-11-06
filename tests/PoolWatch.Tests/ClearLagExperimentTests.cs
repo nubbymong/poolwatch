@@ -1,18 +1,19 @@
 using PoolWatch.Core.Experiments;
 using PoolWatch.Core.Lag;
 using PoolWatch.Core.Model;
+using static PoolWatch.Tests.Clocks;
 
 namespace PoolWatch.Tests;
 
-/// <summary>Addendum 2 C with item 10: the A/B preset "lag before vs after a clear".</summary>
+/// <summary>The A/B preset "lag before vs after a clear".</summary>
 public class ClearLagExperimentTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 9, 0, 0, DateTimeKind.Utc);
     private const long GB = 1L << 30;
 
     private static PoolTotals Pool(double gb) => new((ulong)(gb / 2 * GB), (ulong)(gb / 2 * GB), 0, 0);
-    private static Sample S(double min, double poolGb) => new(T0.AddMinutes(min), Pool(poolGb), [], []);
-    private static LagProbe P(double min, double timer, double file, double poolGb) => new(T0.AddMinutes(min), timer, null, file, null, Pool(poolGb));
+    private static Sample S(double min, double poolGb) => new(T0.AddMinutes(min), Pool(poolGb), [], []) { TickMs = (long)(min * 60_000) };
+    private static LagProbe P(double min, double timer, double file, double poolGb) => new(T0.AddMinutes(min), timer, null, file, null, Pool(poolGb)) { TickMs = (long)(min * 60_000) };
 
     [Fact]
     public void ClearsAtThePhaseBoundaryAndComparesTheMedians()

@@ -61,18 +61,18 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
     /// <summary>The lines under the box, always shown: what you will notice, how long it lasts and how to stop it.</summary>
     public const string TokenGuardHint =
         "While it is on, other programs can bring their windows to the front by themselves and take your keystrokes; most people find that rare. " +
-        "It lasts until you sign out, and PoolWatch turns it on again each time it starts, until you untick this.";
+        "It lasts until you sign out, and PoolWatch turns it on again each time it starts, until you untick this to end it.";
     /// <summary>
     /// The box's tooltip, one sentence a line (a tooltip wraps only at the screen's edge). True to
     /// <see cref="Core.TokenGuard.GuardPolicy"/>: the workaround goes on unless two tests in a row on the build were clean, and
-    /// nothing sets it back before sign-out.
+    /// unticking puts back the setting PoolWatch changed when Windows allows it (<see cref="Engine.TokenLeakGuard.TurnOff"/>).
     /// </summary>
     public const string TokenGuardTip =
         "Windows 11 24H2 and 25H2 leak a little of the kernel pool each time one program starts another.\n" +
         "PoolWatch checks for the leak when it starts, and when you turn this on.\n" +
         "Unless two tests in a row on this build found none, it turns the workaround on.\n" +
         "Windows lets only the program in front turn it on, so PoolWatch may ask you for one click.\n" +
-        "Unticking this does not undo a workaround already on: that lasts until you sign out.";
+        "Unticking this puts back the setting PoolWatch changed; Save says if Windows did not allow it.";
 
     /// <summary>The update notices' box and the line under it, as the setup guide says them.</summary>
     public const string UpdatesLabel = "Tell me when a new version is out.";

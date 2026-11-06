@@ -24,7 +24,7 @@ public sealed record KnowledgeEvidence
     public static readonly TimeSpan GrowthWindow = TimeSpan.FromHours(1);
     /// <summary>A shorter span says nothing about how fast a tag grows (a clear's refill, a burst).</summary>
     public static readonly TimeSpan MinGrowthOver = TimeSpan.FromMinutes(10);
-    /// <summary>The cache clears whose results count.</summary>
+    /// <summary>The cache clears whose results count: those of the last day before the newest sample, on the clock that only goes forward.</summary>
     public static readonly TimeSpan ClearsWithin = TimeSpan.FromDays(1);
 
     /// <summary>When the evidence was gathered: a cache clear from an earlier day is named as yesterday's.</summary>
@@ -61,12 +61,14 @@ public sealed record KnowledgeEvidence
         DateTime nowUtc = inputs.NowUtc;
         var facts = inputs.Facts;
         var (over, growth) = Measure(history, knowledge.GrowthTags, clears, clearSettles);
+        // A clear's age is timed on the forward clock from the newest sample (no samples: no clears are said).
+        long? nowMs = history.Count > 0 ? history.Ms[^1] : null;
         return new KnowledgeEvidence
         {
             NowUtc = nowUtc, WindowsBuild = facts?.Build, FileSystems = facts?.Volumes.Select(v => v.FileSystem).Distinct(StringComparer.OrdinalIgnoreCase).ToList() ?? [],
             Running = running.Select(p => new RunningProcess(p.Image, StorePackageOf(p.ImagePath))).Distinct().ToList(),
             GrowthOver = over, Growth = growth,
-            Clears = clears.Where(c => c is { After: not null, Error: null, TagsAfter.Count: > 0 } && c.TimeUtc <= nowUtc && nowUtc - c.TimeUtc <= ClearsWithin)
+            Clears = clears.Where(c => c is { After: not null, Error: null, TagsAfter.Count: > 0 } && nowMs is { } n && c.TickMs <= n && n - c.TickMs <= (long)ClearsWithin.TotalMilliseconds)
                 .Select(c => new ClearResult(c.TimeUtc, FreedByTag(c))).ToList(),
             ActionsOn = KnownActions.InEffect(inputs, liveForegroundLockTimeout),
         };
@@ -83,15 +85,15 @@ public sealed record KnowledgeEvidence
     {
         var growth = new Dictionary<PoolTag, TagGrowth>();
         if (h.Count < 2) return (TimeSpan.Zero, growth);
-        var last = h.Times[^1];
+        long last = h.Ms[^1]; // the window is timed on the clock that only goes forward
         var own = new OwnClears(clears, clearSettles);
         if (own.Measuring(last) is not null) return (TimeSpan.Zero, growth); // nothing can be told across it until it is measured
         var spans = own.SpansIn(h);
-        int from = spans.Start(h.IndexAtOrAfter(last - GrowthWindow));
-        if (from >= h.Count - 1 || last - h.Times[from] < MinGrowthOver) return (TimeSpan.Zero, growth);
+        int from = spans.Start(h.IndexAtOrAfterMs(last - (long)GrowthWindow.TotalMilliseconds));
+        if (from >= h.Count - 1 || last - h.Ms[from] < (long)MinGrowthOver.TotalMilliseconds) return (TimeSpan.Zero, growth);
         foreach (var tag in tags)
             growth[tag] = new TagGrowth(Rise(h.TagSeries(tag, from, nonPagedOnly: false)), Rise(h.TagSeries(tag, from, nonPagedOnly: true)));
-        return (last - h.Times[from], growth);
+        return (TimeSpan.FromMilliseconds(last - h.Ms[from]), growth);
 
         long Rise(long[] series)
         {

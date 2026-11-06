@@ -10,12 +10,17 @@ using PoolWatch.Core.Services;
 using PoolWatch.Core.Tags;
 using PoolWatch.Core.Versions;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
-/// <summary>C6 (review Part 2): the smaller bugs, each fixed in Core and tested here.</summary>
+/// <summary>The smaller bugs, each fixed in Core and tested here.</summary>
 public class SmallFixesTests : IDisposable
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 8, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>A record read at its own time on both clocks (the system clock left alone).</summary>
+    private static List<Finding> Read(FilterTimeline tl, LogEvent e) => tl.OnLogEvent(e, Clocks.At(e.TimeUtc));
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "pw-c6-" + Guid.NewGuid().ToString("N"));
 
     public SmallFixesTests() => Directory.CreateDirectory(_dir);
@@ -36,7 +41,7 @@ public class SmallFixesTests : IDisposable
         var lost = mgr.CreateCapture(w.History, [PoolTag.Parse("File")], w.Now.AddSeconds(2));
         mgr.Discard(lost); // a capture whose trace never started is not an incident
         Assert.Equal(2, mgr.CreatedCount);
-        mgr.Process(w.History, det, [], w.Now.AddHours(7));
+        mgr.Process(w.History, det, [], At(w.Now.AddHours(7)));
         Assert.Empty(mgr.Closed);              // dropped from memory after 6 h (the folders stay)
         Assert.Equal(2, mgr.CreatedCount);     // still counted for the boot summary
     }
@@ -74,7 +79,7 @@ public class SmallFixesTests : IDisposable
         Assert.False(FindingLog.IsHighVolume(new Finding { TimeUtc = T0, Kind = FindingKind.FilterEvent, Severity = FindingSeverity.Warning, Title = "pair" }));
         log.Add(new Finding { TimeUtc = T0, Kind = FindingKind.Mark, Title = "last" });
         Assert.Equal("last", log.Snapshot()[^1].Title);
-        Assert.Single(log.Between(T0, T0), f => f.Kind == FindingKind.Mark);
+        Assert.Single(log.Within(TimeSpan.FromDays(30), Moment.Now()), f => f.Kind == FindingKind.Mark);
     }
 
     // ---- 4. crash records are paged through, never skipped
@@ -161,7 +166,7 @@ public class SmallFixesTests : IDisposable
     private static Sample S(DateTime t, long npMb) =>
         new(t, new PoolTotals(500UL << 20, (ulong)npMb << 20, 0, 0),
             [new PoolTagEntry(PoolTag.Parse("File"), 0, 0, 0, 10, 1, 80UL << 20), new PoolTagEntry(PoolTag.Parse("MmSt"), 1, 0, 300UL << 20, 0, 0, 0)], [])
-        { System = new SystemCounters(8UL << 30, 32UL << 30, 0, 0, 90_000, 250) };
+        { System = new SystemCounters(8UL << 30, 32UL << 30, 0, 0, 90_000, 250), TickMs = Clocks.At(t).Ms };
 
     [Fact]
     public void FailedBaselineWriteBacksOffAndObserveNeverWrites()
@@ -179,18 +184,18 @@ public class SmallFixesTests : IDisposable
         Assert.Equal(0, checks);                 // in memory only: Observe runs under the history lock
         var baseline = tr.Baseline;
         Assert.NotNull(baseline);
-        Assert.Contains("retry in 5 min", tr.Flush(T0));
+        Assert.Contains("retry in 5 min", tr.Flush(Clocks.At(T0).Ms));
         Assert.Equal(1, baselineWrites);
         for (int i = 1; i <= 60; i++)            // a minute of samples
         {
             tr.Observe(S(T0.AddSeconds(i), 400 + i), TimeSpan.FromMinutes(3) + TimeSpan.FromSeconds(i), 0);
-            tr.Flush(T0.AddSeconds(i));
+            tr.Flush(Clocks.At(T0.AddSeconds(i)).Ms);
         }
         Assert.Same(baseline, tr.Baseline);      // not rebuilt every sample
         Assert.Equal(1, baselineWrites);         // and not rewritten: backed off
         Assert.True(tr.BaselinePending);
         fail = false;
-        Assert.Null(tr.Flush(T0 + BootTracker.RetryAfterFailure));
+        Assert.Null(tr.Flush(Clocks.At(T0 + BootTracker.RetryAfterFailure).Ms));
         Assert.Equal(2, baselineWrites);
         Assert.False(tr.BaselinePending);
         Assert.True(File.Exists(Path.Combine(_dir, baseline!.BootId, "baseline.json")));
@@ -234,20 +239,20 @@ public class SmallFixesTests : IDisposable
         DateTime? stamp = T0;
         var inbox = new MarkInbox(_dir, Check, _ => stamp);
 
-        var first = inbox.Take(T0);
+        var first = inbox.Take(Clocks.At(T0).Ms);
         Assert.Equal(Marks.MaxPerTick, first.Count);                      // the stuck ones are recorded once...
-        var second = inbox.Take(T0.AddSeconds(1));
+        var second = inbox.Take(Clocks.At(T0.AddSeconds(1)).Ms);
         Assert.Equal("new mark", Assert.Single(second).text);            // ...and do not hold the new one back
         Assert.False(File.Exists(Path.Combine(_dir, Marks.RequestName(T0.AddMinutes(5), 1))));
-        Assert.Empty(inbox.Take(T0.AddSeconds(2)));                       // not reported again
+        Assert.Empty(inbox.Take(Clocks.At(T0.AddSeconds(2)).Ms));                       // not reported again
         int listings = inbox.Listings;
-        for (int i = 3; i < 30; i++) Assert.Empty(inbox.Take(T0.AddSeconds(i)));
+        for (int i = 3; i < 30; i++) Assert.Empty(inbox.Take(Clocks.At(T0.AddSeconds(i)).Ms));
         Assert.Equal(listings, inbox.Listings);                           // folder unchanged: not listed every tick
 
         File.WriteAllText(Path.Combine(_dir, Marks.RequestName(T0.AddMinutes(6), 2)), "later");
         stamp = T0.AddSeconds(30);                                        // the folder changed
-        Assert.Equal("later", Assert.Single(inbox.Take(T0.AddSeconds(30))).text);
-        Assert.Empty(inbox.Take(T0.AddSeconds(31) + MarkInbox.RelistEvery)); // the safety-net relisting finds nothing new
+        Assert.Equal("later", Assert.Single(inbox.Take(Clocks.At(T0.AddSeconds(30)).Ms)).text);
+        Assert.Empty(inbox.Take(Clocks.At(T0.AddSeconds(31) + MarkInbox.RelistEvery).Ms)); // the safety-net relisting finds nothing new
         Assert.Equal(listings + 2, inbox.Listings);
     }
 
@@ -260,18 +265,18 @@ public class SmallFixesTests : IDisposable
         using (var held = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
         {
             held.Write("busy"u8);
-            Assert.Empty(inbox.Take(T0));
-            Assert.Empty(inbox.Take(T0.AddSeconds(1))); // retried (stamp unchanged, but a retry is pending)
+            Assert.Empty(inbox.Take(Clocks.At(T0).Ms));
+            Assert.Empty(inbox.Take(Clocks.At(T0.AddSeconds(1)).Ms)); // retried (stamp unchanged, but a retry is pending)
         }
-        Assert.Equal("busy", Assert.Single(inbox.Take(T0.AddSeconds(2))).text);
+        Assert.Equal("busy", Assert.Single(inbox.Take(Clocks.At(T0.AddSeconds(2)).Ms)).text);
 
         // One that never becomes readable is given up after MaxAttempts and no longer forces a listing every tick.
         string stuck = Path.Combine(_dir, Marks.RequestName(T0, 8));
         using var forever = new FileStream(stuck, FileMode.Create, FileAccess.Write, FileShare.None);
         stamp = T0.AddSeconds(3);
-        for (int i = 0; i < MarkInbox.MaxAttempts; i++) Assert.Empty(inbox.Take(T0.AddSeconds(3 + i)));
+        for (int i = 0; i < MarkInbox.MaxAttempts; i++) Assert.Empty(inbox.Take(Clocks.At(T0.AddSeconds(3 + i)).Ms));
         int listings = inbox.Listings;
-        Assert.Empty(inbox.Take(T0.AddSeconds(20)));
+        Assert.Empty(inbox.Take(Clocks.At(T0.AddSeconds(20)).Ms));
         Assert.Equal(listings, inbox.Listings);
     }
 
@@ -282,16 +287,16 @@ public class SmallFixesTests : IDisposable
     {
         var tl = new FilterTimeline();
         // A German system: no "unload" in the text; the filter name is insertion string %5.
-        var unload = Assert.Single(tl.OnLogEvent(new LogEvent(T0, "System", FilterTimeline.FilterManagerProvider, 1,
+        var unload = Assert.Single(Read(tl, new LogEvent(T0, "System", FilterTimeline.FilterManagerProvider, 1,
             "Das Dateisystemfilter \"wcifs\" wurde erfolgreich entladen.", ["0", "10", "0", "", "wcifs", "2026-01-01"])));
         Assert.Equal("unload", unload.Data["action"]);
         Assert.Equal("wcifs", unload.Image);
         // Event 14 says "loaded", but it is an attach policy, not a filter load.
-        var policy = Assert.Single(tl.OnLogEvent(new LogEvent(T0, "System", FilterTimeline.FilterManagerProvider, 14,
+        var policy = Assert.Single(Read(tl, new LogEvent(T0, "System", FilterTimeline.FilterManagerProvider, 14,
             "Filter Manager successfully loaded filter attach policy for this volume.", [])));
         Assert.Equal("other", policy.Data["action"]);
         // A load with no message at all (the description could not be formatted): ID 6 and %5.
-        var load = Assert.Single(tl.OnLogEvent(new LogEvent(T0, "System", FilterTimeline.FilterManagerProvider, 6, null, ["0", "10", "0", "", "bindflt", "x"])));
+        var load = Assert.Single(Read(tl, new LogEvent(T0, "System", FilterTimeline.FilterManagerProvider, 6, null, ["0", "10", "0", "", "bindflt", "x"])));
         Assert.Equal("load", load.Data["action"]);
         Assert.Equal("bindflt", load.Image);
     }

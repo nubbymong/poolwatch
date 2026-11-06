@@ -7,6 +7,8 @@ using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
 /// <summary>
@@ -115,8 +117,8 @@ public class OwnerKeepTests
                 // The first session's commands do more I/O while the tag grows: a session of many processes ranks among
                 // the three owners report.md describes, so their summaries are where a trim would show.
                 var s = w.Step(shortLived: 20, busy: 5, tagGrowth: growth, firstSessionOps: growth > 0 ? 600 : 0);
-                mgr.AddEvents(w.Events);
-                mgr.Process(w.History, det, det.Evaluate(w.History), s.TimeUtc);
+                mgr.AddEvents(w.Events, At(w.Now));
+                mgr.Process(w.History, det, det.Evaluate(w.History), At(s.TimeUtc));
             }
             for (int i = 0; i < 90; i++) Step(0);
             for (int i = 0; i < 90; i++) Step(2L << 20);

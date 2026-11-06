@@ -2,6 +2,7 @@ using System.Globalization;
 using PoolWatch.Core;
 using PoolWatch.Core.Cache;
 using PoolWatch.Core.Model;
+using static PoolWatch.Tests.Clocks;
 
 namespace PoolWatch.Tests;
 
@@ -28,19 +29,19 @@ public class ClearScheduleTests
 
     private static ClearRecord Light(DateTime t, double freedGb = 0, ClearTrigger trigger = ClearTrigger.Schedule) => new()
     {
-        TimeUtc = t, Mode = ClearMode.LowPriority, Trigger = trigger, Before = Pool(6.43, 5.57), After = Pool(6.43 - freedGb / 2, 5.57 - freedGb / 2),
+        TimeUtc = t, TickMs = Clocks.At(t).Ms, Mode = ClearMode.LowPriority, Trigger = trigger, Before = Pool(6.43, 5.57), After = Pool(6.43 - freedGb / 2, 5.57 - freedGb / 2),
     };
 
     private static ClearRecord Full(DateTime t, ClearTrigger trigger = ClearTrigger.Escalation, bool measured = true) => new()
     {
-        TimeUtc = t, Mode = ClearMode.Standby, Trigger = trigger, Before = Pool(6.43, 5.57), After = measured ? Pool(3.23, 3.67) : null,
+        TimeUtc = t, TickMs = Clocks.At(t).Ms, Mode = ClearMode.Standby, Trigger = trigger, Before = Pool(6.43, 5.57), After = measured ? Pool(3.23, 3.67) : null,
         TagsBefore = [(PoolTag.Parse("Reff"), 2800 * MB), (PoolTag.Parse("MSb+"), 900 * MB), (PoolTag.Parse("FMfn"), 700 * MB)],
         TagsAfter = [(PoolTag.Parse("Reff"), 300 * MB), (PoolTag.Parse("MSb+"), 100 * MB), (PoolTag.Parse("FMfn"), 200 * MB)],
     };
 
     private static NextClear Next(Settings s, PoolTotals pool, DateTime now, DateTime? last = null, ClearRecord? lastPool = null,
         bool? canPurge = true, bool? ownTask = false, bool experiment = false, bool busy = false, bool escalation = false) =>
-        ClearPolicy.Next(s, pool, now, last, Now.AddHours(-3), lastPool, canPurge, ownTask, experiment, busy, escalation);
+        ClearPolicy.Next(s, pool, At(now), Ms(last), At(Now.AddHours(-3)).Ms, lastPool, canPurge, ownTask, experiment, busy, escalation);
 
     // ------------------------------------------------------------------ the next clear
 
@@ -85,7 +86,7 @@ public class ClearScheduleTests
         var sizeOnly = Auto(everyHours: 0, poolGb: 9);
         Assert.Equal(new NextClear(NextClearKind.AtPoolSize, PoolBytes: 9 * GB), Next(sizeOnly, Pool(3.1, 3.1), Now));
         // A size-rule clear 2 h ago freed little: the rule waits 6 h after it.
-        var weak = new ClearRecord { TimeUtc = Now.AddHours(-2), Mode = ClearMode.Standby, Trigger = ClearTrigger.PoolOverLimit, Before = Pool(5, 5), After = Pool(4.95, 4.95) };
+        var weak = new ClearRecord { TimeUtc = Now.AddHours(-2), TickMs = Clocks.At(Now.AddHours(-2)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.PoolOverLimit, Before = Pool(5, 5), After = Pool(4.95, 4.95) };
         var backedOff = Next(sizeOnly, Pool(3.1, 3.1), Now, Now.AddHours(-2), weak);
         Assert.Equal(new NextClear(NextClearKind.AtPoolSize, PoolBytes: 9 * GB, PoolRuleAfterUtc: Now.AddHours(4)), backedOff);
         Assert.Equal(new NextClear(NextClearKind.Scheduled, Now.AddHours(4)), Next(sizeOnly, Pool(5, 5), Now, Now.AddHours(-2), weak)); // over it, backed off
@@ -99,7 +100,7 @@ public class ClearScheduleTests
         // Every combination of rules, last clear and pool size, minute by minute: the line says "now" exactly when the rule fires,
         // and at the time it names, the rule fires.
         var start = Now.AddHours(-3);
-        var weak = new ClearRecord { TimeUtc = Now.AddHours(-1), Mode = ClearMode.Standby, Trigger = ClearTrigger.PoolOverLimit, Before = Pool(5, 5), After = Pool(4.9, 4.9) };
+        var weak = new ClearRecord { TimeUtc = Now.AddHours(-1), TickMs = Clocks.At(Now.AddHours(-1)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.PoolOverLimit, Before = Pool(5, 5), After = Pool(4.9, 4.9) };
         foreach (var s in new[] { Auto(1, 0), Auto(0, 8), Auto(1, 8), Auto(2.5, 8), Auto(0.5, 6) })
         foreach (DateTime? last in new DateTime?[] { null, Now.AddMinutes(-10), Now.AddMinutes(-45), Now.AddHours(-1) })
         foreach (var lastPool in new[] { null, weak })
@@ -108,13 +109,13 @@ public class ClearScheduleTests
             {
                 var t = Now.AddMinutes(m);
                 if (last is null && lastPool is not null) continue;
-                var next = ClearPolicy.Next(s, pool, t, last, start, lastPool, true, false, false, false);
-                var due = ClearPolicy.Due(s, pool, t, last, start, lastPool);
+                var next = ClearPolicy.Next(s, pool, At(t), Ms(last), At(start).Ms, lastPool, true, false, false, false);
+                var due = ClearPolicy.Due(s, pool, At(t), Ms(last), At(start).Ms, lastPool);
                 string at = $"{s.AutoClearEveryHours} h, {s.AutoClearPoolGb} GB, last {last}, minute {m}";
                 Assert.True(next.Kind is NextClearKind.Scheduled or NextClearKind.AtPoolSize, at);
                 Assert.Equal(due is not null, next is { Kind: NextClearKind.Scheduled, AtUtc: { } when } && when <= t);
                 if (next is { Kind: NextClearKind.Scheduled, AtUtc: { } named } && named > t)
-                    Assert.NotNull(ClearPolicy.Due(s, pool, named, last, start, lastPool));
+                    Assert.NotNull(ClearPolicy.Due(s, pool, At(named), Ms(last), At(start).Ms, lastPool));
             }
     }
 
@@ -150,9 +151,9 @@ public class ClearScheduleTests
         string Last(params ClearRecord[] history) => ClearScheduleText.Line(next, history, Pool(3, 3), Now)["Automatic clearing is off. ".Length..];
 
         Assert.Equal($"Last clear at {Hm(t)} freed 5.1 GB, mostly ReFS file records.", Last(Full(t, ClearTrigger.Manual)));
-        var grew = new ClearRecord { TimeUtc = t, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = Pool(3, 3), After = Pool(3.1, 3) };
+        var grew = new ClearRecord { TimeUtc = t, TickMs = Clocks.At(t).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = Pool(3, 3), After = Pool(3.1, 3) };
         Assert.Equal($"Last clear at {Hm(t)} freed nothing.", Last(grew));                       // the pool grew during the 2 minutes
-        var failed = new ClearRecord { TimeUtc = t, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = Pool(3, 3), Error = "the purge returned 0xC0000061" };
+        var failed = new ClearRecord { TimeUtc = t, TickMs = Clocks.At(t).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = Pool(3, 3), Error = "the purge returned 0xC0000061" };
         Assert.Equal($"Last clear at {Hm(t)} did not run: the purge returned 0xC0000061.", Last(failed));
         var yesterday = new DateTime(2026, 10, 27, 9, 12, 0, DateTimeKind.Local).ToUniversalTime();
         Assert.Equal("Last clear yesterday at 09:12 freed 5.1 GB, mostly ReFS file records.", Last(Full(yesterday, ClearTrigger.Schedule)));
@@ -197,8 +198,8 @@ public class ClearScheduleTests
         // 0 GB: no size rule. A pool far over any size never clears; the hours do, and the line says only the schedule.
         var s = Auto(everyHours: 1, poolGb: 0);
         var huge = Pool(40, 20);
-        Assert.Null(ClearPolicy.Due(s, huge, Now.AddMinutes(59), Now, Now));
-        Assert.Equal(ClearTrigger.Schedule, ClearPolicy.Due(s, huge, Now.AddMinutes(61), Now, Now));
+        Assert.Null(ClearPolicy.Due(s, huge, At(Now.AddMinutes(59)), Ms(Now), At(Now).Ms));
+        Assert.Equal(ClearTrigger.Schedule, ClearPolicy.Due(s, huge, At(Now.AddMinutes(61)), Ms(Now), At(Now).Ms));
         var next = Next(s, huge, Now, last: Now.AddMinutes(-20));
         Assert.Equal(new NextClear(NextClearKind.Scheduled, Now.AddMinutes(40)), next);
         Assert.StartsWith("Next cache clear in 40 min. ", ClearScheduleText.Line(next, [], huge, Now));
@@ -210,8 +211,8 @@ public class ClearScheduleTests
     {
         // 0 hours: no schedule. However long since the last clear, only the size clears; the line says the size.
         var s = Auto(everyHours: 0, poolGb: 8);
-        Assert.Null(ClearPolicy.Due(s, Pool(3, 2), Now.AddHours(30), Now, Now));
-        Assert.Equal(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, Pool(5, 4), Now.AddHours(1), Now, Now));
+        Assert.Null(ClearPolicy.Due(s, Pool(3, 2), At(Now.AddHours(30)), Ms(Now), At(Now).Ms));
+        Assert.Equal(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, Pool(5, 4), At(Now.AddHours(1)), Ms(Now), At(Now).Ms));
         var next = Next(s, Pool(3, 2), Now, last: Now.AddHours(-30));
         Assert.Equal(NextClearKind.AtPoolSize, next.Kind);
         Assert.Equal(8L * GB, next.PoolBytes);
@@ -225,26 +226,26 @@ public class ClearScheduleTests
     {
         var s = Auto();
         var light = Light(Now.AddMinutes(-2));                                          // automatic, measured, freed 0 B
-        Assert.True(ClearPolicy.EscalateNow([light], s, Now));
+        Assert.True(ClearPolicy.EscalateNow([light], s, At(Now)));
         Assert.Equal(ClearMode.Standby, ClearPolicy.ModeFor([light], s));                // and the mode rule picks the full purge
         // The full purge runs: it is the last clear now, so there is no second escalation, and from then on the full purge is used.
         var full = Full(Now);
-        Assert.False(ClearPolicy.EscalateNow([light, full], s, Now.AddMinutes(3)));
+        Assert.False(ClearPolicy.EscalateNow([light, full], s, At(Now.AddMinutes(3))));
         Assert.Equal(ClearMode.Standby, ClearPolicy.ModeFor([light, full], s));
         Assert.InRange(full.Freed / (double)GB, 5.09, 5.12);
 
-        Assert.False(ClearPolicy.EscalateNow([Light(Now.AddMinutes(-2), freedGb: 4)], s, Now));                       // it helped
-        Assert.False(ClearPolicy.EscalateNow([Light(Now.AddMinutes(-2), trigger: ClearTrigger.Manual)], s, Now));       // not automatic
-        Assert.False(ClearPolicy.EscalateNow([light], Auto(mode: "lowpriority"), Now));                       // the user's choice
-        Assert.False(ClearPolicy.EscalateNow([light], Auto(mode: "standby"), Now));
-        Assert.False(ClearPolicy.EscalateNow([Light(Now.AddMinutes(-31))], s, Now));                                     // past the spacing: the usual rule
-        Assert.False(ClearPolicy.EscalateNow([new ClearRecord { TimeUtc = Now, Mode = ClearMode.LowPriority, Trigger = ClearTrigger.Schedule, Before = Pool(6, 6) }], s, Now)); // not measured
-        Assert.False(ClearPolicy.EscalateNow([], s, Now));
+        Assert.False(ClearPolicy.EscalateNow([Light(Now.AddMinutes(-2), freedGb: 4)], s, At(Now)));                       // it helped
+        Assert.False(ClearPolicy.EscalateNow([Light(Now.AddMinutes(-2), trigger: ClearTrigger.Manual)], s, At(Now)));       // not automatic
+        Assert.False(ClearPolicy.EscalateNow([light], Auto(mode: "lowpriority"), At(Now)));                       // the user's choice
+        Assert.False(ClearPolicy.EscalateNow([light], Auto(mode: "standby"), At(Now)));
+        Assert.False(ClearPolicy.EscalateNow([Light(Now.AddMinutes(-31))], s, At(Now)));                                     // past the spacing: the usual rule
+        Assert.False(ClearPolicy.EscalateNow([new ClearRecord { TimeUtc = Now, TickMs = Clocks.At(Now).Ms, Mode = ClearMode.LowPriority, Trigger = ClearTrigger.Schedule, Before = Pool(6, 6) }], s, At(Now))); // not measured
+        Assert.False(ClearPolicy.EscalateNow([], s, At(Now)));
         // The line says it: the full clear is due at the next sample.
         Assert.Equal(new NextClear(NextClearKind.Scheduled, Now), Next(s, Pool(6.43, 5.57), Now, light.TimeUtc, escalation: true));
 
         // Where the last full purge freed little too, a light clear that freed little is not followed by it again.
-        Assert.False(ClearPolicy.EscalateNow(NeitherHelps(), s, Now));
+        Assert.False(ClearPolicy.EscalateNow(NeitherHelps(), s, At(Now)));
         Assert.Equal(ClearMode.LowPriority, ClearPolicy.ModeFor(NeitherHelps(), s));
 
         // Where light clears used to free 2 GB and the full one 3 GB, the first light clear that frees nothing is followed
@@ -253,11 +254,11 @@ public class ClearScheduleTests
         used.AddRange(Enumerable.Range(0, 19).Select(i => Light(Now.AddHours(-21 + i), freedGb: 2)));
         used.Add(Light(Now.AddMinutes(-2)));
         Assert.Equal(ClearMode.LowPriority, ClearPolicy.ModeFor(used, s));
-        Assert.True(ClearPolicy.EscalateNow(used, s, Now));
+        Assert.True(ClearPolicy.EscalateNow(used, s, At(Now)));
 
         static ClearRecord FreedThree(DateTime t) => new()
         {
-            TimeUtc = t, Mode = ClearMode.Standby, Trigger = ClearTrigger.Experiment, Before = Pool(6.43, 5.57), After = Pool(4.93, 4.07),
+            TimeUtc = t, TickMs = Clocks.At(t).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Experiment, Before = Pool(6.43, 5.57), After = Pool(4.93, 4.07),
         };
     }
 
@@ -265,7 +266,7 @@ public class ClearScheduleTests
     private static ClearRecord[] NeitherHelps() =>
     [
         Light(Now.AddMinutes(-62), freedGb: 0.1),
-        new ClearRecord { TimeUtc = Now.AddMinutes(-60), Mode = ClearMode.Standby, Trigger = ClearTrigger.Escalation, Before = Pool(6.43, 5.57), After = Pool(6.37, 5.51) },
+        new ClearRecord { TimeUtc = Now.AddMinutes(-60), TickMs = Clocks.At(Now.AddMinutes(-60)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Escalation, Before = Pool(6.43, 5.57), After = Pool(6.37, 5.51) },
         Light(Now.AddMinutes(-2), freedGb: 0.1),
     ];
 
@@ -275,30 +276,30 @@ public class ClearScheduleTests
         var s = Auto();
         var since = Now.AddHours(-3);
         var light = Light(Now.AddMinutes(-2));
-        Assert.Equal((ClearMode.Standby, ClearTrigger.Escalation), ClearPolicy.Automatic([light], s, Pool(6.43, 5.57), Now, since, experimentRunning: false));
-        Assert.Null(ClearPolicy.Automatic([light], s, Pool(6.43, 5.57), Now, since, experimentRunning: true));
+        Assert.Equal((ClearMode.Standby, ClearTrigger.Escalation), ClearPolicy.Automatic([light], s, Pool(6.43, 5.57), At(Now), At(since).Ms, experimentRunning: false));
+        Assert.Null(ClearPolicy.Automatic([light], s, Pool(6.43, 5.57), At(Now), At(since).Ms, experimentRunning: true));
         var off = Auto();
         off.AutoClearEnabled = false;
-        Assert.Null(ClearPolicy.Automatic([light], off, Pool(6.43, 5.57), Now, since, false));
+        Assert.Null(ClearPolicy.Automatic([light], off, Pool(6.43, 5.57), At(Now), At(since).Ms, false));
 
         // After the full one: nothing within the spacing, then the hourly clear, as a full purge.
         var full = Full(Now);
-        Assert.Null(ClearPolicy.Automatic([light, full], s, Pool(3.23, 3.67), Now.AddMinutes(3), since, false));
-        Assert.Equal((ClearMode.Standby, ClearTrigger.Schedule), ClearPolicy.Automatic([light, full], s, Pool(4, 4), Now.AddMinutes(61), since, false));
+        Assert.Null(ClearPolicy.Automatic([light, full], s, Pool(3.23, 3.67), At(Now.AddMinutes(3)), At(since).Ms, false));
+        Assert.Equal((ClearMode.Standby, ClearTrigger.Schedule), ClearPolicy.Automatic([light, full], s, Pool(4, 4), At(Now.AddMinutes(61)), At(since).Ms, false));
 
         // Where no clear helps, the hourly clear stays the light one, with no full purge after it.
-        Assert.Null(ClearPolicy.Automatic(NeitherHelps(), s, Pool(6.4, 5.5), Now, since, false));
-        Assert.Equal((ClearMode.LowPriority, ClearTrigger.Schedule), ClearPolicy.Automatic(NeitherHelps(), s, Pool(6.4, 5.5), Now.AddMinutes(59), since, false));
+        Assert.Null(ClearPolicy.Automatic(NeitherHelps(), s, Pool(6.4, 5.5), At(Now), At(since).Ms, false));
+        Assert.Equal((ClearMode.LowPriority, ClearTrigger.Schedule), ClearPolicy.Automatic(NeitherHelps(), s, Pool(6.4, 5.5), At(Now.AddMinutes(59)), At(since).Ms, false));
 
         // The first automatic clear is a light one; the next, the full purge it is compared with.
-        Assert.Equal((ClearMode.LowPriority, ClearTrigger.Schedule), ClearPolicy.Automatic([], s, Pool(4, 4), Now, since, false));
-        Assert.Equal((ClearMode.Standby, ClearTrigger.Experiment), ClearPolicy.Automatic([Light(Now.AddHours(-1), freedGb: 4)], s, Pool(4, 4), Now, since, false));
+        Assert.Equal((ClearMode.LowPriority, ClearTrigger.Schedule), ClearPolicy.Automatic([], s, Pool(4, 4), At(Now), At(since).Ms, false));
+        Assert.Equal((ClearMode.Standby, ClearTrigger.Experiment), ClearPolicy.Automatic([Light(Now.AddHours(-1), freedGb: 4)], s, Pool(4, 4), At(Now), At(since).Ms, false));
 
         // A size-rule clear that freed little holds the size rule off for 6 h, and a later scheduled clear does not hide it.
         var sizeOnly = Auto(everyHours: 0, poolGb: 8);
-        var weak = new ClearRecord { TimeUtc = Now.AddMinutes(-40), Mode = ClearMode.Standby, Trigger = ClearTrigger.PoolOverLimit, Before = Pool(6, 6), After = Pool(5.95, 5.95) };
-        Assert.Null(ClearPolicy.Automatic([weak], sizeOnly, Pool(6, 6), Now, since, false));
-        Assert.Equal((ClearMode.LowPriority, ClearTrigger.PoolOverLimit), ClearPolicy.Automatic([weak], sizeOnly, Pool(6, 6), Now.AddHours(6), since, false));
+        var weak = new ClearRecord { TimeUtc = Now.AddMinutes(-40), TickMs = Clocks.At(Now.AddMinutes(-40)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.PoolOverLimit, Before = Pool(6, 6), After = Pool(5.95, 5.95) };
+        Assert.Null(ClearPolicy.Automatic([weak], sizeOnly, Pool(6, 6), At(Now), At(since).Ms, false));
+        Assert.Equal((ClearMode.LowPriority, ClearTrigger.PoolOverLimit), ClearPolicy.Automatic([weak], sizeOnly, Pool(6, 6), At(Now.AddHours(6)), At(since).Ms, false));
         Assert.Same(weak, ClearPolicy.LastPoolClear([weak, Light(Now.AddMinutes(-5))]));
     }
 
@@ -317,7 +318,7 @@ public class ClearScheduleTests
 
         var ntfs = new ClearRecord
         {
-            TimeUtc = Now.AddMinutes(-5), Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = Pool(2, 1), After = Pool(1.9, 1),
+            TimeUtc = Now.AddMinutes(-5), TickMs = Clocks.At(Now.AddMinutes(-5)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Manual, Before = Pool(2, 1), After = Pool(1.9, 1),
             TagsBefore = [(PoolTag.Parse("Ntff"), 150 * MB)], TagsAfter = [(PoolTag.Parse("Ntff"), 80 * MB)],
         };
         var little = ClearEvidence.From([ntfs]);

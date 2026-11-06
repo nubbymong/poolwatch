@@ -3,10 +3,12 @@ using PoolWatch.Core.Services;
 
 namespace PoolWatch.Tests;
 
-/// <summary>Review Part 3, addendum 4 B: own changes, Restore to Windows default, restart on Restore, the Cost column, "saved about N cores".</summary>
-public class ServicesPartThreeTests
+/// <summary>Services: own changes, Restore to Windows default, restart on Restore, the Cost column, "saved about N cores".</summary>
+public class ServiceRestoreAndCostTests
 {
     private static readonly DateTime T0 = new(2026, 10, 26, 11, 40, 0, DateTimeKind.Utc);
+    /// <summary>A time on the monotonic clock the savings measure is timed on (milliseconds since Windows started).</summary>
+    private const long M0 = 7_200_000;
     private static readonly ServiceCatalogue Cat = DefaultCatalogue.Load();
     private static readonly IReadOnlySet<string> NoDefaults = new HashSet<string>();
 
@@ -197,15 +199,15 @@ public class ServicesPartThreeTests
     public void SavedAboutNCoresOverTheHourAfter()
     {
         var s = new ServiceSavings();
-        s.Start("ESRV_SVC_QUEENCREEK", T0, beforeCores: 1.7, beforeFaultsPerSec: 887_000);
-        Assert.StartsWith("measuring what it saves", ServiceSavings.Text(s.Get("esrv_svc_queencreek")!, T0));
+        s.Start("ESRV_SVC_QUEENCREEK", M0, beforeCores: 1.7, beforeFaultsPerSec: 887_000);
+        Assert.StartsWith("measuring what it saves", ServiceSavings.Text(s.Get("esrv_svc_queencreek")!, M0));
         var done = new List<ServiceSavings.Entry>();
-        for (int sec = 10; sec <= 3600; sec += 10) done.AddRange(s.Observe(T0.AddSeconds(sec), _ => (0, 0))); // stopped: costs nothing
+        for (int sec = 10; sec <= 3600; sec += 10) done.AddRange(s.Observe(M0 + sec * 1000L, _ => (0, 0))); // stopped: costs nothing
         var e = Assert.Single(done);                                   // reported once, at the hour
-        Assert.Empty(s.Observe(T0.AddSeconds(3700), _ => (0, 0)));
+        Assert.Empty(s.Observe(M0 + 3700 * 1000L, _ => (0, 0)));
         Assert.Equal(1.7, e.SavedCores, 3);
         Assert.Equal(3600, e.Seconds, 0);
-        string text = ServiceSavings.Text(e, T0.AddHours(1));
+        string text = ServiceSavings.Text(e, M0 + 3_600_000);
         Assert.StartsWith("saved about 1.7 cores and 887k page faults/s over the hour after", text);
     }
 
@@ -213,15 +215,15 @@ public class ServicesPartThreeTests
     public void ASelfRestartingServiceSavesLessAndAGapIsNotCounted()
     {
         var s = new ServiceSavings();
-        s.Start("ESRV_SVC_QUEENCREEK", T0, 1.7, 0);
+        s.Start("ESRV_SVC_QUEENCREEK", M0, 1.7, 0);
         // Off for 30 min, then it restarts itself (as esrv_svc did) and costs 1.7 cores again.
-        for (int sec = 10; sec <= 1800; sec += 10) s.Observe(T0.AddSeconds(sec), _ => (0, 0));
+        for (int sec = 10; sec <= 1800; sec += 10) s.Observe(M0 + sec * 1000L, _ => (0, 0));
         // A 10-minute sampler gap (sleep): not counted at either cost.
-        for (int sec = 2400; sec <= 3600; sec += 10) s.Observe(T0.AddSeconds(sec), _ => (1.7, 0));
+        for (int sec = 2400; sec <= 3600; sec += 10) s.Observe(M0 + sec * 1000L, _ => (1.7, 0));
         var e = s.Get("ESRV_SVC_QUEENCREEK")!;
         Assert.Equal(1800 + 1200, e.Seconds, 0);
         Assert.Equal(1.7 * 1200 / 3000, e.AfterCores, 3);
-        Assert.Contains("saved about 1.0 core", ServiceSavings.Text(e, T0.AddHours(1)));
+        Assert.Contains("saved about 1.0 core", ServiceSavings.Text(e, M0 + 3_600_000));
         s.Stop("ESRV_SVC_QUEENCREEK");                                  // Restore: nothing more to measure
         Assert.Null(s.Get("ESRV_SVC_QUEENCREEK"));
     }
@@ -230,17 +232,20 @@ public class ServicesPartThreeTests
     public void AnIdleServiceSavesNothingMeasurable()
     {
         var s = new ServiceSavings();
-        s.Start("Fax", T0, 0, 0);
-        for (int sec = 10; sec <= 300; sec += 10) s.Observe(T0.AddSeconds(sec), _ => (0, 0));
-        Assert.StartsWith("no measurable saving", ServiceSavings.Text(s.Get("Fax")!, T0.AddMinutes(5)));
+        s.Start("Fax", M0, 0, 0);
+        for (int sec = 10; sec <= 300; sec += 10) s.Observe(M0 + sec * 1000L, _ => (0, 0));
+        Assert.StartsWith("no measurable saving", ServiceSavings.Text(s.Get("Fax")!, M0 + 300_000));
     }
 }
 
-/// <summary>Review Part 3: per-process cost over minutes (a change's "before"; heavy background apps over 30 min).</summary>
+/// <summary>Per-process cost over minutes (a change's "before"; heavy background apps over 30 min).</summary>
 public class ProcessCostHistoryTests
 {
-    private static readonly DateTime T0 = new(2026, 10, 26, 4, 44, 0, DateTimeKind.Utc);
+    /// <summary>A moment on the history's clock, which only goes forward (the time since Windows started).</summary>
+    private static readonly TimeSpan T0 = TimeSpan.FromHours(30);
     private const long PerSecond = 10_000_000; // 100 ns units
+
+    private static TimeSpan At(int minutes) => T0 + TimeSpan.FromMinutes(minutes);
 
     private static ProcessSample P(int pid, double cpuSeconds, uint faults = 0, string image = "x.exe") =>
         new() { Pid = pid, CreateTime = 5000 + pid, ImageName = image, KernelTime = (long)(cpuSeconds * PerSecond), PageFaultCount = faults };
@@ -250,7 +255,7 @@ public class ProcessCostHistoryTests
     {
         for (int m = startMinute; m <= startMinute + minutes; m++)
         {
-            var t = T0.AddMinutes(m);
+            var t = At(m);
             var samples = procs.Select(p => P(p.pid, p.cores * 60 * m, (uint)(p.faultsPerSec * 60 * m), p.image)).ToList();
             h.Observe(t, samples, foreground?.Invoke(m) ?? 0);
         }
@@ -261,12 +266,12 @@ public class ProcessCostHistoryTests
     {
         var h = new ProcessCostHistory();
         Run(h, 15, [(100, 1.7, 887_000, "esrv_svc.exe"), (200, 0.0, 0, "idle.exe")]);
-        var avg = h.Average(new ProcessKey(100, 5100), TimeSpan.FromMinutes(10), T0.AddMinutes(15));
+        var avg = h.Average(new ProcessKey(100, 5100), TimeSpan.FromMinutes(10), At(15));
         Assert.NotNull(avg);
         Assert.Equal(1.7, avg!.Value.cores, 2);
         Assert.InRange(avg.Value.faultsPerSec, 886_900, 887_100);
         Assert.Equal(TimeSpan.FromMinutes(10), avg.Value.covered);
-        Assert.Null(h.Average(new ProcessKey(200, 5200), TimeSpan.FromMinutes(10), T0.AddMinutes(15))); // never busy: not tracked
+        Assert.Null(h.Average(new ProcessKey(200, 5200), TimeSpan.FromMinutes(10), At(15))); // never busy: not tracked
         Assert.Equal(1, h.Tracked);
     }
 
@@ -281,16 +286,16 @@ public class ProcessCostHistoryTests
             (300, 2.0, 0, "editor.exe"),               // busy, but its window was in front once
         };
         Run(h, 20, procs, m => m == 12 ? 300 : 0);
-        Assert.Empty(h.Heavy(T0.AddMinutes(20), TimeSpan.FromMinutes(30), 0.5)); // 20 min is not 30
+        Assert.Empty(h.Heavy(At(20), TimeSpan.FromMinutes(30), 0.5)); // 20 min is not 30
         Run(h, 12, procs, m => 0, startMinute: 21);
-        var heavy = h.Heavy(T0.AddMinutes(33), TimeSpan.FromMinutes(30), 0.5);
+        var heavy = h.Heavy(At(33), TimeSpan.FromMinutes(30), 0.5);
         var only = Assert.Single(heavy);
         Assert.Equal(100, only.Key.Pid);
         Assert.Equal(1.0, only.Cores, 2);
         Assert.True(only.Covered >= TimeSpan.FromMinutes(30));
         // The editor's foreground minute (12) is now older than 30 min: it is judged on the last 30 minutes only.
         Run(h, 10, procs, m => 0, startMinute: 34);
-        Assert.Contains(h.Heavy(T0.AddMinutes(44), TimeSpan.FromMinutes(30), 0.5), x => x.Key.Pid == 300);
+        Assert.Contains(h.Heavy(At(44), TimeSpan.FromMinutes(30), 0.5), x => x.Key.Pid == 300);
     }
 
     [Fact]
@@ -303,9 +308,9 @@ public class ProcessCostHistoryTests
         {
             if (m == 5) cpu += 40; // 40 CPU-seconds in that minute
             else cpu += 4;          // ~0.07 core otherwise (stays tracked)
-            h.Observe(T0.AddMinutes(m), [P(100, cpu)], 0);
+            h.Observe(At(m), [P(100, cpu)], 0);
         }
-        Assert.Empty(h.Heavy(T0.AddMinutes(31), TimeSpan.FromMinutes(30), 0.5));
+        Assert.Empty(h.Heavy(At(31), TimeSpan.FromMinutes(30), 0.5));
     }
 
     [Fact]
@@ -314,7 +319,7 @@ public class ProcessCostHistoryTests
         var h = new ProcessCostHistory();
         Run(h, 3, [(100, 1.0, 0, "a.exe")]);
         Assert.Equal(1, h.Tracked);
-        h.Observe(T0.AddMinutes(5), [], 0);
+        h.Observe(At(5), [], 0);
         Assert.Equal(0, h.Tracked);
     }
 }

@@ -3,8 +3,8 @@ using PoolWatch.Core.Services;
 
 namespace PoolWatch.Tests;
 
-/// <summary>Review Part 3, addendum 4 C: cost per scheduled task / startup entry, and where startup entries live.</summary>
-public class TasksPartThreeTests
+/// <summary>The cost per scheduled task / startup entry, and where startup entries live.</summary>
+public class TaskCostTests
 {
     [Theory]
     [InlineData("\"C:\\Program Files\\Adobe\\ARM\\1.0\\AdobeARM.exe\" /PRODUCT:Reader", @"C:\Program Files\Adobe\ARM\1.0\AdobeARM.exe")]

@@ -38,6 +38,11 @@ internal interface ISetupHost
     void MarkCompleted();
     void OpenWebPage(IWin32Window owner, string url);
     void Log(string line);
+    /// <summary>
+    /// The owner closes setup on its first run (its close button, Esc, Alt+F4): asks whether to close it
+    /// (<see cref="SetupText.CloseFirstRun"/>); true closes it, and PoolWatch keeps running in the tray.
+    /// </summary>
+    bool ConfirmCloseFirstRun(IWin32Window owner);
 }
 
 /// <summary>The real PC behind setup, over the app's <see cref="SetupContext"/>.</summary>
@@ -77,6 +82,17 @@ internal sealed class SetupHost : ISetupHost
     public void MarkCompleted() => _c.Store.MarkGuideCompleted(DateTime.UtcNow);
     public void OpenWebPage(IWin32Window owner, string url) => _c.Actions.Guarded(owner, "Open web page", () => UiActions.OpenWebPage(url));
     public void Log(string line) => _c.Engine.Log.Info(line);
+
+    /// <summary>The first run's close question in a message box over setup (<see cref="AskCloseFirstRun"/>); the CI UI test never asks (it closes setup itself).</summary>
+    public bool ConfirmCloseFirstRun(IWin32Window owner) =>
+        AskCloseFirstRun((text, caption, buttons, icon, defaultButton) => MessageBox.Show(owner, text, caption, buttons, icon, defaultButton));
+
+    /// <summary>
+    /// The first run's close question, put through <paramref name="show"/> (a message box; the test's own): Yes or No, No
+    /// the default, so Enter keeps setup open. Only Yes closes setup.
+    /// </summary>
+    internal static bool AskCloseFirstRun(Func<string, string, MessageBoxButtons, MessageBoxIcon, MessageBoxDefaultButton, DialogResult> show) =>
+        show(SetupText.CloseFirstRun, SetupText.WindowTitle, MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
 }
 
 /// <summary>
@@ -177,7 +193,7 @@ internal sealed class SetupSession
 
     /// <summary>
     /// How long setup waits for the scan before it goes on with the facts PoolWatch had (it reads in seconds; a hung read
-    /// must never keep the first run, which cannot be closed, from finishing). The rescan after each change gives up on
+    /// must never keep the first run from finishing). The rescan after each change gives up on
     /// the same scan at the same time (<see cref="EnvironmentProbe.ScanAsync(TimeSpan)"/>).
     /// </summary>
     public static readonly TimeSpan ScanWait = EnvironmentProbe.HungAfter;
@@ -239,7 +255,7 @@ internal sealed class SetupSession
     }
 
     public SetupFlow Flow { get; }
-    /// <summary>The Welcome step's choice: the Advanced view (setup and the app); the app takes it when setup finishes.</summary>
+    /// <summary>The Welcome step's choice: the app's Advanced view, which the app takes when setup finishes (setup itself is the same either way).</summary>
     public bool Advanced { get; set; }
     /// <summary>The scan has ended, or setup stopped waiting for it (<see cref="Facts"/> is then what PoolWatch had).</summary>
     public bool Scanned { get; private set; }
@@ -268,7 +284,8 @@ internal sealed class SetupSession
     /// <summary>A check found the token leak on this Windows build: this session's, or the verdict saved for this build.</summary>
     public bool LeakFound => _host.LeakTestNow == LeakVerdict.Leak || Facts?.TokenLeak == TokenLeakStatus.Leaks;
 
-    public IReadOnlyList<ImpactRow> Impact => ImpactRows.From(Facts, Leak);
+    /// <summary>How your PC is impacted, in the order the step lists the rows: by level, the highest first.</summary>
+    public IReadOnlyList<ImpactRow> Impact => ImpactRows.ByLevel(ImpactRows.From(Facts, Leak));
     public IReadOnlyList<FixRow> Fixes => FixRows.From(Facts, Leak, _host.ShortcutMade, _host.LauncherInstalled, LeakFound);
     public IReadOnlyList<SummaryRow> Summary => FixRows.Summary(_host.Running, Facts, Leak, _host.ShortcutMade, ActiveChanges, ChangesRead);
 

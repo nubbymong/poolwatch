@@ -5,8 +5,8 @@ using PoolWatch.Core.Services;
 namespace PoolWatch.Engine;
 
 /// <summary>
-/// Reading and (gated) changing Windows services for the background-services page (addendum 4 B). Reading is unelevated;
-/// changing a start type or stopping a service needs administrator rights, which PoolWatch has under its manifest.
+/// Reading and (gated) changing Windows services for the background-services page. Reading is unelevated;
+/// changing a start type or stopping a service needs administrator rights, which PoolWatch has from its launcher.
 /// Every change is checked against the protected gate here, after the pure <see cref="ServicePlan"/> gate, so neither a
 /// crafted request nor a catalogue edit can touch a protected service.
 /// </summary>
@@ -14,9 +14,9 @@ internal static class ServiceControl
 {
     private const uint SC_MANAGER_CONNECT = 0x0001, SC_MANAGER_ENUMERATE_SERVICE = 0x0004;
     private const uint SERVICE_QUERY_CONFIG = 0x0001, SERVICE_QUERY_STATUS = 0x0004, SERVICE_CHANGE_CONFIG = 0x0002,
-                       SERVICE_START = 0x0010, SERVICE_STOP = 0x0020;
+                       SERVICE_ENUMERATE_DEPENDENTS = 0x0008, SERVICE_START = 0x0010, SERVICE_STOP = 0x0020;
     private const uint SERVICE_WIN32 = 0x30, SERVICE_STATE_ALL = 0x3;
-    private const uint SERVICE_NO_CHANGE = 0xFFFFFFFF, SERVICE_CONTROL_STOP = 0x1;
+    private const uint SERVICE_NO_CHANGE = 0xFFFFFFFF, SERVICE_CONTROL_STOP = 0x1, SERVICE_ACTIVE = 0x1;
 
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr OpenSCManagerW(string? machine, string? database, uint access);
@@ -38,31 +38,88 @@ internal static class ServiceControl
 
     public static bool IsElevated => CacheHelper.IsElevated;
 
-    /// <summary>Every installed Win32 service with its start type, state, binary path and signer (unelevated).</summary>
+    /// <summary>
+    /// Every installed Win32 service with its start type, state, binary path and signer (unelevated). Throws when the list
+    /// cannot be read (the service control manager cannot be opened, or listing the services fails): a list that could not
+    /// be read is never "no services installed". A service that is listed but cannot be opened, or read, is in the list as
+    /// one PoolWatch could not read (<see cref="Unread"/>).
+    /// </summary>
     /// <remarks>
     /// The names come from <see cref="Native.ServiceEnumeration"/>, which reads them from unmanaged memory and copies them
     /// before this loop runs. (This used to read them from a managed array through the addresses the API stored in it:
     /// a compacting collection during the slow per-service queries below moved the array and the reads crashed.)
     /// </remarks>
-    public static List<ServiceView> Enumerate()
+    public static List<ServiceView> Enumerate() => Enumerate(WindowsServiceList.Instance);
+
+    /// <summary>
+    /// <see cref="Enumerate()"/> over <paramref name="windows"/> (the real calls, or a fake in a test): throws when the
+    /// service control manager cannot be opened or the listing fails; lists a service whose read throws as one PoolWatch
+    /// could not read (<see cref="Unread"/>), never leaves it out; and closes the manager's handle whatever happens.
+    /// </summary>
+    internal static List<ServiceView> Enumerate(IServiceList windows)
     {
+        var scm = windows.Open(out int error);
+        if (scm == IntPtr.Zero) throw new InvalidOperationException($"the service control manager could not be opened (error {error})");
         var views = new List<ServiceView>();
-        var scm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE);
-        if (scm == IntPtr.Zero) return views;
         try
         {
-            foreach (var e in Native.ServiceEnumeration.Query(scm, SERVICE_WIN32, SERVICE_STATE_ALL))
-                views.Add(Read(scm, e.Name, e.DisplayName));
+            foreach (var (name, display) in windows.List(scm))
+            {
+                try { views.Add(windows.Read(scm, name, display)); }
+                catch (Exception) { views.Add(Unread(name, display)); }
+            }
         }
-        catch { }
-        finally { CloseServiceHandle(scm); }
+        finally { windows.Close(scm); }
         return views;
     }
 
-    private static ServiceView Read(IntPtr scm, string name, string display)
+    /// <summary>What <see cref="Enumerate(IServiceList)"/> asks Windows (the tests give a fake: no real service is read there).</summary>
+    internal interface IServiceList
+    {
+        /// <summary>Opens the service control manager to list and read services: its handle, or zero and Windows' error.</summary>
+        IntPtr Open(out int error);
+        /// <summary>Every Win32 service Windows lists, by name and display name; throws when the listing fails.</summary>
+        IReadOnlyList<(string Name, string DisplayName)> List(IntPtr scm);
+        /// <summary>One listed service as read; may throw.</summary>
+        ServiceView Read(IntPtr scm, string name, string display);
+        void Close(IntPtr scm);
+    }
+
+    /// <summary>The real calls: OpenSCManagerW, EnumServicesStatusExW (<see cref="Native.ServiceEnumeration"/>), and each service's own read.</summary>
+    private sealed class WindowsServiceList : IServiceList
+    {
+        public static readonly WindowsServiceList Instance = new();
+
+        public IntPtr Open(out int error)
+        {
+            var scm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE);
+            error = scm == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
+            return scm;
+        }
+
+        public IReadOnlyList<(string Name, string DisplayName)> List(IntPtr scm) =>
+            Native.ServiceEnumeration.Query(scm, SERVICE_WIN32, SERVICE_STATE_ALL).Select(e => (e.Name, e.DisplayName)).ToList();
+
+        public ServiceView Read(IntPtr scm, string name, string display) => ServiceControl.Read(scm, name, display);
+
+        public void Close(IntPtr scm) => CloseServiceHandle(scm);
+    }
+
+    /// <summary>
+    /// A listed service PoolWatch could not open or read: neither its start type nor its state is known, so the page says
+    /// "could not read", never "stopped", and no change acts on it (Apply and Put back refuse an Unknown start type).
+    /// </summary>
+    internal static ServiceView Unread(string name, string display) =>
+        new() { Name = name, DisplayName = display, StateUnknown = true, NeitherRunningNorStopped = true };
+
+    /// <summary>
+    /// One listed service as Windows gives it, through the manager handle <paramref name="scm"/> (read rights only). One
+    /// that cannot be opened is one PoolWatch could not read (<see cref="Unread"/>), never "stopped".
+    /// </summary>
+    internal static ServiceView Read(IntPtr scm, string name, string display)
     {
         var svc = OpenServiceW(scm, name, SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS);
-        if (svc == IntPtr.Zero) return new ServiceView { Name = name, DisplayName = display };
+        if (svc == IntPtr.Zero) return Unread(name, display);
         try
         {
             var start = ServiceStartType.Unknown;
@@ -103,7 +160,8 @@ internal static class ServiceControl
             return new ServiceView
             {
                 Name = name, DisplayName = display, StartType = start, Running = running, NeitherRunningNorStopped = between,
-                StateUnknown = StateUnknown(state), BinaryPath = path, Publisher = signer, MicrosoftSigned = isMs, ProcessId = pid, DependsOn = dependsOn,
+                StateUnknown = StateUnknown(state), Between = BetweenOf(state), BinaryPath = path, Publisher = signer, MicrosoftSigned = isMs,
+                ProcessId = pid, DependsOn = dependsOn,
             };
         }
         finally { CloseServiceHandle(svc); }
@@ -121,6 +179,13 @@ internal static class ServiceControl
     /// and STOPPED, so only STOPPED reads as stopped.
     /// </summary>
     internal static (bool running, bool between) RunState(uint state) => (state == SERVICE_RUNNING, state is not (SERVICE_RUNNING or SERVICE_STOPPED));
+
+    /// <summary>
+    /// Which state a service neither running nor stopped is in (pure; <see cref="ServiceView.Between"/>): starting, stopping,
+    /// resuming, pausing or paused; null for running, stopped, and a state Windows could not give.
+    /// </summary>
+    internal static ServiceRunState? BetweenOf(uint state) =>
+        state is SERVICE_START_PENDING or SERVICE_STOP_PENDING or SERVICE_CONTINUE_PENDING or SERVICE_PAUSE_PENDING or SERVICE_PAUSED ? (ServiceRunState)state : null;
 
     /// <summary>
     /// The services a service depends on, from its configuration's dependency list (names one after another, each ending in
@@ -157,7 +222,7 @@ internal static class ServiceControl
     private static readonly Dictionary<string, (string? signer, bool ms)> SignerCache = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// The signer of a service binary and whether it is Microsoft. C6 (review): WinVerifyTrust on the embedded signature,
+    /// The signer of a service binary and whether it is Microsoft. WinVerifyTrust on the embedded signature,
     /// else on the system catalog that lists the file (<see cref="Analysis.FileSignature.Verify"/>), so a catalog-signed
     /// Microsoft binary outside %WINDIR% is Microsoft (Protected unless the catalogue lists it), not "Unknown". The signer
     /// name comes from the verified trust state, not the obsolete X509Certificate.CreateFromSignedFile (SYSLIB0057).
@@ -192,17 +257,19 @@ internal static class ServiceControl
     /// </summary>
     /// <returns>
     /// <c>error</c>: the start type was not set (nothing changed). <c>notStopped</c>: the start type is set, but the service
-    /// is not known to have stopped, and why (Windows does not stop a service while one that depends on it runs).
+    /// is not known to have stopped, and why (Windows does not stop a service while one that depends on it has not
+    /// stopped, say). <c>wasRunning</c>: whether the service was running when the change acted on it, as the change saw
+    /// it (<see cref="Change"/>).
     /// </returns>
-    public static (string? error, NotDone? notStopped) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
+    public static (string? error, NotDone? notStopped, bool? wasRunning) Apply(ServicePlan.Operation op, IReadOnlySet<string> allowed, bool insiderEnrolled)
     {
-        if (Guard(op.Option.Service.Name, allowed, insiderEnrolled) is { } bad) return (bad, null);
+        if (Guard(op.Option.Service.Name, allowed, insiderEnrolled) is { } bad) return (bad, null, null);
         return SetStart(op.Option.Service.Name, op.NewStart, stopIfRunning: op.NewStart == ServiceStartType.Disabled);
     }
 
     /// <summary>
     /// Restores a service to its saved original start type and, when it was running before PoolWatch changed it, starts it
-    /// again (Part 3 review: Restore left a stopped service stopped). The same live gate as Apply; the record was already
+    /// again (Restore left a stopped service stopped). The same live gate as Apply; the record was already
     /// re-validated by <see cref="ServicePlan.GateRestore"/>.
     /// </summary>
     /// <returns>
@@ -214,7 +281,7 @@ internal static class ServiceControl
     {
         if (Guard(change.Service, allowed, insiderEnrolled) is { } bad) return (bad, null);
         // Putting Disabled back (undoing "Restore to Windows default") also stops it if it has started since.
-        var (err, notStopped) = SetStart(change.Service, change.OriginalStart, stopIfRunning: change.OriginalStart == ServiceStartType.Disabled);
+        var (err, notStopped, _) = SetStart(change.Service, change.OriginalStart, stopIfRunning: change.OriginalStart == ServiceStartType.Disabled);
         if (err is not null) return (err, null);
         if (notStopped is not null) return (null, notStopped);
         if (!ServicePlan.StartAfterRestore(change)) return (null, null);
@@ -283,11 +350,37 @@ internal static class ServiceControl
     internal const int StopLookMs = 250;
 
     /// <summary>
-    /// How long Windows can hold a stop request (<c>ControlService</c>) before it answers: it hands a control to one service
-    /// at a time, so the call blocks up to 30 seconds while any service is busy in its control handler (Microsoft's
-    /// ControlService documentation).
+    /// How long Windows can hold a stop request (<c>ControlService</c>) before it answers, unless set otherwise: it hands a
+    /// control to one service at a time, so the call blocks up to 30 seconds while any service is busy in its control
+    /// handler (Microsoft's ControlService documentation). <see cref="ControlWaitSeconds()"/> reads the wait set on this PC.
     /// </summary>
-    internal const int BusyServiceWaitSeconds = 30;
+    internal const int DefaultControlWaitSeconds = 30;
+
+    /// <summary>The longest wait <see cref="ControlWaitSecondsOf"/> gives: a day.</summary>
+    internal const int MaxControlWaitSeconds = 24 * 60 * 60;
+
+    /// <summary>
+    /// How long Windows holds a control request on this PC, in seconds: <see cref="DefaultControlWaitSeconds"/>, or the
+    /// ServicesPipeTimeout value (HKLM\SYSTEM\CurrentControlSet\Control, milliseconds) when it is set longer. Read each
+    /// time, so a change to it counts from the next check.
+    /// </summary>
+    public static int ControlWaitSeconds()
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control");
+            return ControlWaitSecondsOf(k?.GetValue("ServicesPipeTimeout"));
+        }
+        catch (Exception) { return DefaultControlWaitSeconds; }
+    }
+
+    /// <summary>
+    /// The wait for a ServicesPipeTimeout value as the registry gives it (pure): a DWORD of milliseconds (read as an
+    /// unsigned number), rounded up to whole seconds, never under <see cref="DefaultControlWaitSeconds"/> nor over
+    /// <see cref="MaxControlWaitSeconds"/>; anything else (no value, another type) is the default.
+    /// </summary>
+    internal static int ControlWaitSecondsOf(object? value) =>
+        value is int ms ? (int)Math.Clamp(((long)(uint)ms + 999) / 1000, DefaultControlWaitSeconds, MaxControlWaitSeconds) : DefaultControlWaitSeconds;
 
     /// <summary>The most stop requests <see cref="StopAndWait"/> makes: one, and one more after a first error 1061.</summary>
     internal const int StopRequestsAtMost = 2;
@@ -296,23 +389,35 @@ internal static class ServiceControl
     /// Sets the start type and, with <paramref name="stopIfRunning"/>, stops the service and waits until it has stopped
     /// (<see cref="Change"/>). <c>error</c>: the start type was not set, and nothing was stopped. <c>notStopped</c>: it was
     /// set (that is what sticks), but the service is not known to have stopped, and why: Windows does not stop a service
-    /// while one that depends on it runs, and PoolWatch never stops that other one.
+    /// while one that depends on it has not stopped, and PoolWatch never stops that other one.
     /// </summary>
-    private static (string? error, NotDone? notStopped) SetStart(string name, ServiceStartType start, bool stopIfRunning)
+    private static (string? error, NotDone? notStopped, bool? wasRunning) SetStart(string name, ServiceStartType start, bool stopIfRunning)
     {
-        if (!ServicePlan.IsValidStartType(start)) return ($"'{name}': refused start type {start}", null);
-        if (!IsElevated) return ("changing a service needs administrator rights", null);
+        if (!ServicePlan.IsValidStartType(start)) return ($"'{name}': refused start type {start}", null, null);
+        if (!IsElevated) return ("changing a service needs administrator rights", null, null);
         var scm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
-        if (scm == IntPtr.Zero) return ("could not open the service control manager: " + Marshal.GetLastWin32Error(), null);
+        if (scm == IntPtr.Zero) return ("could not open the service control manager: " + Marshal.GetLastWin32Error(), null, null);
         try
         {
-            var svc = OpenServiceW(scm, name, SERVICE_CHANGE_CONFIG | SERVICE_STOP | SERVICE_QUERY_STATUS);
-            if (svc == IntPtr.Zero) return ($"could not open '{name}': {Marshal.GetLastWin32Error()}", null);
-            try { return Change(new OpenService(svc), name, start, stopIfRunning); }
+            var svc = OpenServiceW(scm, name, ChangeAccess);
+            if (svc == IntPtr.Zero) return ($"could not open '{name}': {Marshal.GetLastWin32Error()}", null, null);
+            try { return Change(new OpenService(scm, svc, name), name, start, stopIfRunning); }
             finally { CloseServiceHandle(svc); }
         }
         finally { CloseServiceHandle(scm); }
     }
+
+    /// <summary>
+    /// The rights a change opens a service with: exactly those it uses (setting the start type, the stop, and reading the
+    /// state). Windows opens a service only when every right asked for is granted, so asking for one more would refuse
+    /// the whole change of a service whose access rules give administrators these but not that one. The list of the
+    /// services that depend on it is read on a handle of its own (<see cref="DependentsAccess"/>), opened only when
+    /// Windows refused the stop because of them.
+    /// </summary>
+    internal const uint ChangeAccess = SERVICE_CHANGE_CONFIG | SERVICE_STOP | SERVICE_QUERY_STATUS;
+
+    /// <summary>The right the list of a service's dependents is read with (<see cref="IServiceCalls.ActiveDependents"/>), on its own handle.</summary>
+    internal const uint DependentsAccess = SERVICE_ENUMERATE_DEPENDENTS;
 
     /// <summary>What a change does to an open service (the tests give a fake: no real service is changed there).</summary>
     internal interface IServiceCalls
@@ -323,6 +428,11 @@ internal static class ServiceControl
         uint State();
         /// <summary>Asks the service to stop: 0 when Windows took it, else Windows' error.</summary>
         int Stop();
+        /// <summary>
+        /// The services that depend on this one and have not stopped, with their states, as Windows lists them now (direct
+        /// and indirect ones); null when that list cannot be read.
+        /// </summary>
+        IReadOnlyList<DependentService>? ActiveDependents();
         /// <summary>Milliseconds on a clock that only goes forward.</summary>
         long Now { get; }
         void Sleep(int ms);
@@ -332,40 +442,61 @@ internal static class ServiceControl
     /// The start type first, then, with <paramref name="stop"/>, the stop (<see cref="StopAndWait"/>): a service already set
     /// to Disabled cannot be started again between the two (by a trigger, say). <c>error</c>: the start type was not set,
     /// and no stop was asked for, so nothing changed. <c>notStopped</c>: it was set, but the service is not known to have
-    /// stopped, and why.
+    /// stopped, and why. <c>wasRunning</c>: whether it was running when the change acted on it, as the change saw it: with a
+    /// stop, as <see cref="StopAndWait"/> says; without one, as its state reads once the start type is set
+    /// (<see cref="ServicePlan.WasRunning(ServiceRunState)"/>); null when that is not known.
     /// </summary>
-    internal static (string? error, NotDone? notStopped) Change(IServiceCalls svc, string name, ServiceStartType start, bool stop)
+    internal static (string? error, NotDone? notStopped, bool? wasRunning) Change(IServiceCalls svc, string name, ServiceStartType start, bool stop)
     {
         int error = svc.SetStartType(start);
-        if (error != 0) return ($"could not change '{name}': {error}", null);
-        return (null, stop ? StopAndWait(svc) : null);
+        if (error != 0) return ($"could not change '{name}': {error}", null, null);
+        if (!stop) return (null, null, ServicePlan.WasRunning((ServiceRunState)svc.State()));
+        var (why, wasRunning) = StopAndWait(svc);
+        return (null, why, wasRunning);
     }
 
     /// <summary>
-    /// Stops the service and waits until it has stopped, as <see cref="Looked"/> and <see cref="Answered"/> decide: null when
-    /// it has (or was stopped already), else why it is not known to have stopped. A service that is starting, resuming,
-    /// pausing or stopping is waited for to settle first, up to <see cref="StopWaitSeconds"/>; a stop Windows took is then
-    /// waited for up to as long again. A stop Windows cannot take now (error 1061: the service has just begun to pause,
-    /// say) is looked at again once, within the wait to settle; a second such answer ends it. A stop Windows refuses while
-    /// the service is paused (as the last look found it) says so (<see cref="NotDone.Paused"/>): it is still paused, not
-    /// running.
+    /// Stops the service and waits until it has stopped, as <see cref="Looked"/> and <see cref="Answered"/> decide:
+    /// <c>why</c> is null when it has (or was stopped already), else why it is not known to have stopped. A service that is
+    /// starting, resuming, pausing or stopping is waited for to settle first, up to <see cref="StopWaitSeconds"/>; a stop
+    /// Windows took is then waited for up to as long again. A stop Windows cannot take now (error 1061: the service has just
+    /// begun to pause, say) is looked at again once, within the wait to settle; a second such answer ends it. A stop Windows
+    /// refuses while the service is paused (as the last look found it) says so (<see cref="NotDone.Paused"/>): it is still
+    /// paused, not running. A stop refused because services that depend on it have not stopped (error 1051) carries those
+    /// services as Windows lists them right then (<see cref="NotDone.Dependents"/>).
+    /// <c>wasRunning</c>: the service was running when PoolWatch acted on it (<see cref="ServicePlan.WasRunning(ServiceRunState)"/>),
+    /// as the look that asked for the stop found it, which happens only while it runs or is paused: true, whatever came
+    /// after (a refusal, a state that could not be read); with no stop asked for, as the last look found it: true when it
+    /// was still starting, resuming or pausing when the wait to settle ended (Put back starts such a service again), false
+    /// when it was stopped or stopping, null when Windows could not give its state.
     /// </summary>
-    internal static NotDone? StopAndWait(IServiceCalls svc)
+    internal static (NotDone? why, bool? wasRunning) StopAndWait(IServiceCalls svc)
     {
-        bool asked = false, lookedAgain = false;
+        bool asked = false, lookedAgain = false, stopAsked = false;
+        uint last = 0;
         long until = svc.Now + StopWaitSeconds * 1000L;
         while (true)
         {
             uint state = svc.State();
+            if (!stopAsked) last = state; // from the look that asks for the stop on, which happens only while it runs or is paused
             var step = Looked(state, asked, svc.Now >= until);
             if (step.Next == StopNext.Wait) { svc.Sleep(StopLookMs); continue; }
-            if (step.Next != StopNext.AskStop) return step.Why;
+            if (step.Next != StopNext.AskStop) return (step.Why, WasRunning());
+            stopAsked = true; // only while it runs or is paused
             var answer = Answered(svc.Stop(), lookedAgain);
             if (answer.Next == StopNext.LookAgain) { lookedAgain = true; svc.Sleep(StopLookMs); continue; }
-            if (answer.Next != StopNext.Wait) return state == SERVICE_PAUSED && answer.Why is { } refused ? refused with { Paused = true } : answer.Why;
+            if (answer.Next != StopNext.Wait)
+            {
+                var why = answer.Why;
+                if (why is not null && state == SERVICE_PAUSED) why = why with { Paused = true };
+                if (why is { Cause: NotDoneCause.DependentsRunning }) why = why with { Dependents = svc.ActiveDependents() };
+                return (why, WasRunning());
+            }
             asked = true;
             until = svc.Now + StopWaitSeconds * 1000L;
         }
+
+        bool? WasRunning() => ServicePlan.WasRunning((ServiceRunState)last);
     }
 
     /// <summary>
@@ -410,23 +541,27 @@ internal static class ServiceControl
 
     /// <summary>
     /// What Windows' answer to the stop means (pure): 0, it took the stop (wait until it has stopped); 1062, it is not
-    /// running (it stopped meanwhile: done); 1051, a service that depends on it is running; 1061, it cannot take a stop
-    /// now (it has just begun to start, stop, resume or pause): look again, unless it was looked at again
-    /// (<paramref name="lookedAgain"/>) already; 1052, it takes no stop; any other code, as Windows gave it.
+    /// running (it stopped meanwhile: done); 1051, a service that depends on it has not stopped (running, paused, or
+    /// starting, stopping, resuming or pausing); 1061, it cannot take a stop now (it has just begun to start, stop, resume
+    /// or pause): look again, unless it was looked at again (<paramref name="lookedAgain"/>) already; 1052, it takes no
+    /// stop; any other code, as Windows gave it.
     /// </summary>
     internal static StopStep Answered(int error, bool lookedAgain) => error switch
     {
         0 => new(StopNext.Wait),
         1062 => new(StopNext.Done), // ERROR_SERVICE_NOT_ACTIVE
-        1051 => NotStopped("a service that depends on it is running", NotDoneCause.DependentsRunning), // ERROR_DEPENDENT_SERVICES_RUNNING
+        1051 => NotStopped("a service that depends on it has not stopped (Windows error 1051)", NotDoneCause.DependentsRunning), // ERROR_DEPENDENT_SERVICES_RUNNING
         1061 when !lookedAgain => new(StopNext.LookAgain), // ERROR_SERVICE_CANNOT_ACCEPT_CTRL
         1061 => NotStopped("it cannot take a stop now (Windows error 1061)"),
         1052 => NotStopped("it does not take a stop (Windows error 1052)", NotDoneCause.TakesNoStop), // ERROR_INVALID_SERVICE_CONTROL
         _ => NotStopped($"Windows did not stop it (error {error})"),
     };
 
-    /// <summary>The real calls, on a service handle opened with SERVICE_CHANGE_CONFIG, SERVICE_STOP and SERVICE_QUERY_STATUS.</summary>
-    private sealed class OpenService(IntPtr svc) : IServiceCalls
+    /// <summary>
+    /// The real calls, on a service handle opened with <see cref="ChangeAccess"/> (<paramref name="svc"/>); the list of its
+    /// dependents on a second handle, opened from <paramref name="scm"/> by <paramref name="name"/> when it is asked for.
+    /// </summary>
+    private sealed class OpenService(IntPtr scm, IntPtr svc, string name) : IServiceCalls
     {
         public int SetStartType(ServiceStartType start) =>
             ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, (uint)(int)start, SERVICE_NO_CHANGE, null, null, IntPtr.Zero, null, null, null, null) ? 0 : Marshal.GetLastWin32Error();
@@ -448,7 +583,63 @@ internal static class ServiceControl
             finally { Marshal.FreeHGlobal(buf); }
         }
 
+        public IReadOnlyList<DependentService>? ActiveDependents()
+        {
+            // A handle of its own (DependentsAccess): one that cannot be opened leaves the list not known, and the result
+            // names the dependents as the services were read.
+            var list = OpenServiceW(scm, name, DependentsAccess);
+            if (list == IntPtr.Zero) return null;
+            try { return Dependents(list); }
+            finally { CloseServiceHandle(list); }
+        }
+
+        private static List<DependentService>? Dependents(IntPtr list)
+        {
+            // Asked once with no room for the size, then again with that much (a dependent started between the two calls
+            // makes the second fail: then the list is not known).
+            if (EnumDependentServicesW(list, SERVICE_ACTIVE, IntPtr.Zero, 0, out int needed, out int count)) return count == 0 ? [] : null;
+            if (Marshal.GetLastWin32Error() != ERROR_MORE_DATA || needed <= 0 || needed > MaxDependentsBytes) return null;
+            var buf = Marshal.AllocHGlobal(needed);
+            try { return EnumDependentServicesW(list, SERVICE_ACTIVE, buf, needed, out _, out count) ? ParseDependents(buf, needed, count) : null; }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+
         public long Now => Environment.TickCount64;
         public void Sleep(int ms) => Thread.Sleep(ms);
+    }
+
+    private const int ERROR_MORE_DATA = 234;
+
+    /// <summary>The most room the list of dependents is given (it takes about 50 bytes a service).</summary>
+    internal const int MaxDependentsBytes = 1 << 20;
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool EnumDependentServicesW(IntPtr svc, uint state, IntPtr buf, int size, out int needed, out int count);
+
+    /// <summary>ENUM_SERVICE_STATUSW: two name addresses, then SERVICE_STATUS (seven DWORDs).</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct ENUM_SERVICE_STATUS { public IntPtr ServiceName, DisplayName; public uint ServiceType, CurrentState, ControlsAccepted, Win32ExitCode, ServiceSpecificExitCode, CheckPoint, WaitHint; }
+
+    /// <summary>
+    /// The entries EnumDependentServicesW wrote into <paramref name="buf"/> (<paramref name="size"/> bytes,
+    /// <paramref name="count"/> entries): each service's name and state. A name is read only from inside the buffer, up to
+    /// its end; an entry, or a name, that is not wholly inside it ends the list there.
+    /// </summary>
+    internal static List<DependentService> ParseDependents(IntPtr buf, int size, int count)
+    {
+        var list = new List<DependentService>();
+        int entry = Marshal.SizeOf<ENUM_SERVICE_STATUS>();
+        long start = (long)buf, end = start + size;
+        for (int i = 0; i < count && (long)i * entry + entry <= size; i++)
+        {
+            var e = Marshal.PtrToStructure<ENUM_SERVICE_STATUS>(buf + i * entry);
+            long name = (long)e.ServiceName;
+            if (name < start || name >= end) break;
+            int length = 0;
+            while (name + (length + 1) * sizeof(char) <= end && Marshal.ReadInt16((IntPtr)name, length * sizeof(char)) != 0) length++;
+            if (name + (length + 1) * sizeof(char) > end || length == 0) break; // no ending null inside the buffer, or no name
+            list.Add(new DependentService(Marshal.PtrToStringUni((IntPtr)name, length), (ServiceRunState)e.CurrentState));
+        }
+        return list;
     }
 }

@@ -13,8 +13,14 @@ internal sealed unsafe class SystemQueries : IDisposable
 {
     private readonly NativeBuffer _tagBuffer = new(256 * 1024);
     private readonly NativeBuffer _procBuffer = new(1024 * 1024);
-    private Dictionary<int, string>? _typeNames;
-    private DateTime _typeNamesAt;
+    /// <summary>The object type names, read again every hour on the clock that only goes forward (<see cref="TypeNamesAge"/>).</summary>
+    private readonly Kept<Dictionary<int, string>> _typeNames;
+
+    /// <summary>How long the object type names are kept before they are read again.</summary>
+    internal static readonly TimeSpan TypeNamesAge = TimeSpan.FromHours(1);
+
+    /// <param name="clock">Reads the two clocks (<see cref="Moment.Now"/>; a test gives its own).</param>
+    public SystemQueries(Func<Moment>? clock = null) => _typeNames = new(TypeNamesAge, ReadTypeNames, clock);
 
     public List<PoolTagEntry> QueryPoolTags()
     {
@@ -69,20 +75,19 @@ internal sealed unsafe class SystemQueries : IDisposable
         return (counts, sw.Elapsed);
     }
 
-    /// <summary>Object type index -> name (File, Event, Token...). Cached; types do not change at runtime, but
-    /// refreshed hourly in case a driver registers a new type.</summary>
-    public IReadOnlyDictionary<int, string> ObjectTypeNames()
+    /// <summary>Object type index -> name (File, Event, Token...). Kept; types do not change at runtime, but read again
+    /// hourly (<see cref="TypeNamesAge"/>) in case a driver registers a new type.</summary>
+    public IReadOnlyDictionary<int, string> ObjectTypeNames() => _typeNames.Value;
+
+    private static Dictionary<int, string> ReadTypeNames()
     {
-        if (_typeNames is not null && DateTime.UtcNow - _typeNamesAt < TimeSpan.FromHours(1)) return _typeNames;
         using var buf = new NativeBuffer(64 * 1024);
         int len = buf.Query((p, size) =>
         {
             int st = NativeMethods.NtQueryObject(IntPtr.Zero, NativeMethods.ObjectTypesInformation, (void*)p, size, out int ret);
             return (st, ret);
         });
-        _typeNames = ObjectTypesParser.Parse(buf.Span(len), buf.Address).ToDictionary(t => t.TypeIndex, t => t.Name);
-        _typeNamesAt = DateTime.UtcNow;
-        return _typeNames;
+        return ObjectTypesParser.Parse(buf.Span(len), buf.Address).ToDictionary(t => t.TypeIndex, t => t.Name);
     }
 
     public void Dispose()

@@ -209,27 +209,27 @@ public class TaskReadClockTests
     public void TheTasksAreReadAtFirstThenEveryFewMinutesNeverTwiceAtOnce()
     {
         var clock = new TaskReadClock(TasksTab.ReadEvery);
-        Assert.True(clock.Due(T0));
-        Assert.True(clock.Start(T0));
-        Assert.False(clock.Due(T0 + TimeSpan.FromHours(1)));   // one runs: its result shows
-        Assert.False(clock.Start(T0 + TimeSpan.FromSeconds(1)));
+        Assert.True(clock.Due(AppClocks.At(T0)));
+        Assert.True(clock.Start(AppClocks.At(T0)));
+        Assert.False(clock.Due(AppClocks.At(T0 + TimeSpan.FromHours(1))));   // one runs: its result shows
+        Assert.False(clock.Start(AppClocks.At(T0 + TimeSpan.FromSeconds(1))));
         clock.Finished(null);
         Assert.Equal((true, (string?)null), (clock.Loaded, clock.Error));
-        Assert.False(clock.Due(T0 + TimeSpan.FromSeconds(10)));  // a refresh only works the costs out again
-        Assert.True(clock.Due(T0 + TasksTab.ReadEvery));
+        Assert.False(clock.Due(AppClocks.At(T0 + TimeSpan.FromSeconds(10))));  // a refresh only works the costs out again
+        Assert.True(clock.Due(AppClocks.At(T0 + TasksTab.ReadEvery)));
     }
 
     [Fact]
     public void AFailedReadIsTriedAgainAfterTheSameWaitNotOnEveryRefresh()
     {
         var clock = new TaskReadClock(TasksTab.ReadEvery);
-        clock.Start(T0);
+        clock.Start(AppClocks.At(T0));
         clock.Finished("Access is denied.");
         Assert.Equal((false, "Access is denied."), (clock.Loaded, clock.Error));
-        Assert.False(clock.Due(T0 + TimeSpan.FromSeconds(10)));
-        Assert.False(clock.Due(T0 + TasksTab.ReadEvery - TimeSpan.FromSeconds(1)));
-        Assert.True(clock.Due(T0 + TasksTab.ReadEvery));
-        Assert.True(clock.Start(T0 + TimeSpan.FromSeconds(20)));  // Refresh tries at once
+        Assert.False(clock.Due(AppClocks.At(T0 + TimeSpan.FromSeconds(10))));
+        Assert.False(clock.Due(AppClocks.At(T0 + TasksTab.ReadEvery - TimeSpan.FromSeconds(1))));
+        Assert.True(clock.Due(AppClocks.At(T0 + TasksTab.ReadEvery)));
+        Assert.True(clock.Start(AppClocks.At(T0 + TimeSpan.FromSeconds(20))));  // Refresh tries at once
     }
 
     [Fact]
@@ -238,16 +238,16 @@ public class TaskReadClockTests
         // An AI agent's answer applied from the Services tab switched some startup apps: the tab must not show the old
         // switches until its next five-minute read.
         var clock = new TaskReadClock(TasksTab.ReadEvery);
-        clock.Start(T0);
+        clock.Start(AppClocks.At(T0));
         clock.Finished(null);
-        Assert.False(clock.Due(T0 + TimeSpan.FromSeconds(10)));
+        Assert.False(clock.Due(AppClocks.At(T0 + TimeSpan.FromSeconds(10))));
         clock.Stale();
-        Assert.True(clock.Due(T0 + TimeSpan.FromSeconds(10)));
+        Assert.True(clock.Due(AppClocks.At(T0 + TimeSpan.FromSeconds(10))));
         // Made stale while a read runs (one that may have read the list before the change): read again once it ends.
-        Assert.True(clock.Start(T0 + TimeSpan.FromSeconds(20)));
+        Assert.True(clock.Start(AppClocks.At(T0 + TimeSpan.FromSeconds(20))));
         clock.Stale();
-        Assert.False(clock.Due(T0 + TimeSpan.FromSeconds(21)));   // that read's result shows first
+        Assert.False(clock.Due(AppClocks.At(T0 + TimeSpan.FromSeconds(21))));   // that read's result shows first
         clock.Finished(null);
-        Assert.True(clock.Due(T0 + TimeSpan.FromSeconds(22)));
+        Assert.True(clock.Due(AppClocks.At(T0 + TimeSpan.FromSeconds(22))));
     }
 }

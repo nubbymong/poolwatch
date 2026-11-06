@@ -67,8 +67,8 @@ internal sealed class IncidentWriter
         _sessions = inc.Suspects.Take(5).ToDictionary(s => s.Key, s => _host.DescribeSession(s));
         var system = _host.GetSystemInfo();
         var w = inc.Window;
-        int from = w is null ? 0 : h.IndexAtOrAfter(w.FromUtc);
-        int to = w is null ? h.Count - 1 : Math.Max(from, h.IndexAtOrAfter((inc.ClosedUtc ?? w.ToUtc).AddTicks(1)) - 1);
+        int from = w is null ? 0 : w.FromIndex(h);
+        int to = w is null ? h.Count - 1 : Math.Max(from, (inc.ClosedUtc is { } closed ? w.AfterIndex(h, closed, w.ToMs is null ? null : inc.ClosedMs) : w.AfterIndex(h)) - 1);
         to = Math.Min(to, h.Count - 1);
 
         bool png = false;
@@ -85,6 +85,12 @@ internal sealed class IncidentWriter
         Atomic(Path.Combine(inc.Dir, "report.md"), BuildMarkdown(inc, info, details, system, events, png));
     }
 
+    /// <summary>
+    /// The incident in one line, the top suspect's confidence in the words of Pool causes' Confidence column
+    /// (<see cref="PlainWords.Confidence"/>), as everywhere in report.md: "...; top suspect Leaker.exe PID 7716, started
+    /// 03:46:08 (strong evidence)". A report an earlier build wrote keeps its older words ("(strongly correlated)"): every
+    /// reader takes the headline as written, and reads a suspect's confidence only from report.json's <c>confidence</c> name.
+    /// </summary>
     /// <param name="markdown">Escape free text for report.md (report.json keeps the raw headline).</param>
     public string Headline(Incident inc, TagInfo info, bool markdown = false)
     {
@@ -96,19 +102,20 @@ internal sealed class IncidentWriter
                 ? $"{tag} dropped {Fmt.Bytes(r.Dropped)} at {Fmt.Clock(r.TimeUtc)}"
                 : $"{tag} dropped sharply",
             IncidentKind.NonPagedTotal => $"Non-paged pool over {Fmt.Bytes(inc.Alerts.FirstOrDefault()?.Bytes ?? 0)} and rising; fastest-growing tag {tag} " +
-                                          $"grew {Fmt.Bytes(inc.Growth)} in {Fmt.Duration((inc.EndUtc ?? inc.ClosedUtc ?? inc.LastAlertUtc) - inc.OnsetUtc)}",
-            _ => $"{tag} grew {Fmt.Bytes(inc.Growth)} in {Fmt.Duration((inc.EndUtc ?? inc.ClosedUtc ?? inc.LastAlertUtc) - inc.OnsetUtc)}",
+                                          $"grew {Fmt.Bytes(inc.Growth)} in {Fmt.Duration(inc.GrowthSpan)}",
+            _ => $"{tag} grew {Fmt.Bytes(inc.Growth)} in {Fmt.Duration(inc.GrowthSpan)}",
         };
         if (inc.TraceOwners is { Count: > 0 } to)
             return $"{what}; the confirmation trace shows {(markdown ? Md(to[0].Owner.Name) : to[0].Owner.Name)} allocating {Fmt.Bytes(to[0].Net)} of it";
         var top = inc.Suspects.FirstOrDefault();
         if (top is null) return what + "; no suspect stood out";
-        var parts = new List<string> { $"{top.DisplayName} PID {top.Key.Pid}" };
+        string M(string s) => markdown ? Md(s) : s;
+        var parts = new List<string> { $"{M(top.DisplayName)} PID {top.Key.Pid}" };
         if (top.IsOrphan) parts.Add("orphaned");
         if (top.StartUtc > DateTime.MinValue) parts.Add($"started {Fmt.Clock(top.StartUtc)}");
         if (_sessions.GetValueOrDefault(top.Key)?.Transcript is { } t)
-            parts[^1] += $" by Claude Code session {Short(t.SessionId)}" + (t.WorkflowId is { } wf ? $" / workflow {wf}" : "") + (t.SubagentId is { } sa && t.WorkflowId is null ? $" / sub-agent {Short(sa)}" : "");
-        return $"{what}; top suspect {string.Join(", ", parts)} ({ConfidenceText(top.Confidence)})";
+            parts[^1] += $" by Claude Code session {M(Short(t.SessionId))}" + (t.WorkflowId is { } wf ? $" / workflow {M(wf)}" : "") + (t.SubagentId is { } sa && t.WorkflowId is null ? $" / sub-agent {M(Short(sa))}" : "");
+        return $"{what}; top suspect {string.Join(", ", parts)} ({PlainWords.Confidence(top.Confidence)})";
     }
 
     private static string Short(string id) => id.Length > 8 ? id[..8] : id;
@@ -116,17 +123,9 @@ internal sealed class IncidentWriter
     private static string Owner(TagInfo info) =>
         string.IsNullOrEmpty(info.Description) ? info.Owner : $"{info.Owner} {info.Description}";
 
-    public static string ConfidenceText(Confidence c) => c switch
-    {
-        Confidence.ConfirmedByTrace => "confirmed by trace",
-        Confidence.StronglyCorrelated => "strongly correlated",
-        Confidence.Correlated => "correlated",
-        _ => "weak signal",
-    };
-
     private object BuildJson(Incident inc, TagInfo info, Dictionary<ProcessKey, FileDetails?> details, SystemInfo system, List<LifecycleEvent> events) => new
     {
-        notice = Exporter.UnredactedNotice, // M1: the file as written is not for sharing as it is
+        notice = Exporter.UnredactedNotice, // The file as written is not for sharing as it is
         id = inc.Id,
         kind = inc.Kind,
         tag = inc.Tag.ToString(),
@@ -225,7 +224,7 @@ internal sealed class IncidentWriter
         var sb = new StringBuilder();
         string headline = Headline(inc, info, markdown: true);
         sb.AppendLine($"# {headline}").AppendLine();
-        sb.AppendLine($"> {Exporter.UnredactedNotice}").AppendLine(); // M1
+        sb.AppendLine($"> {Exporter.UnredactedNotice}").AppendLine(); // first, that the report is not redacted
         sb.AppendLine($"- Incident `{inc.Id}` ({inc.Kind}{(inc.IsOpen ? ", still open" : "")}), opened {Fmt.Stamp(inc.OpenedUtc)}" +
                       (inc.ClosedUtc is { } c ? $", closed {Fmt.Stamp(c)}" : ""));
         sb.AppendLine($"- Tag `{inc.Tag}` (raw 0x{inc.Tag.Raw:x8}; tags are case-sensitive): owner **{Md(info.Owner)}**" +
@@ -251,29 +250,29 @@ internal sealed class IncidentWriter
 
         if (png) sb.AppendLine("![timeline](timeline.png)").AppendLine();
 
-        // In plain words: the trace when there is one (2a), else the suspects grouped by who they work for.
+        // In plain words: the trace when there is one, else the suspects grouped by who they work for.
         var owners = PlainOwners(inc);
         string? traced = TraceAnswer(inc, info);
         if (traced is not null || owners is not null)
         {
             sb.AppendLine("## In plain words").AppendLine();
-            sb.AppendLine(Md(traced ?? owners!.Line)).AppendLine();
+            sb.AppendLine(MdText.Line(traced ?? owners!.Line)).AppendLine();
             if (inc.TraceOwners is { Count: > 0 } tos)
             {
                 foreach (var o in tos.Take(3))
-                    sb.AppendLine($"- **{Md(o.Owner.Name)}** (confirmed by trace): {Fmt.SignedBytes(o.Net)} net in {o.Processes.Count:N0} process(es), " +
+                    sb.AppendLine($"- **{Md(o.Owner.Name)}** ({PlainWords.Confidence(Confidence.ConfirmedByTrace)}): {Fmt.SignedBytes(o.Net)} net in {o.Processes.Count:N0} process(es), " +
                                   $"{o.Allocs:N0} allocations, {o.Frees:N0} frees" + (o.PerShortCommand > 0 ? $"; about {Fmt.Bytes(o.PerShortCommand)} kept per short command ({o.ShortOnes.Count:N0} traced)" : "") +
                                   (o.StartsInWindow > 0 ? $"; {o.StartsInWindow:N0} process starts during the growth" : "") + ".");
                 var corr = owners?.Owners.Where(o => o.Meaningful && !tos.Any(t => t.Owner.Key == o.Owner.Key)).Take(3).ToList() ?? [];
                 if (corr.Count > 0)
                 {
                     sb.AppendLine().AppendLine("Correlation only (no allocation in the trace):").AppendLine();
-                    foreach (var o in corr) sb.AppendLine($"- {Md(o.Name)} ({OwnerRanking.Strength(o.Confidence)}, correlation only): {Md(string.Join("; ", o.Plain))}");
+                    foreach (var o in corr) sb.AppendLine($"- {Md(o.Name)} ({PlainWords.Confidence(o.Confidence)}, correlation only): {Md(string.Join("; ", o.Plain))}");
                 }
             }
             else if (owners is { } pw)
                 foreach (var o in pw.Owners.Where(o => o.Meaningful).Take(3))
-                    sb.AppendLine($"- **{Md(o.Name)}** ({OwnerRanking.Strength(o.Confidence)}): {Md(string.Join("; ", o.Plain))}. {Md(o.Summary)}");
+                    sb.AppendLine($"- **{Md(o.Name)}** ({PlainWords.Confidence(o.Confidence)}): {Md(string.Join("; ", o.Plain))}. {Md(o.Summary)}");
             sb.AppendLine();
         }
 
@@ -295,7 +294,7 @@ internal sealed class IncidentWriter
             sb.AppendLine("| # | Process | PID | Confidence | Score | Evidence |");
             sb.AppendLine("|---|---|---|---|---|---|");
             foreach (var s in inc.Suspects)
-                sb.AppendLine($"| {s.Rank} | {Md(s.DisplayName)}{(s.IsOrphan ? " (orphan)" : "")} | {s.Key.Pid} | {ConfidenceText(s.Confidence)} | {s.Score:0.00} | {Md(string.Join("; ", s.Evidence))} |");
+                sb.AppendLine($"| {s.Rank} | {Md(s.DisplayName)}{(s.IsOrphan ? " (orphan)" : "")} | {s.Key.Pid} | {PlainWords.Confidence(s.Confidence)} | {s.Score:0.00} | {Md(string.Join("; ", s.Evidence))} |");
             sb.AppendLine();
         }
 
@@ -319,27 +318,27 @@ internal sealed class IncidentWriter
         foreach (var s in inc.Suspects.Take(5))
         {
             sb.AppendLine($"### {s.Rank}. {Md(s.DisplayName)} (PID {s.Key.Pid})").AppendLine();
-            sb.AppendLine($"- Executable: `{s.ImagePath ?? s.Image}`");
+            sb.AppendLine($"- Executable: `{MdCode(s.ImagePath ?? s.Image)}`");
             if (details.GetValueOrDefault(s.Key) is { } f)
             {
-                sb.AppendLine($"- File version: {f.FileVersion ?? "n/a"}; company: {f.Company ?? "n/a"}; product: {f.Product ?? "n/a"}");
-                sb.AppendLine($"- Signature: {f.SignatureStatus}{(f.Signer is not null ? $", signer {f.Signer}" : "")}");
+                sb.AppendLine($"- File version: {Md(f.FileVersion ?? "n/a")}; company: {Md(f.Company ?? "n/a")}; product: {Md(f.Product ?? "n/a")}");
+                sb.AppendLine($"- Signature: {Md(f.SignatureStatus)}{(f.Signer is not null ? $", signer {Md(f.Signer)}" : "")}");
             }
-            sb.AppendLine($"- Command line: `{(s.CommandLine ?? "(not captured)").Replace("`", "'")}`");
-            if (s.User is not null) sb.AppendLine($"- User: {_host.DisplayUser(s.User)}");
+            sb.AppendLine($"- Command line: `{MdCode(s.CommandLine ?? "(not captured)")}`");
+            if (s.User is not null) sb.AppendLine($"- User: {Md(_host.DisplayUser(s.User))}");
             sb.AppendLine($"- Parent chain: {Md(string.Join(" › ", s.Ancestry))}");
             if (_sessions.GetValueOrDefault(s.Key) is { } sd)
             {
                 sb.AppendLine($"- AICC / Claude Code: {Md(sd.Chain)}");
-                if (sd.Context?.ConfigDir is { } cfg) sb.AppendLine($"- Claude config: `{cfg}`");
+                if (sd.Context?.ConfigDir is { } cfg) sb.AppendLine($"- Claude config: `{MdCode(cfg)}`");
                 if (sd.Transcript is { } t)
-                    sb.AppendLine($"- Issued by Claude Code session `{t.SessionId}` in project `{t.Project}`" +
-                                  (t.WorkflowId is { } wf ? $", workflow `{wf}`" : "") + (t.SubagentId is { } sa ? $", sub-agent `{sa}`" : "") +
-                                  (t.TimestampUtc is { } ts ? $" at {Fmt.Stamp(ts)}" : "") + $" (`{MdCode(t.Command)}` in `{Path.GetFileName(t.File)}`)");
+                    sb.AppendLine($"- Issued by Claude Code session `{MdCode(t.SessionId)}` in project `{MdCode(t.Project)}`" +
+                                  (t.WorkflowId is { } wf ? $", workflow `{MdCode(wf)}`" : "") + (t.SubagentId is { } sa ? $", sub-agent `{MdCode(sa)}`" : "") +
+                                  (t.TimestampUtc is { } ts ? $" at {Fmt.Stamp(ts)}" : "") + $" (`{MdCode(t.Command)}` in `{MdCode(Path.GetFileName(t.File))}`)");
                 else if (sd.SearchPending) sb.AppendLine("- Claude Code transcript search: in progress (the report is rewritten when it finishes)");
                 else sb.AppendLine("- Claude Code transcript search: no matching tool call found within the search window");
             }
-            if (s.Services.Count > 0) sb.AppendLine($"- Services: {string.Join(", ", s.Services)}");
+            if (s.Services.Count > 0) sb.AppendLine($"- Services: {Md(string.Join(", ", s.Services))}");
             sb.AppendLine($"- Started: {(s.StartUtc > DateTime.MinValue ? Fmt.Stamp(s.StartUtc) : "unknown")}" +
                           (s.ExitUtc is { } x ? $"; exited {Fmt.Stamp(x)}{(s.ExitCode is { } code ? $" (code {code})" : "")}" : "; still running") +
                           (s.OrphanedUtc is { } o ? $"; orphaned {Fmt.Stamp(o)}" : ""));
@@ -364,7 +363,7 @@ internal sealed class IncidentWriter
         sb.AppendLine("## Confirmation trace").AppendLine();
         if (c.Error is not null) sb.AppendLine($"The trace failed: {Md(c.Error)}").AppendLine();
         if (c.EtlPath is not null)
-            sb.AppendLine($"- Recorded {Fmt.Clock(c.StartUtc)}-{Fmt.Clock(c.EndUtc)} ({Fmt.Duration(c.EndUtc - c.StartUtc)}) with wpr.exe; saved as `{Path.GetFileName(c.EtlPath)}`; " +
+            sb.AppendLine($"- Recorded {Fmt.Clock(c.StartUtc)}-{Fmt.Clock(c.EndUtc)} ({Fmt.Duration(c.Duration)}) with wpr.exe; saved as `{Path.GetFileName(c.EtlPath)}`; " +
                           $"tags {string.Join(", ", c.Tags.Select(t => $"`{t.ToDisplay()}`"))}.");
         if (c.PoolEventsParsed)
             sb.AppendLine($"- Parsed with {c.Library}: {c.PoolEvents:N0} pool events ({c.StackedPoolEvents:N0} with stacks), " +
@@ -373,13 +372,13 @@ internal sealed class IncidentWriter
         sb.AppendLine();
         if (c.PoolEventsParsed && inc.Traced is { Count: > 0 } traced)
         {
-            // 2b: every traced process with who it was: identity, command line, parent chain and owner (PID + create time).
+            // Every traced process with who it was: identity, command line, parent chain and owner (PID + create time).
             sb.AppendLine($"Net `{inc.Tag.ToDisplay()}` bytes each process allocated during the trace (allocations minus frees of those allocations):").AppendLine();
             sb.AppendLine("| Process | PID | Started | Owner | Net | Allocs | Frees | Command line | Parent chain |");
             sb.AppendLine("|---|---|---|---|---|---|---|---|---|");
             foreach (var t in traced.OrderByDescending(t => t.Usage.NetBytes).Take(30))
                 sb.AppendLine($"| {Md(t.Name)} | {t.Usage.Pid} | {(t.StartUtc is { } st ? Fmt.Clock(st) : "before the trace")} | {Md(t.Identity.Owner.Name)} | " +
-                              $"{Fmt.SignedBytes(t.Usage.NetBytes)} | {t.Usage.Allocs:N0} | {t.Usage.Frees:N0} | `{MdCode(Short(t.CommandLine ?? "(not captured)", 120))}` | {Md(string.Join(" › ", t.Chain))} |");
+                              $"{Fmt.SignedBytes(t.Usage.NetBytes)} | {t.Usage.Allocs:N0} | {t.Usage.Frees:N0} | `{MdText.CodeCell(Short(t.CommandLine ?? "(not captured)", 120))}` | {Md(string.Join(" › ", t.Chain))} |");
             if (traced.Count > 30) sb.AppendLine($"\n({traced.Count - 30:N0} more processes in report.json)");
             sb.AppendLine();
             var others = c.Pool.Where(u => u.Tag != inc.Tag).Take(10).ToList();
@@ -411,7 +410,7 @@ internal sealed class IncidentWriter
         if (c.Cpu is { } cpu)
         {
             sb.AppendLine("### CPU during the trace").AppendLine();
-            sb.AppendLine(Md(cpu.Summary())).AppendLine();
+            sb.AppendLine(MdText.Line(cpu.Summary())).AppendLine();
             sb.AppendLine("| Module | CPU (ms) | Share | | Waited in | Wait (ms) | Switches |").AppendLine("|---|---:|---:|---|---|---:|---:|");
             for (int i = 0; i < Math.Max(Math.Min(10, cpu.TopCpu.Count), Math.Min(10, cpu.TopWait.Count)); i++)
             {
@@ -420,7 +419,7 @@ internal sealed class IncidentWriter
                 sb.AppendLine($"| {(m is null ? "" : Md(m.Module))} | {(m is null ? "" : $"{m.Ms:N0}")} | {(m is null ? "" : $"{m.Share:P1}")} | | {(w is null ? "" : Md(w.Module))} | {(w is null ? "" : $"{w.WaitMs:N0}")} | {(w is null ? "" : $"{w.Switches:N0}")} |");
             }
             if (cpu.TopDpcIsr.Count > 0) sb.AppendLine().AppendLine("DPC / ISR time by module: " + string.Join(", ", cpu.TopDpcIsr.Select(d => $"{Md(d.Module)} {d.Ms:N0} ms")));
-            // Addendum 2 C: the top kernel functions by CPU and by wait (named from local symbols, else module + offset).
+            // The top kernel functions by CPU and by wait (named from local symbols, else module + offset).
             if (cpu.TopFunctions.Count > 0 || cpu.TopWaitFunctions.Count > 0)
             {
                 // Without symbols each row is one instruction address (module + offset), not a whole function: said in the header.
@@ -434,7 +433,7 @@ internal sealed class IncidentWriter
                     sb.AppendLine($"| {(f is null ? "" : Md(f.Name))} | {(f is null ? "" : $"{f.Ms:N0}")} | {(f is null ? "" : $"{f.Share:P1}")} | | {(w is null ? "" : Md(w.Name))} | {(w is null ? "" : $"{w.Ms:N0}")} |");
                 }
             }
-            if (cpu.FunctionsNote.Length > 0) sb.AppendLine().AppendLine(Md(cpu.FunctionsNote));
+            if (cpu.FunctionsNote.Length > 0) sb.AppendLine().AppendLine(MdText.Line(cpu.FunctionsNote));
             sb.AppendLine().AppendLine("File-system lookups show as FLTMGR.SYS / refs.sys / Ntfs.sys, memory-manager work as ntoskrnl.").AppendLine();
         }
         if (c.Files.Count > 0)
@@ -457,13 +456,14 @@ internal sealed class IncidentWriter
     private (TagRates During, TagRates? Before)? Shape(Incident inc)
     {
         if (_history is not { } h || h.Count < 2) return null;
-        int i0 = h.IndexAtOrAfter(inc.OnsetUtc), i1 = Math.Min(h.Count - 1, h.IndexAtOrAfter((inc.EndUtc ?? inc.ClosedUtc ?? h.Times[^1]).AddTicks(1)) - 1);
+        // The episode's samples are found on the clock that only goes forward (the incident's onset and end, the samples' Ms).
+        int i0 = h.IndexAtOrAfterMs(inc.OnsetMs), i1 = Math.Min(h.Count - 1, h.IndexAtOrAfterMs((inc.EndMs ?? inc.ClosedMs ?? h.Ms[^1]) + 1) - 1);
         if (i1 <= i0) return null;
         var r = h.TagRatesBetween(inc.Tag, i0, i1);
         // The same span (at most 10 min) just before the onset: the tag's background churn to compare against. An idle
         // baseline (or none kept: the tag was too small) changes nothing, so it is not reported either.
-        var span = TimeSpan.FromMinutes(Math.Min(10, (h.Times[i1] - h.Times[i0]).TotalMinutes));
-        int b0 = h.IndexAtOrAfter(inc.OnsetUtc - span);
+        long spanMs = Math.Min(600_000, h.Ms[i1] - h.Ms[i0]);
+        int b0 = h.IndexAtOrAfterMs(inc.OnsetMs - spanMs);
         if (b0 >= 0 && i0 - b0 >= 2 && h.TagRatesBetween(inc.Tag, b0, i0) is { Shape: not AllocShape.Idle } baseline)
             return (r with { Shape = LeakShapes.Classify(r.AllocsPerMin, r.FreesPerMin, baseline) }, baseline);
         return (r, null);
@@ -473,16 +473,16 @@ internal sealed class IncidentWriter
     private string ShapeSpan(Incident inc)
     {
         if (_history is not { Count: > 1 } h) return "during the growth";
-        int i0 = h.IndexAtOrAfter(inc.OnsetUtc);
+        int i0 = h.IndexAtOrAfterMs(inc.OnsetMs);
         int first = h.FirstStoredIndex(inc.Tag, i0, h.Count - 1);
         if (first < 0) return "during the growth";
         var from = h.Times[first];
-        if (h.Times[0] > inc.OnsetUtc) return $"from {Fmt.Clock(from)} (the history no longer holds the start of the growth)";
-        return from - inc.OnsetUtc > TimeSpan.FromSeconds(30) ? $"from {Fmt.Clock(from)} (the tag was too small to keep its counters before)" : "during the growth";
+        if (h.Ms[0] > inc.OnsetMs) return $"from {Fmt.Clock(from)} (the history no longer holds the start of the growth)";
+        return h.Ms[first] - inc.OnsetMs > 30_000 ? $"from {Fmt.Clock(from)} (the tag was too small to keep its counters before)" : "during the growth";
     }
 
     private SystemCounters? SystemAtEnd() => _history is { Count: > 0 } h ? h.System[^1] : null;
-    /// <summary>The answer from the confirmation trace (2a), or null without a trace that holds the tag's growth.</summary>
+    /// <summary>The answer from the confirmation trace, or null without a trace that holds the tag's growth.</summary>
     private static string? TraceAnswer(Incident inc, TagInfo info) =>
         inc.Capture is { } c && inc.TraceOwners is { Count: > 0 } o ? TraceAttribution.Answer(inc, info, o, c) : null;
 
@@ -497,7 +497,7 @@ internal sealed class IncidentWriter
         {
             var owners = inc.Owners ?? OwnerRanking.Rank(h, inc.Suspects, inc.Tag, w, inc.Growth, s => Identity.ProcessIdentities.Of(_registry.Ancestry(s.Key) is { Count: > 0 } c ? c : [new ProcessRecord { Key = s.Key, Image = s.Image }]));
             var info = _knowledge.Lookup(inc.Tag);
-            var span = (inc.EndUtc ?? inc.ClosedUtc ?? w.ToUtc) - inc.OnsetUtc;
+            var span = TimeSpan.FromMilliseconds((inc.EndMs ?? inc.ClosedMs ?? w.ToMs ?? inc.LastAlertMs) - inc.OnsetMs);
             var (paged, nonPaged) = h.TagAt(inc.Tag, h.Count - 1);
             _plainFor = inc;
             return _plain = OwnerRanking.Answer(info, inc.Tag, paged, nonPaged, inc.Growth, Fmt.Duration(span), owners);
@@ -505,46 +505,59 @@ internal sealed class IncidentWriter
         catch { return null; }
     }
 
+    /// <summary>
+    /// A volume's line in report.md's System section; "(Dev Drive)" only for one Windows said is a Dev Drive, never for one
+    /// it gave no answer for (null).
+    /// </summary>
+    internal static string SystemVolume(VolumeInfo v) =>
+        $"- Volume {v.Root} {Md(v.FileSystem)}{(v.IsDevDrive == true ? " (Dev Drive)" : "")} {v.DriveType}{(v.Label.Length > 0 ? $" \"{Md(v.Label)}\"" : "")}";
+
+    /// <summary>A volume's line in the bug report's Environment; "Dev Drive" only for one Windows said is a Dev Drive.</summary>
+    internal static string EnvironmentVolume(VolumeInfo v) => $"- {v.Root} {Md(v.FileSystem)}{(v.IsDevDrive == true ? " Dev Drive" : "")}";
+
     private static void AppendSystem(StringBuilder sb, SystemInfo s)
     {
         sb.AppendLine("## System").AppendLine();
-        sb.AppendLine($"- Machine: {s.Machine}; {s.OsDescription} (build {s.OsBuild}); {s.LogicalCpus} logical CPUs; {Fmt.Bytes(s.RamBytes)} RAM" +
+        sb.AppendLine($"- Machine: {Md(s.Machine)}; {Md(s.OsDescription)} (build {Md(s.OsBuild)}); {s.LogicalCpus} logical CPUs; {Fmt.Bytes(s.RamBytes)} RAM" +
                       (s.BootUtc is { } b ? $"; booted {Fmt.Stamp(b)}" : ""));
-        foreach (var v in s.Volumes)
-            sb.AppendLine($"- Volume {v.Root} {v.FileSystem}{(v.IsDevDrive == true ? " (Dev Drive)" : "")} {v.DriveType}{(v.Label.Length > 0 ? $" \"{v.Label}\"" : "")}");
-        sb.AppendLine($"- Antivirus: {s.AntiVirus}");
+        foreach (var v in s.Volumes) sb.AppendLine(SystemVolume(v));
+        sb.AppendLine($"- Antivirus: {Md(s.AntiVirus)}");
         if (s.PoolWatchCost is { } cost) sb.AppendLine($"- {Md(cost)}");
         if (s.FilterDrivers.Count > 0)
         {
             sb.AppendLine("- File-system filter drivers (`fltmc filters`):").AppendLine();
             sb.AppendLine("```");
-            foreach (var l in s.FilterDrivers) sb.AppendLine(l);
+            foreach (var l in s.FilterDrivers) sb.AppendLine(MdCode(l)); // no backtick: the fence cannot be ended early
             sb.AppendLine("```");
         }
         sb.AppendLine();
     }
 
+    /// <summary>
+    /// The draft for the vendor, meant to be pasted elsewhere: every name, version and path in it comes from the suspect
+    /// process or its file, so each goes through <see cref="Md"/> (outside a code span) or <see cref="MdCode"/> (inside).
+    /// </summary>
     private void AppendBugReport(StringBuilder sb, Incident inc, TagInfo info, Dictionary<ProcessKey, FileDetails?> details, SystemInfo s, string headline)
     {
         var top = inc.Suspects.FirstOrDefault();
         var f = top is null ? null : details.GetValueOrDefault(top.Key);
         string vendor = f?.Company ?? f?.Signer ?? top?.Image ?? info.Owner;
-        sb.AppendLine($"## Draft bug report for {vendor}").AppendLine();
+        sb.AppendLine($"## Draft bug report for {Md(vendor)}").AppendLine();
         sb.AppendLine("**Summary**").AppendLine();
         sb.AppendLine(top is null
-            ? $"Kernel pool tag `{inc.Tag.ToDisplay()}` ({info.Owner}) grows abnormally; no single process stood out."
-            : $"While {top.Image}{(f?.FileVersion is { } fv ? $" {fv}" : "")} runs, kernel pool tag `{inc.Tag.ToDisplay()}` ({Md(Owner(info))}) grows by {Fmt.Bytes(inc.Growth)} " +
-              $"in {Fmt.Duration((inc.EndUtc ?? inc.ClosedUtc ?? inc.LastAlertUtc) - inc.OnsetUtc)}" +
+            ? $"Kernel pool tag `{inc.Tag.ToDisplay()}` ({Md(info.Owner)}) grows abnormally; no single process stood out."
+            : $"While {Md(top.Image)}{(f?.FileVersion is { } fv ? $" {Md(fv)}" : "")} runs, kernel pool tag `{inc.Tag.ToDisplay()}` ({Md(Owner(info))}) grows by {Fmt.Bytes(inc.Growth)} " +
+              $"in {Fmt.Duration(inc.GrowthSpan)}" +
               (inc.Retention is not null ? " and is not released after the activity stops" : inc.Release is not null ? "; the memory comes back only when the work is undone" : "") + ".");
         sb.AppendLine();
         sb.AppendLine("**Environment**").AppendLine();
-        sb.AppendLine($"- {s.OsDescription}, build {s.OsBuild}, {s.LogicalCpus} logical CPUs, {Fmt.Bytes(s.RamBytes)} RAM");
-        foreach (var v in s.Volumes) sb.AppendLine($"- {v.Root} {v.FileSystem}{(v.IsDevDrive == true ? " Dev Drive" : "")}");
-        sb.AppendLine($"- Antivirus: {s.AntiVirus}; filter drivers: {(s.FilterDrivers.Count > 0 ? "see the System section" : "unknown")}");
-        if (top is not null) sb.AppendLine($"- Process: `{top.ImagePath ?? top.Image}`{(f?.FileVersion is { } v2 ? $", version {v2}" : "")}");
+        sb.AppendLine($"- {Md(s.OsDescription)}, build {Md(s.OsBuild)}, {s.LogicalCpus} logical CPUs, {Fmt.Bytes(s.RamBytes)} RAM");
+        foreach (var v in s.Volumes) sb.AppendLine(EnvironmentVolume(v));
+        sb.AppendLine($"- Antivirus: {Md(s.AntiVirus)}; filter drivers: {(s.FilterDrivers.Count > 0 ? "see the System section" : "unknown")}");
+        if (top is not null) sb.AppendLine($"- Process: `{MdCode(top.ImagePath ?? top.Image)}`{(f?.FileVersion is { } v2 ? $", version {Md(v2)}" : "")}");
         sb.AppendLine();
         sb.AppendLine("**Steps to reproduce** (template: fill in)").AppendLine();
-        sb.AppendLine($"1. Start {(top?.Image ?? "<process>")}{(top?.CommandLine is { } cl ? $" as `{cl.Replace("`", "'")}`" : "")}.");
+        sb.AppendLine($"1. Start {Md(top?.Image ?? "<process>")}{(top?.CommandLine is { } cl ? $" as `{MdCode(cl)}`" : "")}.");
         sb.AppendLine("2. <what it was doing: the workload, files or folders involved>.");
         sb.AppendLine($"3. Watch kernel pool tag `{inc.Tag.ToDisplay()}` (poolmon, or the attached timeline.csv).");
         sb.AppendLine();
@@ -632,10 +645,15 @@ internal sealed class IncidentWriter
         Profiler.Wrote(path, content.Length);
     }
 
-    /// <summary>Text inside a `code span`: no entity escaping there, only what would end or break the span.</summary>
-    private static string MdCode(string s) => s.Replace("`", "'").Replace("\r", " ").Replace("\n", " ").Replace("\0", " ");
+    /// <summary>Text inside a `code span` (<see cref="MdText.Code"/>): only what would end the span or the line changes.</summary>
+    private static string MdCode(string s) => MdText.Code(s);
 
-    /// <summary>Markdown-safe text: table pipes, line breaks, NULs, and and "<" (GitHub drops unknown tags like &lt;unknown&gt;).</summary>
-    private static string Md(string s) =>
-        s.Replace("|", "\\|").Replace("\r", " ").Replace("\n", " ").Replace("\0", " ").Replace("<", "&lt;");
+    /// <summary>
+    /// Free text outside a code span (<see cref="MdText.Text"/>): it cannot start a link, an image, a code span, an HTML tag,
+    /// a table cell or a character reference, or break the line (a web or e-mail address, an @mention, an issue reference or
+    /// a commit hash goes in a code span, and an '&amp;' that could start a reference such as "&amp;commat;" is escaped, so
+    /// GitHub.com makes no link, mention or reference of it either); characters a reader may not see (bidi, zero-width, tag
+    /// characters, variation selectors) are left out.
+    /// </summary>
+    private static string Md(string s) => MdText.Text(s);
 }

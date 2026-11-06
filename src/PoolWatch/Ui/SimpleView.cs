@@ -29,17 +29,17 @@ internal sealed class SimpleView : UserControl
     /// <summary>Cards taken off at the last rebuild, disposed at the next: a rebuild may run inside one of their own clicks.</summary>
     private readonly List<Card> _retired = [];
     private readonly Font _headingFont = new("Segoe UI Semibold", 8.25f), _titleFont = new("Segoe UI Semibold", 9.5f), _textFont = new("Segoe UI", 9f);
-    private readonly Func<DateTime> _utcNow;
+    private readonly Func<Core.Model.Moment> _clock;
     private string _shown = "";
     /// <summary>How many of the cards fit (the first ones: they come by priority).</summary>
     private int _fitting;
-    /// <summary>The offer whose answer stays, and until when.</summary>
-    private (string Key, DateTime UntilUtc)? _answered;
+    /// <summary>The offer whose answer is shown, and until when, on the clock that only goes forward.</summary>
+    private (string Key, long UntilMs)? _answered;
 
-    /// <param name="utcNow">The clock the answers stay by (tests set it).</param>
-    public SimpleView(Func<DateTime>? utcNow = null)
+    /// <param name="clock">The clocks the answers stay by (<see cref="Core.Model.Moment.Now"/>; tests set it): an answer stays <see cref="AnswerFor"/> on the forward one.</param>
+    public SimpleView(Func<Core.Model.Moment>? clock = null)
     {
-        _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _clock = clock ?? Core.Model.Moment.Now;
         BackColor = SystemColors.Window;
         Padding = Px(16, 12, 16, 10);
         _heading.Font = _headingFont;
@@ -106,7 +106,7 @@ internal sealed class SimpleView : UserControl
     /// </summary>
     public void ShowCards(IReadOnlyList<Recommendation> offers, IReadOnlyList<DiscoveryCard> features)
     {
-        bool answerEnds = _answered is { } answered && _utcNow() >= answered.UntilUtc;
+        bool answerEnds = _answered is { } answered && _clock().Ms >= answered.UntilMs;
         if (answerEnds) _answered = null;
         var items = offers.Select(CardItem.Of).Concat(features.Select(CardItem.Of)).Take(MaxCards).ToList();
         string key = string.Join("\n", items.Select(i => $"{i.Key}\t{i.Title}\t{i.Text}\t{i.Action}"));
@@ -160,7 +160,7 @@ internal sealed class SimpleView : UserControl
         {
             _answer.Text = message;
             _answer.ForeColor = ok ? UiColors.Good : Color.Firebrick;
-            _answered = (r.Key, _utcNow() + AnswerFor);
+            _answered = (r.Key, _clock().Ms + (long)AnswerFor.TotalMilliseconds);
         }
         if (_cards.FirstOrDefault(c => c.Item.Key == r.Key) is { } card)
         {
@@ -187,7 +187,10 @@ internal sealed class SimpleView : UserControl
 
     /// <summary>
     /// The cards under the graph in one row, each as wide as the row allows for as many cards as fit: three when they fit
-    /// above the graph's least height, else two wider (and lower) ones, else one. The answer that stays is above them.
+    /// above the graph's least height, else two wider (and lower) ones, else one. The cards are as tall as the tallest, and
+    /// each one's action and Hide sit in one band along the bottom, as tall as the tallest action, so they line up across
+    /// the row whatever each card says (under its own words, a card with fewer words had its link higher than the next
+    /// card's). The answer that stays is above them.
     /// </summary>
     private void Arrange()
     {
@@ -207,11 +210,16 @@ internal sealed class SimpleView : UserControl
         for (int n = _cards.Count; n >= 1; n--)
         {
             int w = (width - (n - 1) * gap) / n;
-            int h = _cards.Take(n).Max(c => c.Arrange(w));
+            int band = _cards.Take(n).Max(c => c.BandHeight);
+            int h = _cards.Take(n).Max(c => c.Arrange(w, band));
             if (y + h > room) continue;
             _fitting = n;
             rowHeight = h;
-            for (int i = 0; i < n; i++) _cards[i].SetBounds(i * (w + gap), y, w, h);
+            for (int i = 0; i < n; i++)
+            {
+                _cards[i].SetBounds(i * (w + gap), y, w, h);
+                _cards[i].PlaceBand(band);
+            }
             break;
         }
         for (int i = 0; i < _cards.Count; i++) _cards[i].Visible = i < _fitting;
@@ -220,7 +228,7 @@ internal sealed class SimpleView : UserControl
         if (_cardsHost.Height != total) _cardsHost.Height = total;
     }
 
-    /// <summary>CI: the tiles, each shown card's title, words and its one action, the answer that stays, and anything clipped or too small.</summary>
+    /// <summary>CI: the tiles, each shown card's title, words and its one action, the answer that stays, and anything clipped, too small or overlapping.</summary>
     internal object SmokeStats(string nextClear) => new
     {
         nextClear,
@@ -232,11 +240,16 @@ internal sealed class SimpleView : UserControl
 
     /// <summary>
     /// Texts that do not fit, a control outside its card or a card outside the view, a card without exactly one action, a
-    /// graph squeezed too small. Judged from the layout itself, so it holds before the window is shown.
+    /// graph squeezed too small, and parts on each other (<see cref="MainForm.OverlappingSiblings"/>): the tiles, the graph
+    /// and the cards' row; in that row the heading, the answer that stays and the cards shown; in each card its parts.
+    /// Judged from the layout itself, so it holds before the window is shown.
     /// </summary>
     internal List<string> LayoutProblems()
     {
         var problems = new List<string>();
+        bool hostShown = _fitting > 0 || AnswerShown;
+        MainForm.OverlappingSiblings(this, problems, c => c != _cardsHost || hostShown);
+        if (hostShown) MainForm.OverlappingSiblings(_cardsHost, problems, c => c == _answer ? AnswerShown : c is not Card card || _cards.IndexOf(card) < _fitting);
         problems.AddRange(_tiles.Problems());
         if (AnswerShown && _answer.NeededHeight > _answer.Height + 1) problems.Add($"the answer needs {_answer.NeededHeight} px, has {_answer.Height}");
         foreach (var card in _cards.Take(_fitting))
@@ -301,7 +314,7 @@ internal sealed class SimpleView : UserControl
         public Control Action { get; }
         public LinkLabel HideLink { get; }
 
-        /// <summary>A text that does not fit, or a control outside the card.</summary>
+        /// <summary>A text that does not fit, a control outside the card, or two of its parts on each other.</summary>
         public IEnumerable<string> Problems()
         {
             foreach (var label in Shown().Where(l => l.NeededHeight > l.Height + 1)) yield return $"\"{label.Text}\" needs {label.NeededHeight} px, has {label.Height}";
@@ -309,7 +322,13 @@ internal sealed class SimpleView : UserControl
                 if (c.GetPreferredSize(Size.Empty) is var need && (need.Width > c.Width + 1 || need.Height > c.Height + 1)) yield return $"\"{c.Text}\" needs {need}, has {c.Size}";
             foreach (var c in Shown().Concat<Control>([Action, HideLink]).Where(c => !ClientRectangle.Contains(c.Bounds)))
                 yield return $"\"{c.Text}\" at {c.Bounds} is outside it ({ClientSize})";
+            // The action and Hide share one line, where even a pixel of one on the other shows: this check takes any overlap,
+            // where the general one below allows a pixel each way, so it leaves that pair to this one.
             if (Action.Bounds.IntersectsWith(HideLink.Bounds)) yield return $"\"{Action.Text}\" and Hide overlap";
+            var overlaps = new List<string>();
+            MainForm.OverlappingSiblings(this, overlaps, c => c is not WrapLabel l || l.Text.Length > 0, // the texts it shows, its action and Hide
+                (a, b) => a == Action && b == HideLink || a == HideLink && b == Action);
+            foreach (var o in overlaps) yield return o;
         }
 
         /// <summary>The texts the card shows (the details and the answer only when they have one).</summary>
@@ -322,8 +341,14 @@ internal sealed class SimpleView : UserControl
             _message.Visible = text.Length > 0;
         }
 
-        /// <summary>Lays the card out at <paramref name="width"/> and returns its height: the icon and title, the texts, then the action on the left and Hide on the right.</summary>
-        public int Arrange(int width)
+        /// <summary>The height of this card's band of actions on its own: its action or Hide, whichever is taller.</summary>
+        public int BandHeight => Math.Max(Action.GetPreferredSize(Size.Empty).Height, HideLink.GetPreferredSize(Size.Empty).Height);
+
+        /// <summary>
+        /// Lays the card's texts out at <paramref name="width"/> (the icon and title, then the texts) and returns the height it
+        /// needs with a band of actions <paramref name="band"/> high under them (<see cref="PlaceBand"/>).
+        /// </summary>
+        public int Arrange(int width, int band)
         {
             int pad = _view.S(14), icon = _view.S(18), gap = _view.S(4);
             int textWidth = Math.Max(_view.S(80), width - 2 * pad);
@@ -334,12 +359,20 @@ internal sealed class SimpleView : UserControl
                 label.SetBounds(pad, y, textWidth, 1);
                 y = label.Bottom + gap;
             }
+            return y + band + pad;
+        }
+
+        /// <summary>
+        /// The band of actions, <paramref name="band"/> high, along the bottom of the card as it is now: the action on the
+        /// left and Hide on the right, each centred in it. Every card of the row has the same band at the same height.
+        /// </summary>
+        public void PlaceBand(int band)
+        {
+            int pad = _view.S(14), y = Height - pad - band;
             var action = Action.GetPreferredSize(Size.Empty);
             var hide = HideLink.GetPreferredSize(Size.Empty);
-            int row = Math.Max(action.Height, hide.Height);
-            Action.SetBounds(pad, y + (row - action.Height) / 2, action.Width, action.Height);
-            HideLink.SetBounds(width - pad - hide.Width, y + (row - hide.Height) / 2, hide.Width, hide.Height);
-            return y + row + pad;
+            Action.SetBounds(pad, y + (band - action.Height) / 2, action.Width, action.Height);
+            HideLink.SetBounds(Width - pad - hide.Width, y + (band - hide.Height) / 2, hide.Width, hide.Height);
         }
 
         protected override void OnPaint(PaintEventArgs e)

@@ -7,6 +7,8 @@ using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Tags;
 
+using static PoolWatch.Tests.Clocks;
+
 namespace PoolWatch.Tests;
 
 public class ShapeTests
@@ -28,7 +30,7 @@ public class ShapeTests
         for (int i = 0; i <= 10; i++)
         {
             var tag = new PoolTagEntry(PoolTag.Parse("WCsc"), 0, 0, 0, allocs, frees, 50_000_000UL + (ulong)i * 1_000_000);
-            h.Add(new Sample(t0.AddMinutes(i), default, [tag], []) { System = new SystemCounters(1, 2, 3, 4, 5, 6) });
+            h.Add(new Sample(t0.AddMinutes(i), default, [tag], []) { TickMs = Clocks.At(t0.AddMinutes(i)).Ms, System = new SystemCounters(1, 2, 3, 4, 5, 6) });
             allocs = unchecked(allocs + 6000);
             frees += 2;
         }
@@ -51,7 +53,7 @@ public class ShapeTests
         for (int i = 0; i <= 10; i++)
         {
             ulong bytes = 4096 + (ulong)i * 65536;
-            h.Add(new Sample(t0.AddMinutes(i), default, [new PoolTagEntry(tag, 0, 0, 0, allocs, 0, bytes), new PoolTagEntry(PoolTag.Parse("Big "), 0, 0, 0, 1, 0, 1 << 30)], []));
+            h.Add(new Sample(t0.AddMinutes(i), default, [new PoolTagEntry(tag, 0, 0, 0, allocs, 0, bytes), new PoolTagEntry(PoolTag.Parse("Big "), 0, 0, 0, 1, 0, 1 << 30)], []) { TickMs = Clocks.At(t0.AddMinutes(i)).Ms });
             allocs += 100;
         }
         Assert.Equal(1, h.FirstStoredIndex(tag, 0, 10));
@@ -125,8 +127,8 @@ public class ShapeTests
                 allocs += opens;
                 frees += closes;
                 h.Add(new Sample(t, new PoolTotals(400_000_000, 300_000_000, 350_000_000, 250_000_000),
-                                 [new PoolTagEntry(PoolTag.Parse("File"), 0, 0, 0, allocs, frees, bytes)], []));
-                mgr.Process(h, det, det.Evaluate(h), t);
+                                 [new PoolTagEntry(PoolTag.Parse("File"), 0, 0, 0, allocs, frees, bytes)], []) { TickMs = Clocks.At(t).Ms });
+                mgr.Process(h, det, det.Evaluate(h), At(t));
                 t = t.AddSeconds(2);
             }
             for (int i = 0; i < 15; i++) Step(opened, closed);

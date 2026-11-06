@@ -7,7 +7,7 @@ namespace PoolWatch.AppTests;
 
 /// <summary>
 /// The exit signal, always under names of the test's own in the session's local namespace: a test never signals, waits
-/// for or squats the real <see cref="ExitSignal.Name"/>, which a PoolWatch running on the same PC listens on.
+/// for or creates the real one (in <see cref="AdminNamespace"/>), which a PoolWatch running on the same PC listens on.
 /// </summary>
 public sealed class ExitSignalTests
 {
@@ -122,12 +122,18 @@ public sealed class ExitSignalTests
         thread.Start();
         Assert.True(holding.Wait(TimeSpan.FromSeconds(10)));
 
-        var clock = Stopwatch.StartNew();
+        // StopAndHold times its wait on Environment.TickCount64, which moves in steps of the system timer (typically 10 to
+        // 16 ms). Read as the wait starts, the tick count can be up to a step behind, so on a Stopwatch the wait can end up
+        // to a step short of 800 ms (three 250 ms polls that each run a little long reach the deadline just before 800 ms).
+        // So the wait is measured on the same tick count: read before the call, it is never later than the wait's own
+        // start, and the 800 ms the code waits always show in full.
+        long start = Environment.TickCount64;
         var held = ExitSignal.StopAndHold(_event, _mutex, TimeSpan.FromMilliseconds(800));
+        long waited = Environment.TickCount64 - start;
         release.Set();
 
         Assert.Null(held);
-        Assert.True(clock.Elapsed >= TimeSpan.FromMilliseconds(800));
+        Assert.True(waited >= 800, $"waited {waited} ms");
         Assert.True(thread.Join(TimeSpan.FromSeconds(10)));
     }
 

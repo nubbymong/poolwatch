@@ -7,6 +7,7 @@ using PoolWatch.Core.Knowledge;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Recommendations;
 using PoolWatch.Core.Setup;
+using static PoolWatch.Tests.Clocks;
 
 namespace PoolWatch.Tests;
 
@@ -218,7 +219,7 @@ public class KnownIssueMatcherTests
         Assert.Equal($"PoolWatch can clear the cache every hour and show what each clear freed: untick Advanced view to see the suggestion \"{Title(RecommendationId.HourlyCacheClear)}\".",
             ActionLine(refs, ThreeOffers(), "refs-standby-metadata"));
         // Hidden in the last 30 days, so not offered: the note promises nothing.
-        var hidden = new Dictionary<string, DateTime> { [Recommendation.KeyOf(RecommendationId.HourlyCacheClear, null)] = Now };
+        var hidden = new Dictionary<string, Moment> { [Recommendation.KeyOf(RecommendationId.HourlyCacheClear, null)] = Clocks.At(Now) };
         Assert.Null(ActionLine(refs, ThreeOffers() with { Dismissed = hidden }, "refs-standby-metadata"));
 
         // The shortcut's words name no app: the line above them in the note has just said which one is running.
@@ -242,7 +243,7 @@ public class KnownIssueMatcherTests
         // Tokens grew 60 MB over the hour on a 25H2 PC: the known leak, unless something already stops it, when the
         // growth has another cause (a program leaking token handles, say).
         var h = History(i => [("Toke", i * MB, 0)]);
-        var inputs = new RecommendationInputs { NowUtc = Now, Facts = Facts() };
+        var inputs = new RecommendationInputs { NowUtc = Now, NowMs = Clocks.At(Now).Ms, Facts = Facts() };
         Assert.Equal(["windows-token-leak"], Ids(Gather(h, inputs: inputs)));
         // Stopped while the Windows setting that stops the leak is on now, whoever set it.
         Assert.Empty(Ids(Gather(h, inputs: inputs, lockTimeout: 0)));
@@ -266,13 +267,13 @@ public class KnownIssueMatcherTests
     {
         ScannedUtc = Now.AddHours(-1), WindowsName = "Windows 11 Pro", DisplayVersion = "25H2", Build = "26200.9106", Architecture = "x64",
         Volumes = [new(@"C:\", "NTFS", false, null), new(@"D:\", "ReFS", true, true)], TokenLeak = TokenLeakStatus.Clean,
-        LogonTaskExists = true, InstalledInProgramFiles = true, ChatGptInstalled = true,
+        SignIn = SignInState.Starts, InstalledInProgramFiles = true, ChatGptInstalled = true,
     };
 
     /// <summary>Inputs on which the rules offer the hourly clear, the token-leak guard and the ChatGPT shortcut.</summary>
     private static RecommendationInputs ThreeOffers() => new()
     {
-        NowUtc = Now, Facts = Facts(), AutoClearOn = false, TokenGuardOn = false, TokenSpawnLast24h = true,
+        NowUtc = Now, NowMs = Clocks.At(Now).Ms, Facts = Facts(), AutoClearOn = false, TokenGuardOn = false, TokenSpawnLast24h = true,
         ChatGptNamedInGrowth = true, ChatGptLauncherInstalled = true,
     };
 
@@ -399,7 +400,7 @@ public class KnownIssueMatcherTests
         var h = new History();
         for (int i = 0; i <= 70; i++)
             h.Add(new Sample(T0.AddMinutes(i), default,
-                tags(i).Select(t => new PoolTagEntry(PoolTag.Parse(t.Tag), 1, 0, (ulong)t.Paged, 1, 0, (ulong)t.NonPaged)).ToList(), []));
+                tags(i).Select(t => new PoolTagEntry(PoolTag.Parse(t.Tag), 1, 0, (ulong)t.Paged, 1, 0, (ulong)t.NonPaged)).ToList(), []) { TickMs = Clocks.At(T0.AddMinutes(i)).Ms });
         return h;
     }
 
@@ -409,11 +410,11 @@ public class KnownIssueMatcherTests
     /// <summary>The evidence on this history; by default before the first scan, with nothing turned on.</summary>
     private static KnowledgeEvidence Gather(History h, IReadOnlyList<ClearRecord>? clears = null, RecommendationInputs? inputs = null,
         IEnumerable<ProcessRecord>? running = null, uint? lockTimeout = DefaultLockTimeout) =>
-        KnowledgeEvidence.Gather(KnowledgeBase.Embedded(), h, clears ?? [], TimeSpan.FromMinutes(2), inputs ?? new RecommendationInputs { NowUtc = Now }, lockTimeout, running ?? []);
+        KnowledgeEvidence.Gather(KnowledgeBase.Embedded(), h, clears ?? [], TimeSpan.FromMinutes(2), inputs ?? new RecommendationInputs { NowUtc = Now, NowMs = Clocks.At(Now).Ms }, lockTimeout, running ?? []);
 
     private static ClearRecord Clear(DateTime at, params (string Tag, long Before, long After)[] tags) => new()
     {
-        TimeUtc = at, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals(8UL << 30, 4UL << 30, 0, 0),
+        TimeUtc = at, TickMs = Clocks.At(at).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Schedule, Before = new PoolTotals(8UL << 30, 4UL << 30, 0, 0),
         TagsBefore = tags.Select(t => (PoolTag.Parse(t.Tag), t.Before)).ToList(),
         After = new PoolTotals(4UL << 30, 3UL << 30, 0, 0), TagsAfter = tags.Where(t => t.After >= 0).Select(t => (PoolTag.Parse(t.Tag), t.After)).ToList(),
     };
@@ -504,7 +505,7 @@ public class KnownIssueMatcherTests
         // the default 10-second sampling).
         const long KB = 1 << 10;
         var clearAt = Now.AddMinutes(-20);
-        var inputs = new RecommendationInputs { NowUtc = Now, Facts = Facts() };
+        var inputs = new RecommendationInputs { NowUtc = Now, NowMs = Clocks.At(Now).Ms, Facts = Facts() };
         var plain = Gather(History(i => [("Toke", 100 * MB + i * 350 * KB, 0)]), inputs: inputs);
         Assert.Equal((TimeSpan.FromHours(1), new TagGrowth(60 * 350 * KB, 0)), (plain.GrowthOver, plain.Growth[PoolTag.Parse("Toke")]));
         Assert.Equal(["windows-token-leak"], Ids(plain));
@@ -576,7 +577,7 @@ public class KnownIssueMatcherTests
             Proc(12, "claude.exe", @"C:\Users\someone\.local\bin\claude.exe"),
             Proc(13, "notepad.exe", null),
         };
-        var e = Gather(History(i => []), inputs: new RecommendationInputs { NowUtc = Now, Facts = Facts(), AutoClearOn = true }, running: running);
+        var e = Gather(History(i => []), inputs: new RecommendationInputs { NowUtc = Now, NowMs = Clocks.At(Now).Ms, Facts = Facts(), AutoClearOn = true }, running: running);
         Assert.Equal([CodexDesktop, ClaudeCode, new("notepad.exe", null)], e.Running);
         Assert.Equal("26200.9106", e.WindowsBuild);
         Assert.Equal(["NTFS", "ReFS"], e.FileSystems);
@@ -591,7 +592,7 @@ public class KnownIssueMatcherTests
     [Fact]
     public void TheActionsInEffectAreTheSettingsOnTheLeakStoppedAndTheShortcutMade()
     {
-        var off = new RecommendationInputs { NowUtc = Now, Facts = Facts() };
+        var off = new RecommendationInputs { NowUtc = Now, NowMs = Clocks.At(Now).Ms, Facts = Facts() };
         Assert.Empty(KnownActions.InEffect(off, DefaultLockTimeout));
         Assert.Equal(["auto-clear", "token-guard", "chatgpt-shortcut"],
             KnownActions.InEffect(off with { AutoClearOn = true, ChatGptShortcutMade = true }, liveForegroundLockTimeout: 0));

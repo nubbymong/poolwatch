@@ -110,7 +110,10 @@ internal static class PoolCauses
     /// <summary>The same for a tag read back from a report ("Reff"); a tag that does not parse is shown as it is.</summary>
     public static string TagWords(string tag, TagInfo? info) => PoolTag.TryParse(tag, out var t) ? PlainWords.Tag(t, info) : $"Pool tag {tag}";
 
-    public static CauseRow ForIncident(IncidentRow r, string what, DateTime nowUtc)
+    /// <param name="nowMs">Now on the clock that only goes forward: an open incident's growth so far is timed on it from its
+    /// onset (<see cref="IncidentRow.OnsetMs"/>), and a closed one's from its onset to its end. A row read back from disk has
+    /// its times of day only, and is timed by them.</param>
+    public static CauseRow ForIncident(IncidentRow r, string what, DateTime nowUtc, long? nowMs = null)
     {
         var start = r.OnsetUtc ?? r.OpenedUtc;
         string much = "", fast = "", net = "";
@@ -127,7 +130,8 @@ internal static class PoolCauses
             default:
                 if (r.Growth > 0)
                 {
-                    var over = (r.Open ? nowUtc : r.EndUtc ?? r.OpenedUtc) - start;
+                    var over = r.OnsetMs is { } om && (r.Open ? nowMs : r.EndMs) is { } until ? TimeSpan.FromMilliseconds(until - om)
+                        : (r.Open ? nowUtc : r.EndUtc ?? r.OpenedUtc) - start;
                     much = $"+{PlainWords.Amount(r.Growth)}";
                     fast = PlainWords.PerHour(r.Growth, over);
                     grew = r.Growth;
@@ -257,9 +261,12 @@ internal static class PoolCauses
         };
     }
 
-    /// <summary>A finding that explains pool growth or release (warning or alert), and every measured cache clear, from the last 24 hours.</summary>
-    public static bool Shows(Finding f, DateTime nowUtc) =>
-        nowUtc - f.TimeUtc <= FindingWindow && (f.Kind == FindingKind.CacheClear || (PoolKinds.Contains(f.Kind) && f.Severity >= FindingSeverity.Warning));
+    /// <summary>
+    /// A finding that explains pool growth or release (warning or alert), and every measured cache clear. The list takes them
+    /// from the last 24 hours on the clock that only goes forward (<see cref="Core.Findings.FindingLog.Within"/>).
+    /// </summary>
+    public static bool Shows(Finding f) =>
+        f.Kind == FindingKind.CacheClear || (PoolKinds.Contains(f.Kind) && f.Severity >= FindingSeverity.Warning);
 
     public static CauseRow ForFinding(Finding f, DateTime nowUtc)
     {
@@ -354,13 +361,21 @@ internal static class PoolCauses
         return rows;
     }
 
+    /// <summary>
+    /// The incidents the list shows: the open ones and those opened in the last <see cref="IncidentWindow"/> before
+    /// <paramref name="at"/>, timed on the clock that only goes forward (<see cref="IncidentRow.OpenedMs"/>).
+    /// </summary>
+    internal static IEnumerable<IncidentRow> Shown(IEnumerable<IncidentRow> incidents, Core.Model.Moment at) =>
+        incidents.Where(r => r.Open || at.Ms - r.OpenedMs <= (long)IncidentWindow.TotalMilliseconds);
+
     private static List<CauseRow> Rows(AnalysisPipeline a, MonitorEngine engine, TagRankings ranked)
     {
-        var now = DateTime.UtcNow;
+        var at = Core.Model.Moment.Now(); // how long ago an incident opened is timed on the clock that only goes forward
+        var now = at.Utc;
         var rows = new List<CauseRow>();
         var incidents = UiData.Incidents(a, engine.Paths.IncidentsDir);
-        foreach (var r in incidents.Where(r => r.Open || now - r.OpenedUtc <= IncidentWindow).Take(MaxIncidents))
-            rows.Add(ForIncident(r, TagWords(r.Tag, PoolTag.TryParse(r.Tag, out var t) ? a.Knowledge.Lookup(t) : null), now));
+        foreach (var r in Shown(incidents, at).Take(MaxIncidents))
+            rows.Add(ForIncident(r, TagWords(r.Tag, PoolTag.TryParse(r.Tag, out var t) ? a.Knowledge.Lookup(t) : null), now, at.Ms));
 
         var open = incidents.Where(r => r.Open).Select(r => r.Tag).ToHashSet(StringComparer.Ordinal);
         foreach (var s in GrowingTags(a).Where(s => !open.Contains(s.Tag.ToDisplay())))
@@ -368,7 +383,7 @@ internal static class PoolCauses
 
         foreach (var p in ProcessCandidates(a, engine)) rows.Add(ForProcess(p, now));
 
-        foreach (var f in a.Diagnostics.Findings.Snapshot().AsEnumerable().Reverse().Where(f => Shows(f, now)).Take(MaxFindings))
+        foreach (var f in a.Diagnostics.Findings.Within(FindingWindow, at).AsEnumerable().Reverse().Where(Shows).Take(MaxFindings))
             rows.Add(ForFinding(f, now));
         return Order(rows);
     }
@@ -401,7 +416,6 @@ internal static class PoolCauses
     public static PoolStatusLead? Lead(AnalysisPipeline a, TagRankings ranked, IReadOnlyList<ServiceEntry> services, TimeSpan held, out PoolTag? rankTag)
     {
         rankTag = null;
-        var now = DateTime.UtcNow;
         Incident? inc;
         (string? name, Confidence level)? cause;
         lock (a.History.SyncRoot)
@@ -410,7 +424,7 @@ internal static class PoolCauses
             cause = inc is null ? null : FriendlyCause(inc, services);
         }
         if (inc is not null)
-            return new PoolStatusLead(TagWords(inc.Tag, a.Knowledge.Lookup(inc.Tag)), inc.Growth, now - inc.OnsetUtc, cause?.name, cause?.level ?? Confidence.Weak);
+            return new PoolStatusLead(TagWords(inc.Tag, a.Knowledge.Lookup(inc.Tag)), inc.Growth, TimeSpan.FromMilliseconds(Core.Model.Moment.Now().Ms - inc.OnsetMs), cause?.name, cause?.level ?? Confidence.Weak); // on the forward clock
         var openTags = new HashSet<string>(StringComparer.Ordinal);
         if (TopUnexplained(a, openTags) is not { } s) return null;
         long growth = s.Delta60m > 0 ? s.Delta60m : s.Delta10m;
@@ -503,31 +517,37 @@ internal static class PoolCauses
         image.Length > 4 && image.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? image[..^4] : null;
 
     /// <summary>Live processes that stand out (<see cref="Stands"/>), the largest rise first.</summary>
-    private static List<ProcessCandidate> ProcessCandidates(AnalysisPipeline a, MonitorEngine engine)
+    private static List<ProcessCandidate> ProcessCandidates(AnalysisPipeline a, MonitorEngine engine) =>
+        ProcessCandidates(engine.LatestPair, a.History, engine.Registry);
+
+    /// <summary>
+    /// The live processes of <paramref name="pair"/> that stand out over the history's last hour: the rates and the hour are
+    /// timed on the clock that only goes forward (the samples' <see cref="Sample.TickMs"/> and <see cref="Core.History.History.Ms"/>), and
+    /// so is whether a process became an orphan after it was first seen. Takes the history's lock.
+    /// </summary>
+    internal static List<ProcessCandidate> ProcessCandidates(SamplePair? pair, Core.History.History h, ProcessRegistry registry)
     {
-        var pair = engine.LatestPair;
         if (pair?.Current is not { } latest) return [];
         var prev = pair.Previous?.Processes.ToDictionary(p => p.Key);
-        double secs = pair.Previous is null ? 1 : Math.Max(1, (latest.TimeUtc - pair.Previous.TimeUtc).TotalSeconds);
+        double secs = pair.Previous is null ? 1 : Math.Max(1, (latest.TickMs - pair.Previous.TickMs) / 1000.0);
         var list = new List<ProcessCandidate>();
-        lock (a.History.SyncRoot)
+        lock (h.SyncRoot)
         {
-            var h = a.History;
             if (h.Count < 2) return [];
-            int from = h.IndexAtOrAfter(h.Times[^1] - TimeSpan.FromHours(1));
+            int from = h.IndexAtOrAfterMs(h.Ms[^1] - 3_600_000);
             foreach (var p in latest.Processes)
             {
                 long quota = (long)(p.QuotaPagedPoolUsage + p.QuotaNonPagedPoolUsage);
                 long ops = prev is not null && prev.TryGetValue(p.Key, out var q) ? Math.Max(0, (long)((p.TotalOperations - q.TotalOperations) / secs)) : 0;
                 // Cheap filter first: a rise of 5,000 handles or 32 MB needs at least that much now.
                 if (p.HandleCount < HandleRise && quota < QuotaRise && ops < OrphanOpsPerSec) continue;
-                var rec = engine.Registry.Get(p.Key);
+                var rec = registry.Get(p.Key);
                 var series = h.ProcessSeries(p.Key, from);
                 int first = Array.FindIndex(series, x => x is not null);
                 int handlesBefore = first >= 0 ? series[first]!.Value.Handles : p.HandleCount;
                 long quotaBefore = first >= 0 ? series[first]!.Value.QuotaPaged + series[first]!.Value.QuotaNonPaged : quota;
-                var over = first >= 0 ? h.Times[^1] - h.Times[from + first] : TimeSpan.Zero;
-                bool becameOrphan = rec is { OrphanedUtc: { } orphaned } && orphaned - rec.FirstSeenUtc >= ProcessRegistry.OrphanGrace;
+                var over = first >= 0 ? TimeSpan.FromMilliseconds(h.Ms[^1] - h.Ms[from + first]) : TimeSpan.Zero;
+                bool becameOrphan = rec is { OrphanedMs: { } orphaned } && orphaned - rec.FirstSeenMs >= (long)ProcessRegistry.OrphanGrace.TotalMilliseconds;
                 list.Add(new ProcessCandidate(p.Key, rec?.DisplayName ?? p.ImageName, p.HandleCount, handlesBefore, quota, quotaBefore, over, becameOrphan, ops, p.Key.CreateTimeUtc));
             }
         }
@@ -542,7 +562,9 @@ internal static class PoolCauses
 /// Which tag to rank next (pure; unit-tested). A ranking (the correlator over the last hour) costs tens of milliseconds,
 /// so they are spaced: the selected row's tag at once when it has none, then every tag in the list once (one every
 /// <see cref="NewGap"/>), then each refreshed after <see cref="Fresh"/>, the selected one after <see cref="SelectedFresh"/>,
-/// never two within <see cref="Gap"/> (about the old tag page's two rankings a minute).
+/// never two within <see cref="Gap"/> (about the old tag page's two rankings a minute). Timed on the clock that only goes
+/// forward (<see cref="Core.Model.Moment.Ms"/>): setting the system clock back or forward neither holds a ranking back nor
+/// brings one early.
 /// </summary>
 internal static class RankPlan
 {
@@ -553,22 +575,23 @@ internal static class RankPlan
 
     /// <param name="wanted">The tags the rows and the status line show, most important first.</param>
     /// <param name="selected">The selected row's tag, if the selected row is a tag row.</param>
-    /// <param name="builtUtc">When each tag was last ranked (tried: a ranking that found nothing counts).</param>
-    /// <param name="lastBuildUtc">When the last ranking finished.</param>
-    public static PoolTag? Next(IReadOnlyList<PoolTag> wanted, PoolTag? selected, IReadOnlyDictionary<PoolTag, DateTime> builtUtc,
-        DateTime lastBuildUtc, DateTime nowUtc)
+    /// <param name="builtMs">When each tag was last ranked (tried: a ranking that found nothing counts), on the forward clock.</param>
+    /// <param name="lastBuildMs">When the last ranking finished, on the forward clock; null before the first.</param>
+    /// <param name="nowMs">Now, on the forward clock.</param>
+    public static PoolTag? Next(IReadOnlyList<PoolTag> wanted, PoolTag? selected, IReadOnlyDictionary<PoolTag, long> builtMs,
+        long? lastBuildMs, long nowMs)
     {
-        var since = nowUtc - lastBuildUtc;
-        if (selected is { } sel && !builtUtc.ContainsKey(sel)) return sel; // the user is waiting on it
-        if (since >= NewGap)
+        long since = lastBuildMs is { } last ? nowMs - last : long.MaxValue;
+        if (selected is { } sel && !builtMs.ContainsKey(sel)) return sel; // the user is waiting on it
+        if (since >= (long)NewGap.TotalMilliseconds)
             foreach (var t in wanted)
-                if (!builtUtc.ContainsKey(t)) return t;
-        if (since < Gap) return null;
-        if (selected is { } s && nowUtc - builtUtc[s] >= SelectedFresh) return s;
+                if (!builtMs.ContainsKey(t)) return t;
+        if (since < (long)Gap.TotalMilliseconds) return null;
+        if (selected is { } s && nowMs - builtMs[s] >= (long)SelectedFresh.TotalMilliseconds) return s;
         PoolTag? stalest = null;
-        var oldest = DateTime.MaxValue;
+        long oldest = long.MaxValue;
         foreach (var t in wanted)
-            if (builtUtc.TryGetValue(t, out var b) && nowUtc - b >= Fresh && b < oldest) { oldest = b; stalest = t; }
+            if (builtMs.TryGetValue(t, out var b) && nowMs - b >= (long)Fresh.TotalMilliseconds && b < oldest) { oldest = b; stalest = t; }
         return stalest;
     }
 }
@@ -585,14 +608,16 @@ internal sealed class TagRankings
     /// <summary>The most rankings kept, the oldest dropped first. Each holds only what its row shows (a few owners and events).</summary>
     public const int MaxCached = 64;
     private readonly object _lock = new();
-    private readonly Dictionary<PoolTag, (TagViewData? view, DateTime builtUtc)> _views = new();
+    /// <summary>Each tag's ranking and when it was made, on the clock that only goes forward.</summary>
+    private readonly Dictionary<PoolTag, (TagViewData? view, long builtMs)> _views = new();
     private PoolTag? _building;
-    private DateTime _lastBuildUtc = DateTime.MinValue;
+    private long? _lastBuildMs;
     /// <summary>Bumped by <see cref="Clear"/>: a ranking started before it is not stored.</summary>
     private int _generation;
-    private readonly Func<DateTime> _now;
+    private readonly Func<Core.Model.Moment> _clock;
 
-    public TagRankings(Func<DateTime>? now = null) => _now = now ?? (() => DateTime.UtcNow);
+    /// <param name="clock">Both clocks (<see cref="Core.Model.Moment.Now"/>; a test gives its own): the rankings are spaced on the forward one.</param>
+    public TagRankings(Func<Core.Model.Moment>? clock = null) => _clock = clock ?? Core.Model.Moment.Now;
 
     /// <summary>What the rankings hold, for PoolWatch's own cost report: the rankings, their owners, the owners' kept processes and the events.</summary>
     public (int rankings, int owners, int ownerMembers, int events) Held()
@@ -613,7 +638,7 @@ internal sealed class TagRankings
         lock (_lock)
         {
             _views.Clear();
-            _lastBuildUtc = DateTime.MinValue;
+            _lastBuildMs = null;
             _generation++;
         }
     }
@@ -644,7 +669,7 @@ internal sealed class TagRankings
             if (Tried(tag)) continue;
             TagViewData? view = null;
             try { view = build(tag); } catch (Exception) { }
-            lock (_lock) { _views[tag] = (view, _now()); _lastBuildUtc = _now(); }
+            lock (_lock) { long now = _clock().Ms; _views[tag] = (view, now); _lastBuildMs = now; }
         }
     }
 
@@ -659,8 +684,8 @@ internal sealed class TagRankings
         lock (_lock)
         {
             if (_building is not null) return null;
-            var built = _views.ToDictionary(kv => kv.Key, kv => kv.Value.builtUtc);
-            if (RankPlan.Next(wanted, selected, built, _lastBuildUtc, _now()) is not { } next) return null;
+            var built = _views.ToDictionary(kv => kv.Key, kv => kv.Value.builtMs);
+            if (RankPlan.Next(wanted, selected, built, _lastBuildMs, _clock().Ms) is not { } next) return null;
             tag = next;
             _building = tag;
             generation = _generation;
@@ -680,11 +705,11 @@ internal sealed class TagRankings
                     _building = null;
                     if (generation == _generation)
                     {
-                        var now = _now();
+                        long now = _clock().Ms;
                         _views[tag] = (view, now);
-                        _lastBuildUtc = now;
+                        _lastBuildMs = now;
                         if (_views.Count > MaxCached)
-                            foreach (var old in _views.OrderBy(kv => kv.Value.builtUtc).Take(_views.Count - MaxCached).Select(kv => kv.Key).ToList()) _views.Remove(old);
+                            foreach (var old in _views.OrderBy(kv => kv.Value.builtMs).Take(_views.Count - MaxCached).Select(kv => kv.Key).ToList()) _views.Remove(old);
                     }
                 }
                 done();

@@ -3,11 +3,12 @@ using PoolWatch.Core.Cache;
 using PoolWatch.Core.Incidents;
 using PoolWatch.Core.Lag;
 using PoolWatch.Core.Model;
+using static PoolWatch.Tests.Clocks;
 
 namespace PoolWatch.Tests;
 
 /// <summary>
-/// C1 (review): trace rate limiting. On a busy many-core PC, confirmation traces that ran back to back lagged typing. One governor for every trace; the lag probe pauses around PoolWatch's own work; no automatic clear
+/// Trace rate limiting. On a busy many-core PC, confirmation traces that ran back to back lagged typing. One governor for every trace; the lag probe pauses around PoolWatch's own work; no automatic clear
 /// during an experiment; the CPU trace is off by default.
 /// </summary>
 public class CaptureGovernorTests
@@ -42,7 +43,7 @@ public class CaptureGovernorTests
     [Fact]
     public void TheWallClockNeverMovesTheCap()
     {
-        // C1 d (review round 2): the governor reads only its monotonic clock. A wall clock that jumps (NTP step, DST, the
+        // The governor reads only its monotonic clock. A wall clock that jumps (NTP step, DST, the
         // owner setting the time) changes the requests' displayed times, never the hourly cap or the lag trip's 15 minutes.
         var (g, c, _) = New();
         RunCapture(g, c, Alert(c), TimeSpan.FromSeconds(60));
@@ -85,9 +86,9 @@ public class CaptureGovernorTests
     }
 
     [Fact]
-    public void SettingsSavedBeforeC1LoseTheOldCpuTraceDefault()
+    public void SettingsSavedBeforeTheCpuTraceWentOffByDefaultLoseTheOldDefault()
     {
-        string f = Path.Combine(Path.GetTempPath(), "pw-settings-c1-" + Guid.NewGuid().ToString("N") + ".json");
+        string f = Path.Combine(Path.GetTempPath(), "pw-settings-old-" + Guid.NewGuid().ToString("N") + ".json");
         try
         {
             File.WriteAllText(f, "{ \"settingsVersion\": 2, \"cpuTraceEnabled\": true }");
@@ -97,7 +98,7 @@ public class CaptureGovernorTests
             File.WriteAllText(f, "{ \"settingsVersion\": 3, \"cpuTraceEnabled\": true }");
             Assert.True(Settings.Load(f).CpuTraceEnabled); // turned on after the change: kept
 
-            // C1 e (review round 2): an explicit --config file holds only what its author wrote: never migrated, with or
+            // An explicit --config file holds only what its author wrote: never migrated, with or
             // without settingsVersion (a CI config asking for the CPU trace keeps it; a 60 s handle census stays 60 s).
             File.WriteAllText(f, "{ \"cpuTraceEnabled\": true, \"handleIntervalSeconds\": 60 }");
             var cfg = Settings.Load(f, explicitConfig: true);
@@ -132,7 +133,7 @@ public class CaptureGovernorTests
         Assert.Null(g.Pending); // a settings answer is not held back
         Assert.Equal(0, g.SkippedCount);
 
-        // DeeperCapture: what the automatic captures recorded before C1.
+        // DeeperCapture: automatic captures also record Kernel-File.
         s.DeeperCapture = true;
         Assert.Equal(new CaptureScope(true, true, false), CaptureGovernor.ScopeFor(CaptureSource.PoolAlert, s));
         Assert.Equal(new CaptureScope(false, false, true), CaptureGovernor.ScopeFor(CaptureSource.LagTrip, s));
@@ -359,7 +360,7 @@ public class CaptureGovernorTests
     [Fact]
     public void AHungCaptureNeverPausesTheProbeForMoreThanTenMinutes()
     {
-        // C1 b (review round 2): a capture thread that hangs used to keep the probe silent until PoolWatch restarted.
+        // A capture thread that hangs used to keep the probe silent until PoolWatch restarted.
         var now = TimeSpan.FromHours(5);
         Assert.Equal(ProbePause.State.Paused, ProbePause.StateOf(true, now - TimeSpan.FromMinutes(9.9), null, now));
         Assert.Equal(ProbePause.State.Overdue, ProbePause.StateOf(true, now - TimeSpan.FromMinutes(10), null, now)); // probe again, say so
@@ -375,8 +376,8 @@ public class CaptureGovernorTests
         var s = new Settings { AutoClearEnabled = true, AutoClearPoolGb = 8 };
         s.Normalize();
         var pool = new PoolTotals(5UL << 30, 4UL << 30, 0, 0); // 9 GB, over the 8 GB rule
-        Assert.Equal(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, pool, T0, null, T0));
-        Assert.Null(ClearPolicy.Due(s, pool, T0, null, T0, experimentRunning: true));
-        Assert.Null(ClearPolicy.Due(s, pool, T0.AddHours(2), null, T0, experimentRunning: true)); // nor the schedule
+        Assert.Equal(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, pool, At(T0), Ms(null), At(T0).Ms));
+        Assert.Null(ClearPolicy.Due(s, pool, At(T0), Ms(null), At(T0).Ms, experimentRunning: true));
+        Assert.Null(ClearPolicy.Due(s, pool, At(T0.AddHours(2)), Ms(null), At(T0).Ms, experimentRunning: true)); // nor the schedule
     }
 }

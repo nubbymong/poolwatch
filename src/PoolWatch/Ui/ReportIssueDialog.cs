@@ -197,9 +197,12 @@ internal sealed class ReportIssueDialog : Form
         if (RuntimeInformation.ProcessArchitecture != RuntimeInformation.OSArchitecture)
             architecture += $" (the {Arch(RuntimeInformation.ProcessArchitecture)} build under emulation)";
         return new IssueFacts(UiActions.AppVersion, InstallKind(), IssueReport.WindowsLine(system.OsDescription, system.OsBuild, ServicesController.InsiderEnrolled()),
-            architecture, system.RamBytes, engine.Volumes.Count(v => v.IsDevDrive == true), kernel, AutoClear(engine, analysis), TokenGuard(engine, analysis),
+            architecture, system.RamBytes, DevDrives(engine.Volumes), kernel, AutoClear(engine, analysis), TokenGuard(engine, analysis),
             engine.Meter.OwnCostLine(), tags, null);
     }
+
+    /// <summary>The report's count of Dev Drives: the volumes Windows said are Dev Drives, never one it gave no answer for (null).</summary>
+    internal static int DevDrives(IEnumerable<Core.Model.VolumeInfo> volumes) => volumes.Count(v => v.IsDevDrive == true);
 
     private static string Arch(Architecture a) => a switch { Architecture.X64 => "x64", Architecture.Arm64 => "ARM64", _ => a.ToString() };
 
@@ -217,14 +220,14 @@ internal sealed class ReportIssueDialog : Form
             : Change(h) + " in the last hour" + (totals.ClearedHour is { Bytes: > 0 } c ? $"; {Fmt.OwnClearsFreed(c.Bytes, c.OneAtUtc, seconds: false)}, not counted in that change" : ""));
 
     /// <summary>
-    /// How this copy was installed, in the issue form's own words: the installer leaves unins000.exe next to the exe; a
-    /// release is one PoolWatch.exe, so a PoolWatch.dll beside it is a build from source; a self-contained build loads the
-    /// runtime from its own folder.
+    /// How this copy was installed, in the issue form's own words: the installer leaves unins000.exe in the install folder;
+    /// a release's program is one PoolWatch.exe, so a PoolWatch.dll beside it is a build from source; a self-contained
+    /// build loads the runtime from its own folder.
     /// </summary>
     private static string InstallKind()
     {
         string dir = AppContext.BaseDirectory;
-        if (File.Exists(Path.Combine(dir, "unins000.exe"))) return "installer (setup.exe)";
+        if (File.Exists(Path.Combine(Engine.LaunchGate.InstallFolder(), "unins000.exe"))) return "installer (setup.exe)";
         if (File.Exists(Path.Combine(dir, "PoolWatch.dll"))) return "built from source";
         return RuntimeEnvironment.GetRuntimeDirectory().StartsWith(dir, StringComparison.OrdinalIgnoreCase)
             ? "self-contained (win-x64-selfcontained.zip)"
@@ -276,8 +279,8 @@ internal sealed class ReportIssueDialog : Form
     // ------------------------------------------------------------------ CI
 
     /// <summary>
-    /// CI: the preview, the address's length, and anything clipped. With "What happened?" empty it first types a sample
-    /// that names this user's home folder and this PC, so the preview shows redaction working.
+    /// CI: the preview, the address's length, and anything clipped or overlapping. With "What happened?" empty it first
+    /// types a sample that names this user's home folder and this PC, so the preview shows redaction working.
     /// </summary>
     internal object SmokeStats()
     {

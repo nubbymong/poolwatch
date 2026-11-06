@@ -157,7 +157,7 @@ internal abstract class StepPage : Panel
     }
 }
 
-/// <summary>Step 1: the mission, the four pillars, and Simple or Advanced for setup and the app.</summary>
+/// <summary>Step 1: the mission, the four pillars, and Simple or Advanced: the view the app opens in (setup is the same either way).</summary>
 internal sealed class WelcomePage : StepPage
 {
     private readonly AppMark _mark;
@@ -262,11 +262,16 @@ internal sealed class WelcomePage : StepPage
     }
 }
 
-/// <summary>Step 2: one row per known cause, with its level on the None / Low / Medium / High scale and the step that fixes it.</summary>
+/// <summary>
+/// Step 2: one row per known cause, with its level on the None / Low / Medium / High scale (or Not known) and the step that
+/// fixes it, listed by level, the highest first (<see cref="ImpactRows.ByLevel"/>).
+/// </summary>
 internal sealed class ImpactPage : StepPage
 {
     private readonly TextBlock _title, _lead, _state;
     private readonly Dictionary<Cause, (IconBox Icon, TextBlock Title, TextBlock Detail, ImpactMeter Meter)> _rows = [];
+    /// <summary>The causes in the order their rows are shown.</summary>
+    private List<Cause> _order = [];
 
     public ImpactPage(PageContext c) : base(c)
     {
@@ -276,9 +281,9 @@ internal sealed class ImpactPage : StepPage
         Sync(SetupPart.Scan);
     }
 
-    /// <summary>The rows as shown now (the tests and the CI UI test).</summary>
+    /// <summary>The rows as shown now, top to bottom (the tests and the CI UI test).</summary>
     internal IEnumerable<(Cause Cause, string Title, string Detail, string Level, string? Under)> RowsShown =>
-        _rows.Select(r => (r.Key, r.Value.Title.Text, r.Value.Detail.Text, r.Value.Meter.LevelText, r.Value.Meter.Under));
+        _order.Select(c => (c, _rows[c].Title.Text, _rows[c].Detail.Text, _rows[c].Meter.LevelText, _rows[c].Meter.Under));
 
     /// <summary>The meter controls by cause: a row is updated in place, never made again.</summary>
     internal IReadOnlyDictionary<Cause, ImpactMeter> Meters => _rows.ToDictionary(r => r.Key, r => r.Value.Meter);
@@ -299,7 +304,18 @@ internal sealed class ImpactPage : StepPage
             }
             r.Title.Text = row.Title;
             r.Detail.Text = row.Detail;
-            r.Meter.Show(row.Level, row.Under);
+            r.Meter.Show(row.Level, row.Under, row.NotKnown);
+        }
+        var order = rows.Select(r => r.Cause).ToList();
+        if (order.SequenceEqual(_order)) return;
+        // The first rows, or a level that moved one (a check that ended): their controls follow the heading's three texts in
+        // the order the rows are shown, so a screen reader and the page's text read them in that order too.
+        _order = order;
+        int next = Controls.GetChildIndex(_state) + 1;
+        foreach (var cause in _order)
+        {
+            var (icon, title, detail, meter) = _rows[cause];
+            foreach (var control in new Control[] { icon, title, detail, meter }) Controls.SetChildIndex(control, next++);
         }
     }
 
@@ -309,7 +325,7 @@ internal sealed class ImpactPage : StepPage
         if (Shown(_state)) return Put(_state, Inset, y, room) + S(8);
         Line(Inset, Inset + room, y);
         int meterW = _rows.Values.Select(r => r.Meter.MeterWidth).DefaultIfEmpty(S(160)).Max(), textX = Inset + S(26 + 12), textW = room - S(26 + 12) - S(12) - meterW;
-        foreach (var (icon, title, detail, meter) in _rows.Values)
+        foreach (var (icon, title, detail, meter) in _order.Select(c => _rows[c]))
         {
             int top = y + S(12);
             int textH = title.Measure(textW) + S(1) + detail.Measure(textW);

@@ -111,10 +111,11 @@ public class SimpleSettingsTests
         Assert.Contains("again each time it starts, until you untick this", hint);
         Assert.DoesNotContain("sign-in", hint);
         Assert.True(hint.Length <= 250, $"{hint.Length} characters");
-        // The tooltip: when the workaround really goes on, the one click and why, and that turning it off undoes nothing.
+        // The tooltip: when the workaround really goes on, the one click and why, and that unticking puts it back.
         Assert.Contains("Unless two tests in a row on this build found none", tip);
         Assert.Contains("one click", tip);
-        Assert.Contains("does not undo", tip);
+        Assert.Contains("Unticking this puts back the setting PoolWatch changed", tip);
+        Assert.Contains("until you untick this to end it", hint);
         // A tooltip wraps only at the screen's edge, so it breaks its own lines.
         Assert.All(tip.Split('\n'), line => Assert.True(line.Length <= 100, line));
         // No setting names or technical terms (those stay in Advanced and the README).

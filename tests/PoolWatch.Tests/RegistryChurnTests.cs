@@ -15,7 +15,7 @@ public class RegistryChurnTests
     [Fact]
     public void OverTheCapTheRegistryEvictsToFourFifths()
     {
-        var reg = new ProcessRegistry(maxRecords: 1000) { KeepShortLived = TimeSpan.FromMinutes(15) };
+        var reg = new ProcessRegistry(maxRecords: 1000, clock: () => Clocks.At(T0.AddMinutes(1))) { KeepShortLived = TimeSpan.FromMinutes(15) };
         reg.ObserveSnapshot([new() { Pid = 4, ImageName = "System" }], T0);
         for (int i = 0; i < 1100; i++)
         {
