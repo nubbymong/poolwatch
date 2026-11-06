@@ -119,7 +119,7 @@ if (Test-Path $smokeFile) {
                       'Advanced...', 'Save', 'Close') {
         Assert-True ($item -in $form) "Settings shows '$item'"
     }
-    Assert-True (@($form | Where-Object { $_ -like 'While it is on, other programs can bring their windows to the front*until you untick this.' }).Count -eq 1) "Settings says what the token-leak guard does to you and how long it lasts"
+    Assert-True (@($form | Where-Object { $_ -like 'While it is on, other programs can bring their windows to the front*until you untick this to end it.' }).Count -eq 1) "Settings says what the token-leak guard does to you and how long it lasts"
     Assert-True (@($form | Where-Object { $_ -like '*Save puts automatic clearing, the token-leak guard and update notices into effect at once*' }).Count -eq 1) "Settings says what Save applies at once"
     Assert-Plain 'the Settings form' $form
     Assert-True (@($f.layoutProblemsAtMinimumSize).Count -eq 0) "the three tabs at the window's smallest size: nothing clipped or overlapping: $(@($f.layoutProblemsAtMinimumSize) -join '; ')"

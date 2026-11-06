@@ -6590,8 +6590,12 @@ public sealed class UninstallerTests
         // and the setup must say it put back the uninstaller's program it had replaced.
         string lf = e2e.Replace("\r\n", "\n");
         InE2e(@"RegistryAccessRule('BUILTIN\Administrators', 'SetValue, Delete', 'Deny')");
-        InLf("    try { return (Invoke-Setup $name) }\n    finally {\n        $acl = Get-Acl -LiteralPath $uninstallKey\n        [void]$acl.RemoveAccessRule($deny)\n" +
-                        "        Set-Acl -LiteralPath $uninstallKey -AclObject $acl\n    }");
+        InLf("    Set-UninstallKeyRule $deny $true\n    try { return (Invoke-Setup $name) }\n    finally { Set-UninstallKeyRule $deny $false }");
+        // The rule is set on the key through .NET in the 64-bit view (Set-Acl on the registry path said the key did not
+        // exist), and taken out the same way.
+        InLf("            if ($add) { $acl.AddAccessRule($rule) } else { [void]$acl.RemoveAccessRule($rule) }\n            $key.SetAccessControl($acl)");
+        InE2e("[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)");
+        Assert.DoesNotContain("Set-Acl", ScriptCode.PowerShell(e2e)); // in its code: its comment says why
         InE2e("foreach ($f in @(Get-ChildItem -LiteralPath $app -Recurse -Force -File -ErrorAction SilentlyContinue)) {");
         InLf("$changed = @($filesBefore.Keys | Where-Object { $filesAfter[$_] -ne $filesBefore[$_] }) + @($filesAfter.Keys | Where-Object { -not $filesBefore.ContainsKey($_) })\n" +
                         "Assert-True ($changed.Count -eq 0) \"the failed upgrade left every file of the version that was there as it was, and no other ($($changed -join ', '))\"");

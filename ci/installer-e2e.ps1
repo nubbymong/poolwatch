@@ -69,7 +69,8 @@ $data = Join-Path $env:ProgramData 'PoolWatch'
 $log = Join-Path $data 'poolwatch.log'
 $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\PoolWatch.lnk'
 $appId = (Select-String -Path "$PSScriptRoot\..\installer\PoolWatch.iss" -Pattern '^AppId=\{\{([0-9A-F-]+)\}').Matches[0].Groups[1].Value
-$uninstallKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{$appId}_is1"
+$uninstallSubKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{$appId}_is1"
+$uninstallKey = "HKLM:\$uninstallSubKey"
 $silent = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
 # The lines the setup's page code logs (LayOutWelcomePage and LayOutReadyPage in PoolWatch.iss; InstallerPagesTests
 # holds these patterns to the script's own lines): the page's width and height, then where its parts are.
@@ -437,19 +438,28 @@ function Get-ProgramFiles {
     }
     return $files
 }
+# Adds a rule to the Uninstall entry's own access list, or takes it out again. The key is opened through .NET in the
+# 64-bit view, where the setup writes it: Set-Acl on the registry path said the key did not exist, while Get-Acl read it.
+function Set-UninstallKeyRule([System.Security.AccessControl.RegistryAccessRule]$rule, [bool]$add) {
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $key = $base.OpenSubKey($uninstallSubKey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+            [System.Security.AccessControl.RegistryRights]'ReadPermissions, ChangePermissions')
+        if ($null -eq $key) { throw "there is no Uninstall entry at HKLM\$uninstallSubKey" }
+        try {
+            $acl = $key.GetAccessControl()
+            if ($add) { $acl.AddAccessRule($rule) } else { [void]$acl.RemoveAccessRule($rule) }
+            $key.SetAccessControl($acl)
+        } finally { $key.Dispose() }
+    } finally { $base.Dispose() }
+}
 # Runs the setup as step $name with the deny rule on the Uninstall entry, removed again whatever happens; returns its
 # exit code.
 function Invoke-SetupThatFails([string]$name) {
     $deny = New-Object System.Security.AccessControl.RegistryAccessRule('BUILTIN\Administrators', 'SetValue, Delete', 'Deny')
-    $acl = Get-Acl -LiteralPath $uninstallKey
-    $acl.AddAccessRule($deny)
-    Set-Acl -LiteralPath $uninstallKey -AclObject $acl
+    Set-UninstallKeyRule $deny $true
     try { return (Invoke-Setup $name) }
-    finally {
-        $acl = Get-Acl -LiteralPath $uninstallKey
-        [void]$acl.RemoveAccessRule($deny)
-        Set-Acl -LiteralPath $uninstallKey -AclObject $acl
-    }
+    finally { Set-UninstallKeyRule $deny $false }
 }
 
 # The helper processes of a token-leak check: PoolWatch itself (app\PoolWatch.exe) started with --token-leak-test.

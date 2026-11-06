@@ -116,6 +116,13 @@ public class SimpleSettingsTests
         Assert.Contains("one click", tip);
         Assert.Contains("Unticking this puts back the setting PoolWatch changed", tip);
         Assert.Contains("until you untick this to end it", hint);
+        // The UI smoke test (ci/m4-ui.ps1) finds this line in the form by a -like pattern: the pattern matches the hint as
+        // it is now, read as PowerShell's -like reads it (* any characters, without regard to case).
+        string m4 = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "ci", "m4-ui.ps1"));
+        string like = System.Text.RegularExpressions.Regex.Match(m4, @"\$_ -like '(?<p>While it is on, [^']+)'").Groups["p"].Value;
+        Assert.NotEqual("", like);
+        Assert.Matches(new System.Text.RegularExpressions.Regex("^" + System.Text.RegularExpressions.Regex.Escape(like).Replace(@"\*", ".*") + "$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline), hint);
         // A tooltip wraps only at the screen's edge, so it breaks its own lines.
         Assert.All(tip.Split('\n'), line => Assert.True(line.Length <= 100, line));
         // No setting names or technical terms (those stay in Advanced and the README).
