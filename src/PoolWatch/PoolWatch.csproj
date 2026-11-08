@@ -29,6 +29,15 @@
   </PropertyGroup>
   <ItemGroup>
     <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
+    <!-- Gen0 at most 8 MB, whatever the CPU. The workstation GC sizes gen0 from the CPU's largest cache (about half of it,
+         up to 80 MB) and, without the background GC, lets it grow to 128 MB. At PoolWatch's 9 MB a minute a CI runner with
+         a large cache made no collection of gen0 alone in 45 minutes (gen0/1/2 10/10/10: every one was full): the GC kept
+         59 MB committed instead of 34, and the working set reached 113 MB against the 100 MB budget (85 and 87 MB in two
+         runs the day before, same code). 8 MB is two of the GC's 4 MB regions: about 65 gen0 collections an hour, about
+         1 ms each. It is set here, not in the environment (DOTNET_GCGen0MaxBudget; DOTNET_GCgen0size has no runtimeconfig
+         name), because the launcher gives PoolWatch a clean environment; the runtime reads System.GC.Gen0MaxBudget from
+         the runtimeconfig since .NET 10 (9.0 had no public name for it). The soak prints the cap the GC runs with. -->
+    <RuntimeHostConfigurationOption Include="System.GC.Gen0MaxBudget" Value="8388608" />
   </ItemGroup>
   <ItemGroup>
     <!-- The guide for a user's AI assistant (Engine/AgentsGuide.cs): written into the data folder and every export. -->

@@ -58,6 +58,10 @@ internal static class CostReport
                 gen0 = GC.CollectionCount(0), gen1 = GC.CollectionCount(1), gen2 = GC.CollectionCount(2),
                 server = System.Runtime.GCSettings.IsServerGC,
                 latency = System.Runtime.GCSettings.LatencyMode.ToString(),
+                // The gen0 cap the GC runs with: 8 MB from the runtimeconfig (PoolWatch.csproj). The soak prints it.
+                gen0MaxBudgetMB = GC.GetConfigurationVariables().TryGetValue("GCGen0MaxBudget", out var cap)
+                    ? Math.Round(Convert.ToDouble(cap, System.Globalization.CultureInfo.InvariantCulture) / 1048576.0, 1)
+                    : (double?)null,
             },
             // The heap after each full collection: PoolWatch's own compactions (with private memory right after them)
             // and the GC's, the last day of them.

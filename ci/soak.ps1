@@ -138,7 +138,7 @@ if ($Ui) {
     [void]$md.AppendLine("- About's figures (PoolWatch's own meter, read as the end-of-run walk began): $meterText")
     [void]$md.AppendLine("- About at the end of the run said: $aboutText")
 }
-[void]$md.AppendLine(("- GC: heap {0} MB, committed {1} MB, allocated {2} MB total, gen0/1/2 {3}/{4}/{5}, server={6}" -f $profile.gc.heapMB, $profile.gc.committedMB, $profile.gc.totalAllocatedMB, $profile.gc.gen0, $profile.gc.gen1, $profile.gc.gen2, $profile.gc.server))
+[void]$md.AppendLine(("- GC: heap {0} MB, committed {1} MB, allocated {2} MB total, gen0/1/2 {3}/{4}/{5}, server={6}, gen0 cap {7} MB" -f $profile.gc.heapMB, $profile.gc.committedMB, $profile.gc.totalAllocatedMB, $profile.gc.gen0, $profile.gc.gen1, $profile.gc.gen2, $profile.gc.server, $profile.gc.gen0MaxBudgetMB))
 [void]$md.AppendLine(("- Held: {0}" -f ($profile.held | ConvertTo-Json -Compress)))
 [void]$md.AppendLine()
 [void]$md.AppendLine("| Stage | Calls | CPU ms | CPU % of one core | Wall ms | Max wall ms | Alloc MB | KB/call |")

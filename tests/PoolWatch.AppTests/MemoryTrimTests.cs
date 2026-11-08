@@ -1,3 +1,4 @@
+using System.Text.Json;
 using PoolWatch.Engine;
 
 namespace PoolWatch.AppTests;
@@ -348,5 +349,37 @@ public class MemoryTrimTests
         {
             try { Directory.Delete(root, recursive: true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
+    }
+
+    /// <summary>
+    /// The GC settings in the build's own runtimeconfig (the single-file publish carries the same one inside the exe):
+    /// workstation GC without the background thread, the heap compacted harder, and gen0 at most 8 MB, so its size does
+    /// not follow the CPU's cache.
+    /// </summary>
+    [Fact]
+    public void TheGcKeepsGen0SmallOnAnyCpu()
+    {
+        using var config = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "PoolWatch.runtimeconfig.json")));
+        var properties = config.RootElement.GetProperty("runtimeOptions").GetProperty("configProperties");
+        Assert.Equal(8L << 20, properties.GetProperty("System.GC.Gen0MaxBudget").GetInt64());
+        Assert.Equal(7, properties.GetProperty("System.GC.ConserveMemory").GetInt32());
+        Assert.Equal(JsonValueKind.False, properties.GetProperty("System.GC.Concurrent").ValueKind);
+        Assert.Equal(JsonValueKind.False, properties.GetProperty("System.GC.Server").ValueKind);
+    }
+
+    /// <summary>
+    /// The profile gives the gen0 cap the GC runs with, as the GC holds it, and the soak prints it, so a CI run shows the
+    /// shipped build's cap on the runner itself.
+    /// </summary>
+    [Fact]
+    public void TheProfileAndTheSoakGiveTheGen0CapTheGcRunsWith()
+    {
+        string source = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "CostReport.cs"));
+        string gc = MainWindowLayoutTests.Block(source, "gc = new");
+        Assert.Contains("gen0MaxBudgetMB = GC.GetConfigurationVariables().TryGetValue(\"GCGen0MaxBudget\", out var cap)", gc);
+        Assert.True(GC.GetConfigurationVariables().ContainsKey("GCGen0MaxBudget"), "the GC no longer gives GCGen0MaxBudget");
+        string soak = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "ci", "soak.ps1"));
+        Assert.Contains("gen0 cap {7} MB", soak);
+        Assert.Contains("$profile.gc.gen0MaxBudgetMB))", soak);
     }
 }
