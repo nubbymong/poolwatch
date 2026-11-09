@@ -21,7 +21,7 @@ public class WindowFitTests
     private static AboutFacts LongAbout() => new("1.0.0",
         "1,234,567 samples; process events (ETW) kernel session (shared); pooltag.txt not found (built-in tag table and driver scan).",
         "Overhead over 3 h 12 min of steady state (from 15 minutes after start): CPU 0.31% of one core (budget 0.5%), peak working set 96.4 MB (budget 100 MB), disk writes " +
-        "4.2 MB/h (budget 10 MB/h).\nPoolWatch itself (last 10 min): CPU 0.28% of one core, 91 MB, 3.9 MB/h written - OVER BUDGET (CPU, memory; budget <0.5%, <100 MB, <10 MB/h)",
+        "4.2 MB/h (budget 10 MB/h).\nPoolWatch itself (last 10 min): CPU 0.28% of one core, 91 MB now, 3.9 MB/h written - OVER BUDGET (CPU, memory; budget <0.5%, <100 MB, <10 MB/h)",
         @"C:\ProgramData\PoolWatch");
 
     /// <summary>
@@ -379,7 +379,8 @@ public class WindowFitTests
     /// The rolling line (in every report, and in About after its figures) gives its figures from the warm-up, but warns
     /// "OVER BUDGET" only over a window that is all steady state: one that holds part of the first 15 minutes says it is
     /// not judged. It warned over the start-up too, so a report written ten minutes in could call PoolWatch over budget
-    /// for its own start-up.
+    /// for its own start-up. Its working set is the one now, and it says so ("80 MB now"): "80 MB" read like a figure over
+    /// the window, as the CPU and the writes are.
     /// </summary>
     [Fact]
     public void TheRollingLineWarnsOnlyOverAWindowOfSteadyState()
@@ -390,13 +391,13 @@ public class WindowFitTests
         {
             meter.Tick(Busy(s), (80 * MB, 60 * MB), TimeSpan.FromSeconds(s), () => 0);
             if (s == 600)
-                Assert.Equal("PoolWatch itself (last 9 min): CPU 2.00% of one core, 80 MB, 0.0 MB/h written (not judged against the budget: PoolWatch's " +
+                Assert.Equal("PoolWatch itself (last 9 min): CPU 2.00% of one core, 80 MB now, 0.0 MB/h written (not judged against the budget: PoolWatch's " +
                              "first 15 minutes are start-up)", meter.OwnCostLine(TimeSpan.FromSeconds(s), Busy(s), 80 * MB, 0));
             if (s == 1440) Assert.Contains("not judged", meter.OwnCostLine(TimeSpan.FromSeconds(s), Busy(s), 80 * MB, 0)); // its window starts at 14 min
         }
-        Assert.Equal("PoolWatch itself (last 10 min): CPU 2.00% of one core, 80 MB, 0.0 MB/h written - OVER BUDGET (CPU; budget <0.5%, <100 MB, <5 MB/h)",
+        Assert.Equal("PoolWatch itself (last 10 min): CPU 2.00% of one core, 80 MB now, 0.0 MB/h written - OVER BUDGET (CPU; budget <0.5%, <100 MB, <5 MB/h)",
             meter.OwnCostLine(TimeSpan.FromSeconds(1500), Busy(1500), 80 * MB, 0));
-        Assert.StartsWith("PoolWatch itself: 80 MB; CPU and writes measured after its 30-second start-up",
+        Assert.StartsWith("PoolWatch itself: 80 MB now; CPU and writes measured after its 30-second start-up",
             new SelfMeter(TimeSpan.FromSeconds(30)).OwnCostLine(TimeSpan.FromSeconds(10), TimeSpan.Zero, 80 * MB, 0));
     }
 }

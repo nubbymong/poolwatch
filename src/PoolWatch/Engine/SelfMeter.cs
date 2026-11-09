@@ -11,8 +11,10 @@ namespace PoolWatch.Engine;
 /// <see cref="SteadyFromMinutes"/> minutes after start (or at the warm-up, where that is later), the window the soak
 /// judges (DESIGN.md section 12): only figures from it are held against the budget, in About and in the rolling line.
 /// Before that PoolWatch is still starting. In a CI soak with the window open on a busy runner it used 1.4% of one core
-/// between 30 s and 15 minutes and 0.46% after. In the CI UI test About is drawn about 90 s after start, right after the
-/// test built and drew every window, before its next trim: the 138 MB of working set it showed then is that start-up.
+/// between 30 s and 15 minutes and 0.46% after. In the CI UI test About was drawn about 90 s after start, right after the
+/// test built and drew every window, before its next trim: the 138 MB of working set it showed then was that start-up.
+/// At the end of the CI UI soak, drawn after the 8 windows (16 screenshots) of that walk, it read 127 to 131 MB of working
+/// set where the steady peak was 86 to 96 MB: the CI tests now draw it first, before any other window.
 /// </summary>
 internal sealed class SelfMeter
 {
@@ -86,9 +88,10 @@ internal sealed class SelfMeter
     }
 
     /// <summary>
-    /// "PoolWatch itself (last 10 min): CPU 0.21% of one core, 64 MB, 1.2 MB/h written", with a warning when over budget.
-    /// The warning is given only over a window that is all steady state: a window that holds part of the first
-    /// <see cref="SteadyFromMinutes"/> minutes gives its figures and says that they are not judged.
+    /// "PoolWatch itself (last 10 min): CPU 0.21% of one core, 64 MB now, 1.2 MB/h written", with a warning when over
+    /// budget: the CPU and the writes over the window, the working set as it is now (it read "64 MB", which looked like a
+    /// figure over the window too). The warning is given only over a window that is all steady state: a window that holds
+    /// part of the first <see cref="SteadyFromMinutes"/> minutes gives its figures and says that they are not judged.
     /// </summary>
     public string OwnCostLine() => OwnCostLine(_wall.Elapsed, Cpu(), Memory().workingSet, WriteBytes());
 
@@ -97,9 +100,9 @@ internal sealed class SelfMeter
     {
         var (cpu, ws, wph, minutes, steady) = Recent(elapsed, cpuNow, workingSetNow, writesNow);
         if (minutes < MinJudgedMinutes)
-            return $"PoolWatch itself: {ws / 1048576.0:0} MB; CPU and writes measured after its {StartupWords(_warmup)} start-up" +
+            return $"PoolWatch itself: {ws / 1048576.0:0} MB now; CPU and writes measured after its {StartupWords(_warmup)} start-up" +
                    (minutes > 0 ? $" ({minutes:0} of {MinJudgedMinutes:0} min so far)" : "");
-        string line = $"PoolWatch itself (last {minutes:0} min): CPU {cpu:0.00}% of one core, {ws / 1048576.0:0} MB, {wph / 1048576.0:0.0} MB/h written";
+        string line = $"PoolWatch itself (last {minutes:0} min): CPU {cpu:0.00}% of one core, {ws / 1048576.0:0} MB now, {wph / 1048576.0:0.0} MB/h written";
         if (!steady) return line + $" (not judged against the budget: PoolWatch's first {SteadyFromWords(_steadyFrom)} are start-up)";
         var over = new List<string>();
         if (cpu >= CpuBudgetPercent) over.Add("CPU");
@@ -177,10 +180,15 @@ internal sealed class SelfMeter
         }
     }
 
+    /// <summary>
+    /// The report now (About, overhead.json, the CI UI test), from this process's own reads, as each sample takes them: its
+    /// CPU time and its working set and private bytes. It read them through Process.GetCurrentProcess(), whose working set
+    /// and private bytes come from a snapshot of every process on the machine.
+    /// </summary>
     public OverheadReport Report()
     {
-        using var p = Process.GetCurrentProcess();
-        return Report(_wall.Elapsed, p.TotalProcessorTime, p.WorkingSet64, p.PrivateMemorySize64, WriteBytes());
+        var (workingSet, privateBytes) = Memory();
+        return Report(_wall.Elapsed, Cpu(), workingSet, privateBytes, WriteBytes());
     }
 
     /// <summary>The report at <paramref name="elapsed"/> with the process's figures then (tests give their own).</summary>

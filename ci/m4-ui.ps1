@@ -1,8 +1,8 @@
 # Milestone 4 acceptance: the tray app starts and every window under review renders, each drawn to a PNG (the
-# ui-screenshots artifact) and checked: the main window's Simple view (the header with the next clear, Clear now, the
-# graph, up to three suggestions) and Advanced view (Clear now and Settings; the Pool causes, Services and Tasks and
-# startup apps tabs), the plain Settings form and its Advanced grid, each step of setup and How PoolWatch works, Active
-# changes, Report an issue, About and the update notice.
+# ui-screenshots artifact) and checked: About and Report an issue first, then the main window's Simple view (the header
+# with the next clear, Clear now, the graph, up to three suggestions) and Advanced view (Clear now and Settings; the Pool
+# causes, Services and Tasks and startup apps tabs), the plain Settings form and its Advanced grid, each step of setup
+# and How PoolWatch works, Active changes and the update notice.
 # Nothing in them is clipped or overlaps, no internal name shows, everything taken off the window is in the tray menu,
 # every window made for the test is closed again, and the app exits cleanly. Runs a small File-handle leak meanwhile so
 # Pool causes has content, and turns one harmless service off first so Active changes has a service to list.
@@ -203,8 +203,8 @@ if (Test-Path $smokeFile) {
         Assert-True (@($credits | Where-Object { $_ -like "*$name*" }).Count -ge 1) "About credits $name"
     }
     Assert-True (@($s.about.layoutProblems).Count -eq 0) "About: nothing clipped or overlapping: $(@($s.about.layoutProblems) -join '; ')"
-    # About is drawn about 90 s after start, in PoolWatch's start-up: it judges no figure against the budget before steady
-    # state, which starts 15 minutes after start (DESIGN.md section 3); it says when it will.
+    # About is drawn first, about 80 s after start, in PoolWatch's start-up: it judges no figure against the budget before
+    # steady state, which starts 15 minutes after start (DESIGN.md section 3); it says when it will.
     Assert-True ("$($s.about.overhead)" -like 'Overhead: judged over its steady state, from 15 minutes after PoolWatch starts, once that has lasted 5 minutes *') "About judges nothing in the start-up: $($s.about.overhead)"
 
     # The update notice for a sample release, at the bottom of the main window.

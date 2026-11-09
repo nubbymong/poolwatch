@@ -21,8 +21,9 @@ namespace PoolWatch.Engine;
 /// interval): memory in use only faults straight back in (491 MB,
 /// then 64 MB, then 477 MB within 15 s on a busy PC), at a cost in CPU each time. When the main window hides
 /// (<see cref="Request"/>) the compaction and the empty both run once more: the window's pages and caches really are
-/// unused then. The heap each full collection leaves (<see cref="Floors"/>, in profile.json) shows whether memory stays
-/// flat. Only ever PoolWatch's own process.
+/// unused then. So do they when another of PoolWatch's windows closes (Ui.OtherWindows): the pages building it touched
+/// are unused once it has gone. The heap each full collection leaves (<see cref="Floors"/>, in profile.json) shows whether
+/// memory stays flat. Only ever PoolWatch's own process.
 /// </summary>
 internal sealed class MemoryTrim
 {
@@ -99,9 +100,9 @@ internal sealed class MemoryTrim
     /// <summary>What a sample does: nothing, a compaction, both, or (between the checks) only the empty.</summary>
     internal enum TrimAction { None, Compact, CompactAndEmpty, Empty }
 
-    /// <summary>Compacting collections run (start-up, window hidden, heap grown).</summary>
+    /// <summary>Compacting collections run (start-up, window hidden or another closed, heap grown).</summary>
     public int Compactions { get; private set; }
-    /// <summary>Working-set empties run (start-up, window hidden, and each time it was full).</summary>
+    /// <summary>Working-set empties run (start-up, window hidden or another closed, and each time it was full).</summary>
     public int WorkingSetEmptied { get; private set; }
     /// <summary>Empties between the checks that did not hold: the working set back at <see cref="EmptyAt"/> or more <see cref="JudgeAfter"/> after (profile.json).</summary>
     public int EmptiesNotHeld { get; private set; }
@@ -109,7 +110,7 @@ internal sealed class MemoryTrim
     /// <summary>The floors seen, oldest first (sampler thread; read after it stops or on it).</summary>
     public IReadOnlyCollection<Floor> Floors => _floors;
 
-    /// <summary>Any thread: the next sample compacts the heap and empties the working set (the main window has hidden).</summary>
+    /// <summary>Any thread: the next sample compacts the heap and empties the working set (the main window has hidden, or another window closed).</summary>
     public void Request() => Interlocked.Exchange(ref _requested, 1);
 
     /// <summary>

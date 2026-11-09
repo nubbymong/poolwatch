@@ -341,7 +341,10 @@ internal sealed class MonitorEngine : IDisposable
 
     public MemoryTrim Trim { get; }
 
-    /// <summary>Any thread: the next sample compacts PoolWatch's heap and empties its working set (the main window hid and dropped its caches).</summary>
+    /// <summary>
+    /// Any thread: the next sample compacts PoolWatch's heap and empties its working set (the main window hid and dropped its
+    /// caches, or another of PoolWatch's windows closed: Ui.OtherWindows).
+    /// </summary>
     public void ReleaseMemory() => Trim.Request();
 
     /// <summary>Builds profile.json (CostReport.Json); when set, the sampler writes it to cache\profile.json every hour.</summary>

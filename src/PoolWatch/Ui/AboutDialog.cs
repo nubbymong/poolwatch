@@ -175,7 +175,10 @@ internal sealed class AboutDialog : Form
         $"pooltag.txt {(analysis.Knowledge.PoolTagTxtLoaded ? "loaded" : "not found (built-in tag table and driver scan)")}.",
         Overhead(engine), engine.Paths.DataRoot);
 
-    /// <summary>The overhead in steady state against its budget, then the last 10 minutes.</summary>
+    /// <summary>
+    /// The overhead in steady state against its budget, then the last 10 minutes, with the working set now. Read as About
+    /// opens, from this process's own reads (<see cref="SelfMeter.Report()"/>, <see cref="SelfMeter.OwnCostLine()"/>).
+    /// </summary>
     private static string Overhead(MonitorEngine engine) => OverheadText(engine.Meter.Report(), engine.Meter.OwnCostLine);
 
     /// <summary>
@@ -184,9 +187,11 @@ internal sealed class AboutDialog : Form
     /// lasted <see cref="SteadySeconds"/>: its CPU, its highest working set and its disk writes, each against its budget,
     /// then the rolling line (<paramref name="ownCost"/>). Before that, nothing is judged: it says when it will be, and the
     /// budget. Judged from the 30 s warm-up, About held the rest of the start-up against the budget: in the CI UI test it
-    /// is drawn about 90 s after start, right after the test built every window, drew each to a picture and saved it, and
+    /// was drawn about 90 s after start, right after the test built every window, drew each to a picture and saved it, and
     /// before its next trim, so it read CPU 12.38% and 138 MB as over budget. A warm-up longer than 5 minutes (a sample
-    /// interval over 100 s) also put it in the judged branch before any steady figure, with a peak of 0 B.
+    /// interval over 100 s) also put it in the judged branch before any steady figure, with a peak of 0 B. The CI tests now
+    /// draw About first, before any other window: drawn last at the end of the UI soak, it read the working set that the
+    /// windows built just before it had added (127 to 131 MB, where the steady peak was 86 to 96 MB) as over budget.
     /// </summary>
     internal static string OverheadText(OverheadReport o, Func<string> ownCost)
     {

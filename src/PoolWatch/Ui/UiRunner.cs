@@ -109,11 +109,14 @@ internal static class UiRunner
     }
 
     /// <summary>
-    /// CI: every window under review, drawn to a PNG and checked, in the order of the screenshots: the main window
-    /// (its Simple and Advanced views, Services, Tasks and startup apps, Settings and its Advanced grid), each step of setup
-    /// once it has read the PC (it runs no leak check in the test) and "How PoolWatch works", Active changes once its list
-    /// is read, Report an issue with a sample text, About, and the main window's update notice for a sample release. Each
-    /// window made for the test is closed again, so at the end only the main window is open.
+    /// CI: every window under review, drawn to a PNG and checked: About and Report an issue with a sample text first, each
+    /// of which reads PoolWatch's own cost as it opens, so that they read it as the run left it; then the main window (its
+    /// Simple and Advanced views, Services, Tasks and startup apps, Settings and its Advanced grid), each step of setup once
+    /// it has read the PC (it runs no leak check in the test) and "How PoolWatch works", Active changes once its list is
+    /// read, and the main window's update notice for a sample release. Drawn after the others, About read the working set
+    /// that the 8 windows (16 screenshots) made in about 4 s had added, with no trim between them: 127 to 131 MB at the end of the UI soak,
+    /// where the steady peak was 86 to 96 MB, held against the 100 MB budget. Each window made for the test is closed
+    /// again, so at the end only the main window is open.
     /// </summary>
     private static async Task<(List<string> files, object stats)> Smoke(TrayApp app, MonitorEngine engine, AnalysisPipeline analysis, AppPaths paths, string dir)
     {
@@ -126,13 +129,28 @@ internal static class UiRunner
             judgedCpuPercentOfOneCore = meter.JudgedCpuPercentOfOneCore, judgedPeakWorkingSetBytes = meter.JudgedPeakWorkingSetBytes,
             judgedDiskWriteBytesPerHour = meter.JudgedDiskWriteBytesPerHour,
         };
-        var files = app.Form.Screenshots(dir);
-        var form = app.Form.SmokeStats(); // hides the main window last
+        var files = new List<string>();
         string Shot(Form window, string name)
         {
             files.Add(SmokeShots.Save(window, dir, name, paths.Guard));
             return name;
         }
+
+        // About, then Report an issue, before any other window is built (the UI soak checks what About says).
+        var about = new AboutDialog(engine, analysis, app.Setup.Actions);
+        about.Show();
+        var aboutStats = about.SmokeStats();
+        Shot(about, "9-about.png");
+        about.Close();
+
+        var report = new ReportIssueDialog(engine, analysis, app.Setup.Actions, null);
+        report.Show();
+        var reportStats = report.SmokeStats(); // types the sample text first, so the shot shows it
+        Shot(report, "8-report-issue.png");
+        report.Close();
+
+        files.AddRange(app.Form.Screenshots(dir));
+        var form = app.Form.SmokeStats(); // hides the main window last
 
         // Setup as on a first run (its close button asks first), each of its seven steps once it has read the PC, then
         // "How PoolWatch works". Nothing is applied: the test goes straight to each step, and every change refuses in the
@@ -159,18 +177,6 @@ internal static class UiRunner
         bool activeLoaded = await Task.WhenAny(active.Loaded, Task.Delay(SmokeWait)) == active.Loaded;
         var activeStats = new { loaded = activeLoaded, stats = active.SmokeStats(), shot = Shot(active, "7-active-changes.png") };
         active.Close();
-
-        var report = new ReportIssueDialog(engine, analysis, app.Setup.Actions, null);
-        report.Show();
-        var reportStats = report.SmokeStats(); // types the sample text first, so the shot shows it
-        Shot(report, "8-report-issue.png");
-        report.Close();
-
-        var about = new AboutDialog(engine, analysis, app.Setup.Actions);
-        about.Show();
-        var aboutStats = about.SmokeStats();
-        Shot(about, "9-about.png");
-        about.Close();
 
         // The update notice as the Simple view shows it when a newer release is out, for a sample release given to the
         // window in the check's place. The sample skips the update-notices setting (CI turns notices off), so it shows

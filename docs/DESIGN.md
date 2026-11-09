@@ -65,11 +65,16 @@ on), and every lasting one is listed under Active changes, where it can be put b
   for its bounded length only. Steady state starts 15 minutes after PoolWatch starts, the window the soak judges
   (section 12). Before that is start-up: the first scans, the windows built, the JIT and the start-up trims. In a CI
   soak with the window open PoolWatch used 1.4% of one core between 30 s and 15 minutes and 0.46% after; in the CI UI
-  test About is drawn about 90 s in, right after the test built, drew and saved every window and before PoolWatch's
+  test About was drawn about 90 s in, right after the test built, drew and saved every window and before PoolWatch's
   next trim, and the 138 MB of working set it showed then was that start-up. About judges the budget once steady state
   has lasted 5 minutes, with its CPU, its highest working set and its disk writes, and before that says only when it
-  will (`SelfMeter`); the rolling line in every report warns that PoolWatch is over budget only over a window that is
-  all steady state.
+  will (`SelfMeter`); the rolling line in every report ("PoolWatch itself (last 10 min): CPU 0.21% of one core, 64 MB
+  now, 1.2 MB/h written": the CPU and the writes over the window, the working set as it is now) warns that PoolWatch
+  is over budget only over a window that is all steady state. Both read as About opens, so windows built just before it
+  count: at the end of the CI UI soak, drawn after the 8 windows (16 screenshots) that walk made in about 4 s, About
+  read 127 to 131 MB of working set, where the steady peak was 86 to 96 MB, and called it over budget. The CI tests now
+  draw About first, and once any window of PoolWatch's other than the main one closes, its memory is given back
+  (below).
 - **Where it writes**: only under its admin-only data folder `%ProgramData%\PoolWatch` (or an explicit headless
   `--out` folder), apart from the few writes SECURITY.md lists, never in its install folder, never through a link, and never
   on a ReFS volume (every Dev Drive is ReFS: its per-file metadata is the pool being measured). 7-day retention by
@@ -109,13 +114,18 @@ on), and every lasting one is listed under Active changes, where it can be put b
   with it (`MainForm.LayOutOnce`): the smaller header of the Services tabs moves everything under it, and laid out one
   change at a time a switch laid the whole view out twice. A new sample lays the header out again only when a text its
   size is measured from changed (the ring of the next clear moves every sample and only repaints). A compacting full
-  collection of PoolWatch's own heap, with `EmptyWorkingSet`, runs at 30 s, 90 s and 3 minutes after start-up and when
-  the window hides; after that, every 5 minutes, a compacting collection alone (no empty) only when the heap has grown
-  32 MB past what the last full collection left. Between those, a sample empties the working set alone once it has
-  reached 75 MB (three quarters of the budget), at least 2 minutes after the last empty, and only while the heap is at
-  most half of it (`MemoryTrim`). With the window open, the working set holds the pages its views and tabs touched
-  since the last empty: in the CI UI soak with nothing emptied after start-up, 67 to 91 MB with the window of
-  1.0.0-preview.1 and 78 to 101 MB with 1.0.0's, while private memory and the heap stayed the same within 2 MB. The
+  collection of PoolWatch's own heap, with `EmptyWorkingSet`, runs at 30 s, 90 s and 3 minutes after start-up, when
+  the window hides, and when any other window of PoolWatch's stops showing (About, Report an issue, Active changes,
+  Settings and its Advanced grid, setup, and every other: `OtherWindows`, which counts them each time the UI thread
+  goes idle, as WinForms raises no event when any window closes). Building a window touches pages that stay in the
+  working set after it has gone: in a probe, 10 windows built, shown and closed added 38 MB of working set, 27 MB of it
+  private and 11 MB shared (private memory grew 20 MB). After start-up, every 5 minutes, a compacting collection alone (no
+  empty) runs only when the heap has grown 32 MB past what the last full collection left. Between those, a sample
+  empties the working set alone once it has reached 75 MB (three quarters of the budget), at least 2 minutes after the
+  last empty, and only while the heap is at most half of it (`MemoryTrim`). With the window open, the working set
+  holds the pages its views and tabs touched since the last empty: in the CI UI soak with nothing emptied after
+  start-up, 67 to 91 MB with the window of 1.0.0-preview.1 and 78 to 101 MB with 1.0.0's, while private memory and the
+  heap stayed the same within 2 MB. The
   likely reason (not measured by cause) is pages the larger window touches and that stay resident: the working set
   less private memory, steady median, was 14.0 MB with preview.1's window and 22.9 MB with 1.0.0's, and under 1 MB
   headless in both. Each such empty is judged 10 seconds after it, whatever the sample interval: back at 75 MB or more
@@ -941,14 +951,19 @@ The code builds anywhere the .NET 10 SDK runs (`EnableWindowsTargeting`); it run
   self-test, the CSV checks and the end-to-end and diagnostics scenarios under emulation.
 - A 45-minute soak checks the overhead budget under a busy-PC load, headless and with the window open (walking the
   Simple view and the Advanced view's three tabs, one a minute: `MainForm.StartSoakCycle`), judged as steady state from
-  15 minutes in until 10 seconds before PoolWatch's own end of run (the start-up peak, and the end-of-run screenshots or
-  exit reports, are reported on their own lines, not judged). Flat memory is judged through the heap PoolWatch's full
+  15 minutes in until 10 seconds before PoolWatch's own end of run (the start-up peak, and the samples after that
+  window, are reported on their own lines, not judged; the end-of-run screenshots or exit reports last a few seconds,
+  less than the 30 s between samples, so the last sample is usually before them, and the line says how long before).
+  Flat memory is judged through the heap PoolWatch's full
   collections leave (the floors in its profile.json, from the same window; a slope of private memory over every sample
   would depend on where the window cuts the sawtooth between collections): their trend, under 5 MB an hour, when at
   least three floors span 15 minutes, and, in every run, private memory's steady maximum, which must stay under 100 MB.
   With the window open it also checks About's own figures, which PoolWatch's meter takes over the same steady state
-  (read as the end-of-run walk begins; the peak working set under 100 MB), and that the About drawn then judged them;
-  the UI test checks that the About it draws, about 90 s in, judges nothing. The soak and an overhead check run on
+  (read as the end-of-run walk begins; the peak working set under 100 MB), and that the About drawn first in that walk,
+  before any other window, judged them and found them within the budget: a peak working set under 100 MB, CPU under
+  0.5% of one core and nothing over budget. Drawn last, after the 8 windows (16 screenshots) the walk made in about 4 s,
+  it read 127 to 131 MB where the steady peak was 86 to 96 MB, and the CPU and the writes of the walk itself. The UI test
+  checks that the About it draws first, about 80 s in, judges nothing. The soak and an overhead check run on
   demand and before every release. In `overhead.json`, which the overhead check (`ci/overhead.ps1`) reads,
   `steadyStateSeconds` keeps its older name: it counts from the warm-up (the sample interval three times, at least
   30 s), as do the CPU and disk-write figures beside it, not from steady state; the `judged...` figures, which About

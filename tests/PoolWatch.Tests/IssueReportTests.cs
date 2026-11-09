@@ -187,7 +187,7 @@ public class IssueReportTests
 
     private static readonly IssueFacts Facts = new("1.0.0", "installer (setup.exe)", "Windows 11 Pro 25H2, build 26200.8655, Insider", "x64", 64L << 30, 1,
         "9.6 GB (paged and non-paged pool), up 1.2 GB in the last hour", "on, every 1 h; last clear at 09:12 (standby list, automatic) freed 4.7 GB",
-        "off; no saved test result", "PoolWatch itself (last 10 min): CPU 0.21% of one core, 64 MB, 1.2 MB/h written",
+        "off; no saved test result", "PoolWatch itself (last 10 min): CPU 0.21% of one core, 64 MB now, 1.2 MB/h written",
         ["File system metadata (Reff, refs.sys): 2.1 GB"], "Incident x (growth): it grew.");
 
     [Fact]
@@ -196,7 +196,7 @@ public class IssueReportTests
         Assert.Equal("PoolWatch 1.0.0, installer (setup.exe)\nWindows: Windows 11 Pro 25H2, build 26200.8655, Insider, x64\nMemory: 64.0 GB\nDev Drives: 1\n" +
                      "Kernel pool now: 9.6 GB (paged and non-paged pool), up 1.2 GB in the last hour\n" +
                      "Automatic cache clear: on, every 1 h; last clear at 09:12 (standby list, automatic) freed 4.7 GB\nToken-leak guard: off; no saved test result\n" +
-                     "PoolWatch itself (last 10 min): CPU 0.21% of one core, 64 MB, 1.2 MB/h written\nLargest kernel pool tags:\n" +
+                     "PoolWatch itself (last 10 min): CPU 0.21% of one core, 64 MB now, 1.2 MB/h written\nLargest kernel pool tags:\n" +
                      "- File system metadata (Reff, refs.sys): 2.1 GB\n\nIncident x (growth): it grew.\n", IssueReport.Details(Facts));
         Assert.DoesNotContain("Incident", IssueReport.Details(Facts with { Incident = null, TopTags = [] }));
         Assert.DoesNotContain("|", IssueReport.Details(Facts));

@@ -1,15 +1,17 @@
 using System.Text.Json;
 using PoolWatch.Engine;
+using PoolWatch.Ui;
 
 namespace PoolWatch.AppTests;
 
 /// <summary>
 /// PoolWatch's own memory trim: a compacting collection only when the heap grew past what the last full collection left;
-/// the working set emptied after start-up, when the window hides, and, between those, when it has reached three quarters
-/// of the budget, not too soon after the last empty and never while it is mostly heap (that faults straight back in),
-/// waiting longer after each empty that did not hold, judged 10 s after it whatever the sample interval. The sampler's
-/// trim reads the working set its meter read for the sample. The trim acts on the test process itself, never on another
-/// one; the working set tests give it their own readings, run its timer on their own clock and count the empties instead.
+/// the working set emptied after start-up, when the window hides or another of PoolWatch's windows closes, and, between
+/// those, when it has reached three quarters of the budget, not too soon after the last empty and never while it is
+/// mostly heap (that faults straight back in), waiting longer after each empty that did not hold, judged 10 s after it
+/// whatever the sample interval. The sampler's trim reads the working set its meter read for the sample. The trim acts on
+/// the test process itself, never on another one; the working set tests give it their own readings, run its timer on
+/// their own clock and count the empties instead.
 /// </summary>
 public class MemoryTrimTests
 {
@@ -328,6 +330,138 @@ public class MemoryTrimTests
         long fresh = Environment.WorkingSet;
         Assert.True(meter.WorkingSetNow > MB, $"the meter kept {meter.WorkingSetNow} bytes");
         Assert.InRange(meter.WorkingSetNow, fresh / 2, fresh * 2); // this process's own, read a moment ago
+    }
+
+    /// <summary>
+    /// What About and the CI read of PoolWatch's own cost (<c>SelfMeter.Report</c>: About, overhead.json, the CI UI test) is
+    /// this process's own, as each sample reads it: its CPU time and its working set and private bytes. It was read through
+    /// Process.GetCurrentProcess(), whose working set and private bytes come from a snapshot of every process on the
+    /// machine. The meter's code (comments out) names no Process at all.
+    /// </summary>
+    [Fact]
+    public void TheMetersReportReadsThisProcessAloneWithNoSnapshotOfEveryProcess()
+    {
+        var report = new SelfMeter(TimeSpan.FromSeconds(30)).Report();
+        long fresh = Environment.WorkingSet;
+        Assert.InRange(report.PeakWorkingSetBytes, fresh / 2, fresh * 2); // this process's own, read a moment ago
+        Assert.True(report.PeakPrivateBytes > MB, $"the report read {report.PeakPrivateBytes} private bytes");
+        string source = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "SelfMeter.cs"));
+        Assert.DoesNotMatch(@"\bProcess\b", ScriptCode.CSharp(source));
+        Assert.Equal("public OverheadReport Report() { var (workingSet, privateBytes) = Memory(); return Report(_wall.Elapsed, Cpu(), workingSet, privateBytes, WriteBytes()); }",
+            UninstallerTests.OneLine(ScriptCode.CSharp(ScriptCode.CSharpMember(source, "public OverheadReport Report()").Value)));
+    }
+
+    /// <summary>
+    /// One of PoolWatch's windows other than the main one stops showing (it closed, or hid): the look at the next idle of the
+    /// UI thread asks for a release, once. A window that opens, one that stays, and a first look with windows already open
+    /// ask for none; two that close between two looks (Settings with its Advanced grid) ask once.
+    /// </summary>
+    [Fact]
+    public void AnotherWindowThatStopsShowingAsksForARelease()
+    {
+        int shown = 0, released = 0;
+        var windows = new OtherWindows(() => shown, () => released++);
+        void At(int open) { shown = open; windows.Look(); }
+        At(0);
+        At(1); // About opens
+        At(1); // and stays
+        At(2); // Report an issue, opened from it
+        Assert.Equal(0, released);
+        At(1); // About closes
+        Assert.Equal(1, released);
+        At(1);
+        At(0); // then Report an issue
+        Assert.Equal(2, released);
+        At(0);
+        At(2);
+        At(0); // two between two looks
+        Assert.Equal(3, released);
+        var later = new OtherWindows(() => 3, () => released++);
+        later.Look(); // its first look: three already open
+        Assert.Equal(3, released);
+    }
+
+    /// <summary>
+    /// The release another window's closing asks for is the main window's hide's: the trim's request (the engine's
+    /// ReleaseMemory, which the tray app gives the look). The next sample compacts the heap and empties the working set,
+    /// with no guard of the trim's (here 10 s after start, before its first start-up trim, and with the working set far
+    /// under the 75 MB at which a sample empties it alone), once.
+    /// </summary>
+    [Fact]
+    public void AnotherWindowsClosingTrimsTheNextSampleAsTheHideDoes()
+    {
+        int shown = 0, emptied = 0;
+        var trim = new MemoryTrim(() => TimeSpan.FromSeconds(10), () => 20 * MB, () => 10 * MB, () => emptied++);
+        var windows = new OtherWindows(() => shown, trim.Request);
+        shown = 1;
+        windows.Look();
+        trim.MaybeRun(); // About shows: nothing
+        Assert.Equal((0, 0), (trim.Compactions, emptied));
+        shown = 0;
+        windows.Look();
+        trim.MaybeRun(); // closed: both, at once
+        Assert.Equal((1, 1), (trim.Compactions, emptied));
+        trim.MaybeRun(); // the request is used up
+        Assert.Equal((1, 1), (trim.Compactions, emptied));
+    }
+
+    /// <summary>
+    /// The look counts a window that shows, never one that does not (hidden, or closed: Application.OpenForms holds a
+    /// window from its first showing until it closes) nor the main one. No test may put a window on the desktop, so a
+    /// window here "shows" by WinForms' own Visible flag alone, set without a window handle, as
+    /// <see cref="WindowFitTests.OwnVisible"/> reads it; none is ever made.
+    /// </summary>
+    [Fact]
+    public void TheLookCountsAWindowThatShowsButNeverTheMainOne()
+    {
+        using var main = new Form();
+        using var other = new Form();
+        Assert.False(OtherWindows.Counts(other, main)); // never shown
+        Assert.False(OtherWindows.Counts(null, main));
+        try
+        {
+            SetVisible(other, true);
+            SetVisible(main, true);
+            Assert.True(other.Visible && main.Visible && !other.IsHandleCreated && !main.IsHandleCreated);
+            Assert.True(OtherWindows.Counts(other, main));
+            Assert.True(OtherWindows.Counts(other, null)); // before the main window is made
+            Assert.False(OtherWindows.Counts(main, main));
+        }
+        finally
+        {
+            SetVisible(other, false);
+            SetVisible(main, false);
+        }
+        Assert.False(OtherWindows.Counts(other, main)); // hidden again
+        Assert.Equal(0, OtherWindows.Shown(Application.OpenForms, null)); // no test shows a window
+    }
+
+    /// <summary>WinForms' own Control.SetState(States, bool): found by name, so a WinForms that renames it fails here, by name.</summary>
+    private static readonly System.Reflection.MethodInfo SetState = typeof(Control)
+        .GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+        .Single(m => m.Name == "SetState" && m.GetParameters() is [{ ParameterType.IsEnum: true }, { ParameterType: var flag }] && flag == typeof(bool));
+
+    /// <summary>Sets a control's own Visible flag (its States member by name), with no window shown or made.</summary>
+    private static void SetVisible(Control c, bool visible) =>
+        SetState.Invoke(c, [Enum.Parse(SetState.GetParameters()[0].ParameterType, "Visible"), visible]);
+
+    /// <summary>
+    /// The tray app looks at every idle of its UI thread, with the engine's release, which is the trim's request, as the
+    /// main window's hide asks for it; and it stops looking as it exits (the event is the thread's, and would hold the app).
+    /// The tray app needs the whole app, so its source is read.
+    /// </summary>
+    [Fact]
+    public void TheTrayAppLooksAtEveryIdleWithTheHidesReleaseAndStopsAsItExits()
+    {
+        string Code(string file, string header) => UninstallerTests.OneLine(ScriptCode.CSharp(ScriptCode.CSharpMember(
+            File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", file)), header).Value));
+        string tray = Code(Path.Combine("Ui", "TrayApp.cs"), "public TrayApp(");
+        Assert.Contains("_otherWindows = new OtherWindows(() => OtherWindows.Shown(Application.OpenForms, _form), engine.ReleaseMemory); " +
+                        "_onIdle = (_, _) => _otherWindows.Look(); Application.Idle += _onIdle;", tray);
+        Assert.Contains("Application.Idle -= _onIdle;", Code(Path.Combine("Ui", "TrayApp.cs"), "protected override void ExitThreadCore()"));
+        Assert.Contains("_engine.ReleaseMemory(); }", Code(Path.Combine("Ui", "MainForm.cs"), "private void ReleaseWhileHidden()"));
+        string engine = UninstallerTests.OneLine(ScriptCode.CSharp(File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "MonitorEngine.cs"))));
+        Assert.Contains("public void ReleaseMemory() => Trim.Request();", engine);
     }
 
     [Fact]

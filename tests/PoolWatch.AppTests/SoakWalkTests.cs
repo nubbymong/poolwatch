@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using PoolWatch.Engine;
 using PoolWatch.Ui;
 
 namespace PoolWatch.AppTests;
@@ -6,7 +7,8 @@ namespace PoolWatch.AppTests;
 /// <summary>
 /// The CI UI soak's walk through the main window (<c>SoakWalk</c>, <c>MainForm.StartSoakCycle</c>) and what
 /// <c>ci/soak.ps1</c> expects of it: the Simple view and every tab of the Advanced view, one a minute, each refresh
-/// profiled for the view on screen, and nothing more once it is stopped for the end-of-run screenshots.
+/// profiled for the view on screen, and nothing more once it is stopped for the end-of-run screenshots; and what the
+/// About drawn first in that end-of-run walk says, held to the budget.
 /// </summary>
 public class SoakWalkTests
 {
@@ -210,11 +212,102 @@ public class SoakWalkTests
         var smoke = MainWindowLayoutTests.Block(File.ReadAllText(Path.Combine(ui, "UiRunner.cs")), "private static async Task<(List<string> files, object stats)> Smoke(")
             .Split('\n').Select(l => l.Trim()).ToList();
         int stop = smoke.FindIndex(l => l.StartsWith("app.Form.StopSoakCycle();", StringComparison.Ordinal));
-        int shots = smoke.FindIndex(l => l.StartsWith("var files = app.Form.Screenshots(dir);", StringComparison.Ordinal));
+        int shots = smoke.FindIndex(l => l.StartsWith("files.AddRange(app.Form.Screenshots(dir));", StringComparison.Ordinal));
         Assert.True(stop >= 0 && shots > stop, "the runner does not stop the walk before the screenshots");
         var stopCycle = MainWindowLayoutTests.Block(File.ReadAllText(Path.Combine(ui, "MainForm.cs")), "public void StopSoakCycle()")
             .Split('\n').Select(l => l.Trim()).ToList();
         Assert.Contains("_soakWalk?.Stop();", stopCycle); // a step already queued does nothing
         Assert.Contains("_soakTimer?.Stop();", stopCycle);
+    }
+
+    /// <summary>
+    /// The end-of-run walk draws About first, then Report an issue, each of which reads PoolWatch's own cost as it opens:
+    /// right after it stops the soak's walk and reads the meter, before the main window's screenshots and every other
+    /// window it builds. Drawn after them, About read the working set, the CPU and the writes that the 8 windows (16
+    /// screenshots) made in about 4 s had added: 127 to 131 MB at the end of the UI soak, where the steady peak was 86 to 96 MB, as over budget.
+    /// The runner needs the whole app, so its source is read (its code, comments out).
+    /// </summary>
+    [Fact]
+    public void TheEndOfRunWalkDrawsAboutThenReportAnIssueBeforeAnyOtherWindow()
+    {
+        string source = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "UiRunner.cs"));
+        var smoke = MainWindowLayoutTests.Block(ScriptCode.CSharp(source), "private static async Task<(List<string> files, object stats)> Smoke(")
+            .Split('\n').Select(l => l.Trim()).ToList();
+        int Line(string start)
+        {
+            var at = Enumerable.Range(0, smoke.Count).Where(i => smoke[i].StartsWith(start, StringComparison.Ordinal)).ToList();
+            Assert.True(at.Count == 1, $"the walk has {at.Count} lines that start \"{start}\", not one");
+            return at[0];
+        }
+        int[] order =
+        [
+            Line("app.Form.StopSoakCycle();"),
+            Line("var meter = engine.Meter.Report();"),
+            Line("var about = new AboutDialog("),
+            Line("var report = new ReportIssueDialog("),
+            Line("files.AddRange(app.Form.Screenshots(dir));"),
+            Line("var guide = new SetupWizardForm("),
+            Line("var active = new ActiveChangesForm("),
+        ];
+        Assert.Equal(order.Order().ToArray(), order);
+        Assert.Single(Regex.Matches(string.Join("\n", smoke), @"new AboutDialog\("));
+    }
+
+    /// <summary>The soak's reads of what About says: the peak working set in MB and the CPU, both of its steady state.</summary>
+    private const string AboutPeak = @"peak working set ([0-9]+(?:\.[0-9]+)?) MB \(budget";
+    private const string AboutCpu = @"of steady state \([^)]*\): CPU ([0-9]+(?:\.[0-9]+)?)% of one core \(budget";
+
+    /// <summary>
+    /// The UI soak holds what the About drawn first in its end-of-run walk says to the budget: its peak working set under
+    /// 100 MB and its CPU under 0.5% of one core, as its text gives them, and no "OVER BUDGET" (its rolling line's). Each
+    /// read of the text is a statement of the script's top level and the only assignment of its variable; the three checks
+    /// are a run in the -Ui part of the -Assert block with their marker after the last. And the reads find About's steady
+    /// figures in what About writes (<see cref="AboutDialog.OverheadText"/>), not the rolling line's CPU, and nothing in a
+    /// text that judges nothing yet or gives the peak in GB, so that the checks fail.
+    /// </summary>
+    [Fact]
+    public void TheSoakHoldsWhatTheAboutDrawnFirstSaysToTheBudget()
+    {
+        string soak = File.ReadAllText(Path.Combine(CiFolder(), "soak.ps1"));
+        Assert.Equal((1, 1), (ScriptCode.PowerShellAssignments(soak, "aboutPeakMB"), ScriptCode.PowerShellAssignments(soak, "aboutCpu")));
+        Assert.Equal(["$aboutPeakMB = if ($aboutText -match '" + AboutPeak + "') { [double]$Matches[1] } else { $null }"], ScriptCode.StatementsIn(soak, "$aboutPeakMB = "));
+        Assert.Equal(["$aboutCpu = if ($aboutText -match '" + AboutCpu + "') { [double]$Matches[1] } else { $null }"], ScriptCode.StatementsIn(soak, "$aboutCpu = "));
+        Assert.True(ScriptCode.CheckThenMarker(soak,
+        [
+            "Assert-True ($null -ne $aboutPeakMB -and $aboutPeakMB -lt 100) \"",
+            "Assert-True ($null -ne $aboutCpu -and $aboutCpu -lt 0.5) \"",
+            "Assert-True ($aboutText -notlike '*OVER BUDGET*') \"",
+        ], "soak-about-judged", "if ($Assert) {", "if ($Ui) {"), "ci/soak.ps1 does not hold About's text to the budget in its -Ui checks, with the marker after the last");
+
+        // What About writes, read as the soak reads it: PowerShell's -match is .NET's regular expressions, without case.
+        static string? Read(string pattern, string text) => Regex.Match(text, pattern, RegexOptions.IgnoreCase) is { Success: true } m ? m.Groups[1].Value : null;
+        var steady = new OverheadReport
+        {
+            WallSeconds = 2700, JudgedFromSeconds = 900, JudgedSeconds = 1800, Judged = true, JudgedCpuPercentOfOneCore = 0.263,
+            JudgedPeakWorkingSetBytes = 90_387_251, JudgedDiskWriteBytesPerHour = 1_800_000, // 86.2 MB, 1.7 MB/h
+        };
+        const string rolling = "PoolWatch itself (last 10 min): CPU 0.71% of one core, 99 MB now, 4.1 MB/h written";
+        string about = AboutDialog.OverheadText(steady, () => rolling);
+        Assert.Equal(("86.2", "0.26"), (Read(AboutPeak, about), Read(AboutCpu, about)));
+        Assert.Null(Read(AboutCpu, rolling));
+        Assert.Null(Read(AboutPeak, AboutDialog.OverheadText(steady with { JudgedPeakWorkingSetBytes = 2L << 30 }, () => rolling)));
+        string early = AboutDialog.OverheadText(steady with { JudgedSeconds = 60 }, () => rolling);
+        Assert.Null(Read(AboutPeak, early));
+        Assert.Null(Read(AboutCpu, early));
+    }
+
+    /// <summary>
+    /// The soak's line for the samples from outside after the steady window says what they are: they run until PoolWatch
+    /// exited, 30 s apart, so the last of them is usually a few seconds before the end-of-run walk began ("about": the gap
+    /// leaves out PoolWatch's own start before its timer). It read "End of run", as if those samples were the walk's.
+    /// </summary>
+    [Fact]
+    public void TheSoakSaysItsLastSamplesFromOutsideComeBeforeTheEndOfRunWalk()
+    {
+        string soak = File.ReadAllText(Path.Combine(CiFolder(), "soak.ps1"));
+        Assert.Contains("[void]$md.AppendLine((\"- After the steady window (samples from outside from {0:N1} min until PoolWatch exited; not judged): {1}\" -f ($steadyTo / 60), $endText))", soak);
+        Assert.Contains("over {2} samples, the last about {3:N0} s {4}' -f", soak);
+        Assert.Contains("$endWhat = if ($Ui) { 'the end-of-run screenshots and checks' } else { 'the reports written at exit' }", soak);
+        Assert.DoesNotContain("- End of run (", soak);
     }
 }

@@ -61,6 +61,10 @@ internal sealed class TrayApp : ApplicationContext, IShell
     private readonly GuardTray _guardTray;
     /// <summary>Windows' setting-change message, passed to the token-leak guard (<see cref="TokenLeakGuard.SettingChanged"/>).</summary>
     private readonly Microsoft.Win32.UserPreferenceChangedEventHandler _onSettingChange;
+    /// <summary>PoolWatch's windows other than the main one: when one stops showing, its memory is given back (<see cref="OtherWindows"/>).</summary>
+    private readonly OtherWindows _otherWindows;
+    /// <summary>The UI thread's idle, where <see cref="_otherWindows"/> looks.</summary>
+    private readonly EventHandler _onIdle;
 
     /// <summary>The state the tray icon currently shows.</summary>
     public TrayState IconState => _state;
@@ -170,6 +174,12 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _timer.Tick += (_, _) => UpdateIcon();
         _timer.Start();
         UpdateIcon();
+        // Each of PoolWatch's windows other than the main one (About, Report an issue, Active changes, Settings and its
+        // Advanced grid, setup, and every other): once one stops showing, the next sample gives back what building it touched,
+        // as when the main window hides.
+        _otherWindows = new OtherWindows(() => OtherWindows.Shown(Application.OpenForms, _form), engine.ReleaseMemory);
+        _onIdle = (_, _) => _otherWindows.Look();
+        Application.Idle += _onIdle;
         // Until setup was completed once, it opens on its own at every start (started at sign-in too), and the main window
         // waits for it. The update check starts once setup has been completed, so the owner has seen its switch first.
         _gate = new FirstRunGate(completed: () => Setup.Store.GuideCompleted, smoke: smoke, openSetup: OpenGuide, showMain: ShowMain,
@@ -447,6 +457,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _hotkey.Dispose();
         Microsoft.Win32.SystemEvents.SessionEnding -= _onSessionEnding;
         Microsoft.Win32.SystemEvents.UserPreferenceChanged -= _onSettingChange;
+        Application.Idle -= _onIdle; // the event is the thread's, and holds this app until it is removed
         _timer.Stop();
         _timer.Dispose();
         _watchTimer.Stop();
@@ -612,4 +623,45 @@ internal sealed class BalloonClick
     }
 
     public void Closed() => _action = null;
+}
+
+/// <summary>
+/// PoolWatch's own memory once one of its windows other than the main one stops showing (About, Report an issue, Active
+/// changes, Settings and its Advanced grid, setup and How PoolWatch works, and every other): each time the UI thread goes
+/// idle it counts those that show (<paramref name="shown"/>), and when fewer show than at its last look, one has closed or
+/// hidden, so it asks for what the main window asks for when it hides (<paramref name="release"/>: the engine's
+/// ReleaseMemory, after which the next sample compacts the heap and empties the working set; that request has no guard,
+/// and several before one sample run it once). Building a window touches pages that stay in the working set after it has
+/// gone: in a probe, 10 windows built, shown and closed added 38 MB of working set, 27 MB of it private and 11 MB shared
+/// (private memory grew 20 MB); in three CI UI soaks, the 8 windows (16 screenshots) the end-of-run walk made in about
+/// 4 s, with no trim between them, took the working set from a steady peak of 86 to 96 MB to 127 to 131 MB, which the About drawn last in that walk
+/// read as over budget. WinForms raises no event when any of a thread's windows closes, so one look at its idle covers
+/// every window, a modal one and one added later too, and costs a count of the open windows.
+/// </summary>
+internal sealed class OtherWindows(Func<int> shown, Action release)
+{
+    private int _shown;
+
+    /// <summary>The UI thread is idle: when fewer windows show than at the last look, one closed or hid, and memory is given back.</summary>
+    public void Look()
+    {
+        int now = shown();
+        if (now < _shown) release();
+        _shown = now;
+    }
+
+    /// <summary>
+    /// How many of <paramref name="open"/> (Application.OpenForms: the windows shown at least once and not closed since)
+    /// show, other than <paramref name="main"/> (null before it is made).
+    /// </summary>
+    public static int Shown(FormCollection open, Form? main)
+    {
+        int count = 0;
+        for (int i = 0; i < open.Count; i++) // by index: a look at every idle allocates nothing
+            if (Counts(open[i], main)) count++;
+        return count;
+    }
+
+    /// <summary>Whether <paramref name="form"/> counts: it shows, and it is not the main window.</summary>
+    internal static bool Counts(Form? form, Form? main) => form is { Visible: true } && form != main;
 }

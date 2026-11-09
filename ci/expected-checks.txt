@@ -65,3 +65,4 @@ m4-ui.ps1 ui-setup-close-button
 m4-ui.ps1 ui-tray-menu-items
 soak.ps1 soak-walked-pages-refreshed
 soak.ps1 soak-no-other-page-refreshed
+soak.ps1 soak-about-judged

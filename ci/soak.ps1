@@ -115,11 +115,15 @@ $steadyWsText = if ($null -ne $steadyMaxWs) { '{0:N1} MB' -f $steadyMaxWs } else
 $overhead = Get-Content "$Out\overhead.json" -Raw | ConvertFrom-Json
 $summary = Get-Content "$Out\summary.json" -Raw | ConvertFrom-Json
 # -Ui: About's own figures (DESIGN.md section 3), which PoolWatch's meter takes over its steady state, from 15 minutes
-# as here: read from smoke.json as the end-of-run walk began (meterBeforeWalk), with the text the About drawn in that
-# walk showed. Missing, they read as $null and the assertions below fail.
+# as here: read from smoke.json as the end-of-run walk began (meterBeforeWalk), with the text the About drawn first in
+# that walk, before any other window, showed. Missing, they read as $null and the assertions below fail.
 $smoke = if ($Ui -and (Test-Path "$Out\screenshots\smoke.json")) { Get-Content "$Out\screenshots\smoke.json" -Raw | ConvertFrom-Json } else { $null }
 $meter = if ($null -ne $smoke) { $smoke.meterBeforeWalk } else { $null }
 $aboutText = if ($null -ne $smoke) { "$($smoke.about.overhead)" } else { '' }
+# The peak working set About gave in MB and its CPU in % of one core, both of its steady state: $null when its text gives
+# neither so (a peak in GB, say), and the check below fails.
+$aboutPeakMB = if ($aboutText -match 'peak working set ([0-9]+(?:\.[0-9]+)?) MB \(budget') { [double]$Matches[1] } else { $null }
+$aboutCpu = if ($aboutText -match 'of steady state \([^)]*\): CPU ([0-9]+(?:\.[0-9]+)?)% of one core \(budget') { [double]$Matches[1] } else { $null }
 $md = New-Object System.Text.StringBuilder
 [void]$md.AppendLine("# Soak under load ($(if ($Ui) { 'UI, window open' } else { 'headless' }), $Minutes min, $ChainsPerMinute chains/min, $FilesPerSecond files/s, $Handles handles held)")
 [void]$md.AppendLine()
@@ -130,13 +134,22 @@ $md = New-Object System.Text.StringBuilder
 [void]$md.AppendLine(("- Heap after each full collection, from 15 min (PoolWatch's own floors): {0}" -f $(if ($floorList) { $floorList } else { 'none' })))
 [void]$md.AppendLine(("- Start-up peak (working set max over the whole run, start-up included; not judged): {0:N1} MB" -f $startupPeakWs))
 [void]$md.AppendLine(("- PoolWatch's own trim over the whole run (not judged): {0} compactions, working set emptied {1} times" -f $profile.memory.compactions, $profile.memory.workingSetEmptied))
-$endText = if ($endRows.Count -gt 0) { 'working set max {0:N1} MB, private memory max {1:N1} MB over {2} samples' -f ($endRows | Measure-Object workingSetMB -Maximum).Maximum, ($endRows | Measure-Object privateMB -Maximum).Maximum, $endRows.Count } else { 'no sample' }
-[void]$md.AppendLine(("- End of run (after {0:N1} min: {1}; not judged): {2}" -f ($steadyTo / 60), $(if ($Ui) { "the end-of-run screenshots and checks" } else { "the reports written at exit" }), $endText))
+# The samples from outside after the steady window, until PoolWatch exited. Its own end of run (its timer, on this
+# script's clock) lasts a few seconds, less than the 30 s between samples, so the last of them is usually before it.
+# The gap is "about": it leaves out PoolWatch's own start before its timer begins, a second or two.
+$endAt = $seconds - $pwAhead
+$endWhat = if ($Ui) { 'the end-of-run screenshots and checks' } else { 'the reports written at exit' }
+$endText = 'no sample'
+if ($endRows.Count -gt 0) {
+    $gap = $endAt - $endRows[-1].elapsed
+    $endText = 'working set max {0:N1} MB, private memory max {1:N1} MB over {2} samples, the last about {3:N0} s {4}' -f ($endRows | Measure-Object workingSetMB -Maximum).Maximum, ($endRows | Measure-Object privateMB -Maximum).Maximum, $endRows.Count, [math]::Abs($gap), $(if ($gap -gt 0) { "before $endWhat began" } else { "after $endWhat began" })
+}
+[void]$md.AppendLine(("- After the steady window (samples from outside from {0:N1} min until PoolWatch exited; not judged): {1}" -f ($steadyTo / 60), $endText))
 [void]$md.AppendLine(("- Disk writes {0:N2} MB/h (own meter); ETW events {1}; processes tracked {2}" -f ($overhead.diskWriteBytesPerHour / 1MB), $summary.etwEvents, $summary.processesTracked))
 if ($Ui) {
     $meterText = if ($null -ne $meter) { "steady state from {0:N0} min over {1:N1} min: CPU {2:N3}% of one core, peak working set {3:N1} MB, disk writes {4:N2} MB/h" -f ([double]$meter.judgedFromSeconds / 60), ([double]$meter.judgedSeconds / 60), [double]$meter.judgedCpuPercentOfOneCore, ([double]$meter.judgedPeakWorkingSetBytes / 1MB), ([double]$meter.judgedDiskWriteBytesPerHour / 1MB) } else { 'n/a (no meterBeforeWalk in smoke.json)' }
     [void]$md.AppendLine("- About's figures (PoolWatch's own meter, read as the end-of-run walk began): $meterText")
-    [void]$md.AppendLine("- About at the end of the run said: $aboutText")
+    [void]$md.AppendLine("- About, drawn first in the end-of-run walk, said: $aboutText")
 }
 [void]$md.AppendLine(("- GC: heap {0} MB, committed {1} MB, allocated {2} MB total, gen0/1/2 {3}/{4}/{5}, server={6}, gen0 cap {7} MB" -f $profile.gc.heapMB, $profile.gc.committedMB, $profile.gc.totalAllocatedMB, $profile.gc.gen0, $profile.gc.gen1, $profile.gc.gen2, $profile.gc.server, $profile.gc.gen0MaxBudgetMB))
 [void]$md.AppendLine(("- Held: {0}" -f ($profile.held | ConvertTo-Json -Compress)))
@@ -178,6 +191,12 @@ if ($Assert) {
         Assert-True ($null -ne $meter -and $meter.judged -eq $true -and [double]$meter.judgedFromSeconds -eq 900) "About's figures are steady state from 15 min: $meterText"
         Assert-True ($null -ne $meter -and $null -ne $meter.judgedPeakWorkingSetBytes -and [double]$meter.judgedPeakWorkingSetBytes -lt 100MB) "About's peak working set (steady state, own meter) < 100 MB: $meterText"
         Assert-True ($aboutText -like 'Overhead over * of steady state (from 15 minutes after start): CPU *') "About judged the steady state at the end of the run: $aboutText"
+        # And what About itself says is within the budget: drawn first in the end-of-run walk, it reads PoolWatch as the
+        # steady state left it, not with the working set and the CPU of the windows that walk builds after it.
+        Assert-True ($null -ne $aboutPeakMB -and $aboutPeakMB -lt 100) "About's peak working set < 100 MB: $aboutText"
+        Assert-True ($null -ne $aboutCpu -and $aboutCpu -lt 0.5) "About's CPU < 0.5% of one core: $aboutText"
+        Assert-True ($aboutText -notlike '*OVER BUDGET*') "About says nothing is over budget: $aboutText"
+        Write-Host 'CHECK-RAN: soak-about-judged'
     }
 }
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
