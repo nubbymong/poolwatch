@@ -4,7 +4,7 @@ What changed in each PoolWatch release, newest first, in plain words.
 
 ## Unreleased
 
-## 1.0.0 - 2026-10-30
+## 1.0.0 - 2026-11-09
 
 The first public release. PoolWatch keeps a Windows 11 PC fast and stable through long days of agentic coding: it
 watches the kernel pool, empties the standby cache before the pool slows you down, fixes known issues and, if you
