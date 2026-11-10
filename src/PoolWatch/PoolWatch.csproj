@@ -54,9 +54,26 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\PoolWatch.Core\PoolWatch.Core.csproj" />
-    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.30" />
-    <PackageReference Include="System.Management" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="4.0.0" />
+    <PackageReference Include="System.Management" Version="10.0.14" />
     <!-- The Clear cache helper (PoolWatch.CacheHelper, run by two SYSTEM tasks) is gone: the purge is in-process, and
          nothing is written into Program Files. -->
   </ItemGroup>
+  <!-- Off Windows (CI's Linux compile check), restore prunes System.CodeDom as it does on Windows, so packages.lock.json,
+       made on Windows, holds there too and that restore runs in locked mode. System.CodeDom is a System.Management
+       dependency that the Windows Desktop runtime provides. On Windows the SDK reads that from the Windows Desktop
+       targeting pack, which lists it at the pack's version (10.0.14), and prunes it at any patch of that version's
+       major.minor (up to 10.0.32767), which is the target framework's major.minor: the target computes the same version
+       from the target framework. An SDK off Windows has no such pack, and its fallback list is .NET 9's, which prunes
+       System.CodeDom 9.0.x only, so the graph gained System.CodeDom 10.0.x. That list prunes every other Windows Desktop
+       package (System.Diagnostics.EventLog, System.Drawing.Common and the rest) only up to 9.0.x too, and leaves out
+       System.Formats.Nrbf; System.CodeDom is the only one in this graph. If the Linux job's locked restore fails on
+       another one, prune it here the same way. The compile references are the same either way: they come from the
+       Windows Desktop targeting pack, which restore downloads off Windows. -->
+  <Target Name="PruneSystemCodeDomAsOnWindows" AfterTargets="AddPrunePackageReferences" Condition="!$([MSBuild]::IsOSPlatform('Windows'))">
+    <ItemGroup>
+      <PrunePackageReference Remove="System.CodeDom" />
+      <PrunePackageReference Include="System.CodeDom" Version="$([MSBuild]::GetTargetFrameworkVersion('$(TargetFramework)', 2)).32767" />
+    </ItemGroup>
+  </Target>
 </Project>

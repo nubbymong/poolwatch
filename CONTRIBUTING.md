@@ -43,7 +43,9 @@ read it first.
    under "Security-sensitive code" in AGENTS.md need a separate security review before they merge, and a change to how
    PoolWatch detects growth follows "Changing detection" there.
 4. If you change a package reference, update the lock files on Windows (`dotnet restore --force-evaluate`) and commit
-   them: elsewhere the Windows app's lock files come out different, and CI's locked restore fails.
+   them: elsewhere the Windows app's lock files come out different, and CI's locked restore fails. A package that ships
+   (one of the app's or the launcher's) also needs its row in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) at the
+   new version, and its licence checked again: a test holds that table to the lock files.
 5. The CI runs the end-to-end scenarios on a Windows runner; please do not run `ci/*.ps1` on your own PC: they change
    services, scheduled tasks and the standby list.
 6. If users will notice the change, add a line in plain words under "Unreleased" in [CHANGELOG.md](CHANGELOG.md).

@@ -70,7 +70,9 @@ dotnet publish src/PoolWatch.Launcher/PoolWatch.Launcher.csproj -c Release -r wi
   `WindowFitTests.OwnVisible`, or every control reads as hidden and the check finds nothing.
 - Package versions are locked (`packages.lock.json`; CI restores in locked mode). Agree a new NuGet package in an issue
   first; after changing a reference, run `dotnet restore --force-evaluate` on Windows and commit the lock files
-  (elsewhere the Windows app's lock files come out different, and CI's locked restore fails).
+  (elsewhere the Windows app's lock files come out different, and CI's locked restore fails). A package the app or the
+  launcher ships also needs its row in THIRD-PARTY-NOTICES.md at the new version, and its licence checked again
+  (`ThirdPartyNoticesTests` holds the table to the lock files).
 - Do not run `ci/*.ps1`, `tools/Leaker` or the installer on your own PC: they change services, scheduled tasks and the
   standby cache, and Leaker grows the kernel pool and loads the CPU on purpose. CI runs them on throwaway runners; read
   the run's artifacts (logs, reports, screenshots) instead. An AI agent does not start PoolWatch itself unless its
