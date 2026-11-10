@@ -19,7 +19,7 @@ internal static class CostReport
         using var p = Process.GetCurrentProcess();
         var gc = GC.GetGCMemoryInfo();
         double elapsed = (DateTime.Now - p.StartTime).TotalSeconds;
-        int historyProcs; long historyPoints; int minutes; long minuteEntries; int events;
+        int historyProcs; long historyPoints; int minutes; long minuteEntries; int summedHours; int events;
         int growthMinutes, growthTags; long growthTagEntries, growthBytes;
         (int incidents, int owners, int ownerMembers, int events) held;
         Core.Incidents.FoldersBehind behind;
@@ -29,7 +29,9 @@ internal static class CostReport
             historyProcs = analysis.History.ProcessTrackCount;
             historyPoints = analysis.History.ProcessPointCount;
             minutes = analysis.History.Minutes.Count;
-            minuteEntries = analysis.History.Minutes.Sum(m => (long)m.Processes.Length);
+            // Every process entry the minute history holds: the detailed minutes' and the summed hours' (History.cs).
+            minuteEntries = analysis.History.MinuteProcessEntries;
+            summedHours = analysis.History.SummedHourCount;
             events = analysis.Incidents.EventCount;
             held = analysis.Incidents.Held();
             growthMinutes = analysis.Growth.MinuteCount;
@@ -90,12 +92,14 @@ internal static class CostReport
             held = new
             {
                 registryRecords = engine.Registry.Count,
+                namedRecords = engine.Registry.NamedCount, // exited processes kept by name only (ProcessRegistry)
                 compactRecords = engine.Registry.CompactCount,
                 stringPool = StringPool.Count,
                 historyProcessTracks = historyProcs,
                 historyProcessPoints = historyPoints,
                 historyMinutes = minutes,
                 historyMinuteEntries = minuteEntries,
+                historySummedHours = summedHours,
                 incidentEvents = events,
                 incidents = held.incidents,
                 incidentOwners = held.owners,
