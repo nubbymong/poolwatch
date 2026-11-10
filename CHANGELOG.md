@@ -101,11 +101,19 @@ want, trims background work. Every change it makes is listed, with a way to put 
   addresses, `@` names, issue numbers and commit hashes in them go in code spans, so GitHub makes no link or mention of
   them. By default, Export report takes out your user and machine names, your home folder and values that look like
   passwords or keys. It does its best, so read the export before you share it.
+- **Spawn storms, counted right, and light on the disk.** A program that starts more than 30 short commands in 30
+  seconds shows as a spawn storm. The copies Git Bash makes of itself to run a pipeline are not counted (what they
+  start is), and one program is one storm however PoolWatch first saw it. One program's storms within an hour share one
+  report folder, and at most 10 new ones are made an hour. PoolWatch writes its incident and storm reports within a
+  disk budget: a report is written when an incident opens and closes, and brought up to date in between as the budget
+  allows (with many incidents open at once, up to about an hour behind; the list's figures are live). An incident's
+  `events.csv` has every event from its first row to its last. The incident list always shows your incidents, however
+  many storm reports came after them.
 - **A week of data, whatever the clock says.** PoolWatch keeps its data in `C:\ProgramData\PoolWatch`, which only
   administrators can change. A day's folder, an incident or an export is deleted once nothing in it was written for 7
   days (by default), counted on the PC's own timer while the PC is on and awake, so a change of the PC's clock never
   deletes anything early. While PoolWatch runs, the growth, the clears and the alerts are timed on the PC's own
-  timer too, so a change of its clock then moves none of them.
+  timer too, so a change of its clock then moves none of them. Each check of what to delete is one line in the log.
 - **Settings, each explained.** **Advanced...** in Settings lists the settings in a grid and says what the one you
   select does, its default and, where it has them, its unit and limits. The sign-in box is ticked only while PoolWatch
   really starts when you sign in; when its task is there but does not start PoolWatch, a line under it says why.

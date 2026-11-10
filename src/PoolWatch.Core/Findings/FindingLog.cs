@@ -105,7 +105,8 @@ public static class FindingReport
         return dir;
     }
 
-    public static void Write(string dir, Finding f, string markdownBody, IReadOnlyDictionary<string, string>? extraFiles, Func<string, string> checkWrite)
+    /// <summary>Writes the folder's files; returns the bytes written (UTF-8).</summary>
+    public static long Write(string dir, Finding f, string markdownBody, IReadOnlyDictionary<string, string>? extraFiles, Func<string, string> checkWrite)
     {
         Directory.CreateDirectory(checkWrite(dir));
         var md = new StringBuilder();
@@ -114,24 +115,28 @@ public static class FindingReport
         md.AppendLine($"- Finding `{f.Kind}` ({f.Severity}), {Fmt.Stamp(f.TimeUtc)}");
         foreach (var d in f.Details) md.AppendLine($"- {Md(d)}");
         md.AppendLine().Append(markdownBody);
-        Atomic(Path.Combine(dir, "report.md"), md.ToString(), checkWrite);
+        long written = Atomic(Path.Combine(dir, "report.md"), md.ToString(), checkWrite);
         var json = new
         {
             notice = Incidents.Exporter.UnredactedNotice,
             id = Path.GetFileName(dir), kind = f.Kind, severity = f.Severity, headline = f.Title, time = f.TimeUtc, details = f.Details,
             pid = f.Pid, image = f.Image, data = f.Data,
         };
-        Atomic(Path.Combine(dir, "report.json"), JsonSerializer.Serialize(json, Indented), checkWrite);
+        written += Atomic(Path.Combine(dir, "report.json"), JsonSerializer.Serialize(json, Indented), checkWrite);
         if (extraFiles is not null)
-            foreach (var (name, content) in extraFiles) Atomic(Path.Combine(dir, name), content, checkWrite);
+            foreach (var (name, content) in extraFiles) written += Atomic(Path.Combine(dir, name), content, checkWrite);
+        return written;
     }
 
-    private static void Atomic(string path, string content, Func<string, string> checkWrite)
+    /// <summary>Replaces <paramref name="path"/> with <paramref name="content"/> in one step (temp file + move); returns the bytes written.</summary>
+    internal static long Atomic(string path, string content, Func<string, string> checkWrite)
     {
+        var bytes = new UTF8Encoding(false).GetBytes(content);
         string tmp = checkWrite(path + ".tmp");
-        File.WriteAllText(tmp, content, new UTF8Encoding(false));
+        File.WriteAllBytes(tmp, bytes);
         File.Move(tmp, checkWrite(path), overwrite: true);
-        Util.Profiler.Wrote(path, content.Length);
+        Util.Profiler.Wrote(path, bytes.Length);
+        return bytes.Length;
     }
 
     private static string FileSafe(string s)

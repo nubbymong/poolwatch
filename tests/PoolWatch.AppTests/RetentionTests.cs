@@ -79,8 +79,34 @@ public sealed class RetentionTests : IDisposable
         _paths.ApplyRetention(7, _log.Add, clock);
         Assert.False(There(oldDay) || There(yearOld) || There(newDay) || There(ahead));
         Assert.True(There(later)); // first seen at the check after its write
-        Assert.Contains(_log, l => l.StartsWith("retention: removed ") && l.EndsWith("20261024"));
-        Assert.Contains(_log, l => l.StartsWith("retention: removed ") && l.EndsWith("export.zip"));
+        Assert.Contains(_log, l => Removed(l, @"data\20261024"));
+        Assert.Contains(_log, l => Removed(l, @"exports\export.zip"));
+    }
+
+    /// <summary>Whether <paramref name="line"/> is a check's summary that names <paramref name="name"/> as removed (<see cref="AppPaths.RetentionSummary"/>).</summary>
+    private static bool Removed(string line, string name) =>
+        line.StartsWith("retention: removed ", StringComparison.Ordinal) && line[(line.IndexOf("awake time: ", StringComparison.Ordinal) + 12)..].Split(", ").Contains(name);
+
+    /// <summary>
+    /// A check that removes many things logs one line for them: the counts by folder and the first few names (the owner's
+    /// log had 1,137 lines a day, one per folder removed).
+    /// </summary>
+    [Fact]
+    public void ACheckLogsOneLineForWhatItRemoved()
+    {
+        var items = Enumerable.Range(0, 12).Select(i => Item("incidents", $"20261020-1000{i:D2}-SpawnStorm-bash", TimeSpan.FromDays(10))).ToList();
+        items.Add(Item("data", "20261020", TimeSpan.FromDays(10)));
+        var clock = Start(savedMs: _timer);
+        _paths.ApplyRetention(7, _log.Add, clock);
+        Assert.Equal(["retention: 13 things judged, none kept unchanged for over 7 days of the PC's awake time"], _log.Where(l => l.StartsWith("retention: ")));
+        _log.Clear();
+        _timer += Period + Minute;
+        _paths.ApplyRetention(7, _log.Add, clock);
+        Assert.All(items, i => Assert.False(There(i)));
+        string line = Assert.Single(_log);
+        Assert.StartsWith("retention: removed 13 of 13 things (incidents 12, data 1) kept unchanged for over 7 days of the PC's awake time: ", line);
+        Assert.EndsWith(" and 8 more", line);
+        Assert.Equal(AppPaths.SummaryNames, line[(line.IndexOf("awake time: ", StringComparison.Ordinal) + 12)..].Split(", ").Length);
     }
 
     [Fact]
@@ -331,7 +357,7 @@ public sealed class RetentionTests : IDisposable
         _timer += Period - Day + Minute;
         _paths.ApplyRetention(7, _log.Add, clock);
         // Due on its first count: removed, or its removal failed and was logged (it fails at the link in this test's run).
-        Assert.Contains(_log, l => l == "retention: removed " + day || l.StartsWith("retention: could not remove " + day + ": "));
+        Assert.Contains(_log, l => Removed(l, @"data\20261030") || l.StartsWith("retention: could not remove " + day + ": "));
         Assert.Equal("xy", File.ReadAllText(behind));
     }
 
@@ -580,7 +606,7 @@ public sealed class RetentionTests : IDisposable
         _paths.ApplyRetention(7, _log.Add, clock);
         Assert.False(There(day)); // its rest, at the next check
         Assert.True(There(other)); // counted anew from the check that saw the write
-        Assert.Contains("retention: removed " + day, _log);
+        Assert.Contains(_log, l => Removed(l, @"data\20261020"));
         _timer += Period - Minute;
         _paths.ApplyRetention(7, _log.Add, clock);
         Assert.True(There(other));

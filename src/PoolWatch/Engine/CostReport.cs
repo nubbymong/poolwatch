@@ -36,7 +36,8 @@ internal static class CostReport
             growthBytes = analysis.Growth.ApproxBytes();
         }
         int stormTraceRows;
-        lock (analysis.Diagnostics.Spawns) stormTraceRows = analysis.Diagnostics.Spawns.OpenStorms.Sum(s => s.Trace.Count);
+        // The starts the spawn-storm report folders hold for their spawns.csv, not written yet.
+        lock (analysis.Diagnostics.Spawns) stormTraceRows = analysis.Diagnostics.Spawns.Folders.Sum(f => f.PendingRows.Count);
         return new
         {
             elapsedSeconds = Math.Round(elapsed, 1),

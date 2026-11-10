@@ -287,8 +287,8 @@ internal sealed class AppPaths
     public void ApplyRetention(int days, Action<string> log, RetentionClock clock, Func<string, bool, DateTime>? lastWriteUtc = null,
         Func<string, bool, IEnumerable<string>>? list = null)
     {
-        lastWriteUtc ??= (path, dir) => dir ? Directory.GetLastWriteTimeUtc(path) : File.GetLastWriteTimeUtc(path);
         list ??= (root, dirs) => dirs ? Directory.EnumerateDirectories(root) : Directory.EnumerateFiles(root);
+        var removed = new List<string>();
         var seen = new List<RetentionClock.Seen>();
         var where = new Dictionary<string, (string Path, bool Dir)>(StringComparer.OrdinalIgnoreCase);
         var inside = new Dictionary<string, List<RetentionClock.Entry>>(StringComparer.OrdinalIgnoreCase);
@@ -346,7 +346,7 @@ internal sealed class AppPaths
                 else File.Delete(path);
                 _retentionRemoving.Remove(name);
                 _retentionSaid.Remove("remove " + path);
-                log($"retention: removed {path}");
+                removed.Add(name);
             }
             catch (Exception ex)
             {
@@ -356,6 +356,7 @@ internal sealed class AppPaths
             }
         }
         clock.Save();
+        log(RetentionSummary(days, seen.Count, removed));
 
         void Add(string rootName, string path, bool dir)
         {
@@ -381,6 +382,23 @@ internal sealed class AppPaths
         {
             if (_retentionSaid.Add(key)) log(line);
         }
+    }
+
+    /// <summary>The names retention's one line a check names (the rest are counted).</summary>
+    internal const int SummaryNames = 5;
+
+    /// <summary>
+    /// A retention check in one log line: how many things it judged and how many it removed, by folder, with the first
+    /// <see cref="SummaryNames"/> removed by name ("retention: removed 1,137 of 15,230 things (incidents 1,130, data 7) kept
+    /// unchanged for over 7 days of the PC's awake time: incidents\20261102-101010-SpawnStorm-bash, ... and 1,132 more").
+    /// </summary>
+    internal static string RetentionSummary(int days, int judged, IReadOnlyList<string> removed)
+    {
+        if (removed.Count == 0) return $"retention: {judged:N0} things judged, none kept unchanged for over {days} days of the PC's awake time";
+        var byFolder = removed.GroupBy(n => n[..Math.Max(0, n.IndexOf('\\'))], StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(g => g.Count()).Select(g => $"{g.Key} {g.Count():N0}");
+        string names = string.Join(", ", removed.Take(SummaryNames)) + (removed.Count > SummaryNames ? $" and {removed.Count - SummaryNames:N0} more" : "");
+        return $"retention: removed {removed.Count:N0} of {judged:N0} things ({string.Join(", ", byFolder)}) kept unchanged for over {days} days of the PC's awake time: {names}";
     }
 
     /// <summary>
@@ -451,31 +469,51 @@ internal sealed class AppPaths
     /// last-write time is Windows' value for a path that is gone (1601-01-01); throws when any of it cannot be read or
     /// listed. For a folder, what it holds is added to <paramref name="inside"/> when one is given.
     /// </summary>
-    internal static long? StampOf(string path, bool dir, Func<string, bool, DateTime> lastWriteUtc, List<RetentionClock.Entry>? inside = null)
+    /// <param name="lastWriteUtc">A path's last-write time (a test gives its own); null: Windows', read with the file's length in one
+    /// query of the file itself (one per file, where reading the time and the length apart took two).</param>
+    internal static long? StampOf(string path, bool dir, Func<string, bool, DateTime>? lastWriteUtc, List<RetentionClock.Entry>? inside = null)
     {
-        if (Written(path, dir) is not { } own) return null;
-        if (!dir) return RetentionClock.Stamp(own, new FileInfo(path).Length, []);
+        if (!dir) return FileStamp(path) is { } f ? RetentionClock.Stamp(f.written, f.length, []) : null;
+        if (Written(path, true) is not { } own) return null;
         if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint)) return RetentionClock.Stamp(own, -1, []);
         inside ??= new List<RetentionClock.Entry>();
         var folders = new Stack<string>();
         folders.Push(path);
         while (folders.TryPop(out var folder))
         {
-            foreach (var sub in Directory.EnumerateDirectories(folder, "*", Contents))
+            // One listing of the folder for its folders and files (a link left out); each file's time and length are read
+            // from the file itself, as the listing may not yet show what the CSV sink added to a file it holds open.
+            foreach (var entry in new DirectoryInfo(folder).EnumerateFileSystemInfos("*", Contents))
             {
-                if (Written(sub, true) is not { } written) return null;
-                inside.Add(new(Path.GetRelativePath(path, sub), -1, written));
-                folders.Push(sub);
-            }
-            foreach (var file in Directory.EnumerateFiles(folder, "*", Contents))
-            {
-                if (Written(file, false) is not { } written) return null;
-                inside.Add(new(Path.GetRelativePath(path, file), new FileInfo(file).Length, written));
+                if (entry is DirectoryInfo)
+                {
+                    if (Written(entry.FullName, true) is not { } written) return null;
+                    inside.Add(new(Path.GetRelativePath(path, entry.FullName), -1, written));
+                    folders.Push(entry.FullName);
+                }
+                else
+                {
+                    if (FileStamp(entry.FullName) is not { } f) return null;
+                    inside.Add(new(Path.GetRelativePath(path, entry.FullName), f.length, f.written));
+                }
             }
         }
         return RetentionClock.Stamp(own, -1, inside);
 
         // Windows gives 1601-01-01 for a path that is gone: not read.
-        long? Written(string at, bool folder) => lastWriteUtc(at, folder) is var utc && utc == DateTime.FromFileTimeUtc(0) ? null : utc.Ticks;
+        long? Written(string at, bool folder)
+        {
+            var utc = lastWriteUtc is null ? (folder ? Directory.GetLastWriteTimeUtc(at) : File.GetLastWriteTimeUtc(at)) : lastWriteUtc(at, folder);
+            return utc == DateTime.FromFileTimeUtc(0) ? null : utc.Ticks;
+        }
+
+        // A file's time and length, from one query of the file (FileInfo reads both at once) unless a test gives the time.
+        (long written, long length)? FileStamp(string file)
+        {
+            var info = new FileInfo(file);
+            var utc = lastWriteUtc is null ? info.LastWriteTimeUtc : lastWriteUtc(file, false);
+            if (utc == DateTime.FromFileTimeUtc(0)) return null;
+            return (utc.Ticks, info.Length);
+        }
     }
 }

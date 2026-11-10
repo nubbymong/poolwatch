@@ -47,7 +47,7 @@ In the data folder:
 | `since-boot.md`, `since-boot.json`, `boots.md` | written when PoolWatch exits: what grew since boot, and the last boots side by side |
 | `data\<yyyyMMdd>\` | one folder per day: the CSV files below and `findings.jsonl`. Deleted once nothing in it was written for 7 days (by default) of time the PC was awake, so a PC that sleeps keeps more calendar days |
 | `incidents\<id>\` | one folder per incident (section 3). `<id>` is `<yyyyMMdd-HHmmss>-<tag>-<tag in hex>` |
-| `incidents\<yyyyMMdd-HHmmss>-<kind>-<subject>\` | a report on one alert finding (such as `Experiment`, `Crash`, `SpawnStorm`): its `report.json` is that finding (time, kind, title, details, data), not an incident |
+| `incidents\<yyyyMMdd-HHmmss>-<kind>-<subject>\` | a report on one alert finding (such as `Experiment`, `Crash`, `SpawnStorm`): its `report.json` is that finding (time, kind, title, details, data), not an incident. A `SpawnStorm` folder holds every storm of one program (its image, role and owner, such as a Claude Code session's bash) that came within an hour of the one before: `data.episodes` lists them, `data` is otherwise the latest storm's, and `spawns.csv` has the folder's first 1,000 starts. Fork copies (a child with its parent's own image and command line, as Git Bash runs a pipeline) are not counted as starts. At most 10 such folders are made an hour; a storm past that is only in `findings.jsonl` |
 | `cache\clears.json` | the last 100 finished cache clears: when, how and why, the pool (and its paged part) and the standby list before and after, and any error; for a measured clear, the tags it freed (up to 12, each at least 1 MB, with the bytes before and after). Every tag that dropped is in the `CacheClear` findings |
 | `cache\token-guard.json` | the last token-leak test: the Windows build, the result and when it ran |
 | `cache\token-guard-setting.json` | the Windows setting the token-leak guard replaced (the live foreground lock timeout from before it set 0), one value per sign-in with the sign-in it belongs to, so turning the guard off or uninstalling in that sign-in puts it back when Windows allows it (one the guard found already changed is not recorded, and stays until you sign out) |
@@ -117,8 +117,13 @@ after a watched app ran), `incidents.md`, `experiment\` (when one ran), `filters
 
 Each incident folder has `report.md` (for people), `report.json` (the same, for you), `timeline.csv`,
 `processes.csv`, `events.csv`, `timeline.png` and, when a trace was taken, `capture.etl`. (A folder whose name has a
-finding's kind instead of a tag is a finding's report, described in the file map.) The fields of `report.json` that
-matter:
+finding's kind instead of a tag is a finding's report, described in the file map.) An incident's `events.csv` holds
+the events of its window from 2 minutes before the onset, every one from its first row to its last, in the order
+PoolWatch added them (sorted by time within each addition): the window's first 5,000 at most, and on a busy PC fewer
+while the incident is open, as PoolWatch writes within a disk budget. When it holds fewer than the window had for good,
+its last row (`kind` `Note`) says so, and its time is when its events stop. An `Alert` row marks when each growth rule
+first fired (the report has its latest numbers). The day's `data\<yyyyMMdd>\events.csv` has every event. On a busy
+PC an open incident's `report.json` can be up to about an hour behind. The fields of `report.json` that matter:
 
 - `id`, `kind` (`Growth`, `NonPagedTotal` for the whole non-paged pool over its limit, `Release` for a sharp drop,
   `Capture` for a trace the person started), `tag` and `tagHex`, `owner` and `description` (the driver and what the

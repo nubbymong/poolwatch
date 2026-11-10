@@ -14,10 +14,97 @@ namespace PoolWatch.Core.Incidents;
 /// <summary>
 /// Writes an incident folder: report.md (headline, chart, suspects with evidence, process details, system info,
 /// draft bug report), report.json (the same, machine-readable), timeline.csv, processes.csv, events.csv and
-/// timeline.png. Files are replaced atomically (temp file + move) so a reader never sees half a report.
+/// timeline.png. report.md, report.json, timeline.csv, processes.csv and timeline.png are replaced atomically (temp file +
+/// move) so a reader never sees half a report, and only when what they say changed since this run last wrote them (an
+/// unchanged file, a closed incident's CSVs and chart among them, is not written again). events.csv is appended to, from
+/// what the incident kept of its window's events (<see cref="IncidentEventSet.Kept"/>: every event from the window's
+/// start in order, at most <see cref="MaxEventRows"/>): each event once, the earliest not written yet first, so the file
+/// holds every event from its first row to its last, however far the write budget held it back; when the incident stopped
+/// keeping events (it kept <see cref="MaxEventRows"/>) and the file has all it kept, a last row says up to when it holds
+/// them. It is rewritten whole only when it is not as PoolWatch last wrote it, or when a closed incident's onset moved
+/// later than rows it holds (they are then left out, and the rest kept as written). Each write returns the bytes it wrote,
+/// for the report folders' budget (<see cref="WriteBudget"/>).
 /// </summary>
 internal sealed class IncidentWriter
 {
+    /// <summary>The most event rows an incident's events.csv holds (the alerts' rows aside), and the most events an incident keeps.</summary>
+    public const int MaxEventRows = 5000;
+
+    private static readonly UTF8Encoding Utf8 = new(false);
+
+    /// <summary>
+    /// An alert's row in events.csv: one per growth rule (kind + window) and onset, when the rule first fired with it (a rule
+    /// that keeps firing replaces its alert with the bigger one and keeps its onset, so it stays one row; a re-opening's
+    /// alert has its own onset, so a new episode gets its row; the report has the latest numbers), and one per release alert.
+    /// </summary>
+    private readonly record struct AlertRow(AlertKind Kind, TimeSpan Window, long OnsetMs, Alert? Release)
+    {
+        public static AlertRow Of(Alert a) => a.Kind == AlertKind.Release ? new(a.Kind, a.Window, 0, a) : new(a.Kind, a.Window, a.OnsetMs, null);
+    }
+
+    /// <summary>What this run last wrote into each incident's folder (forgotten with the incident).</summary>
+    private sealed class FileState
+    {
+        /// <summary>Each replaced file's content hash, by file name.</summary>
+        public readonly Dictionary<string, UInt128> Hashes = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>The events events.csv holds, by <see cref="RowKey"/> (no event is kept alive for it), and its alerts' rows; null before it was written.</summary>
+        public HashSet<long>? Events;
+        public HashSet<AlertRow>? Alerts;
+        /// <summary>events.csv's length as written, to tell that it is still as written.</summary>
+        public long Length;
+        public int EventRows;
+        /// <summary>The earliest event it holds, on the clock that only goes forward.</summary>
+        public long FirstMs = long.MaxValue;
+        /// <summary>It holds no event before this (on the forward clock): where the incident started keeping them, later when a closed incident's onset moved later.</summary>
+        public long StartMs = long.MinValue;
+        /// <summary>Its last row says the events after that row's time are not in it (the incident stopped keeping them): when, else null.</summary>
+        public DateTime? NotedAt;
+        /// <summary>A write left rows of the window for later (it may write only so many, or none while the write budget has no room).</summary>
+        public bool Pending;
+        /// <summary>When the chart, timeline.csv and processes.csv were last written (a full write), on the forward clock; null: never.</summary>
+        public long? FullMs;
+        /// <summary>The latest time of day of an event row it holds; null: none.</summary>
+        public DateTime? LastUtc;
+        /// <summary>How many events the incident had kept at the last write of events.csv (it keeps more while open).</summary>
+        public int KeptSeen;
+    }
+
+    /// <summary>
+    /// The incident leaves memory with kept events its events.csv does not have yet (the write budget held them back): a
+    /// last row says to when the file holds the window's events (the rest are in the day's events.csv). A row, written
+    /// whatever the budget. Returns the bytes written.
+    /// </summary>
+    public long NoteUnwritten(Incident inc)
+    {
+        if (!_state.TryGetValue(inc, out var st) || !Pending(inc, st)) return 0;
+        string path = Path.Combine(inc.Dir, "events.csv");
+        if (!File.Exists(path) || new FileInfo(path).Length != st.Length) return 0; // not as written: left as it is
+        var onsetLess2 = inc.OnsetUtc.AddMinutes(-2);
+        var at = st.LastUtc is { } l && l > onsetLess2 ? l : onsetLess2;
+        var add = Utf8.GetBytes(NoteLine(at) + Environment.NewLine);
+        using (var fs = new FileStream(_host.CheckWrite(path), FileMode.Append, FileAccess.Write, FileShare.Read))
+        {
+            fs.Write(add);
+            st.Length = fs.Length;
+        }
+        Profiler.Wrote(path, add.Length);
+        (st.NotedAt, st.Pending) = (at, false);
+        return add.Length;
+    }
+
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<Incident, FileState> _state = new();
+
+    private FileState StateOf(Incident inc) => _state.GetValue(inc, _ => new FileState());
+
+    /// <summary>A write of the incident left rows of its window out of events.csv for later (<see cref="AppendEvents"/>).</summary>
+    public bool EventsPending(Incident inc) => _state.TryGetValue(inc, out var st) && Pending(inc, st);
+
+    /// <summary>Kept events not in events.csv yet: a write left some for later, or the incident kept more since its last write.</summary>
+    private static bool Pending(Incident inc, FileState st) => st.Events is not null && st.NotedAt is null && (st.Pending || inc.Events.Count != st.KeptSeen);
+
+    /// <summary>When the incident's chart, timeline.csv and processes.csv were last written this run (a full write), on the forward clock; null: never.</summary>
+    public long? FullWrittenMs(Incident inc) => _state.TryGetValue(inc, out var st) ? st.FullMs : null;
+
     private readonly TagKnowledge _knowledge;
     private readonly IIncidentHost _host;
     private readonly ProcessRegistry _registry;
@@ -57,10 +144,23 @@ internal sealed class IncidentWriter
         catch { return Path.GetFileName(cap.EtlPath); }
     }
 
-    public void Write(History.History h, Incident inc, List<LifecycleEvent> events)
+    /// <summary><see cref="Write(History.History, Incident, IncidentEventSet, int)"/> with <paramref name="events"/> as all the window's events there are.</summary>
+    public long Write(History.History h, Incident inc, List<LifecycleEvent> events, int maxRows = MaxEventRows) => Write(h, inc, IncidentEventSet.Of(events), maxRows);
+
+    /// <summary>
+    /// Writes the folder: each file whose content changed, and up to <paramref name="maxRows"/> of the kept events not in
+    /// events.csv yet (the rest left for a later write, <see cref="EventsPending"/>). Without <paramref name="full"/> (an
+    /// open incident's refresh, its opening) only report.json and report.md (what the window's details and Copy summary
+    /// read) and the events: the chart, timeline.csv and processes.csv stay as they were (<see cref="FullWrittenMs"/>).
+    /// Returns the bytes written.
+    /// </summary>
+    /// <param name="atMs">The write's moment on the forward clock, kept as <see cref="FullWrittenMs"/> for a full write.</param>
+    public long Write(History.History h, Incident inc, IncidentEventSet ev, int maxRows = MaxEventRows, bool full = true, long atMs = 0)
     {
+        var events = ev.Window;
         _history = h;
         _plainFor = null;
+        var st = StateOf(inc);
         Directory.CreateDirectory(_host.CheckWrite(inc.Dir));
         var info = _knowledge.Lookup(inc.Tag);
         var details = inc.Suspects.Take(5).ToDictionary(s => s.Key, s => _host.DescribeFile(s.ImagePath));
@@ -71,19 +171,36 @@ internal sealed class IncidentWriter
         int to = w is null ? h.Count - 1 : Math.Max(from, (inc.ClosedUtc is { } closed ? w.AfterIndex(h, closed, w.ToMs is null ? null : inc.ClosedMs) : w.AfterIndex(h)) - 1);
         to = Math.Min(to, h.Count - 1);
 
-        bool png = false;
-        if (h.Count > 1 && to > from)
+        bool png = File.Exists(Path.Combine(inc.Dir, "timeline.png"));
+        long bytes = 0;
+        if (full)
         {
-            try { png = RenderChart(h, inc, from, to, Path.Combine(inc.Dir, "timeline.png")); }
-            catch (Exception ex) { _host.Log($"incident {inc.Id}: chart failed: {ex.Message}"); }
+            png = false;
+            if (h.Count > 1 && to > from)
+            {
+                try { (png, long pngBytes) = RenderChart(h, inc, from, to, Path.Combine(inc.Dir, "timeline.png"), st); bytes += pngBytes; }
+                catch (Exception ex) { _host.Log($"incident {inc.Id}: chart failed: {ex.Message}"); }
+            }
+            bytes += WriteTimelineCsv(h, inc, from, to, st);
+            bytes += WriteProcessesCsv(h, inc, from, to, st);
+            st.FullMs = atMs;
         }
-        WriteTimelineCsv(h, inc, from, to);
-        WriteProcessesCsv(h, inc, from, to);
-        WriteEventsCsv(inc, events);
+        bytes += WriteEventsCsv(inc, ev, st, maxRows);
         var report = BuildJson(inc, info, details, system, events);
-        Atomic(Path.Combine(inc.Dir, "report.json"), JsonSerializer.Serialize(report, Json));
-        Atomic(Path.Combine(inc.Dir, "report.md"), BuildMarkdown(inc, info, details, system, events, png));
+        bytes += Atomic(Path.Combine(inc.Dir, "report.json"), JsonSerializer.Serialize(report, Json), st);
+        bytes += Atomic(Path.Combine(inc.Dir, "report.md"), BuildMarkdown(inc, info, details, system, events, png, st), st);
+        return bytes;
     }
+
+    /// <summary>Appends up to <paramref name="maxRows"/> of the kept events not written yet to events.csv alone (rows a write left for later); returns the bytes written.</summary>
+    public long AppendEvents(Incident inc, IncidentEventSet ev, int maxRows)
+    {
+        Directory.CreateDirectory(_host.CheckWrite(inc.Dir));
+        return WriteEventsCsv(inc, ev, StateOf(inc), maxRows);
+    }
+
+    /// <summary><see cref="AppendEvents(Incident, IncidentEventSet, int)"/> with <paramref name="events"/> as all the window's events there are.</summary>
+    public long AppendEvents(Incident inc, List<LifecycleEvent> events, int maxRows) => AppendEvents(inc, IncidentEventSet.Of(events), maxRows);
 
     /// <summary>
     /// The incident in one line, the top suspect's confidence in the words of Pool causes' Confidence column
@@ -219,7 +336,8 @@ internal sealed class IncidentWriter
 
     private static double? Round(double v) => double.IsNaN(v) ? null : Math.Round(v, 3);
 
-    private string BuildMarkdown(Incident inc, TagInfo info, Dictionary<ProcessKey, FileDetails?> details, SystemInfo system, List<LifecycleEvent> events, bool png)
+    private string BuildMarkdown(Incident inc, TagInfo info, Dictionary<ProcessKey, FileDetails?> details, SystemInfo system, List<LifecycleEvent> events, bool png,
+        FileState st)
     {
         var sb = new StringBuilder();
         string headline = Headline(inc, info, markdown: true);
@@ -351,7 +469,12 @@ internal sealed class IncidentWriter
         foreach (var e in shown)
             sb.AppendLine($"- {Fmt.Clock(e.TimeUtc)} {e.Kind} {Md(e.Image)} (PID {e.Pid}){(e.ExitCode is { } c2 ? $" code {c2}" : "")}{(e.Detail is { } d ? $": {Md(d)}" : "")}");
         int more = events.Count - shown.Count;
-        sb.AppendLine(more > 0 ? $"\n({more} other events in events.csv)" : "").AppendLine();
+        // events.csv holds the window's events from its start as written so far: to the time its last row says (the incident
+        // kept MaxEventRows), or fewer while the write budget has kept new rows for later. The day's data\<yyyyMMdd>\events.csv
+        // has every one.
+        string where = st.NotedAt is { } noted ? $"; events.csv holds the window's events to {Fmt.Clock(noted)} and the day's `data\\<yyyyMMdd>\\events.csv` every one"
+            : st.Pending ? "; events.csv gets the rest when PoolWatch's write budget has room, and the day's `data\\<yyyyMMdd>\\events.csv` has every one" : "";
+        sb.AppendLine(more > 0 ? (where.Length == 0 ? $"\n({more} other events in events.csv)" : $"\n({more} other events in the window{where})") : "").AppendLine();
 
         AppendSystem(sb, system);
         AppendBugReport(sb, inc, info, details, system, headline);
@@ -567,7 +690,7 @@ internal sealed class IncidentWriter
                       (File.Exists(Path.Combine(inc.Dir, "timeline.png")) ? ", timeline.png" : "") + ".");
     }
 
-    private void WriteTimelineCsv(History.History h, Incident inc, int from, int to)
+    private long WriteTimelineCsv(History.History h, Incident inc, int from, int to, FileState st)
     {
         var sb = new StringBuilder("time,tag_bytes,tag_paged_bytes,tag_nonpaged_bytes,committed_paged_bytes,committed_nonpaged_bytes,tagsum_paged_bytes,tagsum_nonpaged_bytes\n");
         for (int i = from; i <= to && i < h.Count; i++)
@@ -576,10 +699,10 @@ internal sealed class IncidentWriter
             var t = h.Totals[i];
             sb.AppendLine(Csv.Line(h.Times[i], p + np, p, np, t.CommittedPaged, t.CommittedNonPaged, t.TagSumPaged, t.TagSumNonPaged));
         }
-        Atomic(Path.Combine(inc.Dir, "timeline.csv"), sb.ToString());
+        return Atomic(Path.Combine(inc.Dir, "timeline.csv"), sb.ToString(), st);
     }
 
-    private void WriteProcessesCsv(History.History h, Incident inc, int from, int to)
+    private long WriteProcessesCsv(History.History h, Incident inc, int from, int to, FileState st)
     {
         var sb = new StringBuilder("time,rank,pid,create_time,image,handles,read_ops,write_ops,other_ops,quota_paged,quota_nonpaged\n");
         foreach (var s in inc.Suspects.Take(5))
@@ -591,22 +714,146 @@ internal sealed class IncidentWriter
                 sb.AppendLine(Csv.Line(h.Times[from + i], s.Rank, s.Key.Pid, s.Key.CreateTime, s.Image, p.Handles, p.ReadOps, p.WriteOps, p.OtherOps, p.QuotaPaged, p.QuotaNonPaged));
             }
         }
-        Atomic(Path.Combine(inc.Dir, "processes.csv"), sb.ToString());
+        return Atomic(Path.Combine(inc.Dir, "processes.csv"), sb.ToString(), st);
     }
 
-    private void WriteEventsCsv(Incident inc, List<LifecycleEvent> events)
+    private const string EventsHeader = "time,kind,pid,create_time,parent_pid,image,exit_code,user,command_line,detail\n";
+
+    private string EventLine(LifecycleEvent e) => Csv.Line(e.TimeUtc, e.Kind.ToString(), e.Pid, e.CreateTime, e.ParentPid, e.Image, e.ExitCode,
+        e.User is null ? null : _host.DisplayUser(e.User), e.CommandLine, e.Detail);
+
+    private static string AlertLine(Alert a) => Csv.Line(a.TimeUtc, a.Kind == AlertKind.Release ? "Release" : "Alert", 0, 0, 0, "", null, null, null,
+        $"{a.Tag.ToDisplay()} {a.Rule} ({Fmt.SignedBytes(a.Kind == AlertKind.Release ? -a.Bytes : a.Bytes)})");
+
+    /// <summary>The last row of an events.csv whose incident stopped keeping events: the file has none after <paramref name="t"/>.</summary>
+    private static string NoteLine(DateTime t) => Csv.Line(t, "Note", 0, 0, 0, "", null, null, null,
+        $"events.csv holds the incident window's events to this row's time (an incident keeps at most {MaxEventRows:N0}); the later ones are in the day's data\\<yyyyMMdd>\\events.csv");
+
+    /// <summary>Rows of events and alerts, sorted by time (the alerts' rows among the events'), each ending a line; the note row last.</summary>
+    private string Rows(IEnumerable<LifecycleEvent> events, IEnumerable<Alert> alerts, DateTime? noteAt)
     {
-        var sb = new StringBuilder("time,kind,pid,create_time,parent_pid,image,exit_code,user,command_line,detail\n");
-        var rows = events.TakeLast(5000).Select(e => (e.TimeUtc, line: Csv.Line(e.TimeUtc, e.Kind.ToString(), e.Pid, e.CreateTime, e.ParentPid, e.Image, e.ExitCode,
-            e.User is null ? null : _host.DisplayUser(e.User), e.CommandLine, e.Detail)))
-            .Concat(inc.Alerts.Select(a => (a.TimeUtc, line: Csv.Line(a.TimeUtc, a.Kind == AlertKind.Release ? "Release" : "Alert", 0, 0, 0, "", null, null, null,
-                $"{a.Tag.ToDisplay()} {a.Rule} ({Fmt.SignedBytes(a.Kind == AlertKind.Release ? -a.Bytes : a.Bytes)})"))))
-            .OrderBy(x => x.TimeUtc);
+        var rows = events.Select(e => (e.TimeUtc, line: EventLine(e))).Concat(alerts.Select(a => (a.TimeUtc, line: AlertLine(a)))).OrderBy(x => x.TimeUtc);
+        var sb = new StringBuilder();
         foreach (var (_, line) in rows) sb.AppendLine(line);
-        Atomic(Path.Combine(inc.Dir, "events.csv"), sb.ToString());
+        if (noteAt is { } n) sb.AppendLine(NoteLine(n));
+        return sb.ToString();
     }
 
-    private bool RenderChart(History.History h, Incident inc, int from, int to, string path)
+    /// <summary>
+    /// events.csv: up to <paramref name="maxRows"/> of the kept events not in it yet (<see cref="IncidentEventSet.Kept"/>, the
+    /// earliest first: the file holds every kept event from its first row to its last) and the alert rows not in it yet
+    /// (<see cref="AlertRow"/>), appended as whole rows; once it holds everything the incident kept before it stopped keeping
+    /// them, a last row says to when. The whole file is written again only when it is not as this run last wrote it (or not
+    /// there), or when the incident is closed and its onset moved later than rows it holds (those rows are then left out,
+    /// and the rows after them stay as written: all of them are among the kept events). Events left for a later write make
+    /// it pending (<see cref="EventsPending"/>).
+    /// </summary>
+    private long WriteEventsCsv(Incident inc, IncidentEventSet ev, FileState st, int maxRows)
+    {
+        string path = Path.Combine(inc.Dir, "events.csv");
+        bool asWritten = st.Events is not null && File.Exists(path) && new FileInfo(path).Length == st.Length;
+        if (!asWritten) (st.StartMs, st.NotedAt) = (ev.FromMs, null);
+        // The rows start at what the incident kept from; a closed incident's at its window's start (the onset less 2 min),
+        // and never earlier than they did (a re-opened incident's file does not get back the rows a close left out).
+        long lower = Math.Max(ev.FromMs, st.StartMs);
+        if (!inc.IsOpen) lower = Math.Max(lower, IncidentManager.EventWindowStartMs(inc));
+        bool rewrite = !asWritten || st.FirstMs < lower;
+        var kept = new List<LifecycleEvent>();
+        var fresh = new List<LifecycleEvent>();
+        bool more = false;
+        foreach (var e in ev.Kept)
+        {
+            if (e.Ms < lower || e.Ms > ev.EndMs) continue;
+            if (asWritten && st.Events!.Contains(RowKey(e))) { if (rewrite) kept.Add(e); continue; }
+            if (fresh.Count >= maxRows) { more = true; break; }
+            fresh.Add(e);
+        }
+        // Everything kept before the incident stopped keeping events is in the file: a last row says to when (not before the window).
+        DateTime? note = st.NotedAt;
+        bool noting = false;
+        if (note is null && !more && ev.CutMs is { } cutMs && cutMs <= ev.EndMs)
+        {
+            var onsetLess2 = inc.OnsetUtc.AddMinutes(-2);
+            note = ev.CutUtc!.Value > onsetLess2 ? ev.CutUtc.Value : onsetLess2;
+            noting = true;
+        }
+        st.Pending = more;
+        st.KeptSeen = ev.Kept.Count;
+        if (rewrite)
+        {
+            var rows = kept.Concat(fresh).OrderBy(e => e.Ms).ToList();
+            var bytes = Utf8.GetBytes(EventsHeader + Rows(rows, AlertRows(inc).Values, note));
+            string tmp = _host.CheckWrite(path + ".tmp");
+            File.WriteAllBytes(tmp, bytes);
+            File.Move(tmp, _host.CheckWrite(path), overwrite: true);
+            Profiler.Wrote(path, bytes.Length);
+            st.Events = rows.Select(RowKey).ToHashSet();
+            st.Alerts = AlertRows(inc).Keys.ToHashSet();
+            (st.EventRows, st.Length, st.StartMs, st.NotedAt) = (rows.Count, bytes.Length, lower, note);
+            st.FirstMs = rows.Count > 0 ? rows[0].Ms : long.MaxValue;
+            st.LastUtc = rows.Count > 0 ? rows.Max(e => e.TimeUtc) : null;
+            return bytes.Length;
+        }
+        var alerts = AlertRows(inc).Where(kv => !st.Alerts!.Contains(kv.Key)).ToList();
+        if (fresh.Count == 0 && alerts.Count == 0 && !noting) return 0;
+        var add = Utf8.GetBytes(Rows(fresh, alerts.Select(kv => kv.Value), noting ? note : null));
+        long length;
+        // Whole rows in one write at the end of the file.
+        using (var fs = new FileStream(_host.CheckWrite(path), FileMode.Append, FileAccess.Write, FileShare.Read))
+        {
+            fs.Write(add);
+            length = fs.Length;
+        }
+        Profiler.Wrote(path, add.Length);
+        foreach (var e in fresh)
+        {
+            st.Events!.Add(RowKey(e));
+            st.FirstMs = Math.Min(st.FirstMs, e.Ms);
+            if (st.LastUtc is not { } l || e.TimeUtc > l) st.LastUtc = e.TimeUtc;
+        }
+        foreach (var (k, _) in alerts) st.Alerts!.Add(k);
+        st.EventRows += fresh.Count;
+        st.Length = length;
+        st.NotedAt = note;
+        return add.Length;
+    }
+
+    /// <summary>The incident's alerts by their row (<see cref="AlertRow"/>).</summary>
+    private static Dictionary<AlertRow, Alert> AlertRows(Incident inc)
+    {
+        var d = new Dictionary<AlertRow, Alert>();
+        foreach (var a in inc.Alerts) d.TryAdd(AlertRow.Of(a), a);
+        return d;
+    }
+
+    /// <summary>
+    /// An event's row in events.csv as one number (64-bit FNV-1a of its time, kind, process, parent, image, count and detail),
+    /// so the rows written are known without keeping the events: two rows alike in all of those are one row.
+    /// </summary>
+    internal static long RowKey(LifecycleEvent e)
+    {
+        ulong h = 14695981039346656037UL;
+        void Mix(long v) { for (int i = 0; i < 8; i++, v >>= 8) h = (h ^ (byte)v) * 1099511628211UL; }
+        void MixText(string? s)
+        {
+            Mix(s?.Length ?? -1);
+            if (s is not null) foreach (char c in s) h = (((h ^ (byte)c) * 1099511628211UL) ^ (byte)(c >> 8)) * 1099511628211UL;
+        }
+        Mix(e.TimeUtc.Ticks);
+        Mix((long)e.Kind);
+        Mix(e.Pid);
+        Mix(e.CreateTime);
+        Mix(e.ParentPid);
+        Mix(e.Count);
+        MixText(e.Image);
+        MixText(e.Detail);
+        return (long)h;
+    }
+
+    /// <summary>A hash of the content, to tell an unchanged file from a changed one.</summary>
+    private static UInt128 Hash(ReadOnlySpan<byte> content) => System.Buffers.Binary.BinaryPrimitives.ReadUInt128LittleEndian(System.Security.Cryptography.SHA256.HashData(content));
+
+    private (bool written, long bytes) RenderChart(History.History h, Incident inc, int from, int to, string path, FileState st)
     {
         var times = new List<DateTime>();
         var tag = new List<long>();
@@ -628,21 +875,39 @@ internal sealed class IncidentWriter
             if (top.ExitUtc is { } x && x <= times[^1]) markers.Add((x, $"{top.Image} exit"));
             if (top.OrphanedUtc is { } o && o >= times[0] && o <= times[^1]) markers.Add((o, $"{top.Image} orphaned"));
         }
-        var chart = new TimelineChart($"{inc.Tag.ToDisplay()} ({_knowledge.Lookup(inc.Tag).Owner})", times, tag, total,
-            nonPaged ? "committed non-paged pool" : "committed paged pool", markers);
+        string title = $"{inc.Tag.ToDisplay()} ({_knowledge.Lookup(inc.Tag).Owner})", totalLabel = nonPaged ? "committed non-paged pool" : "committed paged pool";
+        // Drawn again only when what it shows changed (a closed incident's chart is drawn once).
+        var key = new StringBuilder(title).Append('|').Append(totalLabel);
+        for (int i = 0; i < times.Count; i++) key.Append('|').Append(times[i].Ticks).Append(',').Append(tag[i]).Append(',').Append(total[i]);
+        foreach (var (t, label) in markers) key.Append('|').Append(t.Ticks).Append(',').Append(label);
+        var hash = Hash(Utf8.GetBytes(key.ToString()));
+        if (st.Hashes.TryGetValue("timeline.png", out var was) && was == hash && File.Exists(path)) return (true, 0);
+        var chart = new TimelineChart(title, times, tag, total, totalLabel, markers);
         string tmp = _host.CheckWrite(path + ".tmp");
-        if (!_host.RenderTimeline(chart, tmp)) return false;
+        if (!_host.RenderTimeline(chart, tmp)) return (false, 0);
         File.Move(tmp, _host.CheckWrite(path), overwrite: true);
-        Profiler.Wrote(path, new FileInfo(path).Length);
-        return true;
+        long length = new FileInfo(path).Length;
+        Profiler.Wrote(path, length);
+        st.Hashes["timeline.png"] = hash;
+        return (true, length);
     }
 
-    private void Atomic(string path, string content)
+    /// <summary>
+    /// Replaces <paramref name="path"/> with <paramref name="content"/> in one step (temp file + move), unless it holds just
+    /// that as this run last wrote it; returns the bytes written (0 when unchanged).
+    /// </summary>
+    private long Atomic(string path, string content, FileState st)
     {
+        var bytes = Utf8.GetBytes(content);
+        var hash = Hash(bytes);
+        string name = Path.GetFileName(path);
+        if (st.Hashes.TryGetValue(name, out var was) && was == hash && File.Exists(path)) return 0;
         string tmp = _host.CheckWrite(path + ".tmp");
-        File.WriteAllText(tmp, content, new UTF8Encoding(false));
+        File.WriteAllBytes(tmp, bytes);
         File.Move(tmp, _host.CheckWrite(path), overwrite: true);
-        Profiler.Wrote(path, content.Length);
+        Profiler.Wrote(path, bytes.Length);
+        st.Hashes[name] = hash;
+        return bytes.Length;
     }
 
     /// <summary>Text inside a `code span` (<see cref="MdText.Code"/>): only what would end the span or the line changes.</summary>
@@ -656,4 +921,24 @@ internal sealed class IncidentWriter
     /// characters, variation selectors) are left out.
     /// </summary>
     private static string Md(string s) => MdText.Text(s);
+}
+
+/// <summary>
+/// An incident's events at a write. <see cref="Window"/>: the window's events PoolWatch holds (what the incident kept and the
+/// newest still in the shared buffer), in time order, for the reports. <see cref="Kept"/>: what the incident kept of them
+/// (<see cref="Incident.Events"/>), every event from <see cref="FromMs"/> on, in time order, up to
+/// <see cref="IncidentWriter.MaxEventRows"/>, for events.csv; <see cref="CutMs"/>, when it stopped keeping them (the
+/// first event it left out), else null; <see cref="EndMs"/>, the window's end now (events after it are not the window's).
+/// All on the clock that only goes forward.
+/// </summary>
+internal sealed record IncidentEventSet(List<LifecycleEvent> Window, IReadOnlyList<LifecycleEvent> Kept, long FromMs, long EndMs, DateTime? CutUtc, long? CutMs)
+{
+    /// <summary>Events taken as all there are: sorted, the first <see cref="IncidentWriter.MaxEventRows"/> kept and the rest cut.</summary>
+    public static IncidentEventSet Of(List<LifecycleEvent> events)
+    {
+        var sorted = events.OrderBy(e => e.Ms).ToList();
+        var kept = sorted.Count > IncidentWriter.MaxEventRows ? sorted.GetRange(0, IncidentWriter.MaxEventRows) : sorted;
+        var cut = sorted.Count > IncidentWriter.MaxEventRows ? sorted[IncidentWriter.MaxEventRows] : null;
+        return new(sorted, kept, long.MinValue, long.MaxValue, cut?.TimeUtc, cut?.Ms);
+    }
 }

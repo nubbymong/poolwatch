@@ -175,7 +175,7 @@ public class ForwardClockWindowTests
             Id = "x", Dir = "x", Tag = Reff, Kind = IncidentKind.Growth, OnsetUtc = At(0).Utc, OnsetMs = At(0).Ms, EndUtc = At(20).Utc, EndMs = At(20).Ms,
             Events = Enumerable.Range(-3, 13).Select(m => Event(m) with { Ms = At(m).Ms }).ToList(),
         };
-        Assert.Equal(Enumerable.Range(98, 17), mgr.IncidentEvents(inc, At(20).Ms).Select(e => e.Pid));
+        Assert.Equal(Enumerable.Range(98, 17), mgr.IncidentEvents(inc, At(20).Ms).Window.Select(e => e.Pid));
     }
 
     [Fact]

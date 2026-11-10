@@ -222,15 +222,26 @@ internal static class UiData
         return live.OrderByDescending(r => r.OpenedUtc).ToList();
     }
 
-    /// <summary>The incident folders on disk that are not in memory; rows of folders no longer there are dropped from the cache.</summary>
-    private static List<IncidentRow> ListDisk(string incidentsDir, HashSet<string> known, Core.Model.Moment at)
+    /// <summary>The most incident folders read from disk for the list (the newest by name, which starts with the time).</summary>
+    internal const int MaxDiskRows = 500;
+
+    /// <summary>Whether a folder name is an incident's, not a finding report's: Core's own test, beside the naming (<see cref="Core.Incidents.IncidentManager.IsFolderName"/>).</summary>
+    internal static bool IsIncidentName(string name) => Core.Incidents.IncidentManager.IsFolderName(name);
+
+    /// <summary>
+    /// The incident folders on disk that are not in memory: the newest <see cref="MaxDiskRows"/> incident folders, told by their
+    /// names from the finding reports (spawn storms and the like, which have no row: their findings have), so however many of
+    /// those there are, no incident is hidden behind them. Rows of folders no longer there are dropped from the cache.
+    /// </summary>
+    internal static List<IncidentRow> ListDisk(string incidentsDir, HashSet<string> known, Core.Model.Moment at)
     {
         var rows = new List<IncidentRow>();
         var listed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             if (Directory.Exists(incidentsDir))
-                foreach (var dir in Directory.EnumerateDirectories(incidentsDir).OrderByDescending(d => d, StringComparer.Ordinal).Take(500))
+                foreach (var dir in Directory.EnumerateDirectories(incidentsDir).Where(d => IsIncidentName(Path.GetFileName(d)))
+                             .OrderByDescending(d => d, StringComparer.Ordinal).Take(MaxDiskRows))
                 {
                     listed.Add(dir);
                     if (known.Contains(dir)) continue;

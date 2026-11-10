@@ -111,7 +111,9 @@ on the PC's own timer, never on its clock, from the check (every 6 hours) that f
 last-write time and size, for a folder that is not a link also the name, size and last-write time of every file in it
 but a link or what is behind one, so rows added to a day's files count as a write into its folder, and a change of the
 PC's clock never removes anything early. Only time the PC is on and awake counts, so data can stay longer, and the first
-time this version runs, what is already there is kept the whole period from then:
+time this version runs, what is already there is kept the whole period from then (its age cannot be taken from the
+files' times, which a clock set back can make look old). `poolwatch.log` has one line for each check: what it judged
+and removed, with the first few names:
 
 - `data\<yyyyMMdd>\`: the CSV files (totals, tags, processes, handles, events, services, volumes, lag, load) and
   `findings.jsonl`, about 2-3 MB an hour (about 350-500 MB over the 7 days kept). A CSV file whose columns changed in
@@ -121,7 +123,18 @@ time this version runs, what is already there is kept the whole period from then
   dropped, when PoolWatch stops are counted in `poolwatch.log` (when its sampler does not stop within 30 s, the log
   says instead that the stop neither writes nor counts the rows not written yet);
 - `incidents\<id>\`: `report.md`, `report.json`, `timeline.csv`, `processes.csv`, `events.csv`, `timeline.png`, and
-  `capture.etl` when a trace was taken (a trace can add far more than the CSV files);
+  `capture.etl` when a trace was taken (a trace can add far more than the CSV files). `events.csv` holds the incident's
+  events from 2 minutes before its onset, every one from its first row to its last, added as PoolWatch writes the
+  folder, at most 5,000; when it holds fewer than the window had, its last row says to when (the day's `events.csv` has
+  every one). Its rows are appended in single writes: copying the folder at that moment can fail (try again), and a
+  crash then can cut its last row short. What can wait in the report folders is held to 1 MB an hour (a 256 KB burst):
+  an open incident's `report.json` and `report.md` first, then the rest. An incident's opening, re-opening and closing,
+  a trace attached and a storm folder's first and last writes are always made; under the owner's load (10 incidents
+  opening together beside a storm-heavy hour) the folders wrote about 1.7 MB in that hour, and an open incident's
+  report was up to about an hour behind (the row's figures are live). It is written again when the incident closes;
+- `incidents\<yyyyMMdd-HHmmss>-SpawnStorm-<program>\`: a program's spawn storms (by default, more than 30 short commands
+  in 30 s from one parent); its storms within an hour of each other share the folder, Git Bash's fork copies are not
+  counted, and at most 10 such folders are made an hour (the rest are in `findings.jsonl`);
 - `settings.json` (your settings and service profiles), `poolwatch.log` (and, only for a run during which an append
   to the log kept being refused — another program held it so the line could not be written, or opening the log to add
   the line would otherwise have had to wait for another program, which PoolWatch gives up at once rather than wait —

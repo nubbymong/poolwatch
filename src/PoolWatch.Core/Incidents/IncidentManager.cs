@@ -41,6 +41,17 @@ public sealed class IncidentManager
     /// <summary>How often an open incident is re-ranked; its folder is rewritten only on a material change or every <see cref="MaxRewriteInterval"/>.</summary>
     public TimeSpan RewriteInterval { get; set; } = TimeSpan.FromSeconds(30);
     public TimeSpan MaxRewriteInterval { get; set; } = TimeSpan.FromMinutes(5);
+    /// <summary>A closed incident's alerts counted after it closed ("fired 37 more times") are written at most this often.</summary>
+    public TimeSpan ClosedRewriteInterval { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// The report folders' write budget (<see cref="WriteBudget"/>), shared with the spawn-storm folders: an open incident's
+    /// refresh, a closed one's update and the rows of events.csv wait while it has no room; an incident's opening, re-opening,
+    /// closing and a trace attached are always written.
+    /// </summary>
+    public WriteBudget Budget { get; set; } = new();
+    /// <summary>The end of a run: everything left for later is written.</summary>
+    private bool _finishing;
     /// <summary>The non-paged total rule is one system-level incident, whichever tag grew fastest at each alert.</summary>
     private static readonly PoolTag TotalKey = new(0);
     private static PoolTag Key(Incident i) => i.Kind == IncidentKind.NonPagedTotal ? TotalKey : i.Tag;
@@ -76,11 +87,89 @@ public sealed class IncidentManager
     /// <summary>Raised when an incident is created (for the tray / events.csv).</summary>
     public event Action<Incident, Alert>? Opened;
 
-    /// <summary>Events to keep for the incidents' timelines, each read onto the clock that only goes forward at <paramref name="now"/>.</summary>
+    /// <summary>
+    /// Events to keep for the incidents' timelines, each read onto the clock that only goes forward at <paramref name="now"/>.
+    /// The open incidents take theirs at once (<see cref="KeepEvents"/>), before the shared buffer lets any go, so what an
+    /// incident keeps has every event of its window however long its writes wait for the write budget.
+    /// </summary>
     public void AddEvents(IEnumerable<LifecycleEvent> events, Moment now)
     {
+        int before = _events.Count;
         foreach (var e in events) _events.Add(e with { Ms = now.MsOf(e.TimeUtc) });
-        if (_events.Count > MaxEvents) _events.RemoveRange(0, _events.Count - MaxEvents);
+        _eventsAdded += _events.Count - before;
+        foreach (var inc in _open.Values) KeepEvents(inc);
+        if (_events.Count > MaxEvents) DropEvents(_events.Count - MaxEvents);
+    }
+
+    /// <summary>Events put into the shared buffer in all, and let go from its front in all: the buffer's event i is number <c>_eventsDropped + i</c>.</summary>
+    private long _eventsAdded, _eventsDropped;
+
+    private void DropEvents(int n)
+    {
+        _events.RemoveRange(0, n);
+        _eventsDropped += n;
+    }
+
+    /// <summary>
+    /// What an incident has kept of the shared buffer's events (<see cref="Incident.Events"/>): every one from
+    /// <see cref="FromMs"/> on, in time order, of those numbered below <see cref="Seq"/>, up to
+    /// <see cref="IncidentWriter.MaxEventRows"/>; from <see cref="CutMs"/> on (the first event it left out) none.
+    /// </summary>
+    private sealed class KeptEvents
+    {
+        /// <summary>Its window's start when it first kept events (the onset less 2 min then), on the forward clock.</summary>
+        public long FromMs;
+        /// <summary>The buffer's events numbered below this were looked at.</summary>
+        public long Seq;
+        public DateTime? CutUtc;
+        public long? CutMs;
+    }
+
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<Incident, KeptEvents> _kept = new();
+
+    /// <summary>
+    /// The incident takes the buffer's events it has not looked at yet: the first time every one from its window's start, then
+    /// each new one (a late one, read onto the forward clock earlier, in its place). It stops when it has kept
+    /// <see cref="IncidentWriter.MaxEventRows"/>, or when the buffer let events go before it looked at them (a closed
+    /// incident re-opened after the buffer moved on): it keeps none after that point, so it never has a gap.
+    /// </summary>
+    private KeptEvents KeepEvents(Incident inc)
+    {
+        HashSet<LifecycleEvent>? had = null;
+        if (!_kept.TryGetValue(inc, out var k))
+        {
+            k = new KeptEvents { FromMs = EventWindowStartMs(inc), Seq = _eventsDropped };
+            _kept.Add(inc, k);
+            // Events it came with (none, but for one made with them) stay, in time order, each once.
+            inc.Events = inc.Events.OrderBy(e => e.Ms).ToList();
+            if (inc.Events.Count > 0) had = new HashSet<LifecycleEvent>(inc.Events, ReferenceEqualityComparer.Instance);
+        }
+        if (k.CutMs is not null) return k;
+        long start = k.Seq - _eventsDropped;
+        if (start < 0)
+        {
+            // Let go of before this incident looked at them: from the last it looked at on, it keeps none.
+            var last = inc.Events.Count > 0 ? inc.Events[^1] : null;
+            (k.CutUtc, k.CutMs) = last is null ? (inc.OnsetUtc.AddMinutes(-2), k.FromMs) : (last.TimeUtc, last.Ms + 1);
+            return k;
+        }
+        var kept = inc.Events;
+        for (int i = (int)start; i < _events.Count; i++)
+        {
+            var e = _events[i];
+            if (e.Ms < k.FromMs || (had is not null && had.Contains(e))) continue;
+            if (kept.Count >= IncidentWriter.MaxEventRows) { (k.CutUtc, k.CutMs) = (e.TimeUtc, e.Ms); break; }
+            if (kept.Count == 0 || kept[^1].Ms <= e.Ms) kept.Add(e);
+            else
+            {
+                // A late event: in its place by time, after those of the same moment.
+                int lo = 0, hi = kept.Count;
+                while (lo < hi) { int mid = (lo + hi) >>> 1; if (kept[mid].Ms <= e.Ms) lo = mid + 1; else hi = mid; }
+                kept.Insert(lo, e);
+            }
+        }
+        k.Seq = _eventsAdded;
+        return k;
     }
 
     /// <summary>Lifecycle events in [<paramref name="fromMs"/>, <paramref name="toMs"/>] on the clock that only goes forward, in the order they happened.</summary>
@@ -95,7 +184,11 @@ public sealed class IncidentManager
         // Every interval here is timed on the clock that only goes forward (now.Ms); the times of day are shown and written.
         long nowMs = now.Ms;
         int cut = _events.FindIndex(e => nowMs - e.Ms <= Ms(EventKeep));
-        if (cut > 0) _events.RemoveRange(0, cut);
+        if (cut > 0)
+        {
+            foreach (var inc in _open.Values) KeepEvents(inc); // what they have not taken yet, before it goes
+            DropEvents(cut);
+        }
         _clears = detector.Clears;
         LowerHighsByClearsJustMeasured(h);
 
@@ -105,7 +198,9 @@ public sealed class IncidentManager
             else OnGrowth(h, a);
         }
 
-        foreach (var inc in _open.Values.ToList())
+        // The one written longest ago first, so the write budget is shared out when it has room for only some; the rows of
+        // events.csv left for later after every refresh due.
+        foreach (var inc in _open.Values.OrderBy(i => i.LastWriteMs).ToList())
         {
             // While PoolWatch's own clear is being measured the detector holds: its silence is not the growth stopping.
             if (!detector.Holding && nowMs - inc.QuietSinceMs >= Ms(TimeSpan.FromMinutes(_settings.IncidentQuietMinutes)))
@@ -116,18 +211,29 @@ public sealed class IncidentManager
             {
                 Rank(h, inc, nowMs);
                 (inc.LastRankUtc, inc.LastRankMs) = (nowUtc, nowMs);
-                // Disk budget: rewrite on a new top suspect, 25% more growth, or every few minutes.
+                // Disk budget: rewrite on a new top suspect, 25% more growth, or every few minutes, while the write budget
+                // has room (else at a later re-rank).
                 var top = inc.Suspects.FirstOrDefault()?.Key;
                 if (top != inc.WrittenTop || inc.Growth > inc.WrittenGrowth + inc.WrittenGrowth / 4 + (1 << 20) || nowMs - inc.LastWriteMs >= Ms(MaxRewriteInterval))
-                    Write(h, inc);
+                    Write(h, inc, mustWrite: false);
             }
         }
+        // Rows come last: only while every open incident's report is up to date (none has waited for its refresh), so they
+        // never take the room a refresh needs; then the open incidents', then the closed ones' (below).
+        bool reportsCurrent = _open.Values.All(i => nowMs - i.LastWriteMs < Ms(MaxRewriteInterval));
+        if (reportsCurrent)
+            foreach (var inc in _open.Values.OrderBy(i => i.LastWriteMs).ToList())
+                if (_writer.EventsPending(inc) && !AppendEvents(h, inc)) break; // the budget has no room left
 
         if (!detector.Holding) CheckRetention(h, detector, now);
         foreach (var freed in detector.ClearedRetentions) NoteRetentionCleared(freed, nowUtc);
-        // A closed incident is rewritten on a change, and at most every few minutes for alerts counted
-        // on its timeline after it closed.
-        foreach (var inc in _closed.Where(i => i.Dirty || (i.CountPending && nowMs - i.LastWriteMs >= Ms(MaxRewriteInterval))).ToList()) Write(h, inc);
+        // A closed incident is rewritten on a change, and at most every half hour for alerts counted on its timeline after
+        // it closed, while the write budget has room; the rows of events.csv a write left for later follow when it has.
+        foreach (var inc in _closed.OrderBy(i => i.LastWriteMs).ToList())
+        {
+            if (inc.Dirty || (inc.CountPending && nowMs - inc.LastWriteMs >= Ms(ClosedRewriteInterval))) Write(h, inc, mustWrite: false);
+            else if (reportsCurrent && _writer.EventsPending(inc) && nowMs - inc.LastWriteMs >= Ms(RewriteInterval)) AppendEvents(h, inc);
+        }
         // The processes of an incident's window plus 10 minutes on each side (sized by time, not by a count) stay
         // resolvable in the registry while the incident is open or closed in the last 15 min (its trace may still be
         // parsing), so the trace's PIDs resolve to who ran them.
@@ -136,8 +242,12 @@ public sealed class IncidentManager
         _registry.ProtectSinceMs = since;
         _registry.ProtectUntilMs = until;
         int old = _closed.FindIndex(i => nowMs - i.ClosedMs!.Value < Ms(ReleaseAttachWindow));
-        if (old > 0) _closed.RemoveRange(0, old); // their folders stay on disk
-        else if (old < 0) _closed.Clear();
+        if (old < 0) old = _closed.Count;
+        // Their folders stay on disk; an events.csv the write budget had not brought up to date says to when it holds its events.
+        for (int i = 0; i < old; i++)
+            try { Budget.Spend(_writer.NoteUnwritten(_closed[i]), nowMs, must: true); }
+            catch (Exception ex) { _host.Log($"incident {_closed[i].Id}: events.csv write failed: {ex.Message}"); }
+        if (old > 0) _closed.RemoveRange(0, old);
     }
 
     /// <summary>PoolWatch's own cache clears as the detector read them last: <see cref="Rank"/> and the release record measure across them as it does.</summary>
@@ -228,7 +338,7 @@ public sealed class IncidentManager
             (inc.ClosedUtc, inc.ClosedMs) = (result.EndUtc, result.EndMs);
         }
         Rank(h, inc, inc.ClosedMs ?? NewestMs(h));
-        Write(h, inc);
+        Write(h, inc, full: true);
         _host.Log($"incident {inc.Id}: capture attached ({(result.PoolEventsParsed ? $"{result.PoolEvents} pool events" : result.Error ?? "no pool events")})");
     }
 
@@ -245,8 +355,9 @@ public sealed class IncidentManager
     /// <summary>Closes and writes every open incident (end of a headless run, app exit).</summary>
     public void Finish(History.History h, DateTime nowUtc)
     {
+        _finishing = true;
         foreach (var inc in _open.Values.ToList()) Close(h, inc, nowUtc, NewestMs(h));
-        foreach (var inc in _closed.Where(i => i.Dirty || i.CountPending)) Write(h, inc);
+        foreach (var inc in _closed.Where(i => i.Dirty || i.CountPending || _writer.EventsPending(i))) Write(h, inc);
     }
 
     private void OnGrowth(History.History h, Alert a)
@@ -316,7 +427,7 @@ public sealed class IncidentManager
             _host.Log($"incident {last.Id} re-opened: {a.Tag.ToDisplay()} {a.Rule} ({Fmt.SignedBytes(a.Bytes)})");
             _host.RequestHandleScan();
             Rank(h, last, a.Ms);
-            Write(h, last);
+            Write(h, last, full: false); // its report at once; its chart and CSVs at its first refresh
             Opened?.Invoke(last, a); // a new episode gets its own confirmation trace and notification
             return;
         }
@@ -332,7 +443,7 @@ public sealed class IncidentManager
         _host.RequestHandleScan();
         if (_knowledge.NeedsDriverScan(a.Tag)) _host.RequestTagScan([a.Tag]);
         Rank(h, inc, a.Ms);
-        Write(h, inc);
+        Write(h, inc, full: false); // its report at once; its chart and CSVs at its first refresh
         Opened?.Invoke(inc, a);
     }
 
@@ -365,9 +476,21 @@ public sealed class IncidentManager
         }
     }
 
+    /// <summary>An incident's folder name: when it opened (local time) and its tag (<see cref="PoolTag.ToFileSafe"/>); "-2" and on follow when two shared a second.</summary>
+    public static string FolderName(DateTime openedUtc, PoolTag tag) => $"{openedUtc.ToLocalTime():yyyyMMdd-HHmmss}-{tag.ToFileSafe()}";
+
+    private static readonly System.Text.RegularExpressions.Regex FolderNamePattern = new(
+        @"^[0-9]{8}-[0-9]{6}-[A-Za-z0-9_]{0,4}-[0-9a-f]{8}(-[0-9]+)?$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Whether a folder name is an incident's (<see cref="FolderName"/>, with "-2" and on), not a finding report's
+    /// (<c>yyyyMMdd-HHmmss-&lt;kind&gt;-&lt;subject&gt;</c>: a spawn storm, a crash, an experiment).
+    /// </summary>
+    public static bool IsFolderName(string name) => FolderNamePattern.IsMatch(name);
+
     private Incident Create(PoolTag tag, IncidentKind kind, DateTime nowUtc, long nowMs)
     {
-        string id = $"{nowUtc.ToLocalTime():yyyyMMdd-HHmmss}-{tag.ToFileSafe()}";
+        string id = FolderName(nowUtc, tag);
         string dir = Path.Combine(_host.IncidentsDir, id);
         for (int i = 2; Directory.Exists(dir); i++) dir = Path.Combine(_host.IncidentsDir, $"{id}-{i}");
         CreatedCount++;
@@ -778,22 +901,42 @@ public sealed class IncidentManager
     }
 
     /// <summary>
-    /// The incident's events: the window's events now, merged with those it already had (the shared buffer drops events
-    /// after <see cref="Settings.IncidentEventKeepMinutes"/>; a re-opened incident's onset can be older). Capped at 5,000.
+    /// The incident's events (<see cref="IncidentEventSet"/>): what it kept (<see cref="KeepEvents"/>: the shared buffer drops
+    /// events after <see cref="Settings.IncidentEventKeepMinutes"/>, the incident keeps the first
+    /// <see cref="IncidentWriter.MaxEventRows"/> of its window, and its events.csv is written from those, the earliest not
+    /// written yet first), and, for the reports (<paramref name="forReports"/>), the window's events now: those kept and the
+    /// newest still in the buffer.
     /// </summary>
-    internal List<LifecycleEvent> IncidentEvents(Incident inc, long nowMs)
+    internal IncidentEventSet IncidentEvents(Incident inc, long nowMs, bool forReports = true)
     {
-        long from = EventWindowStartMs(inc);
-        var fresh = EventsBetween(from, EventWindowEndMs(inc, nowMs));
-        if (inc.Events.Count > 0)
+        var k = KeepEvents(inc);
+        long from = EventWindowStartMs(inc), to = EventWindowEndMs(inc, nowMs);
+        var window = new List<LifecycleEvent>();
+        if (forReports)
         {
-            var seen = new HashSet<(DateTime, LifecycleKind, int, long)>(fresh.Select(e => (e.TimeUtc, e.Kind, e.Pid, e.CreateTime)));
-            fresh.AddRange(inc.Events.Where(e => e.Ms >= from && seen.Add((e.TimeUtc, e.Kind, e.Pid, e.CreateTime))));
-            fresh.Sort((x, y) => x.Ms.CompareTo(y.Ms));
+            foreach (var e in inc.Events) if (e.Ms >= from && e.Ms <= to) window.Add(e);
+            // The buffer's events the incident did not keep: those before it kept from, and those after it stopped keeping
+            // (until then it kept every one it looked at, and it has looked at them all).
+            for (int i = 0; i < _events.Count; i++)
+            {
+                var e = _events[i];
+                if (e.Ms < from || e.Ms > to) continue;
+                bool kept = e.Ms >= k.FromMs && (k.CutMs is null ? _eventsDropped + i < k.Seq : Kept(inc, e));
+                if (!kept) window.Add(e);
+            }
+            window.Sort((x, y) => x.Ms.CompareTo(y.Ms));
         }
-        if (fresh.Count > 5000) fresh.RemoveRange(0, fresh.Count - 5000);
-        inc.Events = fresh;
-        return fresh;
+        return new IncidentEventSet(window, inc.Events, k.FromMs, to, k.CutUtc, k.CutMs);
+    }
+
+    /// <summary>Whether the incident kept this very event (a search by time: they are in time order).</summary>
+    private static bool Kept(Incident inc, LifecycleEvent e)
+    {
+        var kept = inc.Events;
+        int lo = 0, hi = kept.Count;
+        while (lo < hi) { int mid = (lo + hi) >>> 1; if (kept[mid].Ms < e.Ms) lo = mid + 1; else hi = mid; }
+        for (int i = lo; i < kept.Count && kept[i].Ms == e.Ms; i++) if (ReferenceEquals(kept[i], e)) return true;
+        return false;
     }
 
     /// <summary>
@@ -804,14 +947,46 @@ public sealed class IncidentManager
 
     public static long EventWindowEndMs(Incident inc, long nowMs) => (inc.EndMs ?? (inc.IsOpen ? nowMs : inc.LastRiseMs)) + 60_000;
 
-    private void Write(History.History h, Incident inc)
+    /// <summary>
+    /// At most this many of an incident's events go into its events.csv at one write (the rest at later writes): ten
+    /// incidents opening together each get the start of their window at once, and none takes the write budget alone.
+    /// </summary>
+    public const int EventRowsPerWrite = 100;
+
+    /// <summary>
+    /// While an incident is open its chart, timeline.csv and processes.csv (which the window does not read) are written
+    /// with a refresh at most this often, and only while the write budget has room to spare
+    /// (<see cref="WriteBudget.HasRoomToSpare"/>); its report.json and report.md, which the window's details and Copy
+    /// summary read, at every refresh. A closed one's every time.
+    /// </summary>
+    public TimeSpan OpenChartInterval { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Writes the incident's folder. A write that must be made now (<paramref name="mustWrite"/>: the incident opened,
+    /// re-opened, closed, or a trace was attached; and the end of a run) is made whatever the write budget; one that can wait
+    /// is made only while it has room, and otherwise stays due (the incident stays dirty). <paramref name="full"/>: the
+    /// chart, the two CSVs and up to <see cref="EventRowsPerWrite"/> rows of events.csv (every row left at the end of a
+    /// run) too; by default when the incident is closed, at the end of a run, and while it is open when the budget has
+    /// room to spare and they were never written or last written <see cref="OpenChartInterval"/> ago. Otherwise (an open
+    /// incident's opening, re-opening and refreshes) report.json and report.md, and the rows follow as the budget allows
+    /// (<see cref="AppendEvents"/>), after every refresh due.
+    /// </summary>
+    private void Write(History.History h, Incident inc, bool mustWrite = true, bool? full = null)
     {
+        long nowMs = NewestMs(h);
+        if (!mustWrite && !_finishing && !Budget.HasRoom(nowMs))
+        {
+            Budget.Hold();
+            return;
+        }
+        bool all = _finishing || (full ?? (!inc.IsOpen || ((_writer.FullWrittenMs(inc) is not { } fw || nowMs - fw >= Ms(OpenChartInterval)) && Budget.HasRoomToSpare(nowMs))));
+        int rows = _finishing ? IncidentWriter.MaxEventRows : all ? EventRowsPerWrite : 0;
         using var stage = Util.Profiler.Stage("incident.write");
         try
         {
-            _writer.Write(h, inc, IncidentEvents(inc, NewestMs(h)));
+            Budget.Spend(_writer.Write(h, inc, IncidentEvents(inc, nowMs), rows, all, nowMs), nowMs, mustWrite || _finishing);
             inc.LastWriteUtc = h.Times.Count > 0 ? h.Times[^1] : DateTime.UtcNow;
-            inc.LastWriteMs = NewestMs(h);
+            inc.LastWriteMs = nowMs;
             inc.WrittenTop = inc.Suspects.FirstOrDefault()?.Key;
             inc.WrittenGrowth = inc.Growth;
             inc.Dirty = false;
@@ -822,6 +997,17 @@ public sealed class IncidentManager
             inc.Dirty = inc.CountPending = false; // do not retry every sample; the next change rewrites it
             _host.Log($"incident {inc.Id}: write failed: {ex.Message}");
         }
+    }
+
+    /// <summary>The rows of events.csv a write left for later, while the write budget has room; false when it had none.</summary>
+    private bool AppendEvents(History.History h, Incident inc)
+    {
+        long nowMs = NewestMs(h);
+        if (!Budget.HasRoom(nowMs)) { Budget.Hold(); return false; }
+        using var stage = Util.Profiler.Stage("incident.write");
+        try { Budget.Spend(_writer.AppendEvents(inc, IncidentEvents(inc, nowMs, forReports: false), EventRowsPerWrite), nowMs); }
+        catch (Exception ex) { _host.Log($"incident {inc.Id}: events.csv write failed: {ex.Message}"); }
+        return true;
     }
 
     private static DateTime Min(DateTime a, DateTime b) => a < b ? a : b;

@@ -75,6 +75,28 @@ on), and every lasting one is listed under Active changes, where it can be put b
   read 127 to 131 MB of working set, where the steady peak was 86 to 96 MB, and called it over budget. The CI tests now
   draw About first, and once any window of PoolWatch's other than the main one closes, its memory is given back
   (below).
+- **Report folders inside the write budget.** On a PC doing agentic coding (the owner's: about 200,000 process starts
+  and 9,400 recorded events an hour, 7 to 10 incidents open at once in a pool episode) the incident and storm folders
+  wrote 140 to 225 MB an hour in 1.0.0-beta.2: every open incident's whole folder (events.csv alone 1.2 to 1.3 MB) every
+  5 minutes, and a folder for every spawn storm (about 3,000 a day, most of them Git Bash fork copies). They now share
+  one write budget (`Core.Incidents.WriteBudget`, section 10), the report folders' share of the 5 MB an hour beside the
+  day's CSV files' 2 to 3 MB: what can wait is written while the budget has room, 1 MB an hour with a burst of 256 KB,
+  first an open incident's `report.json` and `report.md` (what the window's details and Copy summary read), the one
+  written longest ago first, then its events' rows while no report is due, and a storm folder's update, an open
+  incident's chart and CSVs only while the budget has room to spare; what a reader needs at once (an incident opening,
+  re-opening or closing, a trace attached, a storm's first and last folder write, the end of a run) is always written
+  and spends it too, its debt at most the burst (a quarter of an hour's refill), so ten incidents opening together hold
+  the refreshes back that long and no longer. A file that did not change is not written again, events.csv and
+  spawns.csv are appended to, and each write adds at most 100 of an incident's events. `WriteBudgetTests` measures this
+  at the write check every file goes through: 10 growth incidents opening and open for an hour beside a storm-heavy hour
+  (three sessions bursting every 2.5 minutes, a new program storming every 2 minutes, Git Bash fork copies), at the
+  owner's event rate and command-line lengths, write 1.7 MB in that hour (1.0 MB of it the openings and the storm
+  folders' first writes, which must be made), under its 2 MB share; each open incident's report there is at most an
+  hour behind (an incident's report is about 90 KB, ten of them refreshed every 5 minutes would be 10 MB an hour).
+  It also measures the CPU of that work on its thread: about 6 s in the hour (0.17% of one core), most of it the
+  correlation ranking every open incident gets every 30 s, and asserts under 18 s, the 0.5% budget. The rest of the
+  overhead on the owner's PC (2.9% of one core and 254 MB in 1.0.0-beta.2, `cache\profile.json`: the ranking, the
+  handle scans' CSV flush, the day's CSV files at about 4.7 MB an hour, the allocations) is outside the report folders.
 - **Where it writes**: only under its admin-only data folder `%ProgramData%\PoolWatch` (or an explicit headless
   `--out` folder), apart from the few writes SECURITY.md lists, never in its install folder, never through a link, and never
   on a ReFS volume (every Dev Drive is ReFS: its per-file metadata is the pool being measured). 7-day retention by
@@ -191,7 +213,9 @@ Notes:
   helper status, and the worker labels; the event summary's held starts and rollup window, and the exit of a start it
   held (a start it listed as long-running has its exit listed; it keeps at most 20,000 such listings, the earliest let
   go first); a spawned child's start and lifetime (the registry's,
-  when it holds them), the spawn storms, the git root cache and the child accumulation; the filter timeline's pairing of
+  when it holds them), the spawn storms and their report folders (the re-open hour, the hourly limit on new ones and
+  their refreshes), the report folders' write budget, the git root cache and the child accumulation; the filter
+  timeline's pairing of
   a filter load with a package activation, its minute between two entries of one package and the two minutes it keeps
   them (each event-log record is read onto the forward clock as it arrives); the hold on alerts for PoolWatch's own
   trace buffers; a trace's length and the CPU recording's (their starts and ends are read on both clocks); the known
@@ -282,6 +306,15 @@ Notes:
   PoolWatch; after a restart it is seen anew, so kept longer). A folder that cannot be listed, a thing that cannot
   be read whole and one that cannot be removed are each logged once until that can be done again. A save is at most
   4 MB, leaving out the records first seen latest (those things are seen anew after the next start, so kept longer).
+  Each check logs one line: how many things it judged and how many it removed, by folder, with the first five names
+  (`AppPaths.RetentionSummary`; the owner's log had 1,137 lines a day, one per folder removed). A check lists each
+  folder once for its folders and files and reads each file's time and length in one query of the file itself.
+  The first run of this version, with no saved clock, counts everything from 0, and no seeding of the records can be
+  safe: what there is to seed from is each thing's last-write time, a system-clock time, and a clock set back before a
+  write makes a file written a minute ago look a week old, so a record seeded from it would delete that file early
+  (the PC's working-time timer itself starts again at every boot, so it holds no age from before this boot either).
+  Counting from 0 keeps data longer, never shorter; on the owner's PC, upgrading to beta.2 kept 14,416 storm folders
+  a week longer, which retention then removes as it would any other.
 - The filter manager's events in the System log are read from the newest record the last run saw. That record's age is
   read on the system clock, as Windows gives it on no other: an event record is stamped with the system time (its
   `TimeCreated` `SystemTime`), and an event query's `timediff(@SystemTime)` is measured from the system time now
@@ -504,6 +537,59 @@ Each alert or capture creates `incidents\<yyyyMMdd-HHmmss>-<tag>-<raw hex>\` wit
   info (OS build, RAM, volumes with file system and Dev Drive flag, filter drivers) and a draft bug report for the
   owning vendor;
 - `report.json`, `timeline.csv`, `processes.csv`, `events.csv`, `timeline.png`, and the `.etl` when a trace was taken.
+
+**How the folder is written** (`IncidentWriter`, `IncidentManager.Write`). It is written when the incident opens or
+re-opens (`report.json` and `report.md`, what the window's details read), when it closes and when a trace is attached
+(everything); while it is open, its `report.json` and `report.md` on a new top suspect, 25% more growth or every 5
+minutes, the chart, `timeline.csv` and `processes.csv` with them at most every 30 minutes and only while the write
+budget has room to spare, and the rows of `events.csv` only while no open incident's report is due; a closed one on a
+new timeline entry, and every 30 minutes for alerts counted after it closed. All but the opening, re-opening, closing,
+trace and end-of-run writes wait while the report folders' write budget has no room (section 3), and are written at a
+later re-rank, the incident written longest ago first, so on a busy PC with many incidents open the report may be up
+to about an hour behind the window (the list, the tray and the notices are live). `report.md`, `report.json`,
+`timeline.csv`, `processes.csv` and `timeline.png` are each replaced in one step (temp file and move), and only when
+what they say changed since this run last wrote them (the chart is drawn again only when what it shows changed), so a
+closed incident's CSVs and chart are written once. `events.csv` is appended to, in whole rows sorted by time within
+each write, from what the incident kept of its window's events: an open incident takes each event from the shared
+buffer as it comes (the buffer keeps 90 minutes, the incident its window's first 5,000 from the onset less 2 minutes
+as it was when it first kept them), so the earliest kept event not written yet is always there to write and the file
+has every event from its first row to its last, however long the budget held it back. Each write adds at most 100
+(every one left at the end of a run). Once it has all an incident kept that stopped keeping (5,000 kept, or the
+buffer let events go before a closed incident re-opened and looked at them), a last `Note` row says to when it holds
+the window's events, and so does a last row when the incident leaves memory 6 hours after closing with rows the budget
+never had room for; the day's `data\<yyyyMMdd>\events.csv` has every event. An alert is one row per growth rule and
+onset (a rule that keeps firing keeps its bigger alert under the first one's onset; a re-opening's has its own), at
+the time the file first saw it, and one row per release. While open it can hold rows from after the growth ended, up
+to the close. It is written whole again only when it is not as this run last wrote it, or when a closed incident's
+onset moved later than rows it holds: those rows are left out and the rest stay as written (they are all among what it
+kept). Its rows are written in single appends and read by others as they are: a copy taken in the moment of an
+append can fail with a sharing violation (an export then fails and can be tried again), and a crash in that moment can leave its last row cut short, which a
+later write in the same run repairs (a file not as written is written whole again) and a later run leaves as it is.
+At the end of a run everything left is written.
+
+**Spawn storms** (`Core.Spawn.SpawnTracker`, `StormReports`). A parent that starts more than 30 short-lived children
+(each exited within 10 s) within 30 s, by default, opens a storm, which closes once its rate stayed under half that for a minute. A fork copy (a child
+with its parent's own image and exact command line: how Git Bash, MSYS2 and Cygwin run a subshell, a pipeline stage or
+a command substitution) is no launch and is not counted, whatever it lived; what a fork copy starts counts to the
+process it was forked from (a copy of a copy followed). A start's parent is the registry's record of it, else the
+process with the parent's PID that can have started it (`ProcessRegistry.ParentKeyOf`: the live one, else the newest
+remembered one that had not exited before the child started, for a child seen after its parent exited), by the key it
+has now: a key a snapshot re-keyed (an estimated create time made exact) is followed (`ProcessRegistry.CurrentKey`),
+and an open storm moves with it (should it meet another open storm of that key, it ends there as a storm ends), so one
+parent is one storm. The owner's 20261109-231314-SpawnStorm-bash, 48 fork copies of one bash, is no storm now. Each storm
+is written into its parent identity's report folder (`StormFolder`: the image, its role and its owner, as
+`ProcessIdentities.Of` gives them, so one Claude Code session's bash storms share one): a storm that opens while another
+of that identity is open, or within 60 minutes of the last one closing, goes into the same folder, as a growth incident
+re-opens; after that a new one is made, at most 10 an hour (a storm past that is in its findings, the log and
+findings.jsonl, and says why it has no folder). The folder is written when it is made, then while its storms change at
+most every 10 minutes (every 30 while only the numbers of an open one change), while the write budget has room to
+spare (the open incidents' reports come first), and once more when it leaves memory an hour after its last storm
+closed, at the end of a run, or when a storm of its identity opens in the very sample its hour ended. Its `report.md`
+lists every storm in it (opened, closed, parent, starts, peak, fork copies, children) and its latest in full; its
+`report.json`'s `data` is the latest storm's with `identity`, `storms`, `folderTotalStarts` and `episodes`;
+`spawns.csv` gets the folder's first 1,000 starts, each appended once its process exited, and those still running at
+its last write as they are then (no lifetime). tools/Leaker's agent-load session (a burst every 2.5 minutes) makes one
+folder in an hour, where it made one a burst.
 
 These files are written as recorded, for you, and each report says so at the top ("NOT REDACTED"). **Export report**
 builds a zip for sharing, redacted by default: the user name, home and TEMP paths (long and 8.3 forms), machine name,

@@ -125,6 +125,54 @@ public sealed class ProcessRegistry
     /// <summary>The image of the latest process that had this PID (live or exited), for labels.</summary>
     public string? RecentImage(int pid) { lock (_lock) return _lastImage.GetValueOrDefault(pid); }
 
+    /// <summary>
+    /// Each estimated key a snapshot re-keyed (<see cref="Rekey"/>) with the exact key it became, the newest
+    /// <see cref="MaxRekeyed"/> kept, so a key copied before the re-key (a child's parent in a spawn record, an open spawn
+    /// storm's parent) still names the same process (<see cref="CurrentKey"/>).
+    /// </summary>
+    private readonly Dictionary<ProcessKey, ProcessKey> _rekeyed = new();
+    private readonly Queue<ProcessKey> _rekeyOrder = new();
+    public const int MaxRekeyed = 4096;
+
+    /// <summary>How many re-keys there have been: a reader that keeps keys looks them up again only when this changed.</summary>
+    public long Rekeys { get { lock (_lock) return _rekeys; } }
+    private long _rekeys;
+
+    /// <summary>The key the process instance <paramref name="key"/> names has now: the exact key an estimated one was re-keyed to, else itself.</summary>
+    public ProcessKey CurrentKey(ProcessKey key)
+    {
+        lock (_lock)
+        {
+            for (int i = 0; i < 4 && _rekeyed.TryGetValue(key, out var next); i++) key = next;
+            return key;
+        }
+    }
+
+    /// <summary>
+    /// The process with PID <paramref name="pid"/> that can be the parent of a process created at
+    /// <paramref name="childCreateTime"/> (FILETIME; 0 when unknown): the live one, else, when it exited already (a short fork
+    /// copy, a child seen late), the newest remembered instance with that PID, as <see cref="ResolveParent"/> takes an
+    /// exited parent. Either was created no later than the child, within 2 s (an estimated create time may be a little
+    /// late), and a remembered one had not exited before the child was created. Null when there is none, or a newer process
+    /// has the PID (the parent exited and its PID was reused).
+    /// </summary>
+    public ProcessKey? ParentKeyOf(int pid, long childCreateTime)
+    {
+        lock (_lock)
+        {
+            if (IsRootPid(pid)) return null;
+            long slack = 2 * TimeSpan.TicksPerSecond;
+            if (_livePid.TryGetValue(pid, out var k)) return childCreateTime > 0 && k.CreateTime > childCreateTime + slack ? null : k;
+            if (!_lastKey.TryGetValue(pid, out var last) || (childCreateTime > 0 && last.CreateTime > childCreateTime + slack)) return null;
+            // Exited before the child was created: not its parent (the PID's next process may not have been seen yet).
+            if (childCreateTime > 0 && _all.TryGetValue(last, out var r) && r.ExitUtc is { } x && x.ToFileTimeUtc() < childCreateTime - slack) return null;
+            return last;
+        }
+    }
+
+    /// <summary>The newest instance seen with each PID (live or exited), for <see cref="ParentKeyOf"/>.</summary>
+    private readonly Dictionary<int, ProcessKey> _lastKey = new();
+
     /// <summary>Called when a process record is created, to fill image path / command line / user (outside the lock).</summary>
     public Action<ProcessRecord>? Enricher { get; set; }
 
@@ -401,6 +449,12 @@ public sealed class ProcessRegistry
         foreach (var r in _all.Values)
             if (r.ParentKey == estimated.Key) r.ParentKey = exact.Key;
         Add(exact);
+        if (_lastKey.TryGetValue(exact.Pid, out var last) && last == estimated.Key) _lastKey[exact.Pid] = exact.Key;
+        // Keys copied before now (a spawn record's parent) still find it.
+        _rekeyed[estimated.Key] = exact.Key;
+        _rekeyOrder.Enqueue(estimated.Key);
+        while (_rekeyOrder.Count > MaxRekeyed) _rekeyed.Remove(_rekeyOrder.Dequeue());
+        _rekeys++;
     }
 
     private void Add(ProcessRecord rec)
@@ -408,6 +462,7 @@ public sealed class ProcessRegistry
         _all[rec.Key] = rec;
         _livePid[rec.Pid] = rec.Key;
         if (rec.Image.Length > 0) _lastImage[rec.Pid] = rec.Image;
+        if (!_lastKey.TryGetValue(rec.Pid, out var was) || was.CreateTime <= rec.Key.CreateTime || was == rec.Key) _lastKey[rec.Pid] = rec.Key;
     }
 
     /// <param name="exitMs">The exit on the clock that only goes forward when it is known (the snapshot it went missing at);
@@ -675,6 +730,13 @@ public sealed class ProcessRegistry
         {
             _lastImage.Clear();
             foreach (var r in _all.Values) if (r.Image.Length > 0) _lastImage[r.Pid] = r.Image;
+        }
+        if (_lastKey.Count > 2 * _maxRecords)
+        {
+            _lastKey.Clear();
+            foreach (var r in _all.Values)
+                if (!_lastKey.TryGetValue(r.Pid, out var was) || was.CreateTime < r.Key.CreateTime) _lastKey[r.Pid] = r.Key;
+            foreach (var (pid, k) in _livePid) _lastKey[pid] = k;
         }
     }
 

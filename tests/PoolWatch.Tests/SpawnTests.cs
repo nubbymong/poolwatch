@@ -243,7 +243,7 @@ public class SpawnTrackerTests
             var events = new List<LifecycleEvent>();
             for (int k = 0; k < 20; k++) events.AddRange(rig.Spawn("cmd.exe", "cmd /c echo", 80));
             var (_, toWrite) = rig.Tracker.Observe(events, At(rig.Now, ms));
-            foreach (var storm in toWrite) storm.LastWriteMs = ms;
+            foreach (var folder in toWrite) folder.MarkWritten(ms); // as the storm's report writer leaves it
             if (toWrite.Count > 0) written.Add(ms / 1000);
         }
         Assert.Single(rig.Tracker.OpenStorms);
@@ -341,7 +341,7 @@ public class SpawnTrackerTests
     {
         var rig = new Rig();
         var all = new List<Finding>();
-        var written = new List<SpawnStorm>();
+        var written = new List<StormFolder>();
         // 2 starts per second for 40 s: 60 per 30 s, every one exits in 80 ms.
         for (int s = 0; s < 40; s++)
         {
@@ -365,9 +365,9 @@ public class SpawnTrackerTests
         Assert.True(storm.PeakShortLived > 30);
         Assert.Equal("git status --porcelain", storm.Patterns.OrderByDescending(kv => kv.Value).First().Key);
         Assert.True(storm.GitRoots[@"C:\Users\me"].Info.Suspicious);
-        Assert.Contains(storm, written);
-        Assert.Contains("| git.exe |", rig.Tracker.StormMarkdown(storm));
-        Assert.Contains("parent cwd", SpawnTracker.TraceCsv(storm));
+        Assert.Contains(storm.Folder, written); // its report folder is due when it opens
+        Assert.Contains("| git.exe |", rig.Tracker.StormMarkdown(storm.Folder!));
+        Assert.Contains("parent cwd", SpawnTracker.TraceRows(storm.Folder!.PendingRows)); // the rows its folder's spawns.csv gets
 
         // Quiet: the storm closes a minute after the rate fell below half the threshold.
         all.Clear();
@@ -414,7 +414,7 @@ public class SpawnTrackerTests
 
         // spawns.csv: PoolWatch's own "where the folder came from" is never a cell a spreadsheet reads as a formula, so it
         // is written as it is (ci/diag-e2e.ps1 reads it so).
-        var rows = SpawnTracker.TraceCsv(storm).Split('\n', StringSplitOptions.RemoveEmptyEntries).Skip(1).Select(PoolWatch.Core.Util.Csv.Split).ToList();
+        var rows = SpawnTracker.TraceRows(storm.Folder!.PendingRows).Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(PoolWatch.Core.Util.Csv.Split).ToList();
         var git = rows.Where(r => r[2] == "git.exe").ToList();
         Assert.NotEmpty(git);
         Assert.All(git, r => Assert.Equal(SpawnTracker.GitDashC, r[6]));
@@ -422,7 +422,7 @@ public class SpawnTrackerTests
         Assert.False(PoolWatch.Core.Util.Csv.IsFormulaStart(SpawnTracker.GitDashC));
 
         // report.md: a child's pipe stays inside its code span and its cell.
-        var row = Assert.Single(rig.Tracker.StormMarkdown(storm).Split('\n').Select(l => l.TrimEnd('\r')), l => l.Contains("findstr"));
+        var row = Assert.Single(rig.Tracker.StormMarkdown(storm.Folder!).Split('\n').Select(l => l.TrimEnd('\r')), l => l.Contains("findstr"));
         Assert.Contains(@"dir \| findstr", row);
         int unescaped = 0;
         for (int i = 0; i < row.Length; i++)

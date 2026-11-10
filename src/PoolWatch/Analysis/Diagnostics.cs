@@ -412,11 +412,11 @@ internal sealed class Diagnostics
         try
         {
             List<Finding> findings;
-            List<SpawnStorm> toWrite;
+            List<StormFolder> toWrite;
             // The token-leak guard's own test (PoolWatch.exe starting 300 cmd.exe) is not a spawn storm to report.
             var spawnEvents = Guard.Checking || Environment.TickCount64 < _ownHelperUntilMs ? events.Where(e => !IsOwnHelper(e.ParentPid)).ToList() : events;
             lock (Spawns) (findings, toWrite) = Spawns.Observe(spawnEvents, Core.Model.Moment.Of(s));
-            foreach (var storm in toWrite) WriteStorm(storm, s.TickMs); // sets ReportDir on the storm's latest finding
+            foreach (var folder in toWrite) WriteStorm(folder, s.TickMs); // sets ReportDir on its storms' latest findings
             foreach (var f in findings) Findings.Add(f);
         }
         catch (Exception ex) { _engine.Log.Info("spawn diagnostics failed: " + ex.Message); }
@@ -721,45 +721,33 @@ internal sealed class Diagnostics
         return found;
     }
 
-    private void WriteStorm(SpawnStorm storm, long nowMs)
+    /// <summary>
+    /// Writes a spawn-storm report folder (<see cref="StormReports.WriteWithin"/>). Its first write and its last (it leaves memory,
+    /// or PoolWatch stops) are always made; an update in between waits while the report folders' write budget has no room
+    /// (<see cref="Core.Incidents.WriteBudget"/>, shared with the incidents), and is made at a later sample.
+    /// </summary>
+    private void WriteStorm(StormFolder folder, long nowMs)
     {
         try
         {
-            var head = new Finding
-            {
-                TimeUtc = storm.OpenedUtc, Kind = FindingKind.SpawnStorm, Severity = FindingSeverity.Alert,
-                Title = $"Spawn storm: {storm.ParentImage} (PID {storm.ParentPid}) started {storm.TotalStarts:N0} processes" +
-                        $" (peak {storm.PeakShortLived} short-lived per {_engine.Settings.SpawnStormWindowSeconds:0} s){(storm.IsOpen ? ", still running" : "")}",
-                Pid = storm.ParentPid, Image = storm.ParentImage, Data = Spawns.StormData(storm),
-            };
-            storm.ReportDir ??= FindingReport.NewDir(_engine.Paths.IncidentsDir, head, Path.GetFileNameWithoutExtension(storm.ParentImage.Split(' ')[0]));
-            // spawns.csv (up to 2,000 rows) when it gained rows, and once more at close / exit (late exit codes).
-            bool final = !storm.IsOpen || _finishing;
-            var extra = storm.Trace.Count != storm.TraceWritten || final ? new Dictionary<string, string> { ["spawns.csv"] = SpawnTracker.TraceCsv(storm) } : null;
-            FindingReport.Write(storm.ReportDir, head, Spawns.StormMarkdown(storm) + "\n" + _engine.Meter.OwnCostLine() + "\n", extra, _engine.Paths.CheckRealNoWait);
-            storm.TraceWritten = storm.Trace.Count;
-            storm.LastWriteMs = nowMs;
-            if (storm.LastFinding is { } lf) lf.ReportDir = storm.ReportDir;
+            StormReports.WriteWithin(_analysis.Incidents.Budget, Spawns, folder, _engine.Paths.IncidentsDir, _engine.Meter.OwnCostLine(), _engine.Paths.CheckRealNoWait, nowMs);
         }
         catch (Exception ex)
         {
-            storm.LastWriteMs = nowMs; // back off to the normal refresh interval instead of retrying every tick
+            folder.LastWriteMs = nowMs; // back off to the normal refresh interval instead of retrying every tick
             _engine.Log.Info("spawn storm report failed: " + ex.Message);
         }
     }
 
-    /// <summary>End of a run: rewrite the reports of storms that are still open with their final numbers.</summary>
-    private bool _finishing;
-
+    /// <summary>End of a run: the report folders with anything not written yet get it, with their storms' final numbers.</summary>
     public void Finish()
     {
-        _finishing = true;
         CancelExperiment();
         DrainOtherThreads(); // the sampler has stopped: record what is still queued
         _lagProber?.Dispose();
         EventLog.Dispose();
         lock (Spawns)
-            foreach (var storm in Spawns.OpenStorms.ToList()) WriteStorm(storm, Environment.TickCount64);
+            foreach (var folder in Spawns.FoldersToFinish()) WriteStorm(folder, Environment.TickCount64);
     }
 
     /// <summary>Every finding: log, findings.jsonl, events.csv and the incident timelines.</summary>

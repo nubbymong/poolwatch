@@ -95,9 +95,23 @@ public sealed class NoWaitOpenSiteTests
         Assert.Contains("public string CheckWrite(string path) => _engine.Paths.CheckRealNoWait(path);", Code(In(Analysis, "WindowsIncidentHost.cs")));
         string diagnostics = Code(In(Analysis, "Diagnostics.cs"));
         int writes = Regex.Matches(diagnostics, @"\bFindingReport\.Write\(").Count;
-        Assert.Equal(4, writes);
+        Assert.Equal(3, writes); // the crash and the two experiment reports; a spawn storm's folder is written by StormReports
         Assert.Equal(writes, Regex.Matches(diagnostics, @"\bFindingReport\.Write\([^;]*, _engine\.Paths\.CheckRealNoWait\);").Count);
         Assert.Contains("_markInbox ??= new Core.Experiments.MarkInbox(_engine.Paths.RequestsDir, _engine.Paths.CheckRealNoWait);", diagnostics);
+        // The storm folders' writer is given the same check, and every path it makes, replaces or appends to goes through it.
+        Assert.Single(Regex.Matches(diagnostics, @"\bStormReports\.Write"));
+        Assert.Contains("StormReports.WriteWithin(_analysis.Incidents.Budget, Spawns, folder, _engine.Paths.IncidentsDir, _engine.Meter.OwnCostLine(), " +
+                        "_engine.Paths.CheckRealNoWait, nowMs);", diagnostics);
+        string storms = Code(["PoolWatch.Core", "Spawn", "StormReports.cs"]);
+        Assert.Contains("Directory.CreateDirectory(checkWrite(f.Dir));", storms);
+        Assert.Contains("bytes += FindingReport.Write(f.Dir, head, tracker.StormMarkdown(f) + \"\" + costLine + \"\", null, checkWrite);", storms); // strings read empty
+        // A new spawns.csv is replaced in one step by the finding reports' own replace, which checks both of its paths.
+        Assert.Contains("long written = FindingReport.Atomic(path, SpawnTracker.TraceHeader + \"\" + SpawnTracker.TraceRows(rows), checkWrite);", storms);
+        Assert.Contains("using (var fs = new FileStream(checkWrite(path), FileMode.Append, FileAccess.Write, FileShare.Read))", storms);
+        Assert.Single(Regex.Matches(storms, @"\bnew FileStream\(|\bFile\.(WriteAllText|WriteAllBytes|AppendAllText|Open|OpenWrite|Create)\(")); // that one
+        string atomic = Member(["PoolWatch.Core", "Findings", "FindingLog.cs"], "internal static long Atomic(");
+        Assert.Contains("string tmp = checkWrite(path + \"\"); File.WriteAllBytes(tmp, bytes); File.Move(tmp, checkWrite(path), overwrite: true);", atomic);
+        Assert.Single(Regex.Matches(atomic, @"\bnew FileStream\(|\bFile\.(WriteAllText|WriteAllBytes|AppendAllText|Open|OpenWrite|Create)\(")); // that one, to the checked temp file
     }
 
     [Fact]

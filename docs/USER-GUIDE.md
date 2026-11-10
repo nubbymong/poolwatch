@@ -139,7 +139,13 @@ Switch on **Advanced view** for the details. The header stays, and the window ad
     folder exists. A known issue that matches shows as a note here. In a small window the details scroll: Tab reaches
     them at their top, then their words and each button, and the arrow keys scroll them; switching away and back keeps
     your place. What PoolWatch's own cache clear frees is
-    that clear's result, not a release: it shows in the clear's own row.
+    that clear's result, not a release: it shows in the clear's own row. Incidents from before PoolWatch last started
+    come from their report folders, however many spawn-storm reports came after them. An open incident's evidence comes
+    from its report, which PoolWatch brings up to date as its write budget allows (on a busy PC with many incidents
+    open, about once an hour; the row's figures are live). A **spawn storm** row is a program starting more than 30
+    short commands in 30 seconds; the copies Git Bash makes of itself to run a pipeline are not counted, what they
+    start is. One program's storms within an hour share one report folder, and PoolWatch makes at most 10 new ones an hour
+    (a storm past that has its row and no folder).
   - **Services**: see [Services](#services).
   - **Tasks and startup apps**: see [Tasks and startup apps](#tasks-and-startup-apps).
 
