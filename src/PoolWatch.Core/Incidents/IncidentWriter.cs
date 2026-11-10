@@ -16,28 +16,35 @@ namespace PoolWatch.Core.Incidents;
 /// draft bug report), report.json (the same, machine-readable), timeline.csv, processes.csv, events.csv and
 /// timeline.png. report.md, report.json, timeline.csv, processes.csv and timeline.png are replaced atomically (temp file +
 /// move) so a reader never sees half a report, and only when what they say changed since this run last wrote them (an
-/// unchanged file, a closed incident's CSVs and chart among them, is not written again). events.csv is appended to, from
-/// what the incident kept of its window's events (<see cref="IncidentEventSet.Kept"/>: every event from the window's
-/// start in order, at most <see cref="MaxEventRows"/>): each event once, the earliest not written yet first, so the file
-/// holds every event from its first row to its last, however far the write budget held it back; when the incident stopped
-/// keeping events (it kept <see cref="MaxEventRows"/>) and the file has all it kept, a last row says up to when it holds
-/// them. It is rewritten whole only when it is not as PoolWatch last wrote it, or when a closed incident's onset moved
-/// later than rows it holds (they are then left out, and the rest kept as written). Each write returns the bytes it wrote,
-/// for the report folders' budget (<see cref="WriteBudget"/>).
+/// unchanged file, a closed incident's CSVs and chart among them, is not written again). events.csv holds both ends of the
+/// window: while the incident is open it is appended to, from the first part of what the incident kept of its window's
+/// events (<see cref="IncidentEventSet.Kept"/>: the window's earliest by time from its start, in time order, at most
+/// <see cref="MaxEventRows"/>): each event once, the earliest not written yet first, so the file holds every event from its
+/// first row to its last, however far the write budget held it back; when the incident's first part is full and the file
+/// has all of it, a last row says to when it holds them, and no event row follows it. When the incident closes (and at the
+/// end of a run, or as it leaves memory, when it has not been yet) it is replaced whole in one step with both ends: the
+/// first part, a row between the two parts saying how many events it left out and between which times (when it left any
+/// out), and the latest <see cref="MaxEventRows"/> events of the window (<see cref="IncidentEventSet.Tail"/>), all sorted
+/// by time, each event once; once the incident let go of its latest part (<see cref="IncidentEventSet.LatestReleased"/>)
+/// that file is final. It is rewritten whole otherwise only when it is not as PoolWatch last wrote it, or when a closed
+/// incident's onset moved later than rows it holds (they are then left out, and the rest kept as written). Each write
+/// returns the bytes it wrote, for the report folders' budget (<see cref="WriteBudget"/>).
 /// </summary>
 internal sealed class IncidentWriter
 {
     /// <summary>
-    /// The most event rows an incident's events.csv holds (the alerts' rows aside), and the most events an incident keeps in
-    /// memory for it: the window's first 1,000 from the onset less 2 minutes, about 6 minutes of a busy agentic PC's events
-    /// (9,400 an hour), more on a quieter one. Its last row says to when it holds them; with Detailed recording the day's
-    /// events.csv has every one.
-    /// An incident is kept up to 8 hours (open 2, closed 6) and 26 were held at once on the maintainer's PC: 5,000 each held
-    /// up to 130,000 events, most of which the write budget could never write. An open incident shares its events with the
+    /// The most events of each end of an incident's window its events.csv holds (the alerts' rows and the row between the
+    /// two ends aside), and that an incident keeps in memory for it: the window's first 1,000 by time from the onset less 2
+    /// minutes, about 6 minutes of a busy agentic PC's events (9,400 an hour), more on a quieter one, and its latest 1,000;
+    /// with Detailed recording the day's events.csv has every one. An
+    /// incident is kept up to 8 hours (open 2, closed 6) and 26 were held at once on the maintainer's PC: 5,000 each held up
+    /// to 130,000 events, most of which the write budget could never write. An open incident shares its events with the
     /// 90-minute buffer only for those 90 minutes; past them, and once closed, what it kept is its own: in AgentLoadTests'
     /// world (10 incidents open all day, 20 closed) 5,000 held 3.2 MB more heap at 6 hours than 1,000 (42.1 against 38.9 MB),
     /// and with all 32 incidents held at the cap it would be about 29 MB more (4,000 more events each, at the 225 bytes an
-    /// event the world's closed incidents hold), against a heap already over its target.
+    /// event the world's closed incidents hold), against a heap already over its target. Its latest 1,000 are the newest,
+    /// which an open incident shares with the buffer, and a closed one lets them go once it can no longer re-open and its
+    /// file holds them (an hour after it closed): <c>BothEndsTests</c> measures what they hold.
     /// </summary>
     public const int MaxEventRows = 1000;
 
@@ -68,7 +75,7 @@ internal sealed class IncidentWriter
         public long FirstMs = long.MaxValue;
         /// <summary>It holds no event before this (on the forward clock): where the incident started keeping them, later when a closed incident's onset moved later.</summary>
         public long StartMs = long.MinValue;
-        /// <summary>Its last row says the events after that row's time are not in it (the incident stopped keeping them): when, else null.</summary>
+        /// <summary>Its last row says the events after that row's time are not in it yet (an open incident's first part is full; its latest come at its close): when, else null.</summary>
         public DateTime? NotedAt;
         /// <summary>A write left rows of the window for later (it may write only so many, or none while the write budget has no room).</summary>
         public bool Pending;
@@ -78,30 +85,52 @@ internal sealed class IncidentWriter
         public DateTime? LastUtc;
         /// <summary>How many events the incident had kept at the last write of events.csv (it keeps more while open).</summary>
         public int KeptSeen;
+        /// <summary>
+        /// It holds both ends of the window, written whole (<see cref="TailKey"/>: what it holds of the latest part, and how
+        /// many it left out), or, after a last row for rows the write budget never had room for, that row's: null while it
+        /// holds the first part only (rows after its last would then come after the latest part).
+        /// </summary>
+        public (int Rows, long First, long Last, int LeftOut)? Tail;
+        /// <summary>The row it holds that says how many events of the window it leaves out and between which times; null: none.</summary>
+        public EventGap? Gap;
     }
 
     /// <summary>
-    /// The incident leaves memory with kept events its events.csv does not have yet (the write budget held them back): a
-    /// last row says to when the file holds the window's events (the rest are in the day's events.csv with Detailed
-    /// recording, and not recorded in Reports only). A row, written
-    /// whatever the budget. Returns the bytes written.
+    /// The incident leaves memory: its events.csv is replaced whole with both ends of its window when it does not hold them
+    /// (its closing write failed, or the file is gone, say), so a later run keeps them; else, when the write budget never had
+    /// room for some of its first part, a last row says how many it leaves out and between which times (only on a file as
+    /// this run wrote it: another is left as it is; the day's events.csv has them with Detailed recording, and they are not
+    /// recorded in Reports only). Written whatever the budget. Returns the bytes written.
     /// </summary>
-    public long NoteUnwritten(Incident inc)
+    public long WriteLeaving(Incident inc, IncidentEventSet ev)
     {
-        if (!_state.TryGetValue(inc, out var st) || !Pending(inc, st)) return 0;
         string path = Path.Combine(inc.Dir, "events.csv");
-        if (!File.Exists(path) || new FileInfo(path).Length != st.Length) return 0; // not as written: left as it is
-        var onsetLess2 = inc.OnsetUtc.AddMinutes(-2);
-        var at = st.LastUtc is { } l && l > onsetLess2 ? l : onsetLess2;
-        var add = Utf8.GetBytes(NoteLine(at) + Environment.NewLine);
-        using (var fs = new FileStream(_host.CheckWrite(path), FileMode.Append, FileAccess.Write, FileShare.Read))
+        var st = StateOf(inc);
+        var p = Plan(inc, ev, st, path);
+        if (p.BothEnds)
         {
-            fs.Write(add);
-            st.Length = fs.Length;
+            if (p.Holds) return 0;
+            Directory.CreateDirectory(_host.CheckWrite(inc.Dir));
+            return WriteWhole(inc, path, st, p);
         }
-        Profiler.Wrote(path, add.Length);
-        (st.NotedAt, st.Pending) = (at, false);
-        return add.Length;
+        if (!p.AsWritten) return 0; // not as written: left as it is
+        if (p.Fresh.Count == 0 || st.NotedAt is not null || st.Tail is not null) return 0;
+        var gap = EventGap.Of(p.Fresh, 0, p.Fresh.Count);
+        long bytes = AppendRows(inc, path, st, [], null, (gap, LeftByBudget));
+        (st.Gap, st.Tail, st.Pending) = (gap, (0, 0, 0, gap.Count), false);
+        return bytes;
+    }
+
+    /// <summary>
+    /// Whether the incident's events.csv is still to be replaced whole with both ends of its window: a closed incident whose
+    /// file does not hold them as they are now (its closing write failed, or its window took more in since). The end of a
+    /// run writes it then.
+    /// </summary>
+    public bool BothEndsDue(Incident inc, IncidentEventSet ev)
+    {
+        if (inc.IsOpen) return false;
+        var p = Plan(inc, ev, StateOf(inc), Path.Combine(inc.Dir, "events.csv"));
+        return p.BothEnds && !p.Holds;
     }
 
     private readonly System.Runtime.CompilerServices.ConditionalWeakTable<Incident, FileState> _state = new();
@@ -113,6 +142,17 @@ internal sealed class IncidentWriter
 
     /// <summary>Kept events not in events.csv yet: a write left some for later, or the incident kept more since its last write.</summary>
     private static bool Pending(Incident inc, FileState st) => st.Events is not null && st.NotedAt is null && (st.Pending || inc.Events.Count != st.KeptSeen);
+
+    /// <summary>
+    /// Whether the closed incident's events.csv holds both ends of its window as this run wrote them, as they are now: the
+    /// manager then lets go of its latest part once it can no longer re-open (<see cref="IncidentEventSet.LatestReleased"/>).
+    /// </summary>
+    public bool HoldsBothEnds(Incident inc, IncidentEventSet ev)
+    {
+        if (inc.IsOpen) return false;
+        var p = Plan(inc, ev, StateOf(inc), Path.Combine(inc.Dir, "events.csv"));
+        return p.BothEnds && p.Holds;
+    }
 
     /// <summary>When the incident's chart, timeline.csv and processes.csv were last written this run (a full write), on the forward clock; null: never.</summary>
     public long? FullWrittenMs(Incident inc) => _state.TryGetValue(inc, out var st) ? st.FullMs : null;
@@ -161,13 +201,16 @@ internal sealed class IncidentWriter
 
     /// <summary>
     /// Writes the folder: each file whose content changed, and up to <paramref name="maxRows"/> of the kept events not in
-    /// events.csv yet (the rest left for a later write, <see cref="EventsPending"/>). Without <paramref name="full"/> (an
-    /// open incident's refresh, its opening) only report.json and report.md (what the window's details and Copy summary
-    /// read) and the events: the chart, timeline.csv and processes.csv stay as they were (<see cref="FullWrittenMs"/>).
-    /// Returns the bytes written.
+    /// events.csv yet (the rest left for a later write, <see cref="EventsPending"/>); a closed incident's events.csv with both
+    /// ends of its window, replaced whole, when it does not hold them yet and the write must be made
+    /// (<paramref name="must"/>). Without <paramref name="full"/> (an open incident's refresh, its opening) only report.json
+    /// and report.md (what the window's details and Copy summary read) and the events: the chart, timeline.csv and
+    /// processes.csv stay as they were (<see cref="FullWrittenMs"/>). Returns the bytes written.
     /// </summary>
     /// <param name="atMs">The write's moment on the forward clock, kept as <see cref="FullWrittenMs"/> for a full write.</param>
-    public long Write(History.History h, Incident inc, IncidentEventSet ev, int maxRows = MaxEventRows, bool full = true, long atMs = 0)
+    /// <param name="must">A write that must be made (an opening, re-opening or closing, a trace attached, the end of a run):
+    /// only such a write replaces a closed incident's events.csv whole with both ends, as it is made whatever the budget.</param>
+    public long Write(History.History h, Incident inc, IncidentEventSet ev, int maxRows = MaxEventRows, bool full = true, long atMs = 0, bool must = true)
     {
         var events = ev.Window;
         _history = h;
@@ -197,10 +240,10 @@ internal sealed class IncidentWriter
             bytes += WriteProcessesCsv(h, inc, from, to, st);
             st.FullMs = atMs;
         }
-        bytes += WriteEventsCsv(inc, ev, st, maxRows);
+        bytes += WriteEventsCsv(inc, ev, st, maxRows, must);
         var report = BuildJson(inc, info, details, system, events);
         bytes += Atomic(Path.Combine(inc.Dir, "report.json"), JsonSerializer.Serialize(report, Json), st);
-        bytes += Atomic(Path.Combine(inc.Dir, "report.md"), BuildMarkdown(inc, info, details, system, events, png, st), st);
+        bytes += Atomic(Path.Combine(inc.Dir, "report.md"), BuildMarkdown(inc, info, details, system, ev, png, st), st);
         return bytes;
     }
 
@@ -237,11 +280,36 @@ internal sealed class IncidentWriter
         return JsonSerializer.Serialize(summary, Json);
     }
 
-    /// <summary>Appends up to <paramref name="maxRows"/> of the kept events not written yet to events.csv alone (rows a write left for later); returns the bytes written.</summary>
+    /// <summary>
+    /// Appends up to <paramref name="maxRows"/> of the kept events not written yet to events.csv alone (rows a write left for
+    /// later), a write that can wait (it never replaces a closed incident's file with both ends); returns the bytes written.
+    /// </summary>
     public long AppendEvents(Incident inc, IncidentEventSet ev, int maxRows)
     {
         Directory.CreateDirectory(_host.CheckWrite(inc.Dir));
-        return WriteEventsCsv(inc, ev, StateOf(inc), maxRows);
+        return WriteEventsCsv(inc, ev, StateOf(inc), maxRows, must: false);
+    }
+
+    /// <summary>
+    /// The incident's events.csv with both ends of its window as a whole write would make it now (<see cref="WriteWhole"/>),
+    /// and its report.md as a write would make it beside that file (its line under the window's events counting that file's
+    /// rows and saying what it leaves out), from memory: what an export of an open incident holds in place of its folder's
+    /// two, as its folder's events.csv holds the first part only while it is open. <paramref name="ev"/> is the incident's
+    /// events for the reports. Writes nothing. The caller holds the history lock, as for a write.
+    /// </summary>
+    public (string EventsCsv, string ReportMd) ExportTexts(History.History h, Incident inc, IncidentEventSet ev)
+    {
+        var p = Plan(inc, ev, StateOf(inc), Path.Combine(inc.Dir, "events.csv"), ends: true);
+        string csv = BothEndsRows(inc, p.Head, p.Tail, p.Gap, out var rows, out var keys).ToString();
+        // That file as a whole write would leave this run's knowledge of it.
+        var exported = new FileState { Events = keys, EventRows = rows.Count, Gap = p.Gap.Count > 0 ? p.Gap : null, Tail = p.Tail.Count > 0 || p.Gap.Count > 0 ? p.Key : null };
+        _history = h;
+        _plainFor = null;
+        var info = _knowledge.Lookup(inc.Tag);
+        var details = inc.Suspects.Take(5).ToDictionary(s => s.Key, s => _host.DescribeFile(s.ImagePath));
+        _sessions = inc.Suspects.Take(5).ToDictionary(s => s.Key, s => _host.DescribeSession(s));
+        bool png = File.Exists(Path.Combine(inc.Dir, "timeline.png"));
+        return (csv, BuildMarkdown(inc, info, details, _host.GetSystemInfo(), ev, png, exported));
     }
 
     /// <summary><see cref="AppendEvents(Incident, IncidentEventSet, int)"/> with <paramref name="events"/> as all the window's events there are.</summary>
@@ -381,9 +449,10 @@ internal sealed class IncidentWriter
 
     private static double? Round(double v) => double.IsNaN(v) ? null : Math.Round(v, 3);
 
-    private string BuildMarkdown(Incident inc, TagInfo info, Dictionary<ProcessKey, FileDetails?> details, SystemInfo system, List<LifecycleEvent> events, bool png,
+    private string BuildMarkdown(Incident inc, TagInfo info, Dictionary<ProcessKey, FileDetails?> details, SystemInfo system, IncidentEventSet ev, bool png,
         FileState st)
     {
+        var events = ev.Window;
         var sb = new StringBuilder();
         string headline = Headline(inc, info, markdown: true);
         sb.AppendLine($"# {headline}").AppendLine();
@@ -513,24 +582,49 @@ internal sealed class IncidentWriter
         if (shown.Count == 0) sb.AppendLine("None recorded.");
         foreach (var e in shown)
             sb.AppendLine($"- {Fmt.Clock(e.TimeUtc)} {e.Kind} {Md(e.Image)} (PID {e.Pid}){(e.ExitCode is { } c2 ? $" code {c2}" : "")}{(e.Detail is { } d ? $": {Md(d)}" : "")}");
-        int more = events.Count - shown.Count;
-        // events.csv holds the window's events from its start as written so far: to the time its last row says (the incident
-        // kept MaxEventRows), or fewer while the write budget has kept new rows for later. With Detailed recording on for the
-        // whole window the day's data\<yyyyMMdd>\events.csv has every one; in Reports only there is no such file, and the
-        // report names none; after a switch in the window, it has those of the time Detailed recording was on.
-        string day = more == 0 ? "" : DayEventsFrom(events[0].TimeUtc) switch
-        {
-            DayCopy.Every => "every one",
-            DayCopy.Part => "those of the time Detailed recording was on",
-            _ => "",
-        };
-        string where = st.NotedAt is { } noted ? $"; events.csv holds the window's events to {Fmt.Clock(noted)}" + (day.Length > 0 ? $" and the day's `data\\<yyyyMMdd>\\events.csv` {day}" : "")
-            : st.Pending ? "; events.csv gets the rest when PoolWatch's write budget has room" + (day.Length > 0 ? $", and the day's `data\\<yyyyMMdd>\\events.csv` has {day}" : "") : "";
-        sb.AppendLine(more > 0 ? (where.Length == 0 ? $"\n({more} other events in events.csv)" : $"\n({more} other events in the window{where})") : "").AppendLine();
+        sb.AppendLine(OtherEventsLine(inc, ev, shown, st)).AppendLine();
 
         AppendSystem(sb, system);
         AppendBugReport(sb, inc, info, details, system, headline);
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// report.md's line under the window's events: how many more events.csv holds than those listed (its rows counted as
+    /// written, those listed among them aside), and what it leaves out: when it holds both ends, how many of the window's
+    /// events it leaves out between them and between which times, as its <c>Gap</c> row says; while the incident is open and
+    /// its first part is full, how many more the window has so far, whose latest are added at its close; while the write
+    /// budget holds rows back, what the file gets and when (an open incident's: the rest of its first part as the budget
+    /// allows, its latest part at its close). Empty when there is nothing more to say. Starts with a line break, for the blank
+    /// line before it.
+    /// </summary>
+    private string OtherEventsLine(Incident inc, IncidentEventSet ev, List<LifecycleEvent> shown, FileState st)
+    {
+        int inFile = st.Events is { } written ? Math.Max(0, st.EventRows - shown.Count(e => written.Contains(RowKey(e)))) : 0;
+        if (st.Gap is { } g)
+            return $"\n({inFile} other events in events.csv; it leaves out {g.Count:N0} events, between {Fmt.Clock(g.FromUtc)} and {Fmt.Clock(g.ToUtc)}, as its Gap row says)";
+        if (inc.IsOpen && st.Tail is null && st.NotedAt is { } noted)
+            return $"\n({inFile} other events in events.csv: while the incident is open it holds the window's first {MaxEventRows:N0} events, to {Fmt.Clock(noted)}; " +
+                   $"the window has {ev.AfterCut:N0} more so far, and the latest of them, up to {MaxEventRows:N0}, are added when it closes)";
+        // The write budget kept rows of the first part for later.
+        int more = ev.Window.Count - shown.Count;
+        if (st.Pending && more > 0)
+        {
+            // With Detailed recording on for the whole window the day's data\<yyyyMMdd>\events.csv has every one; in Reports
+            // only there is no such file, and the line names none; after a switch in the window, it has those of the time
+            // Detailed recording was on.
+            string day = DayEventsFrom(ev.Window[0].TimeUtc) switch
+            {
+                DayCopy.Every => ", and the day's `data\\<yyyyMMdd>\\events.csv` has every one",
+                DayCopy.Part => ", and the day's `data\\<yyyyMMdd>\\events.csv` has those of the time Detailed recording was on",
+                _ => "",
+            };
+            return inc.IsOpen
+                ? $"\n({more} other events in the window; events.csv gets the rest of the window's first {MaxEventRows:N0} events as PoolWatch's write budget allows " +
+                  $"and its latest {MaxEventRows:N0} when the incident closes{day})"
+                : $"\n({more} other events in the window; events.csv gets the rest when PoolWatch's write budget has room{day})";
+        }
+        return inFile > 0 ? $"\n({inFile} other events in events.csv)" : "";
     }
 
     private static void AppendCapture(StringBuilder sb, Incident inc, CaptureResult c)
@@ -793,87 +887,174 @@ internal sealed class IncidentWriter
     }
 
     /// <summary>
-    /// The last row of an events.csv whose incident stopped keeping events: the file has none after <paramref name="t"/>.
-    /// It says where the later ones are only where they are (<see cref="DayEventsFrom"/>).
+    /// The last row of an open incident's events.csv once its first part is full and all written: the file has no event after
+    /// <paramref name="t"/>. Worded as a fact about this file, true however the run ends (a crash or a power loss before the
+    /// incident closes leaves the file as it is), with what PoolWatch does with it at the close.
     /// </summary>
-    private string NoteLine(DateTime t) => Csv.Line(t, "Note", 0, 0, 0, "", null, null, null,
-        $"events.csv holds the incident window's events to this row's time (an incident keeps at most {MaxEventRows:N0}); " + DayEventsFrom(t) switch
-        {
-            DayCopy.Every => "the later ones are in the day's data\\<yyyyMMdd>\\events.csv",
-            DayCopy.None => "the later ones are not recorded (Reports only)",
-            _ => "the later ones are in the day's data\\<yyyyMMdd>\\events.csv only for the time Detailed recording was on",
-        });
+    private static string NoteLine(DateTime t) => Csv.Line(t, "Note", 0, 0, 0, "", null, null, null,
+        string.Create(CultureInfo.InvariantCulture, $"events.csv holds the incident window's first {MaxEventRows:N0} events, to this row's time; the window's later events are not in this file ") +
+        string.Create(CultureInfo.InvariantCulture, $"(when the incident closes PoolWatch replaces it with the first {MaxEventRows:N0}, a Gap row and the latest {MaxEventRows:N0})"));
 
-    /// <summary>Rows of events and alerts, sorted by time (the alerts' rows among the events'), each ending a line; the note row last.</summary>
-    private string Rows(IEnumerable<LifecycleEvent> events, IEnumerable<Alert> alerts, DateTime? noteAt)
+    /// <summary>Why a <c>Gap</c> row's events are not in the file: the window's two ends are kept, or the write budget never had room for them.</summary>
+    private static readonly string LeftBetweenEnds = string.Create(CultureInfo.InvariantCulture,
+            $"events.csv keeps the incident window's first {MaxEventRows:N0} events and its latest {MaxEventRows:N0}"),
+        LeftByBudget = "PoolWatch's write budget had no room for them before the incident left memory";
+
+    /// <summary>
+    /// The row that says how many events the file leaves out, and the first and last of their times: at the first one's
+    /// time, so it sorts where they begin (events.csv's time format in its detail).
+    /// </summary>
+    private static string GapLine(EventGap g, string why) => Csv.Line(g.FromUtc, "Gap", 0, 0, 0, "", null, null, null,
+        string.Create(CultureInfo.InvariantCulture, $"{g.Count:N0} events left out, between {Csv.Escape(g.FromUtc)} and {Csv.Escape(g.ToUtc)} ({why})"));
+
+    /// <summary>
+    /// Rows of events and alerts, sorted by time (the alerts' rows among the events'), each ending a line; a <c>Gap</c> row in
+    /// its place by time (after rows of the same time); the note row last.
+    /// </summary>
+    private string Rows(IEnumerable<LifecycleEvent> events, IEnumerable<Alert> alerts, DateTime? noteAt, (EventGap Gap, string Why)? gap = null) =>
+        RowsInto(new StringBuilder(), events, alerts, noteAt, gap).ToString();
+
+    /// <summary><see cref="Rows"/> appended to <paramref name="sb"/>: sorted first, each row made as it is appended.</summary>
+    private StringBuilder RowsInto(StringBuilder sb, IEnumerable<LifecycleEvent> events, IEnumerable<Alert> alerts, DateTime? noteAt, (EventGap Gap, string Why)? gap = null)
     {
-        var rows = events.Select(e => (e.TimeUtc, line: EventLine(e))).Concat(alerts.Select(a => (a.TimeUtc, line: AlertLine(a)))).OrderBy(x => x.TimeUtc);
-        var sb = new StringBuilder();
-        foreach (var (_, line) in rows) sb.AppendLine(line);
+        // Each row as what it is (an event, an alert or the Gap row), in time order (stable: an alert after the events of its
+        // moment, the Gap row after both).
+        IEnumerable<(DateTime TimeUtc, LifecycleEvent? Event, Alert? Alert)> rows =
+            events.Select(e => (e.TimeUtc, (LifecycleEvent?)e, (Alert?)null)).Concat(alerts.Select(a => (a.TimeUtc, (LifecycleEvent?)null, (Alert?)a)));
+        if (gap is { } g) rows = rows.Append((g.Gap.FromUtc, null, null));
+        foreach (var (_, e, a) in rows.OrderBy(x => x.TimeUtc))
+            sb.AppendLine(e is not null ? EventLine(e) : a is not null ? AlertLine(a) : GapLine(gap!.Value.Gap, gap.Value.Why));
         if (noteAt is { } n) sb.AppendLine(NoteLine(n));
-        return sb.ToString();
+        return sb;
     }
 
     /// <summary>
-    /// events.csv: up to <paramref name="maxRows"/> of the kept events not in it yet (<see cref="IncidentEventSet.Kept"/>, the
-    /// earliest first: the file holds every kept event from its first row to its last) and the alert rows not in it yet
-    /// (<see cref="AlertRow"/>), appended as whole rows; once it holds everything the incident kept before it stopped keeping
-    /// them, a last row says to when. The whole file is written again only when it is not as this run last wrote it (or not
-    /// there), or when the incident is closed and its onset moved later than rows it holds (those rows are then left out,
-    /// and the rows after them stay as written: all of them are among the kept events). Events left for a later write make
-    /// it pending (<see cref="EventsPending"/>).
+    /// What events.csv should hold of the window now, against what it holds (<see cref="WriteEventsCsv"/>,
+    /// <see cref="BothEndsDue"/>, <see cref="WriteLeaving"/>): its first part (<see cref="Head"/>: <see cref="Written"/> in
+    /// the file as written, <see cref="Fresh"/> not yet) and its latest part (<see cref="Tail"/>), each from
+    /// <see cref="Lower"/> to the window's end, and what it leaves out between them (<see cref="Gap"/>); whether it is to hold
+    /// both ends (<see cref="BothEnds"/>: a closed incident with events after its first part, or whose file holds a note or
+    /// both ends already), and whether it does as written (<see cref="Holds"/>).
     /// </summary>
-    private long WriteEventsCsv(Incident inc, IncidentEventSet ev, FileState st, int maxRows)
+    private sealed record EventsPlan(bool AsWritten, long Lower, bool Rewrite, List<LifecycleEvent> Head, List<LifecycleEvent> Written, List<LifecycleEvent> Fresh,
+        List<LifecycleEvent> Tail, EventGap Gap, bool BothEnds, bool Holds, (int Rows, long First, long Last, int LeftOut) Key);
+
+    /// <param name="ends">Both ends are wanted whatever the incident (an export of an open one): an open incident's plan
+    /// otherwise holds only what an append reads (<see cref="EventsPlan.Fresh"/>, and what a rewrite of its first part
+    /// does), not its two parts.</param>
+    /// <param name="freshMax">An open incident's plan stops at this many events not in the file and one more (a write adds
+    /// at most this many; the one more says some are left for later).</param>
+    private EventsPlan Plan(Incident inc, IncidentEventSet ev, FileState st, string path, bool ends = false, int freshMax = int.MaxValue)
     {
-        string path = Path.Combine(inc.Dir, "events.csv");
         bool asWritten = st.Events is not null && File.Exists(path) && new FileInfo(path).Length == st.Length;
-        if (!asWritten) (st.StartMs, st.NotedAt) = (ev.FromMs, null);
         // The rows start at what the incident kept from; a closed incident's at its window's start (the onset less 2 min),
-        // and never earlier than they did (a re-opened incident's file does not get back the rows a close left out).
-        long lower = Math.Max(ev.FromMs, st.StartMs);
-        if (!inc.IsOpen) lower = Math.Max(lower, IncidentManager.EventWindowStartMs(inc));
-        bool rewrite = !asWritten || st.FirstMs < lower;
-        var kept = new List<LifecycleEvent>();
+        // and never earlier than they did (a re-opened incident's file does not get back the rows a close left out). A
+        // re-opened one's window starts at its latest episode's onset: its file keeps the first part of its first episode.
+        long lower = Math.Max(ev.FromMs, asWritten ? st.StartMs : ev.FromMs);
+        if (!inc.IsOpen && inc.Reopened == 0) lower = Math.Max(lower, IncidentManager.EventWindowStartMs(inc));
+        // Once the incident let go of its latest part (it can no longer re-open), its file as written is final: a later onset
+        // does not write it again without the latest part.
+        bool released = ev.LatestReleased && !inc.IsOpen;
+        bool rewrite = !asWritten || (st.FirstMs < lower && !released);
+        ends |= !inc.IsOpen;
+        var head = new List<LifecycleEvent>(ends ? ev.Kept.Count : 0);
+        var written = new List<LifecycleEvent>(ends || rewrite ? ev.Kept.Count : 0);
         var fresh = new List<LifecycleEvent>();
-        bool more = false;
         foreach (var e in ev.Kept)
         {
             if (e.Ms < lower || e.Ms > ev.EndMs) continue;
-            if (asWritten && st.Events!.Contains(RowKey(e))) { if (rewrite) kept.Add(e); continue; }
-            if (fresh.Count >= maxRows) { more = true; break; }
-            fresh.Add(e);
+            if (ends) head.Add(e);
+            if (!asWritten || !st.Events!.Contains(RowKey(e)))
+            {
+                fresh.Add(e);
+                if (!ends && fresh.Count > freshMax) break;
+            }
+            else if (ends || rewrite) written.Add(e);
         }
-        // Everything kept before the incident stopped keeping events is in the file: a last row says to when (not before the window).
-        DateTime? note = st.NotedAt;
-        bool noting = false;
-        if (note is null && !more && ev.CutMs is { } cutMs && cutMs <= ev.EndMs)
+        var tail = new List<LifecycleEvent>(ends ? ev.Tail.Count : 0);
+        if (ends) foreach (var e in ev.Tail) if (e.Ms >= lower && e.Ms <= ev.EndMs) tail.Add(e);
+        bool bothEnds = !inc.IsOpen && (released || tail.Count > 0 || ev.Gap.Count > 0 || (asWritten && (st.NotedAt is not null || st.Tail is not null)));
+        var key = released && asWritten && st.Tail is { } final ? final : TailKey(tail, ev.Gap);
+        bool holds = bothEnds && asWritten && !rewrite && fresh.Count == 0 && st.Tail == key;
+        return new(asWritten, lower, rewrite, head, written, fresh, tail, ev.Gap, bothEnds, holds, key);
+    }
+
+    /// <summary>What a file holds of the latest part, as one value: how many rows, the first and last (<see cref="RowKey"/>), and how many it leaves out.</summary>
+    private static (int Rows, long First, long Last, int LeftOut) TailKey(List<LifecycleEvent> tail, EventGap gap) =>
+        (tail.Count, tail.Count > 0 ? RowKey(tail[0]) : 0, tail.Count > 0 ? RowKey(tail[^1]) : 0, gap.Count);
+
+    /// <summary>
+    /// Both ends of the window as rows: the first part, then, when it left any out, the <c>Gap</c> row, then the latest part,
+    /// each part in time order on the clock that only goes forward (as the incident keeps them), each event once (by
+    /// <see cref="RowKey"/>), and the incident's alerts among them by time (after the events of their moment; before the Gap
+    /// row when of its moment or earlier). The Gap row is placed by position, between the two parts, not by its time alone:
+    /// an event of the latest part with the Gap row's time stays after it, and a clock set back between the two parts does not
+    /// mix them. <paramref name="events"/>: the events written.
+    /// </summary>
+    private StringBuilder BothEndsRows(Incident inc, List<LifecycleEvent> head, List<LifecycleEvent> tail, EventGap gap, out List<LifecycleEvent> events, out HashSet<long> keys)
+    {
+        keys = new HashSet<long>(head.Count + tail.Count);
+        events = new List<LifecycleEvent>(head.Count + tail.Count);
+        foreach (var e in head) if (keys.Add(RowKey(e))) events.Add(e);
+        int firstPart = events.Count;
+        foreach (var e in tail) if (keys.Add(RowKey(e))) events.Add(e);
+        // About 300 characters a row at the owner's command-line lengths: room for all of them at once.
+        var sb = new StringBuilder(EventsHeader, EventsHeader.Length + 320 * (events.Count + inc.Alerts.Count + 1));
+        var alerts = AlertRows(inc).Values.OrderBy(a => a.TimeUtc).ToList();
+        int next = 0;
+        for (int i = 0; i <= events.Count; i++)
         {
-            var onsetLess2 = inc.OnsetUtc.AddMinutes(-2);
-            note = ev.CutUtc!.Value > onsetLess2 ? ev.CutUtc.Value : onsetLess2;
-            noting = true;
+            if (i == firstPart && gap.Count > 0)
+            {
+                while (next < alerts.Count && alerts[next].TimeUtc <= gap.FromUtc) sb.AppendLine(AlertLine(alerts[next++]));
+                sb.AppendLine(GapLine(gap, LeftBetweenEnds));
+            }
+            if (i == events.Count) break;
+            while (next < alerts.Count && alerts[next].TimeUtc < events[i].TimeUtc) sb.AppendLine(AlertLine(alerts[next++]));
+            sb.AppendLine(EventLine(events[i]));
         }
-        st.Pending = more;
-        st.KeptSeen = ev.Kept.Count;
-        if (rewrite)
-        {
-            var rows = kept.Concat(fresh).OrderBy(e => e.Ms).ToList();
-            var bytes = Utf8.GetBytes(EventsHeader + Rows(rows, AlertRows(inc).Values, note));
-            string tmp = _host.CheckWrite(path + ".tmp");
-            File.WriteAllBytes(tmp, bytes);
-            File.Move(tmp, _host.CheckWrite(path), overwrite: true);
-            Profiler.Wrote(path, bytes.Length);
-            st.Events = rows.Select(RowKey).ToHashSet();
-            st.Alerts = AlertRows(inc).Keys.ToHashSet();
-            (st.EventRows, st.Length, st.StartMs, st.NotedAt) = (rows.Count, bytes.Length, lower, note);
-            st.FirstMs = rows.Count > 0 ? rows[0].Ms : long.MaxValue;
-            st.LastUtc = rows.Count > 0 ? rows.Max(e => e.TimeUtc) : null;
-            return bytes.Length;
-        }
-        var alerts = AlertRows(inc).Where(kv => !st.Alerts!.Contains(kv.Key)).ToList();
-        if (fresh.Count == 0 && alerts.Count == 0 && !noting) return 0;
-        var add = Utf8.GetBytes(Rows(fresh, alerts.Select(kv => kv.Value), noting ? note : null));
+        while (next < alerts.Count) sb.AppendLine(AlertLine(alerts[next++]));
+        return sb;
+    }
+
+    /// <summary>Replaces events.csv whole in one step (temp file and move) with both ends of the window (<see cref="BothEndsRows"/>); returns the bytes written.</summary>
+    private long WriteWhole(Incident inc, string path, FileState st, EventsPlan p)
+    {
+        var gap = p.Gap;
+        var text = BothEndsRows(inc, p.Head, p.Tail, gap, out var rows, out var keys);
+        string tmp = _host.CheckWrite(path + ".tmp");
         long length;
-        // Whole rows in one write at the end of the file.
+        // Written from the builder as it is, without a copy of the whole file as one string.
+        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            using (var w = new StreamWriter(fs, Utf8, 1 << 16, leaveOpen: true))
+                foreach (var chunk in text.GetChunks()) w.Write(chunk.Span);
+            length = fs.Length;
+        }
+        File.Move(tmp, _host.CheckWrite(path), overwrite: true);
+        Profiler.Wrote(path, length);
+        st.Events = keys;
+        st.Alerts = AlertRows(inc).Keys.ToHashSet();
+        (st.EventRows, st.Length, st.StartMs, st.NotedAt, st.Pending) = (rows.Count, length, p.Lower, null, false);
+        st.FirstMs = rows.Count > 0 ? rows.Min(e => e.Ms) : long.MaxValue;
+        st.LastUtc = rows.Count > 0 ? rows.Max(e => e.TimeUtc) : null;
+        // A file with no latest part and nothing left out is the first part again: later rows can follow it.
+        bool ends = p.Tail.Count > 0 || gap.Count > 0;
+        st.Tail = ends ? p.Key : null;
+        st.Gap = gap.Count > 0 ? gap : null;
+        return length;
+    }
+
+    /// <summary>
+    /// Appends whole rows in one write at the end of the file: <paramref name="fresh"/> events, the alerts' rows not in it yet,
+    /// and a note or <c>Gap</c> row; returns the bytes written (0: nothing to add).
+    /// </summary>
+    private long AppendRows(Incident inc, string path, FileState st, List<LifecycleEvent> fresh, DateTime? noteAt, (EventGap Gap, string Why)? gap = null)
+    {
+        var alerts = AlertRows(inc).Where(kv => !st.Alerts!.Contains(kv.Key)).ToList();
+        if (fresh.Count == 0 && alerts.Count == 0 && noteAt is null && gap is null) return 0;
+        var add = Utf8.GetBytes(Rows(fresh, alerts.Select(kv => kv.Value), noteAt, gap));
+        long length;
         using (var fs = new FileStream(_host.CheckWrite(path), FileMode.Append, FileAccess.Write, FileShare.Read))
         {
             fs.Write(add);
@@ -889,8 +1070,75 @@ internal sealed class IncidentWriter
         foreach (var (k, _) in alerts) st.Alerts!.Add(k);
         st.EventRows += fresh.Count;
         st.Length = length;
-        st.NotedAt = note;
+        if (noteAt is not null) st.NotedAt = noteAt;
         return add.Length;
+    }
+
+    /// <summary>
+    /// events.csv. While the incident is open, its first part: up to <paramref name="maxRows"/> of the kept events not in it
+    /// yet (<see cref="IncidentEventSet.Kept"/>, the earliest first: the file holds every kept event from its first row to
+    /// its last) and the alert rows not in it yet (<see cref="AlertRow"/>), appended as whole rows; once it holds all of a
+    /// full first part, a last row says to when. A closed incident's with events after its first part (or whose file holds
+    /// a note or both ends already) holds both ends: a write that must be made (<paramref name="must"/>: its closing write,
+    /// once; the end of a run; a trace attached) replaces it whole in one step with them when it does not hold them as they
+    /// are (<see cref="WriteWhole"/>), every row of the first part included; until then it gets only new alerts' rows. A
+    /// file that holds both ends while its incident is open again (re-opened) gets only new alerts' rows until it closes. The
+    /// whole file is written again otherwise only when it is not as this run last wrote it (or not there), or when the
+    /// incident is closed and its onset moved later than rows it holds (those rows are then left out, and the rows after them
+    /// stay as written: all of them are among the kept events). Events left for a later write make it pending
+    /// (<see cref="EventsPending"/>).
+    /// </summary>
+    private long WriteEventsCsv(Incident inc, IncidentEventSet ev, FileState st, int maxRows, bool must)
+    {
+        string path = Path.Combine(inc.Dir, "events.csv");
+        var p = Plan(inc, ev, st, path, freshMax: maxRows);
+        if (!p.AsWritten) (st.StartMs, st.NotedAt, st.Tail, st.Gap) = (ev.FromMs, null, null, null);
+        st.KeptSeen = ev.Kept.Count;
+        if (p.BothEnds)
+        {
+            st.Pending = false;
+            if (!p.Holds && must) return WriteWhole(inc, path, st, p);
+            // It holds them, or waits for a write that must be made (its rows would otherwise follow its latest part).
+            return p.AsWritten ? AppendRows(inc, path, st, [], null) : 0;
+        }
+        if (p.AsWritten && st.Tail is not null)
+        {
+            // Both ends from its last close, the incident open again: its new rows wait for its next close.
+            st.Pending = false;
+            return AppendRows(inc, path, st, [], null);
+        }
+        var fresh = p.Fresh;
+        // Once its last row says to when it holds the first part (the Note row), an open incident's file gets no more event
+        // rows: a late event that takes a place in the first part since (its last one moving on) waits for the close, which
+        // writes the file whole.
+        if (inc.IsOpen && st.NotedAt is not null && !p.Rewrite) fresh = [];
+        bool more = fresh.Count > maxRows;
+        if (more) fresh = fresh.GetRange(0, maxRows);
+        // An open incident's first part is full and all in the file: a last row says to when (not before the window).
+        DateTime? note = null;
+        if (inc.IsOpen && st.NotedAt is null && !more && ev.CutMs is { } cutMs && cutMs <= ev.EndMs)
+        {
+            var onsetLess2 = inc.OnsetUtc.AddMinutes(-2);
+            note = ev.CutUtc!.Value > onsetLess2 ? ev.CutUtc.Value : onsetLess2;
+        }
+        st.Pending = more;
+        if (p.Rewrite)
+        {
+            var rows = p.Written.Concat(fresh).OrderBy(e => e.Ms).ToList();
+            note ??= st.NotedAt;
+            var bytes = Utf8.GetBytes(EventsHeader + Rows(rows, AlertRows(inc).Values, note));
+            string tmp = _host.CheckWrite(path + ".tmp");
+            File.WriteAllBytes(tmp, bytes);
+            File.Move(tmp, _host.CheckWrite(path), overwrite: true);
+            Profiler.Wrote(path, bytes.Length);
+            st.Events = rows.Select(RowKey).ToHashSet();
+            st.Alerts = AlertRows(inc).Keys.ToHashSet();
+            (st.EventRows, st.Length, st.StartMs, st.NotedAt) = (rows.Count, bytes.Length, p.Lower, note);
+            st.FirstMs = rows.Count > 0 ? rows[0].Ms : long.MaxValue;
+            st.LastUtc = rows.Count > 0 ? rows.Max(e => e.TimeUtc) : null;
+            return bytes.Length;
+        }
+        return AppendRows(inc, path, st, fresh, note);
     }
 
     /// <summary>The incident's alerts by their row (<see cref="AlertRow"/>).</summary>
@@ -1000,20 +1248,60 @@ internal sealed class IncidentWriter
 
 /// <summary>
 /// An incident's events at a write. <see cref="Window"/>: the window's events PoolWatch holds (what the incident kept and the
-/// newest still in the shared buffer), in time order, for the reports. <see cref="Kept"/>: what the incident kept of them
-/// (<see cref="Incident.Events"/>), every event from <see cref="FromMs"/> on, in time order, up to
-/// <see cref="IncidentWriter.MaxEventRows"/>, for events.csv; <see cref="CutMs"/>, when it stopped keeping them (the
-/// first event it left out), else null; <see cref="EndMs"/>, the window's end now (events after it are not the window's).
-/// All on the clock that only goes forward.
+/// others still in the shared buffer), in time order, for the reports. <see cref="Kept"/>: the first part of what the
+/// incident kept of them (<see cref="Incident.Events"/>), every event from <see cref="FromMs"/> on, in time order, up to
+/// <see cref="IncidentWriter.MaxEventRows"/>, for events.csv; <see cref="CutMs"/>, where that part stops (the first event
+/// it left out of it), else null; <see cref="Tail"/>: the latest part, the latest <see cref="IncidentWriter.MaxEventRows"/>
+/// events from the cut to the window's end, in time order, and <see cref="Gap"/>, those of the window it left out between
+/// the two parts; <see cref="EndMs"/>, the window's end now (events after it are not the window's). All on the clock that
+/// only goes forward.
 /// </summary>
 internal sealed record IncidentEventSet(List<LifecycleEvent> Window, IReadOnlyList<LifecycleEvent> Kept, long FromMs, long EndMs, DateTime? CutUtc, long? CutMs)
 {
-    /// <summary>Events taken as all there are: sorted, the first <see cref="IncidentWriter.MaxEventRows"/> kept and the rest cut.</summary>
+    public IReadOnlyList<LifecycleEvent> Tail { get; init; } = [];
+    public EventGap Gap { get; init; }
+    /// <summary>
+    /// The incident let go of its latest part (it can no longer re-open, and its events.csv held both ends as written): what
+    /// the file holds of it is final, and <see cref="Gap"/> counts those events now (<see cref="Tail"/> is empty).
+    /// </summary>
+    public bool LatestReleased { get; init; }
+    /// <summary>The window's events after its first part: the latest part and those left out.</summary>
+    public int AfterCut => Tail.Count + Gap.Count;
+
+    /// <summary>
+    /// Events taken as all there are: sorted, the first <see cref="IncidentWriter.MaxEventRows"/> kept, the latest
+    /// <see cref="IncidentWriter.MaxEventRows"/> of the rest as the latest part and those between left out.
+    /// </summary>
     public static IncidentEventSet Of(List<LifecycleEvent> events)
     {
+        const int n = IncidentWriter.MaxEventRows;
         var sorted = events.OrderBy(e => e.Ms).ToList();
-        var kept = sorted.Count > IncidentWriter.MaxEventRows ? sorted.GetRange(0, IncidentWriter.MaxEventRows) : sorted;
-        var cut = sorted.Count > IncidentWriter.MaxEventRows ? sorted[IncidentWriter.MaxEventRows] : null;
-        return new(sorted, kept, long.MinValue, long.MaxValue, cut?.TimeUtc, cut?.Ms);
+        var kept = sorted.Count > n ? sorted.GetRange(0, n) : sorted;
+        var cut = sorted.Count > n ? sorted[n] : null;
+        var rest = sorted.Count > n ? sorted.GetRange(n, sorted.Count - n) : [];
+        int skip = Math.Max(0, rest.Count - n);
+        return new(sorted, kept, long.MinValue, long.MaxValue, cut?.TimeUtc, cut?.Ms) { Tail = rest.GetRange(skip, rest.Count - skip), Gap = EventGap.Of(rest, 0, skip) };
+    }
+}
+
+/// <summary>
+/// Events of an incident's window left out of its events.csv (between the two ends it keeps): how many, and the first and
+/// last of their times, on the clock that only goes forward and as times of day. <see cref="Count"/> 0: none.
+/// </summary>
+internal readonly record struct EventGap(int Count, DateTime FromUtc, DateTime ToUtc, long FromMs, long ToMs)
+{
+    /// <summary>These and <paramref name="o"/> together.</summary>
+    public EventGap With(EventGap o) => o.Count == 0 ? this : Count == 0 ? o
+        : new(Count + o.Count, o.FromMs < FromMs ? o.FromUtc : FromUtc, o.ToMs > ToMs ? o.ToUtc : ToUtc, Math.Min(FromMs, o.FromMs), Math.Max(ToMs, o.ToMs));
+
+    /// <summary>One event.</summary>
+    public static EventGap One(LifecycleEvent e) => new(1, e.TimeUtc, e.TimeUtc, e.Ms, e.Ms);
+
+    /// <summary><paramref name="count"/> events of a list in time order, from <paramref name="index"/>.</summary>
+    public static EventGap Of(List<LifecycleEvent> events, int index, int count)
+    {
+        if (count <= 0) return default;
+        var (first, last) = (events[index], events[index + count - 1]);
+        return new(count, first.TimeUtc, last.TimeUtc, first.Ms, last.Ms);
     }
 }

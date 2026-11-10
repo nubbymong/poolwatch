@@ -247,6 +247,20 @@ internal static class UiData
         return null;
     }
 
+    /// <summary>
+    /// An open incident's events.csv with both ends of its window and its report.md to match, from memory
+    /// (<see cref="IncidentManager.ExportFilesNow"/>), by name, for its export in place of the folder's (whose events.csv holds
+    /// the first part only while it is open); null when <paramref name="dir"/> is no open incident in memory (a closed one's
+    /// file has both ends).
+    /// </summary>
+    public static IReadOnlyDictionary<string, string>? OpenIncidentExportFiles(AnalysisPipeline a, string dir)
+    {
+        lock (a.History.SyncRoot)
+            foreach (var i in a.Incidents.Open)
+                if (string.Equals(i.Dir, dir, StringComparison.OrdinalIgnoreCase)) return a.Incidents.ExportFilesNow(a.History, i);
+        return null;
+    }
+
     /// <summary>The most incident folders read from disk for the list (the newest by name, which starts with the time).</summary>
     internal const int MaxDiskRows = 500;
 

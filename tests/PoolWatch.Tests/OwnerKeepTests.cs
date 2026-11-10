@@ -124,8 +124,9 @@ public class OwnerKeepTests
             for (int i = 0; i < 90; i++) Step(2L << 20);
             var inc = Assert.Single(mgr.Open);
             Assert.All(inc.Owners!, o => Assert.True(o.Meaningful && o.Members.Count <= OwnerRanking.KeptMembers + 1));
-            // What profile.json reports as held.
-            Assert.Equal((1, inc.Owners!.Count, inc.Owners.Sum(o => o.Members.Count), inc.Events.Count), mgr.Held());
+            // What profile.json reports as held: the events are both ends of the window.
+            Assert.Equal((1, inc.Owners!.Count, inc.Owners.Sum(o => o.Members.Count), inc.Events.Count + mgr.LatestHeld(inc)), mgr.Held());
+            Assert.True(mgr.LatestHeld(inc) >= mgr.IncidentEvents(inc, At(w.Now).Ms, forReports: false).Tail.Count);
 
             // The same incident written with every owner of its ranking, then with what the manager keeps.
             var window = inc.Window!;

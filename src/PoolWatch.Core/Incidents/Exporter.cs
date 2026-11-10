@@ -190,8 +190,12 @@ public static class Exporter
     /// <param name="checkWrite">The write policy (returns the path or throws).</param>
     /// <param name="extraFiles">Text files added at the root of the zip as they are, never redacted (the guide for AI
     /// assistants, which holds nothing about this PC), by file name. A file of the same name in the folder is left out.</param>
+    /// <param name="liveFiles">Files of the folder whose content from memory goes in the zip in their place, redacted as the
+    /// folder's are, by their path in the folder: an open incident's events.csv with both ends of its window and its report.md
+    /// to match (<see cref="IncidentManager.ExportFilesNow"/>), as its folder's events.csv holds the first part only while it
+    /// is open.</param>
     public static string Export(string incidentDir, string exportsDir, RedactionInfo? redaction, Func<string, string> checkWrite,
-        IReadOnlyDictionary<string, string>? extraFiles = null)
+        IReadOnlyDictionary<string, string>? extraFiles = null, IReadOnlyDictionary<string, string>? liveFiles = null)
     {
         Directory.CreateDirectory(checkWrite(exportsDir));
         string name = Path.GetFileName(incidentDir.TrimEnd('\\', '/')) + (redaction is not null ? "-redacted" : "") + ".zip";
@@ -206,11 +210,18 @@ public static class Exporter
                 using var s = zip.CreateEntry(extra, CompressionLevel.Optimal).Open();
                 s.Write(new UTF8Encoding(false).GetBytes(content));
             }
+            // From memory in place of the folder's file, redacted as the folder's text is.
+            foreach (var (rel, content) in liveFiles ?? new Dictionary<string, string>())
+            {
+                if (extraFiles?.ContainsKey(rel) == true) continue;
+                using var s = zip.CreateEntry(rel, CompressionLevel.Optimal).Open();
+                s.Write(new UTF8Encoding(false).GetBytes(redaction is null ? content : RedactText(content, redaction, IsStructured(rel))));
+            }
             foreach (var file in Directory.EnumerateFiles(incidentDir, "*", SearchOption.AllDirectories))
             {
                 string rel = Path.GetRelativePath(incidentDir, file).Replace('\\', '/');
                 if (rel.StartsWith("wpr-temp/", StringComparison.OrdinalIgnoreCase)) continue; // a running capture's buffers
-                if (extraFiles?.ContainsKey(rel) == true) continue;
+                if (extraFiles?.ContainsKey(rel) == true || liveFiles?.ContainsKey(rel) == true) continue;
                 string ext = Path.GetExtension(file);
                 if (ext.Equals(".tmp", StringComparison.OrdinalIgnoreCase) || ext.Equals(".etlx", StringComparison.OrdinalIgnoreCase)) continue;
                 if (IsAppended(rel))

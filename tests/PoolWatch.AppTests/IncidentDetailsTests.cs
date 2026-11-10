@@ -78,6 +78,32 @@ public sealed class IncidentDetailsTests : IDisposable
     }
 
     /// <summary>
+    /// Export report of an open incident puts both ends of its events.csv in the zip, built from memory (its file holds up to
+    /// the first 1,000 events of the window while it is open), with a report.md that counts them, after its folder is
+    /// written; and its details say what its events.csv holds until it closes (a re-opened incident's too), and that the
+    /// export has both ends. Read from the window's source, as the window needs the whole app to build (<c>BothEndsTests</c>
+    /// holds the zip's events.csv to both ends and its report.md to it).
+    /// </summary>
+    [Fact]
+    public void AnOpenIncidentsExportTakesBothEndsOfItsEventsCsvFromMemory()
+    {
+        string ui = Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui");
+        string export = MainWindowLayoutTests.Block(File.ReadAllText(Path.Combine(ui, "UiActions.cs")), "public void ExportReport(IWin32Window? owner, string? dir)");
+        int write = export.IndexOf("UiData.WriteOpenIncident(_analysis, dir) is false", StringComparison.Ordinal);
+        int live = export.IndexOf("var live = UiData.OpenIncidentExportFiles(_analysis, dir);", StringComparison.Ordinal);
+        int zip = export.IndexOf("Exporter.Export(", StringComparison.Ordinal);
+        Assert.True(write > 0 && write < live && live < zip, "the folder written, then both ends of events.csv and report.md from memory, then the zip");
+        Assert.Contains("new Dictionary<string, string> { [AgentsGuide.FileName] = AgentsGuide.Text }, live);", export);
+        string snapshot = MainWindowLayoutTests.Block(File.ReadAllText(Path.Combine(ui, "UiSnapshot.cs")), "public static IReadOnlyDictionary<string, string>? OpenIncidentExportFiles(AnalysisPipeline a, string dir)");
+        Assert.Contains("foreach (var i in a.Incidents.Open)", snapshot);
+        Assert.Contains("return a.Incidents.ExportFilesNow(a.History, i);", snapshot);
+        string note = MainForm.LiveFolderNote(null);
+        Assert.Contains("Until then events.csv holds up to the first 1,000 events of the window (fewer while the budget holds rows back; " +
+                        "a re-opened incident's holds both ends as its last close wrote them); when the incident closes PoolWatch replaces it with the first 1,000", note);
+        Assert.Contains("Its zip has both ends of events.csv, from memory, with a report.md that counts them.", note);
+    }
+
+    /// <summary>
     /// Report an issue's incident digest of an open incident comes from the same live summary as its details (so the window
     /// never shows two states of one incident), before any report.json is read; a closed one's from its report.json. The
     /// digest of the live summary is report.json's once written (<c>LiveDetailsTests.ReportAnIssuesDigestOfAnOpenIncidentIsTheLiveOne</c>).

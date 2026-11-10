@@ -122,7 +122,8 @@ switch ($Scenario) {
             Assert-True (@($r.suspects | Where-Object { $_.image -eq '?' -or $_.displayName -eq '?' }).Count -eq 0) "no '?' suspect"
             $md = Get-Content (Join-Path $r.dir 'report.md') -Raw
             Assert-True ($md -match '## In plain words\s+\S.*The trace shows') "report.md leads with the trace answer"
-            # Events from the onset minus 2 min, not from when the incident closed.
+            # Events from the onset minus 2 min, not from when the incident closed. A re-opened incident's file keeps its first
+            # episode's rows, from before report.json's onsetUtc (the latest episode's), so the onset check is for one episode.
             $evs = @(Import-PwCsv (Join-Path $r.dir 'events.csv'))
             $inv = [cultureinfo]::InvariantCulture
             function ToUtc($x) { if ($x -is [datetime]) { $x.ToUniversalTime() } else { [datetime]::Parse([string]$x, $inv, 'RoundtripKind').ToUniversalTime() } }
@@ -131,7 +132,8 @@ switch ($Scenario) {
             $times = @($evs | Where-Object { $_.time } | ForEach-Object { [datetime]::Parse($_.time, $inv, 'RoundtripKind').ToUniversalTime() })
             $tooEarly = @($times | Where-Object { $_ -lt $onset.AddMinutes(-2).AddSeconds(-5) })
             $beforeAlert = @($times | Where-Object { $_ -le $alert })
-            Assert-True ($tooEarly.Count -eq 0) "no event in events.csv before onset - 2 min ($($tooEarly.Count) of $($times.Count))"
+            if ([int]$r.reopened -gt 0) { Write-Host "  re-opened $($r.reopened) time(s): events.csv starts at its first episode, before onsetUtc; onset check skipped" }
+            else { Assert-True ($tooEarly.Count -eq 0) "no event in events.csv before onset - 2 min ($($tooEarly.Count) of $($times.Count))" }
             Assert-True ($beforeAlert.Count -ge 1) "events.csv has events from the growth itself, before the alert ($($beforeAlert.Count) of $($times.Count))"
         }
         $summary = Get-Content "$Out\summary.json" -Raw | ConvertFrom-Json

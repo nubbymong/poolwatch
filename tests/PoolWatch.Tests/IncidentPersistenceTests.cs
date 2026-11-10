@@ -10,10 +10,11 @@ using static PoolWatch.Tests.Clocks;
 namespace PoolWatch.Tests;
 
 /// <summary>
-/// How an incident's folder is written on a busy PC: its events.csv has every event of its window from its first row to
-/// its last however far the write budget held it back, an alert that keeps firing is one row, a closed incident's counted
-/// repeats wait half an hour, the folder written longest ago gets the room first, and an unchanged chart is not drawn
-/// again. The shapes are the owner's (about 26 events every 10 s sample, 2026-11-09).
+/// How an incident's folder is written on a busy PC: its events.csv has every event of its window's first part from its
+/// first row to its last however far the write budget held it back, and both ends of its window once it closes, an alert
+/// that keeps firing is one row, a closed incident's counted repeats wait half an hour, the folder written longest ago gets
+/// the room first, and an unchanged chart is not drawn again. The shapes are the owner's (about 26 events every 10 s
+/// sample, 2026-11-09). (<c>BothEndsTests</c> holds the two ends to their counts and times.)
 /// </summary>
 public sealed class IncidentPersistenceTests : IDisposable
 {
@@ -30,15 +31,25 @@ public sealed class IncidentPersistenceTests : IDisposable
     private static List<int> EventPids(string dir) => File.ReadAllLines(Path.Combine(dir, "events.csv")).Skip(1)
         .Select(PoolWatch.Core.Util.Csv.Split).Where(c => c[1] == "Start").Select(c => int.Parse(c[2])).ToList();
 
+    /// <summary>The event rows' PIDs before the <c>Gap</c> row and after it (none after it when there is no such row).</summary>
+    private static (List<int> First, List<int> Latest) EventPidsByEnd(string dir)
+    {
+        var rows = File.ReadAllLines(Path.Combine(dir, "events.csv")).Skip(1).Select(PoolWatch.Core.Util.Csv.Split).ToList();
+        int gap = rows.FindIndex(c => c[1] == "Gap");
+        List<int> Pids(IEnumerable<List<string>> part) => part.Where(c => c[1] == "Start").Select(c => int.Parse(c[2])).ToList();
+        return gap < 0 ? (Pids(rows), []) : (Pids(rows.Take(gap)), Pids(rows.Skip(gap + 1)));
+    }
+
     [Fact]
     public void UnderTheOwnersLoadEventsCsvHoldsEveryEventFromItsFirstRowToItsLast()
     {
         // One growth incident open for 100 minutes on a PC that records 26 events every 10 s sample (9,400 an hour), with
-        // the default write budget: the window passes the 1,000 events an incident keeps long before its events.csv has
+        // the default write budget: the window passes the 1,000 events of its first part long before its events.csv has
         // caught up. Its rows are the window's events from its first row on, with none missing between its first row and
         // its last (each event's PID is one more than the one before, so a gap shows as a missing PID); at the end of the
-        // run it has all it kept, and a last row says to when. The incident outlives the raw history (70 minutes): its
-        // onset stays where the growth began, so the rows it kept stay in its window.
+        // run it holds both ends of the window: all of the first part, a Gap row, and the latest 1,000. The incident
+        // outlives the raw history (70 minutes): its onset stays where the growth began, so the rows it kept stay in its
+        // window. (Before both ends were kept, its file at the end of the run ended with the first part and a Note row.)
         Directory.CreateDirectory(_dir);
         var host = new CountingHost(_dir);
         var w = new World { Interval = TimeSpan.FromSeconds(10) };
@@ -50,6 +61,7 @@ public sealed class IncidentPersistenceTests : IDisposable
         long tag = 100L << 20;
         int pid = 500_000;
         var rnd = new Random(3);
+        var sampled = new List<(int LastPid, long Ms)>(); // each sample's last event, and the moment its events are read at
         for (int i = 0; i < 630; i++)
         {
             for (int p = 0; p < 10; p++) w.Io(100 + p, other: 50 + rnd.Next(500));
@@ -61,6 +73,7 @@ public sealed class IncidentPersistenceTests : IDisposable
                 TimeUtc = now.AddMilliseconds(k * 300), Kind = LifecycleKind.Start, Pid = pid++, CreateTime = now.ToFileTimeUtc() + k, ParentPid = 100 + k % 10,
                 Image = "node.exe", CommandLine = "node build.js --step " + new string('x', 200 + rnd.Next(300)),
             }).ToList();
+            sampled.Add((pid - 1, At(now).Ms));
             mgr.AddEvents(events, At(now));
             mgr.Process(w.History, det, det.Evaluate(w.History), At(now));
             host.Settle();
@@ -69,25 +82,33 @@ public sealed class IncidentPersistenceTests : IDisposable
         var open = EventPids(inc.Dir);
         Assert.NotEmpty(open);
         Assert.Equal(Enumerable.Range(open.Min(), open.Count), open.Order()); // no event missing between its first row and its last
+        Assert.True(open.Max() < open.Min() + IncidentWriter.MaxEventRows); // while open, the first part only
 
         mgr.Finish(w.History, w.Now);
-        var rows = EventPids(inc.Dir);
+        var (rows, latest) = EventPidsByEnd(inc.Dir);
         Assert.Equal(Enumerable.Range(rows.Min(), rows.Count), rows.Order());
-        // Every event it kept is there (the first 1,000 from the window's start as it first wrote it), less the rows a
-        // later onset left before its window.
+        // Every event of the first part is there (the first 1,000 from the window's start as it first wrote it), less the
+        // rows a later onset left before its window; then the latest 1,000, to the window's last event (its end: a minute
+        // after the growth's end as last measured, or after its last rise).
         Assert.Equal(open.Min() + IncidentWriter.MaxEventRows - 1, rows.Max());
         Assert.True(rows.Min() >= open.Min());
-        var last = File.ReadAllLines(Path.Combine(inc.Dir, "events.csv"))[^1];
-        Assert.Contains(",Note,", last);
-        Assert.Contains("events.csv holds the incident window's events to this row's time", last);
+        int lastOfWindow = sampled.Where(s => s.Ms <= IncidentManager.EventWindowEndMs(inc, w.History.Ms[^1])).Max(s => s.LastPid);
+        Assert.Equal(Enumerable.Range(lastOfWindow - IncidentWriter.MaxEventRows + 1, IncidentWriter.MaxEventRows), latest);
+        var lines = File.ReadAllLines(Path.Combine(inc.Dir, "events.csv"));
+        Assert.DoesNotContain(lines, l => l.Contains(",Note,"));
+        string said = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{latest[0] - rows.Max() - 1:N0} events left out");
+        Assert.Single(lines, l => l.Contains(",Gap,") && l.Contains(said)); // every event between the two ends counted
     }
 
-    [Fact]
-    public void AClosedIncidentThatLeavesMemoryWithRowsNotWrittenSaysToWhenItsEventsCsvHoldsThem()
+    /// <summary>
+    /// A growth incident on a PC that records <paramref name="perSample"/> events every 10 s sample, the write budget with no
+    /// room from its opening on: the growth, the 10 quiet minutes to its close, 6 hours, a little more (it leaves memory).
+    /// <paramref name="closed"/> is called once, the sample it closes. <c>Sampled</c>: each sample's first PID, how many events it
+    /// had and the moment they are read at (they are timed after it, so all at it).
+    /// </summary>
+    private (Incident Inc, IncidentManager Mgr, List<(int FirstPid, int Count, long Ms)> Sampled) NoRoomUntilItLeaves(int perSample, Action<Incident> closed)
     {
-        // The write budget never has room after the incident opened: its close writes the first rows (a write that must be
-        // made), the rest wait; 6 hours after closing it leaves memory, and its events.csv's last row says to when it holds
-        // the window's events (the day's events.csv has the rest).
+        var sampled = new List<(int FirstPid, int Count, long Ms)>();
         Directory.CreateDirectory(_dir);
         var host = new CountingHost(_dir);
         var w = new World { Interval = TimeSpan.FromSeconds(10) };
@@ -99,39 +120,98 @@ public sealed class IncidentPersistenceTests : IDisposable
         long tag = 100L << 20;
         int pid = 500_000;
         Incident? inc = null;
-        for (int i = 0; i < 30 + 120 + 60 + 6 * 360 + 30; i++) // the growth, the 10 quiet minutes to its close, 6 hours, a little more
+        bool wasClosed = false;
+        for (int i = 0; i < 30 + 120 + 60 + 6 * 360 + 30; i++)
         {
             w.Io(100, other: 500);
             if (i is >= 30 and < 150) tag += 1L << 20;
             w.Sample(("T000", tag));
             var now = w.Now - w.Interval;
+            if (i < 200) sampled.Add((pid, perSample, At(now).Ms));
             if (i < 200)
-                mgr.AddEvents(Enumerable.Range(0, 26).Select(k => new LifecycleEvent
+                mgr.AddEvents(Enumerable.Range(0, perSample).Select(k => new LifecycleEvent
                 {
                     TimeUtc = now.AddMilliseconds(k * 300), Kind = LifecycleKind.Start, Pid = pid++, CreateTime = now.ToFileTimeUtc() + k, ParentPid = 100,
                     Image = "node.exe", CommandLine = "node build.js",
                 }).ToList(), At(now));
             mgr.Process(w.History, det, det.Evaluate(w.History), At(now));
-            if (inc is null && mgr.Open.Count > 0) { inc = mgr.Open.Single(); mgr.Budget = new WriteBudget(bytesPerHour: 1, burst: 1); }
+            if (inc is null && mgr.Open.Count > 0)
+            {
+                inc = mgr.Open.Single();
+                mgr.Budget = new WriteBudget(bytesPerHour: 0, burst: 1); // no room from now on
+                mgr.Budget.Spend(1, At(now).Ms);
+            }
+            if (inc is { IsOpen: false } && !wasClosed) { wasClosed = true; closed(inc); }
         }
         Assert.NotNull(inc);
         Assert.Empty(mgr.Open);
         Assert.Empty(mgr.Closed); // it left memory
-        var lines = File.ReadAllLines(Path.Combine(inc!.Dir, "events.csv"));
-        var pids = EventPids(inc.Dir);
-        Assert.Equal(Enumerable.Range(pids.Min(), pids.Count), pids.Order());
-        Assert.True(pids.Count < 26 * 120, $"{pids.Count} rows"); // not all of them
-        Assert.Contains(",Note,", lines[^1]);
-        var lastRow = lines.Skip(1).Select(PoolWatch.Core.Util.Csv.Split).Where(c => c[1] == "Start").Max(c => DateTime.Parse(c[0], null, System.Globalization.DateTimeStyles.RoundtripKind));
-        Assert.Equal(lastRow, DateTime.Parse(PoolWatch.Core.Util.Csv.Split(lines[^1])[0], null, System.Globalization.DateTimeStyles.RoundtripKind));
+        return (inc!, mgr, sampled);
     }
 
     [Fact]
-    public void AnIncidentKeepsNoEventAfterOnesTheBufferLetGoBeforeItLookedAtThem()
+    public void AClosedIncidentsClosingWriteHoldsBothEndsWhateverTheBudget()
+    {
+        // The write budget never has room after the incident opened, and its window has over 3,000 events: its close (a
+        // write that must be made) replaces its events.csv whole with both ends of its window; 6 hours after closing it
+        // leaves memory, and its file is not written again. (Before both ends were kept, its close wrote the first rows,
+        // the rest waited, and a last Note row written as it left memory said to when the file held the window's events.)
+        string? atClose = null;
+        var (inc, _, _) = NoRoomUntilItLeaves(26, i => atClose = File.ReadAllText(Path.Combine(i.Dir, "events.csv")));
+        Assert.Equal(atClose, File.ReadAllText(Path.Combine(inc.Dir, "events.csv"))); // as its close wrote it
+        var (first, latest) = EventPidsByEnd(inc.Dir);
+        Assert.Equal(Enumerable.Range(first.Min(), first.Count), first);
+        Assert.Equal(Enumerable.Range(latest.Min(), latest.Count), latest);
+        Assert.Equal(IncidentWriter.MaxEventRows, latest.Count);
+        Assert.True(first.Count is > 0 and <= IncidentWriter.MaxEventRows, $"{first.Count} rows");
+        var lines = File.ReadAllLines(Path.Combine(inc.Dir, "events.csv"));
+        Assert.DoesNotContain(lines, l => l.Contains(",Note,"));
+        string said = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{latest[0] - first[^1] - 1:N0} events left out");
+        Assert.Single(lines, l => l.Contains(",Gap,") && l.Contains(said));
+    }
+
+    [Fact]
+    public void AClosedIncidentThatLeavesMemoryWithRowsNotWrittenSaysHowManyItsEventsCsvLeavesOut()
+    {
+        // 4 events a sample: its window has under 1,000 events, so it keeps no latest part. The write budget never has room
+        // after it opened: its close writes the first rows (a write that must be made), the rest wait; 6 hours after closing
+        // it leaves memory, and a last Gap row says how many of the window's events its events.csv leaves out and between
+        // which times (the first and last of those not written). (Before, a Note row said to when the file held them, and
+        // that the day's events.csv had the rest.)
+        var (inc, _, sampled) = NoRoomUntilItLeaves(4, _ => { });
+        var lines = File.ReadAllLines(Path.Combine(inc.Dir, "events.csv"));
+        var pids = EventPids(inc.Dir);
+        Assert.Equal(Enumerable.Range(pids.Min(), pids.Count), pids.Order());
+        var last = PoolWatch.Core.Util.Csv.Split(lines[^1]);
+        Assert.Equal("Gap", last[1]);
+        Assert.Contains("(PoolWatch's write budget had no room for them before the incident left memory)", last[9]);
+        Assert.DoesNotContain(lines, l => l.Contains(",Note,"));
+        // The row is at the time of the first event not written, the one after the last written.
+        static DateTime T(string s) => DateTime.Parse(s, null, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime();
+        var written = lines.Skip(1).Select(PoolWatch.Core.Util.Csv.Split).Where(c => c[1] == "Start").Select(c => T(c[0])).Max();
+        Assert.True(T(last[0]) > written);
+        var m = System.Text.RegularExpressions.Regex.Match(last[9], @"^([0-9,]+) events left out, between (\S+) and (\S+) \(");
+        Assert.True(m.Success, last[9]);
+        int left = int.Parse(m.Groups[1].Value, System.Globalization.NumberStyles.AllowThousands, System.Globalization.CultureInfo.InvariantCulture);
+        Assert.True(left > 0 && pids.Count + left < IncidentWriter.MaxEventRows, $"{pids.Count} written, {left} left out");
+        Assert.Equal(T(last[0]), T(m.Groups[2].Value));
+        Assert.True(T(m.Groups[3].Value) >= T(m.Groups[2].Value));
+        // Every event of the window from the file's first row to the window's end is in the file or counted in its Gap row.
+        long firstMs = sampled.Single(s => pids.Min() >= s.FirstPid && pids.Min() < s.FirstPid + s.Count).Ms;
+        int inWindow = sampled.Where(s => s.Ms >= firstMs && s.Ms <= IncidentManager.EventWindowEndMs(inc, 0)).Sum(s => s.Count);
+        Assert.Equal(inWindow, pids.Count + left);
+    }
+
+    [Fact]
+    public void AnIncidentCountsTheEventsTheBufferLetGoBeforeItLookedAtThemAsLeftOut()
     {
         // A closed incident kept its 100 events; then the shared buffer took in 25,000 more and let the oldest go, among them
-        // events the incident had not looked at (it is closed). When it looks again (re-opened, say), it keeps none from
-        // that point on, so its events.csv has no gap: it ends where what it kept ends, and says so.
+        // 5,000 events the incident had not looked at (it is closed). When it looks again (re-opened, say), its first part
+        // ends where it was, the 5,000 are left out, and from the rest it keeps its window's latest 1,000: its events.csv
+        // holds its 100, a Gap row for the 24,000 between (the 5,000 and the 19,000 before its latest), and its latest 1,000.
+        // The incident is not one the manager holds, so the first event let go is not known: the row's first time is the
+        // last event it looked at, its last time the latest event left out. (Before both ends were kept, it kept none from
+        // that point on, and its file ended with its 100 and a Note row.)
         var mgr = new IncidentManager(new Settings(), new TagKnowledge(null, null), new FakeHost(_dir), new ProcessRegistry());
         var t0 = new DateTime(2026, 11, 9, 22, 0, 0, DateTimeKind.Utc);
         LifecycleEvent E(int i) => new() { TimeUtc = t0.AddSeconds(i * 0.1), Kind = LifecycleKind.Start, Pid = 1000 + i, CreateTime = 1 + i, Image = "x.exe" };
@@ -146,14 +226,115 @@ public sealed class IncidentPersistenceTests : IDisposable
         Assert.Null(first.CutMs);
         mgr.AddEvents(Enumerable.Range(100, 25_000).Select(E), At(t0.AddMinutes(10)));
         var again = mgr.IncidentEvents(inc, At(t0.AddMinutes(10)).Ms);
-        Assert.Equal(100, again.Kept.Count); // none after the point it looked to
+        Assert.Equal(100, again.Kept.Count); // its first part ends where it was
         Assert.NotNull(again.CutMs);
-        Assert.True(again.Window.Count > 100); // the reports still have the window's events the buffer holds
+        Assert.Equal(Enumerable.Range(1000 + 24_100, 1000), again.Tail.Select(e => e.Pid)); // its latest 1,000
+        Assert.Equal(24_000, again.Gap.Count);
+        Assert.Equal(E(99).TimeUtc, again.Gap.FromUtc);
+        Assert.Equal(E(24_099).TimeUtc, again.Gap.ToUtc);
+        Assert.True(again.Window.Count > 1100); // the reports still have the window's events the buffer holds
 
         var writer = new IncidentWriter(new TagKnowledge(null, null), new CountingHost(_dir), new ProcessRegistry());
         writer.Write(new History(), inc, again);
-        Assert.Equal(Enumerable.Range(1000, 100), EventPids(inc.Dir));
-        Assert.Contains(",Note,", File.ReadAllLines(Path.Combine(inc.Dir, "events.csv"))[^1]);
+        var (head, latest) = EventPidsByEnd(inc.Dir);
+        Assert.Equal(Enumerable.Range(1000, 100), head);
+        Assert.Equal(Enumerable.Range(1000 + 24_100, 1000), latest);
+        var lines = File.ReadAllLines(Path.Combine(inc.Dir, "events.csv"));
+        Assert.Single(lines, l => l.Contains(",Gap,") && l.Contains("24,000 events left out"));
+        Assert.DoesNotContain(lines, l => l.Contains(",Note,"));
+    }
+
+    [Fact]
+    public void ALatestPartAfterEventsSetAsideHasNoHole()
+    {
+        // A closed incident within its hour holds the events after its window's end (at most 4,000; the earliest of more are
+        // set aside and counted). When its window's end then moves in among those it kept, its latest part is only of the
+        // events after those set aside: every event before them is counted as left out with them, so the latest part has no
+        // hole and the Gap row's range holds no row of the file.
+        var mgr = new IncidentManager(new Settings(), new TagKnowledge(null, null), new FakeHost(_dir), new ProcessRegistry());
+        var t0 = new DateTime(2026, 11, 9, 22, 0, 0, DateTimeKind.Utc);
+        LifecycleEvent E(int i) => new() { TimeUtc = t0.AddSeconds(i * 0.1), Kind = LifecycleKind.Start, Pid = 1000 + i, CreateTime = 1 + i, Image = "x.exe" };
+        // Its window: from t0 (2 minutes before its onset) to t0 + 7 min (a minute after its last rise), events 0 to 4,200;
+        // then 6,000 events after its end.
+        var inc = new Incident
+        {
+            Id = "x", Dir = Path.Combine(_dir, "x"), Tag = PoolTag.Parse("File"), Kind = IncidentKind.Growth,
+            OnsetUtc = t0.AddMinutes(2), OnsetMs = At(t0.AddMinutes(2)).Ms, LastRiseUtc = t0.AddMinutes(6), LastRiseMs = At(t0.AddMinutes(6)).Ms,
+            ClosedUtc = t0.AddMinutes(16), ClosedMs = At(t0.AddMinutes(16)).Ms,
+        };
+        var now = At(t0.AddMinutes(18));
+        mgr.AddEvents(Enumerable.Range(0, 10_201).Select(E), now);
+        var before = mgr.IncidentEvents(inc, now.Ms, forReports: false);
+        Assert.Equal(Enumerable.Range(1000 + 3_201, 1000), before.Tail.Select(e => e.Pid)); // the latest 1,000 to its end
+        Assert.Equal(2_201, before.Gap.Count);
+
+        // Its end moves to event 6,500's time: past the 2,000 set aside (4,201 to 6,200), among the 4,000 kept after them.
+        (inc.EndUtc, inc.EndMs) = (E(6_500).TimeUtc.AddMinutes(-1), At(E(6_500).TimeUtc).Ms - 60_000);
+        var after = mgr.IncidentEvents(inc, now.Ms, forReports: false);
+        Assert.Equal(Enumerable.Range(1000 + 6_201, 300), after.Tail.Select(e => e.Pid)); // only those after the ones set aside, no hole
+        Assert.Equal(5_201, after.Gap.Count); // 1,000 to 6,200: every event between the first part and the latest
+        Assert.Equal(E(1_000).TimeUtc, after.Gap.FromUtc);
+        Assert.Equal(E(6_200).TimeUtc, after.Gap.ToUtc);
+
+        var writer = new IncidentWriter(new TagKnowledge(null, null), new CountingHost(_dir), new ProcessRegistry());
+        writer.Write(new History(), inc, after);
+        var (head, latest) = EventPidsByEnd(inc.Dir);
+        Assert.Equal(Enumerable.Range(1000, 1000), head);
+        Assert.Equal(Enumerable.Range(1000 + 6_201, 300), latest);
+        Assert.Single(File.ReadAllLines(Path.Combine(inc.Dir, "events.csv")), l => l.Contains(",Gap,") && l.Contains("5,201 events left out"));
+    }
+
+    [Fact]
+    public void ALateEventAmongThoseLeftOutIsCountedWithThemSoTheLatestPartFollowsThem()
+    {
+        // An open incident's latest part has let go of its earliest events (counted). A late event (a rollup timed at its first
+        // start) then falls among those: it is counted with them, not held at the front of the latest part. Its window's end is
+        // then measured earlier than the latest part's slack covers, so the latest part is fewer than 1,000: it still starts
+        // after the last event left out, and the Gap row's range holds none of its events.
+        var mgr = new IncidentManager(new Settings(), new TagKnowledge(null, null), new FakeHost(_dir), new ProcessRegistry());
+        var t0 = new DateTime(2026, 11, 9, 22, 0, 0, DateTimeKind.Utc);
+        LifecycleEvent E(int i) => new() { TimeUtc = t0.AddSeconds(i * 0.1), Kind = LifecycleKind.Start, Pid = 1000 + i, CreateTime = 1 + i, Image = "x.exe" };
+        var inc = new Incident
+        {
+            Id = "x", Dir = Path.Combine(_dir, "x"), Tag = PoolTag.Parse("File"), Kind = IncidentKind.Growth,
+            OnsetUtc = t0.AddMinutes(2), OnsetMs = At(t0.AddMinutes(2)).Ms, LastRiseUtc = t0.AddHours(1), LastRiseMs = At(t0.AddHours(1)).Ms,
+        };
+        Assert.True(inc.IsOpen);
+        mgr.AddEvents(Enumerable.Range(0, 3_000).Select(E), At(t0.AddMinutes(5)));
+        var first = mgr.IncidentEvents(inc, At(t0.AddMinutes(5)).Ms, forReports: false);
+        Assert.Equal(1_000, first.Kept.Count);
+        // Its latest part held 2,000 (events 1,000 to 2,999) and let go of the earliest 500 (1,000 to 1,499), keeping the latest
+        // 1,000 and 500 more while it is open.
+        Assert.Equal(Enumerable.Range(1000 + 2_000, 1000), first.Tail.Select(e => e.Pid));
+        // Late: timed among those it let go (between events 1,200 and 1,201).
+        var late = new LifecycleEvent { TimeUtc = t0.AddSeconds(120.05), Kind = LifecycleKind.Rollup, Pid = 99_999, CreateTime = 1, Image = "bash.exe" };
+        mgr.AddEvents([late], At(t0.AddMinutes(5).AddSeconds(10)));
+        // Its end is measured at event 1,999's time: 500 of the latest part are in its window now.
+        (inc.EndUtc, inc.EndMs) = (E(1_999).TimeUtc.AddMinutes(-1), At(E(1_999).TimeUtc).Ms - 60_000);
+        var ev = mgr.IncidentEvents(inc, At(t0.AddMinutes(5).AddSeconds(10)).Ms, forReports: false);
+        Assert.DoesNotContain(ev.Tail, e => e.Pid == late.Pid);
+        Assert.All(ev.Tail, e => Assert.True(e.Ms > ev.Gap.ToMs, $"{e.Pid} at {e.Ms} inside the Gap row's range (to {ev.Gap.ToMs})"));
+        Assert.Equal(Enumerable.Range(1000 + 1_500, 500), ev.Tail.Select(e => e.Pid));
+        Assert.Equal(501, ev.Gap.Count); // the 500 it let go, and the late one counted with them
+        Assert.Equal(E(1_499).TimeUtc, ev.Gap.ToUtc);
+    }
+
+    [Fact]
+    public void AHeldIncidentCountsTheEventsTheBufferLetGoFromTheFirstOfThem()
+    {
+        // The same with an incident the manager holds (closed, so it does not look at the buffer until it is written): the
+        // buffer notes the first event it lets go that the incident had not looked at, so the Gap row starts there.
+        var settings = new Settings { GrowthRules = [new(1, 3 * Settings.MB)], IncidentQuietMinutes = 0.5, RetentionMinutes = 600 };
+        var (mgr, w, _, step) = Closing(_dir, settings);
+        Incident? inc = null;
+        for (int i = 0; i < 200 && inc is null; i++) { step(); inc = mgr.Closed.FirstOrDefault(); }
+        Assert.NotNull(inc);
+        var t = inc!.LastRiseUtc; // events of its window (to a minute after its last rise), come late
+        LifecycleEvent E(int i) => new() { TimeUtc = t.AddMilliseconds(i), Kind = LifecycleKind.Start, Pid = 100_000 + i, CreateTime = 1 + i, Image = "x.exe" };
+        mgr.AddEvents(Enumerable.Range(0, 25_000).Select(E), At(w.Now));
+        var ev = mgr.IncidentEvents(inc, At(w.Now).Ms);
+        Assert.True(ev.Gap.Count >= 5_000, $"{ev.Gap.Count} left out");
+        Assert.Equal(E(0).TimeUtc, ev.Gap.FromUtc); // the first event let go, not the last it looked at
     }
 
     [Fact]

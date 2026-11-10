@@ -23,6 +23,12 @@ internal sealed class CountingHost(string dir) : IIncidentHost
     public string IncidentsDir { get; } = dir;
     public long Bytes { get; private set; }
     public List<string> Logs { get; } = [];
+    /// <summary>How many times each file was replaced whole (a temp file moved onto it), by its path.</summary>
+    public Dictionary<string, int> Replaced { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>What was written to files of each name (events.csv, report.md, ...) in all folders: replaced and appended.</summary>
+    public Dictionary<string, long> BytesByName { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Of <see cref="BytesByName"/>, what replacing them whole wrote.</summary>
+    public Dictionary<string, long> ReplacedBytesByName { get; } = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _tmp = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long> _appendFrom = new(StringComparer.OrdinalIgnoreCase);
 
@@ -30,7 +36,16 @@ internal sealed class CountingHost(string dir) : IIncidentHost
     {
         if (!path.StartsWith(IncidentsDir, StringComparison.OrdinalIgnoreCase)) throw new UnauthorizedAccessException(path);
         if (path.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) _tmp.Add(path);
-        else if (_tmp.Remove(path + ".tmp")) Bytes += new FileInfo(path + ".tmp").Length; // replaced: the whole new file (written, not yet moved)
+        else if (_tmp.Remove(path + ".tmp"))
+        {
+            // Replaced: the whole new file (written, not yet moved).
+            long n = new FileInfo(path + ".tmp").Length;
+            Bytes += n;
+            string name = Path.GetFileName(path);
+            BytesByName[name] = BytesByName.GetValueOrDefault(name) + n;
+            ReplacedBytesByName[name] = ReplacedBytesByName.GetValueOrDefault(name) + n;
+            Replaced[path] = Replaced.GetValueOrDefault(path) + 1;
+        }
         else if (!Directory.Exists(path)) _appendFrom.TryAdd(path, File.Exists(path) ? new FileInfo(path).Length : 0); // appended to (or a folder made)
         return path;
     }
@@ -39,7 +54,13 @@ internal sealed class CountingHost(string dir) : IIncidentHost
     public void Settle()
     {
         foreach (var (path, from) in _appendFrom)
-            if (File.Exists(path)) Bytes += new FileInfo(path).Length - from;
+            if (File.Exists(path))
+            {
+                long n = new FileInfo(path).Length - from;
+                Bytes += n;
+                string name = Path.GetFileName(path);
+                BytesByName[name] = BytesByName.GetValueOrDefault(name) + n;
+            }
         _appendFrom.Clear();
     }
 

@@ -1031,13 +1031,17 @@ internal sealed class MainForm : Form
 
     /// <summary>
     /// What the details of an open incident say about its folder: the details are live, the folder is written within the
-    /// disk budget (so it can be behind them), when it was last written, and that Export report writes it whole first.
+    /// disk budget (so it can be behind them), when it was last written, what its events.csv holds while it is open (a
+    /// re-opened one's too), and that Export report writes it whole first, with both ends of events.csv from memory.
     /// </summary>
     internal static string LiveFolderNote(DateTime? writtenUtc) =>
         "These details are live, from PoolWatch's memory. While the incident is open PoolWatch writes its report folder within its disk " +
         "budget, so on a busy PC the folder can be behind them" + (writtenUtc is { } w ? $" (its report was last written at {Fmt.Stamp(w)})" : " (its report is being written)") +
         ": report.md and report.json at each refresh the budget has room for, the timeline chart and the CSV files when it has room to spare, " +
-        "and all of it when the incident closes. Export report writes the folder whole first.";
+        "and all of it when the incident closes. Until then events.csv holds up to the first 1,000 events of the window (fewer while the budget " +
+        "holds rows back; a re-opened incident's holds both ends as its last close wrote them); when the incident closes PoolWatch replaces it " +
+        "with the first 1,000, a row saying how many events between the two were left out, if any were, and the latest 1,000. Export report " +
+        "writes the folder whole first. Its zip has both ends of events.csv, from memory, with a report.md that counts them.";
 
     /// <summary>
     /// The incident's report summary as the details show it (<see cref="UiActions.IncidentDetails"/>: no Markdown marks, the

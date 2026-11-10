@@ -152,8 +152,11 @@ internal sealed class UiActions
                 "its files would be behind what PoolWatch knows. Try again in a moment.", "Export report");
             return;
         }
+        // Its events.csv holds the first part of its window while it is open: the zip has both ends, from memory, and a
+        // report.md that counts them.
+        var live = UiData.OpenIncidentExportFiles(_analysis, dir);
         var zip = Exporter.Export(dir, _engine.Paths.ExportsDir, answer == DialogResult.Yes ? MainForm.CurrentRedaction() : null, _engine.Paths.Guard.CheckReal,
-            new Dictionary<string, string> { [AgentsGuide.FileName] = AgentsGuide.Text });
+            new Dictionary<string, string> { [AgentsGuide.FileName] = AgentsGuide.Text }, live);
         OpenFolder(Path.GetDirectoryName(zip)!);
     }
 

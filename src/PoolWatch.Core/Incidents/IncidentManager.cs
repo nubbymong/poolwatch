@@ -91,11 +91,23 @@ public sealed class IncidentManager
     /// <summary>Every incident held, in the order they opened (by the clock that only goes forward).</summary>
     public IEnumerable<Incident> All => _closed.Concat(_open.Values).OrderBy(i => i.OpenedMs);
 
-    /// <summary>What the incidents in memory hold, for PoolWatch's own cost report. Under the history lock.</summary>
+    /// <summary>What the incidents in memory hold, for PoolWatch's own cost report: the events are both ends of each one's window (<see cref="KeptEvents"/>). Under the history lock.</summary>
     public (int incidents, int owners, int ownerMembers, int events) Held()
     {
         var all = _closed.Concat(_open.Values).ToList();
-        return (all.Count, all.Sum(i => i.Owners?.Count ?? 0), all.Sum(i => i.Owners?.Sum(o => o.Members.Count) ?? 0), all.Sum(i => i.Events.Count));
+        return (all.Count, all.Sum(i => i.Owners?.Count ?? 0), all.Sum(i => i.Owners?.Sum(o => o.Members.Count) ?? 0),
+            all.Sum(i => i.Events.Count + (_kept.TryGetValue(i, out var k) ? k.Tail.Count : 0)));
+    }
+
+    /// <summary>
+    /// A test hook, never called by PoolWatch itself: lets go of every incident's latest part (<see cref="KeptEvents.Tail"/>),
+    /// its list's room included, so what is held then is what PoolWatch would hold keeping the first part alone and a test
+    /// can measure what the latest parts hold (<c>BothEndsTests</c>).
+    /// </summary>
+    internal void ForgetLatestParts()
+    {
+        foreach (var inc in _closed.Concat(_open.Values))
+            if (_kept.TryGetValue(inc, out var k)) { k.Tail.Clear(); k.Tail.TrimExcess(); }
     }
 
     /// <summary>
@@ -110,30 +122,46 @@ public sealed class IncidentManager
     /// <summary>
     /// Events to keep for the incidents' timelines, each read onto the clock that only goes forward at <paramref name="now"/>.
     /// The open incidents take theirs at once (<see cref="KeepEvents"/>), before the shared buffer lets any go, so what an
-    /// incident keeps has every event of its window however long its writes wait for the write budget.
+    /// incident keeps of its window (both ends, and how many it let go between them) misses none however long its writes
+    /// wait for the write budget.
     /// </summary>
     public void AddEvents(IEnumerable<LifecycleEvent> events, Moment now)
     {
         int before = _events.Count;
         foreach (var e in events) _events.Add(e with { Ms = now.MsOf(e.TimeUtc) });
         _eventsAdded += _events.Count - before;
-        foreach (var inc in _open.Values) KeepEvents(inc);
+        foreach (var inc in _open.Values) KeepEvents(inc, now.Ms);
         if (_events.Count > MaxEvents) DropEvents(_events.Count - MaxEvents);
     }
 
     /// <summary>Events put into the shared buffer in all, and let go from its front in all: the buffer's event i is number <c>_eventsDropped + i</c>.</summary>
     private long _eventsAdded, _eventsDropped;
+    /// <summary>The latest of the events the buffer let go (on the forward clock, and its time of day); null before it let any go.</summary>
+    private (long Ms, DateTime Utc)? _droppedTo;
 
     private void DropEvents(int n)
     {
+        for (int i = 0; i < n; i++)
+            if (_droppedTo is not { } d || _events[i].Ms > d.Ms) _droppedTo = (_events[i].Ms, _events[i].TimeUtc);
+        // A closed incident (it looks at the buffer only when written) that has not looked at events going now: the first of
+        // them, for its count of what it left out should it re-open (open ones looked at them all just before).
+        foreach (var inc in _closed)
+            if (_kept.TryGetValue(inc, out var k) && k.LostFrom is null && k.Seq < _eventsDropped + n && k.Seq >= _eventsDropped)
+                k.LostFrom = (_events[(int)(k.Seq - _eventsDropped)].Ms, _events[(int)(k.Seq - _eventsDropped)].TimeUtc);
         _events.RemoveRange(0, n);
         _eventsDropped += n;
     }
 
     /// <summary>
-    /// What an incident has kept of the shared buffer's events (<see cref="Incident.Events"/>): every one from
-    /// <see cref="FromMs"/> on, in time order, of those numbered below <see cref="Seq"/>, up to
-    /// <see cref="IncidentWriter.MaxEventRows"/>; from <see cref="CutMs"/> on (the first event it left out) none.
+    /// What an incident has kept of the shared buffer's events: both ends of its window. The first part
+    /// (<see cref="Incident.Events"/>): the earliest by time from <see cref="FromMs"/> on of those numbered below
+    /// <see cref="Seq"/>, up to <see cref="IncidentWriter.MaxEventRows"/>, in time order; from <see cref="CutMs"/> on (the
+    /// earliest event it left out of it) none. The latest part (<see cref="Tail"/>): the events after the first part, the
+    /// latest <see cref="IncidentWriter.MaxEventRows"/> up to the window's end (<see cref="TailEndMs"/>), the earlier ones
+    /// let go and counted (<see cref="LeftOut"/>), so its events.csv can say how many it leaves out between the two and when.
+    /// By time on the forward clock the three never interleave: every event of the first part is at or before the first of
+    /// those left out, and every one left out at or before the first of the latest part (a late event goes where it
+    /// belongs, <see cref="TakeLatest"/>).
     /// </summary>
     private sealed class KeptEvents
     {
@@ -143,17 +171,77 @@ public sealed class IncidentManager
         public long Seq;
         public DateTime? CutUtc;
         public long? CutMs;
+        /// <summary>
+        /// The window's events from the cut on that it looked at, in time order (a late one in its place): of those up to the
+        /// window's end as it would be if the incident closed now (<see cref="TailEndMs"/>) the latest
+        /// <see cref="IncidentWriter.MaxEventRows"/> (and <see cref="LatestSlack"/> more while it is open), the earlier ones
+        /// let go into <see cref="LeftOut"/>; and those after it (its quiet minutes, or the time since it closed), at most
+        /// <see cref="AfterEndMax"/>, the earliest of more into <see cref="SetAside"/>, only while they can still become its
+        /// window's (it is open, or closed and can re-open). Shared with the 90-minute buffer while the buffer holds them, so
+        /// on a busy PC most of it is references only; let go whole once the incident can no longer re-open and its file
+        /// holds both ends (<see cref="Released"/>), before the buffer lets them go.
+        /// </summary>
+        public readonly List<LifecycleEvent> Tail = [];
+        /// <summary>The window's events from the cut on that it let go: how many, and the first and last of their times.</summary>
+        public EventGap LeftOut;
+        /// <summary>Events after the window's end it let go past <see cref="AfterEndMax"/>: they are left out if its window comes to take them in.</summary>
+        public EventGap SetAside;
+        /// <summary>The latest event it looked at, on the forward clock and its time of day.</summary>
+        public long SeenMs = long.MinValue;
+        public DateTime SeenUtc;
+        /// <summary>The first event the buffer let go before it looked at it (noted for a closed incident held); null: none, or not known.</summary>
+        public (long Ms, DateTime Utc)? LostFrom;
+        /// <summary>
+        /// Its latest part was let go (<see cref="ReleaseLatest"/>): it can no longer re-open and its events.csv held both ends
+        /// as written, so what that file holds of them is final, those events are counted in <see cref="LeftOut"/>, and so is
+        /// any event of its window that comes after.
+        /// </summary>
+        public bool Released;
+        /// <summary>The write (<see cref="Incident.LastWriteMs"/>) at which letting go of its latest part was tried and its file did not hold both ends; null: not tried.</summary>
+        public long? ReleaseTriedAt;
     }
+
+    /// <summary>The most events after an incident's window end it holds for the window to take in (the latest part, <see cref="KeptEvents.Tail"/>).</summary>
+    internal const int AfterEndMax = 4 * IncidentWriter.MaxEventRows;
+
+    /// <summary>
+    /// While an incident is open its latest part holds this many events more up to its window's end, so that when the end
+    /// of its growth is measured a little earlier (by up to this many events: at the owner's 9,400 an hour about 3 minutes)
+    /// its latest <see cref="IncidentWriter.MaxEventRows"/> are still there; once it closes, and its end is as measured then,
+    /// it holds <see cref="IncidentWriter.MaxEventRows"/>.
+    /// </summary>
+    internal const int LatestSlack = IncidentWriter.MaxEventRows / 2;
+
+    /// <summary>An open incident's latest part lets go of its earliest events once it holds this many more than it keeps, all at once (a move of its list each time).</summary>
+    internal const int TrimBatch = 256;
+
+    /// <summary>A test hook, never called by PoolWatch itself: how many events an incident's latest part holds (<see cref="KeptEvents.Tail"/>), for a test of what <see cref="Held"/> counts.</summary>
+    internal int LatestHeld(Incident inc) => _kept.TryGetValue(inc, out var k) ? k.Tail.Count : 0;
 
     private readonly System.Runtime.CompilerServices.ConditionalWeakTable<Incident, KeptEvents> _kept = new();
 
     /// <summary>
-    /// The incident takes the buffer's events it has not looked at yet: the first time every one from its window's start, then
-    /// each new one (a late one, read onto the forward clock earlier, in its place). It stops when it has kept
-    /// <see cref="IncidentWriter.MaxEventRows"/>, or when the buffer let events go before it looked at them (a closed
-    /// incident re-opened after the buffer moved on): it keeps none after that point, so it never has a gap.
+    /// Where the incident's window would end if it closed now, on the forward clock: a minute after the end of its growth, or
+    /// after its last rise (<see cref="EventWindowEndMs"/> of a closed incident). Its latest events are counted up to here.
     /// </summary>
-    private KeptEvents KeepEvents(Incident inc)
+    internal static long TailEndMs(Incident inc) => (inc.EndMs ?? inc.LastRiseMs) + 60_000;
+
+    /// <summary>Whether events after the incident's window end can still become its window's: it is open, or a growth incident closed less than <see cref="ReopenMinutes"/> ago.</summary>
+    private static bool CanTakeLater(Incident inc, long nowMs) =>
+        inc.IsOpen || (inc.Kind is IncidentKind.Growth or IncidentKind.NonPagedTotal && nowMs - inc.ClosedMs!.Value < Ms(TimeSpan.FromMinutes(ReopenMinutes)));
+
+    /// <summary>
+    /// The incident takes the buffer's events it has not looked at yet: the first time every one from its window's start, then
+    /// each new one (a late one, read onto the forward clock earlier, in its place). Its first part takes them until it has
+    /// <see cref="IncidentWriter.MaxEventRows"/>; from then on its latest part does (<see cref="KeptEvents.Tail"/>), but for
+    /// a late event earlier than the first part's last (the summarizer's rollups come up to a minute late, at their first
+    /// start), which takes that one's place in the first part, the last one moving on: the first part stays the window's
+    /// earliest by time. When the buffer let events go before it looked at them (a closed incident re-opened after the
+    /// buffer moved on), its first part ends where it was, and those events are counted as left out (how many, from the first
+    /// of them, noted as it went for an incident held, else from the latest event it looked at, to the latest the buffer let
+    /// go), with the latest part's events before them, when they can be its window's.
+    /// </summary>
+    private KeptEvents KeepEvents(Incident inc, long nowMs)
     {
         HashSet<LifecycleEvent>? had = null;
         if (!_kept.TryGetValue(inc, out var k))
@@ -162,34 +250,211 @@ public sealed class IncidentManager
             _kept.Add(inc, k);
             // Events it came with (none, but for one made with them) stay, in time order, each once.
             inc.Events = inc.Events.OrderBy(e => e.Ms).ToList();
-            if (inc.Events.Count > 0) had = new HashSet<LifecycleEvent>(inc.Events, ReferenceEqualityComparer.Instance);
+            if (inc.Events.Count > 0)
+            {
+                had = new HashSet<LifecycleEvent>(inc.Events, ReferenceEqualityComparer.Instance);
+                (k.SeenMs, k.SeenUtc) = (inc.Events[^1].Ms, inc.Events[^1].TimeUtc);
+            }
         }
-        if (k.CutMs is not null) return k;
+        long endMs = TailEndMs(inc);
+        bool later = CanTakeLater(inc, nowMs) && !k.Released;
         long start = k.Seq - _eventsDropped;
         if (start < 0)
         {
-            // Let go of before this incident looked at them: from the last it looked at on, it keeps none.
-            var last = inc.Events.Count > 0 ? inc.Events[^1] : null;
-            (k.CutUtc, k.CutMs) = last is null ? (inc.OnsetUtc.AddMinutes(-2), k.FromMs) : (last.TimeUtc, last.Ms + 1);
-            return k;
+            // Let go of before this incident looked at them: its first part ends where it was (from the last it kept on, it
+            // keeps none), and they are left out.
+            if (k.CutMs is null)
+            {
+                var last = inc.Events.Count > 0 ? inc.Events[^1] : null;
+                (k.CutUtc, k.CutMs) = last is null ? (inc.OnsetUtc.AddMinutes(-2), k.FromMs) : (last.TimeUtc, last.Ms + 1);
+            }
+            if (_droppedTo is { } to && to.Ms >= k.FromMs)
+            {
+                // From the first of them (noted as it went, for an incident held), else after the latest it looked at; to the
+                // latest the buffer let go.
+                var (fromMs, fromUtc) = k.LostFrom is { } lf && lf.Ms >= k.FromMs ? lf
+                    : k.SeenMs >= k.FromMs ? (k.SeenMs, k.SeenUtc) : (k.FromMs, inc.OnsetUtc.AddMinutes(-2));
+                k.LostFrom = null;
+                var lost = new EventGap((int)Math.Min(int.MaxValue, -start), fromUtc, to.Utc, fromMs, to.Ms);
+                // In its window: left out, and the latest part's events before them with them (the latest part follows what
+                // it left out); after its end, set aside while the window can still take them in, so too.
+                if (fromMs <= endMs) { LetGoThrough(k, lost.ToMs); k.LeftOut = k.LeftOut.With(lost); }
+                else if (later) { SetAsideThrough(k, endMs, lost.ToMs); k.SetAside = k.SetAside.With(lost); }
+            }
+            start = 0;
         }
         var kept = inc.Events;
+        bool tailed = false;
         for (int i = (int)start; i < _events.Count; i++)
         {
             var e = _events[i];
             if (e.Ms < k.FromMs || (had is not null && had.Contains(e))) continue;
-            if (kept.Count >= IncidentWriter.MaxEventRows) { (k.CutUtc, k.CutMs) = (e.TimeUtc, e.Ms); break; }
-            if (kept.Count == 0 || kept[^1].Ms <= e.Ms) kept.Add(e);
-            else
+            if (e.Ms >= k.SeenMs) (k.SeenMs, k.SeenUtc) = (e.Ms, e.TimeUtc);
+            if (k.Released)
             {
-                // A late event: in its place by time, after those of the same moment.
-                int lo = 0, hi = kept.Count;
-                while (lo < hi) { int mid = (lo + hi) >>> 1; if (kept[mid].Ms <= e.Ms) lo = mid + 1; else hi = mid; }
-                kept.Insert(lo, e);
+                // Its file's latest part is final: an event of its window that comes now is counted as left out.
+                if (e.Ms <= endMs) k.LeftOut = k.LeftOut.With(EventGap.One(e));
+                continue;
             }
+            if (k.CutMs is null && kept.Count < IncidentWriter.MaxEventRows) { InsertByTime(kept, e); continue; }
+            // The first part is the window's earliest by time: a late event earlier than its last takes that one's place, and
+            // the last one moves on to the latest part.
+            if (kept.Count > 0 && e.Ms < kept[^1].Ms)
+            {
+                InsertByTime(kept, e);
+                if (kept.Count <= IncidentWriter.MaxEventRows) continue; // a first part that ended early (events let go before it looked at them)
+                e = kept[^1];
+                kept.RemoveAt(kept.Count - 1);
+            }
+            if (k.CutMs is not { } cut || e.Ms < cut) (k.CutUtc, k.CutMs) = (e.TimeUtc, e.Ms);
+            // The latest part: those after the window's end only while the window can still take them in.
+            if (e.Ms <= endMs || later) { TakeLatest(k, e, endMs); tailed = true; }
         }
         k.Seq = _eventsAdded;
+        if (tailed || k.Tail.Count > 0) TrimTail(k, endMs, later, inc.IsOpen);
         return k;
+    }
+
+    /// <summary>
+    /// An event after the first part goes into the latest part in its place by time, but for one that falls among those
+    /// left out (a late one), which is counted with them, and one after the window's end among those set aside, likewise:
+    /// the latest part always follows what was left out, and its events after the window's end follow what was set aside.
+    /// </summary>
+    private static void TakeLatest(KeptEvents k, LifecycleEvent e, long endMs)
+    {
+        if (k.LeftOut.Count > 0 && e.Ms <= k.LeftOut.ToMs) k.LeftOut = k.LeftOut.With(EventGap.One(e));
+        else if (k.SetAside.Count > 0 && e.Ms > endMs && e.Ms <= k.SetAside.ToMs) k.SetAside = k.SetAside.With(EventGap.One(e));
+        else InsertByTime(k.Tail, e);
+    }
+
+    /// <summary>The latest part's events at or before <paramref name="ms"/> are let go and counted as left out (those left out after them come next).</summary>
+    private static void LetGoThrough(KeptEvents k, long ms)
+    {
+        int n = UpperBound(k.Tail, ms);
+        if (n == 0) return;
+        k.LeftOut = k.LeftOut.With(EventGap.Of(k.Tail, 0, n));
+        k.Tail.RemoveRange(0, n);
+    }
+
+    /// <summary>The latest part's events after the window's end (<paramref name="endMs"/>) and at or before <paramref name="ms"/> are set aside (those set aside after them come next).</summary>
+    private static void SetAsideThrough(KeptEvents k, long endMs, long ms)
+    {
+        int from = UpperBound(k.Tail, endMs), to = UpperBound(k.Tail, ms);
+        if (to <= from) return;
+        k.SetAside = k.SetAside.With(EventGap.Of(k.Tail, from, to - from));
+        k.Tail.RemoveRange(from, to - from);
+    }
+
+    /// <summary>Puts an event in its place in a list in time order, after those of the same moment (at the end, but for a late one).</summary>
+    private static void InsertByTime(List<LifecycleEvent> list, LifecycleEvent e)
+    {
+        if (list.Count == 0 || list[^1].Ms <= e.Ms) { list.Add(e); return; }
+        list.Insert(UpperBound(list, e.Ms), e);
+    }
+
+    /// <summary>How many events of the list (in time order) are at or before <paramref name="ms"/> (all of them, most often: looked at first).</summary>
+    private static int UpperBound(List<LifecycleEvent> list, long ms)
+    {
+        if (list.Count == 0 || list[^1].Ms <= ms) return list.Count;
+        int lo = 0, hi = list.Count;
+        while (lo < hi) { int mid = (lo + hi) >>> 1; if (list[mid].Ms <= ms) lo = mid + 1; else hi = mid; }
+        return lo;
+    }
+
+    /// <summary>
+    /// The latest part held to its bounds: of its events up to <paramref name="endMs"/> the latest
+    /// <see cref="IncidentWriter.MaxEventRows"/>, and <see cref="LatestSlack"/> more while the incident is
+    /// <paramref name="open"/> (the earlier ones let go into <see cref="KeptEvents.LeftOut"/>, an open incident's
+    /// <see cref="TrimBatch"/> at a time); of those after it, none when
+    /// the window can no longer take them in (<paramref name="later"/> false), else the latest <see cref="AfterEndMax"/> (the
+    /// earlier ones set aside). Set-aside events the window's end has reached are left out, and every event of the latest
+    /// part before them with them, so the latest part has no hole: it is the events after them.
+    /// </summary>
+    private static void TrimTail(KeptEvents k, long endMs, bool later, bool open)
+    {
+        var tail = k.Tail;
+        if (k.SetAside.Count > 0 && k.SetAside.FromMs <= endMs)
+        {
+            LetGoThrough(k, k.SetAside.ToMs);
+            (k.LeftOut, k.SetAside) = (k.LeftOut.With(k.SetAside), default);
+        }
+        int upTo = UpperBound(tail, endMs);
+        int after = tail.Count - upTo;
+        if (!later)
+        {
+            if (after > 0) tail.RemoveRange(upTo, after);
+            k.SetAside = default;
+        }
+        else if (after > AfterEndMax)
+        {
+            // The earliest go, and any before the last of those set aside with them, so those set aside stay before the rest.
+            int n = Math.Max(after - AfterEndMax, k.SetAside.Count > 0 ? UpperBound(tail, k.SetAside.ToMs) - upTo : 0);
+            k.SetAside = k.SetAside.With(EventGap.Of(tail, upTo, n));
+            tail.RemoveRange(upTo, n);
+        }
+        // An open one lets go of them a batch at a time (each a move of the list), a closed one at once.
+        int keep = IncidentWriter.MaxEventRows + (open ? LatestSlack : 0);
+        if (upTo > keep + (open ? TrimBatch : 0))
+        {
+            int n = upTo - keep;
+            k.LeftOut = k.LeftOut.With(EventGap.Of(tail, 0, n));
+            tail.RemoveRange(0, n);
+        }
+    }
+
+    /// <summary>
+    /// The incident's latest part for a window ending at <paramref name="endMs"/>: its latest
+    /// <see cref="IncidentWriter.MaxEventRows"/> events up to there, and what it left out before them (those it let go, and
+    /// its earlier ones up to there past the latest <see cref="IncidentWriter.MaxEventRows"/>). When the end reaches events
+    /// it set aside, the latest part is only of those after them (fewer, when there are not that many): it has no hole.
+    /// </summary>
+    private static (IReadOnlyList<LifecycleEvent> Tail, EventGap LeftOut) TailOf(KeptEvents k, long endMs)
+    {
+        var left = k.LeftOut;
+        int from = 0;
+        if (k.SetAside.Count > 0 && k.SetAside.FromMs <= endMs)
+        {
+            from = UpperBound(k.Tail, k.SetAside.ToMs);
+            left = left.With(EventGap.Of(k.Tail, 0, from)).With(k.SetAside);
+        }
+        int upTo = Math.Max(from, UpperBound(k.Tail, endMs));
+        int skip = Math.Max(from, upTo - IncidentWriter.MaxEventRows);
+        if (skip > from) left = left.With(EventGap.Of(k.Tail, from, skip - from));
+        return (new Slice(k.Tail, skip, upTo - skip), left);
+    }
+
+    /// <summary>
+    /// Lets go of a closed incident's latest part once it can no longer re-open (an hour after it closed) and its events.csv
+    /// holds both ends as written (its closing write made it so): those events are counted among those it left out, and what
+    /// its file holds of them is final (<see cref="IncidentEventSet.LatestReleased"/>), so a closed incident held for its 6
+    /// hours holds its first part only, as before it kept both ends. When its file does not hold them (its closing write
+    /// failed, say) it keeps them for the write that will (the end of a run, or as it leaves memory), and is tried again
+    /// after its next write.
+    /// </summary>
+    private void ReleaseLatest(Incident inc, KeptEvents k, long nowMs)
+    {
+        if (!_writer.HoldsBothEnds(inc, IncidentEvents(inc, nowMs, forReports: false)))
+        {
+            k.ReleaseTriedAt = inc.LastWriteMs;
+            return;
+        }
+        k.LeftOut = k.LeftOut.With(EventGap.Of(k.Tail, 0, k.Tail.Count));
+        k.Tail.Clear();
+        k.Tail.TrimExcess();
+        k.SetAside = default;
+        k.Released = true;
+    }
+
+    /// <summary>
+    /// Part of a list, read in place (not copied): the latest part an event set carries, read by the write it is made for,
+    /// under the history lock, before the list changes.
+    /// </summary>
+    private sealed class Slice(List<LifecycleEvent> list, int start, int count) : IReadOnlyList<LifecycleEvent>
+    {
+        public int Count => count;
+        public LifecycleEvent this[int index] => (uint)index < (uint)count ? list[start + index] : throw new ArgumentOutOfRangeException(nameof(index));
+        public IEnumerator<LifecycleEvent> GetEnumerator() { for (int i = 0; i < count; i++) yield return list[start + i]; }
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
     /// <summary>Lifecycle events in [<paramref name="fromMs"/>, <paramref name="toMs"/>] on the clock that only goes forward, in the order they happened.</summary>
@@ -206,7 +471,7 @@ public sealed class IncidentManager
         int cut = _events.FindIndex(e => nowMs - e.Ms <= Ms(EventKeep));
         if (cut > 0)
         {
-            foreach (var inc in _open.Values) KeepEvents(inc); // what they have not taken yet, before it goes
+            foreach (var inc in _open.Values) KeepEvents(inc, nowMs); // what they have not taken yet, before it goes
             DropEvents(cut);
         }
         _clears = detector.Clears;
@@ -266,6 +531,14 @@ public sealed class IncidentManager
         {
             if (inc.Dirty || (inc.CountPending && nowMs - inc.LastWriteMs >= Ms(ClosedRewriteInterval))) Write(h, inc, mustWrite: false);
             else if (reportsCurrent && _writer.EventsPending(inc) && nowMs - inc.LastWriteMs >= Ms(RewriteInterval)) AppendEvents(h, inc);
+            if (_kept.TryGetValue(inc, out var k) && k.Tail.Count > 0)
+            {
+                // Events after its window's end it held in case it re-opened: let go once it no longer can.
+                if (k.Tail[^1].Ms > TailEndMs(inc) && !CanTakeLater(inc, nowMs)) TrimTail(k, TailEndMs(inc), later: false, open: false);
+                // Its latest part once it can no longer re-open, when its events.csv holds both ends as written (once a write).
+                if (!k.Released && k.Tail.Count > 0 && nowMs - inc.ClosedMs!.Value >= Ms(TimeSpan.FromMinutes(ReopenMinutes)) && k.ReleaseTriedAt != inc.LastWriteMs)
+                    ReleaseLatest(inc, k, nowMs);
+            }
         }
         // The processes of an incident's window plus 10 minutes on each side (sized by time, not by a count) stay
         // resolvable in the registry while the incident is open or closed in the last 15 min (its trace may still be
@@ -286,9 +559,10 @@ public sealed class IncidentManager
         // At most MaxClosed closed incidents stay in memory, the oldest closed leaving first as at 6 hours: a PC that opens
         // many in a few hours would otherwise hold each one's events and owners for 6 hours.
         old = Math.Max(old, _closed.Count - MaxClosed);
-        // Their folders stay on disk; an events.csv the write budget had not brought up to date says to when it holds its events.
+        // Their folders stay on disk, each events.csv with both ends of its window (written whole now when it is not yet, so
+        // a later run keeps them), or saying how many the write budget never had room for, and between which times.
         for (int i = 0; i < old; i++)
-            try { Budget.Spend(_writer.NoteUnwritten(_closed[i]), nowMs, must: true); }
+            try { Budget.Spend(_writer.WriteLeaving(_closed[i], IncidentEvents(_closed[i], nowMs, forReports: false)), nowMs, must: true); }
             catch (Exception ex) { _host.Log($"incident {_closed[i].Id}: events.csv write failed: {ex.Message}"); }
         if (old > 0) _closed.RemoveRange(0, old);
     }
@@ -400,12 +674,17 @@ public sealed class IncidentManager
         }
     }
 
-    /// <summary>Closes and writes every open incident (end of a headless run, app exit).</summary>
+    /// <summary>
+    /// Closes and writes every open incident (end of a headless run, app exit, Windows shutting down), each events.csv with
+    /// both ends of its window, and writes what any closed one still has to (its events.csv's both ends among it).
+    /// </summary>
     public void Finish(History.History h, DateTime nowUtc)
     {
         _finishing = true;
-        foreach (var inc in _open.Values.ToList()) Close(h, inc, nowUtc, NewestMs(h));
-        foreach (var inc in _closed.Where(i => i.Dirty || i.CountPending || _writer.EventsPending(i))) Write(h, inc);
+        long nowMs = NewestMs(h);
+        foreach (var inc in _open.Values.ToList()) Close(h, inc, nowUtc, nowMs);
+        foreach (var inc in _closed.Where(i => i.Dirty || i.CountPending || _writer.EventsPending(i) || _writer.BothEndsDue(i, IncidentEvents(i, nowMs, forReports: false))).ToList())
+            Write(h, inc);
     }
 
     private void OnGrowth(History.History h, Alert a)
@@ -1005,37 +1284,40 @@ public sealed class IncidentManager
 
     /// <summary>
     /// The incident's events (<see cref="IncidentEventSet"/>): what it kept (<see cref="KeepEvents"/>: the shared buffer drops
-    /// events after <see cref="Settings.IncidentEventKeepMinutes"/>, the incident keeps the first
-    /// <see cref="IncidentWriter.MaxEventRows"/> of its window, and its events.csv is written from those, the earliest not
-    /// written yet first), and, for the reports (<paramref name="forReports"/>), the window's events now: those kept and the
-    /// newest still in the buffer.
+    /// events after <see cref="Settings.IncidentEventKeepMinutes"/>, the incident keeps both ends of its window, the first
+    /// <see cref="IncidentWriter.MaxEventRows"/> and the latest <see cref="IncidentWriter.MaxEventRows"/> up to its end now,
+    /// with how many it left out between them and when; its events.csv is written from those), and, for the reports
+    /// (<paramref name="forReports"/>), the window's events now: those kept and the others still in the buffer.
     /// </summary>
     internal IncidentEventSet IncidentEvents(Incident inc, long nowMs, bool forReports = true)
     {
-        var k = KeepEvents(inc);
+        var k = KeepEvents(inc, nowMs);
         long from = EventWindowStartMs(inc), to = EventWindowEndMs(inc, nowMs);
+        var (tail, left) = TailOf(k, to);
         var window = new List<LifecycleEvent>();
         if (forReports)
         {
             foreach (var e in inc.Events) if (e.Ms >= from && e.Ms <= to) window.Add(e);
-            // The buffer's events the incident did not keep: those before it kept from, and those after it stopped keeping
-            // (until then it kept every one it looked at, and it has looked at them all).
+            foreach (var e in k.Tail) if (e.Ms >= from && e.Ms <= to) window.Add(e);
+            // The buffer's events the incident did not keep: those before it kept from, those it let go of between its two
+            // parts, and those after its window's end (until it stopped keeping its first part it kept every one it looked
+            // at, and it has looked at them all).
             for (int i = 0; i < _events.Count; i++)
             {
                 var e = _events[i];
                 if (e.Ms < from || e.Ms > to) continue;
-                bool kept = e.Ms >= k.FromMs && (k.CutMs is null ? _eventsDropped + i < k.Seq : Kept(inc, e));
+                bool kept = e.Ms >= k.FromMs && (k.CutMs is null ? _eventsDropped + i < k.Seq : Holds(inc.Events, e) || Holds(k.Tail, e));
                 if (!kept) window.Add(e);
             }
             window.Sort((x, y) => x.Ms.CompareTo(y.Ms));
         }
-        return new IncidentEventSet(window, inc.Events, k.FromMs, to, k.CutUtc, k.CutMs);
+        return new IncidentEventSet(window, inc.Events, k.FromMs, to, k.CutUtc, k.CutMs) { Tail = tail, Gap = left, LatestReleased = k.Released };
     }
 
-    /// <summary>Whether the incident kept this very event (a search by time: they are in time order).</summary>
-    private static bool Kept(Incident inc, LifecycleEvent e)
+    /// <summary>Whether a list of events in time order holds this very event (a search by time; none outside its first and last time).</summary>
+    private static bool Holds(List<LifecycleEvent> kept, LifecycleEvent e)
     {
-        var kept = inc.Events;
+        if (kept.Count == 0 || e.Ms < kept[0].Ms || e.Ms > kept[^1].Ms) return false;
         int lo = 0, hi = kept.Count;
         while (lo < hi) { int mid = (lo + hi) >>> 1; if (kept[mid].Ms < e.Ms) lo = mid + 1; else hi = mid; }
         for (int i = lo; i < kept.Count && kept[i].Ms == e.Ms; i++) if (ReferenceEquals(kept[i], e)) return true;
@@ -1052,7 +1334,8 @@ public sealed class IncidentManager
 
     /// <summary>
     /// At most this many of an incident's events go into its events.csv at one write (the rest at later writes): ten
-    /// incidents opening together each get the start of their window at once, and none takes the write budget alone.
+    /// incidents opening together each get the start of their window at once, and none takes the write budget alone. A
+    /// closing write that replaces the file with both ends of the window writes them all, once.
     /// </summary>
     public const int EventRowsPerWrite = 100;
 
@@ -1072,7 +1355,8 @@ public sealed class IncidentManager
     /// run) too; by default when the incident is closed, at the end of a run, and while it is open when the budget has
     /// room to spare and they were never written or last written <see cref="OpenChartInterval"/> ago. Otherwise (an open
     /// incident's opening, re-opening and refreshes) report.json and report.md, and the rows follow as the budget allows
-    /// (<see cref="AppendEvents"/>), after every refresh due.
+    /// (<see cref="AppendEvents"/>), after every refresh due. A closed incident's write that must be made replaces its
+    /// events.csv whole with both ends of its window when it does not hold them yet (its closing write, once).
     /// </summary>
     /// <param name="rows">How many rows of events.csv the write may add (null: as above).</param>
     /// <returns>Whether the folder was written (false: it waits for the budget, or the write failed and was logged).</returns>
@@ -1089,7 +1373,7 @@ public sealed class IncidentManager
         using var stage = Util.Profiler.Stage("incident.write");
         try
         {
-            Budget.Spend(_writer.Write(h, inc, IncidentEvents(inc, nowMs), rows.Value, all, nowMs), nowMs, mustWrite || _finishing);
+            Budget.Spend(_writer.Write(h, inc, IncidentEvents(inc, nowMs), rows.Value, all, nowMs, must: mustWrite || _finishing), nowMs, mustWrite || _finishing);
             inc.LastWriteUtc = h.Times.Count > 0 ? h.Times[^1] : DateTime.UtcNow;
             inc.LastWriteMs = nowMs;
             inc.WrittenTop = inc.Suspects.FirstOrDefault()?.Key;
@@ -1120,11 +1404,29 @@ public sealed class IncidentManager
     private LiveSummaries? _live;
 
     /// <summary>
-    /// Writes the incident's whole folder now, every event it kept included, whatever the write budget (it spends it as a
-    /// write a reader needs at once): an export of an open incident holds its state now, not a refresh the budget held
-    /// back. False when the write failed (logged). The caller holds the history lock.
+    /// Writes the incident's whole folder now, every event of the first part of its window included (of an open one; a
+    /// closed one's events.csv has both ends), whatever the write budget (it spends it as a write a reader needs at once):
+    /// an export of an open incident holds its state now, not a refresh the budget held back, and takes its events.csv's
+    /// both ends from memory, with a report.md that says so (<see cref="ExportFilesNow"/>). False when the write failed
+    /// (logged). The caller holds the history lock.
     /// </summary>
     public bool WriteNow(History.History h, Incident inc) => Write(h, inc, mustWrite: true, full: true, rows: IncidentWriter.MaxEventRows);
+
+    /// <summary>
+    /// An open incident's events.csv as it would be written were the incident to close now, built from memory (the first
+    /// <see cref="IncidentWriter.MaxEventRows"/> events of its window, a row saying how many it left out and between which
+    /// times when it left any out, then its latest <see cref="IncidentWriter.MaxEventRows"/>, sorted by time, its alerts'
+    /// rows among them), and its report.md as a write would make it now beside that file, so its line under the window's
+    /// events counts that file's rows and says what it leaves out; by their names. While the incident is open its folder's
+    /// events.csv holds the first part only, so Export report puts these two in place of the folder's (the zip agrees with
+    /// itself). Null for a closed incident (its file has both ends). Writes nothing. The caller holds the history lock.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? ExportFilesNow(History.History h, Incident inc)
+    {
+        if (!inc.IsOpen) return null;
+        var (events, report) = _writer.ExportTexts(h, inc, IncidentEvents(inc, NewestMs(h)));
+        return new Dictionary<string, string> { ["events.csv"] = events, ["report.md"] = report };
+    }
 
     /// <summary>
     /// What of the open incidents' folders is behind what PoolWatch knows of them now, on the forward clock. Their reports

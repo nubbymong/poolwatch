@@ -121,7 +121,10 @@ want, trims background work. Every change it makes is listed, with a way to put 
   knows now, and Export report writes an open incident's folder whole first. About and `cache\profile.json` say what the
   budget wrote, how much of it could wait against what the budget allows, how often it held a write back, and which
   open incidents' reports or charts are behind. An
-  incident's `events.csv` has every event from its first row to its last, and an export never takes half a row of it.
+  incident's `events.csv` holds both ends of its window: its first 1,000 events and, once it closes, its latest 1,000,
+  with a row between them saying how many events were left out and between which times. While the incident is open it
+  holds up to the first 1,000, every event from its first row to its last; Export report of an open incident has both
+  ends, with a `report.md` that counts them, and an export never takes half a row.
   The incident list always shows your incidents, however many storm reports came after them.
 - **Lighter on the CPU and memory under agentic load.** On a PC starting hundreds of processes a minute with ten
   incidents open, 1.0.0-beta.2 spent 2.4% of one core and its memory rose for hours (170 MB of managed memory after
@@ -132,12 +135,13 @@ want, trims background work. Every change it makes is listed, with a way to put 
   shell's command line, only processes a ranking can name are kept for an incident's window, a process that ended over
   90 minutes ago keeps only its name and details (the latest 10,000 such), the one-minute history keeps each process's
   I/O for 2 hours and then each hour's 10 busiest by name (what the Since boot report names), an incident keeps the
-  first 1,000 events of its window (its `events.csv` says to when; with Detailed recording the day's `events.csv` has
-  every one), and at most
+  first 1,000 events of its window and the latest 1,000, a closed one its first 1,000 alone once it can no longer
+  re-open (its `events.csv` says how many it left out between them, and when; with Detailed recording the day's `events.csv` has every one),
+  and at most
   20 closed incidents stay in memory (the rest are listed from their folders; a tag growing again an hour after its
   incident left memory gets a new one). Replaying a day of that load through PoolWatch's per-sample analysis (not its
   process query, event trace, window or files) takes 0.12% of one core where it took 2.6% before this change, and holds
-  38 to 42 MB of managed memory from the sixth hour to the day's end, where it held 101 MB after 4 hours and rose. PoolWatch
+  39 to 44 MB of managed memory from the sixth hour to the day's end, where it held 101 MB after 4 hours and rose. PoolWatch
   as a whole is still over its own budget on such a PC (About and every report say how much). An incident open longer
   than 70 minutes keeps where its growth began, so its growth no longer shrinks in its report, and PoolWatch's own
   cache clears still count in it after they leave the 70 minutes.

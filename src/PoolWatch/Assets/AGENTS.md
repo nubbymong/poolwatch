@@ -146,16 +146,26 @@ after a watched app ran), `incidents.md`, `experiment\` (when one ran), `filters
 Each incident folder has `report.md` (for people), `report.json` (the same, for you), `timeline.csv`,
 `processes.csv`, `events.csv`, `timeline.png` and, when a trace was taken, `capture.etl`. (A folder whose name has a
 finding's kind instead of a tag is a finding's report, described in the file map.) An incident's `events.csv` holds
-the events of its window from 2 minutes before the onset, every one from its first row to its last, in the order
-PoolWatch added them (sorted by time within each addition): the window's first 1,000 at most, and on a busy PC fewer
-while the incident is open, as PoolWatch writes within a disk budget. When it holds fewer than the window had for good,
-its last row (`kind` `Note`) says so, and its time is when its events stop. An `Alert` row marks when each growth rule
-first fired (the report has its latest numbers). With Detailed recording the day's `data\<yyyyMMdd>\events.csv` has
-every event; with Reports only that `Note` row says the later ones are not recorded; and when the choice was changed
-during the incident, it says the day's file has them only for the time Detailed recording was on. On a busy
+both ends of its window. While the incident is open it holds the window's first 1,000 events from 2 minutes before the
+onset, every one from its first row to its last, in the order PoolWatch added them (sorted by time within each
+addition), and on a busy PC fewer, as PoolWatch writes within a disk budget; once it has all 1,000, its last row
+(`kind` `Note`) says so, and its time is when they stop. Once the incident has closed it holds the window's first 1,000
+events by time, then its latest 1,000, all sorted by time, each event once; when events between the two were left
+out, a row of `kind` `Gap` sits between the two parts, at the time of the first one left out, and its `detail` says
+how many and the time of the first and the last of them (a window of under 2,000 events has every one and no such
+row). A last `Gap` row also says how many of a short incident's events PoolWatch's disk budget never had room for.
+When `reopened` in `report.json` is above 0, the rows start at the first episode's onset less 2 minutes (`onsetUtc`
+is the latest episode's), and while the incident is open again the file holds both ends as its last close wrote them:
+the new episode's events come at its next close. `Alert`, `Release`, `Note` and `Gap` rows are not events: count the
+others. An `Alert` row marks when each growth rule first fired (the report has its latest numbers).
+With Detailed recording the day's `data\<yyyyMMdd>\events.csv` has every event; with Reports only there is no such
+file. A folder an older PoolWatch wrote can differ: 1.0.0-beta.2
+and earlier kept up to the window's newest 5,000 events with no `Note` or `Gap` row, so such an `events.csv` may not
+have every event of the window. On a busy
 PC an open incident's `report.json` can be up to about an hour behind (PoolWatch's window shows it live); an export
-of an open incident (Export report) writes its folder whole first, so the zip is current. The fields of `report.json`
-that matter:
+of an open incident (Export report) writes its folder whole first, so the zip is current, and its `events.csv` in the
+zip has both ends of the window, from memory, with a `report.md` that counts them. The fields of `report.json` that
+matter:
 
 - `id`, `kind` (`Growth`, `NonPagedTotal` for the whole non-paged pool over its limit, `Release` for a sharp drop,
   `Capture` for a trace the person started), `tag` and `tagHex`, `owner` and `description` (the driver and what the

@@ -140,14 +140,24 @@ and removed, with the first few names:
   within 30 s, the log says instead that the stop neither writes nor counts the rows not written yet, and so it does
   for the handle scan's write when that does not end within 10 s);
 - `incidents\<id>\`: `report.md`, `report.json`, `timeline.csv`, `processes.csv`, `events.csv`, `timeline.png`, and
-  `capture.etl` when a trace was taken (a trace can add far more than the CSV files). `events.csv` holds the incident's
-  events from 2 minutes before its onset, every one from its first row to its last, added as PoolWatch writes the
-  folder, at most 1,000; when it holds fewer than the window had, its last row says to when (with Detailed recording
-  the day's `events.csv` has every one; with Reports only the row says the later ones are not recorded; after a switch
-  in the incident's window, that the day's file has them only for the time Detailed recording was on). Its rows are
-  appended in single writes: copying the folder at that moment can fail (try again; Export
-  report reads it beside the write, its whole rows only), and a crash then can cut its last row short. What can wait in
-  the report folders is held to 1 MB an hour (a 256 KB burst):
+  `capture.etl` when a trace was taken (a trace can add far more than the CSV files). `events.csv` holds both ends of
+  the incident's window: its first 1,000 events by time from 2 minutes before its onset, and its latest 1,000. While
+  the incident is open it holds up to the first 1,000 (fewer while the disk budget holds rows back), every one from its
+  first row to its last, added as PoolWatch writes the folder; once it has all of them, a last `Note` row says to when,
+  and no event row follows it. When the incident closes (and at the end of a run, or when it leaves memory, if the file
+  does not hold them yet) the file is replaced whole in one step with both ends, sorted by time, each event once; when
+  events between the two were left out, a `Gap` row between the two parts says how many, and the first and last of
+  their times (with Detailed recording the day's `events.csv` has every one). A re-opened incident's file keeps its first episode's first
+  part, and holds both ends as its last close wrote them until it closes again. At the owner's event mix and
+  command-line lengths a long incident's closing write of `events.csv` is about 0.46 to 0.58 MB (2,000 rows; the
+  latest 1,000 about 0.29 MB of it), once per close: a re-opened incident's next close writes it again, and so does a
+  trace attached after the close that measures the window's end again. Long incidents closing about 3 an hour (the
+  maintainer's rate) make that about 1.8 MB an hour of `events.csv`, written whatever the budget, and the report
+  folders 3.1 MB an hour in all (`BothEndsTests`). Its rows are appended in single writes while the
+  incident is open: copying the folder at that moment can fail (try again; Export report reads it beside the write,
+  its whole rows only, and puts an open incident's both ends in the zip from memory, with a `report.md` that counts
+  them), and a crash then can cut its last row short. What can wait in the report folders is held to 1 MB an hour (a
+  256 KB burst):
   an open incident's `report.json` and `report.md` first, then the rest. An incident's opening, re-opening and closing,
   a trace attached and a storm folder's first and last writes are always made; under the owner's load (10 incidents
   opening together beside a storm-heavy hour) the folders wrote about 1.7 MB in that hour, and an open incident's

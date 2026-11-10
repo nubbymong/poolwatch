@@ -89,8 +89,18 @@ on), and every lasting one is listed under Active changes, where it can be put b
   incident's chart and CSVs only while the budget has room to spare; what a reader needs at once (an incident opening,
   re-opening or closing, a trace attached, a storm's first and last folder write, the end of a run) is always written
   and spends it too, its debt at most the burst (a quarter of an hour's refill), so ten incidents opening together hold
-  the refreshes back that long and no longer. A file that did not change is not written again, events.csv and
-  spawns.csv are appended to, and each write adds at most 100 of an incident's events. `WriteBudgetTests` measures this
+  the refreshes back that long and no longer. A file that did not change is not written again, an open incident's
+  events.csv and spawns.csv are appended to, and each write adds at most 100 of an incident's events; an incident's
+  closing write replaces its events.csv once per close, whole, with both ends of its window (its first and its latest
+  1,000 events: 0.46 to 0.58 MB a long incident at the owner's event mix and command-line lengths, 0.29 MB of it the
+  latest 1,000, `BothEndsTests`), a write that must be made like the rest of the closing write. That is the cost of
+  keeping both ends (the owner's choice, 2026-11-10), and it is over budget when such incidents close often: ten
+  closing in one hour write 4.6 MB of events.csv, and 7.5 MB with the rest of their closing writes, over the 5 MB an
+  hour for that hour; and through a day of long incidents closing about 3 an hour (the maintainer's rate: 16 held
+  after 4 hours), events.csv writes 1.8 MB an hour, all but 0.05 MB of it writes that must be made, and the report
+  folders 3.1 MB an hour in all, over their 2 MB share (`BothEndsTests`, 19 incidents 18 minutes apart over 6 hours;
+  in review, 976632c's events.csv wrote about 30 KB a close in such a day, the rest of the first part waiting for a
+  budget that seldom had room for it). `WriteBudgetTests` measures this
   at the write check every file goes through: 10 growth incidents opening and open for an hour beside a storm-heavy hour
   (three sessions bursting every 2.5 minutes, a new program storming every 2 minutes, Git Bash fork copies), at the
   owner's event rate and command-line lengths, write 1.7 MB in that hour (1.0 MB of it the openings and the storm
@@ -136,10 +146,16 @@ on), and every lasting one is listed under Active changes, where it can be put b
     rest of its day, at most 10,000, the first named going first (on the owner's load 3 to 4 hours past the 90 minutes;
     the since-boot report names an hour's processes as it sums it, 2 to 3 hours after they ran); each PID's newest
     instance and image are kept for the records held only; the string pool holds at most 4,096 strings;
-  - an incident keeps its window's first 1,000 events (events.csv says to when it holds them, and with Detailed
-    recording the day's events.csv has every one: 5,000 held 3.2 MB more in the test below at 6 hours, and about 29 MB
-    more with all 32 incidents at the cap) and the members of its first three owners only (its reports are
-    byte-identical); at most 20 closed incidents
+  - an incident keeps its window's first 1,000 events by time and its latest 1,000 (500 more before those while it is
+    open, so an end of its growth measured a little earlier still leaves 1,000; and, while it can still take them into
+    its window, the events after its end, at most 4,000), and its events.csv says how many it left out between them and
+    when (with Detailed recording the day's events.csv has every one; 5,000 from the start held 3.2 MB more in the test below at 6 hours, and
+    about 29 MB more with all 32 incidents at the cap; an open incident's latest are the newest, which the 90-minute
+    buffer holds too, so with 10 incidents open for 3 hours at the owner's rate they hold 0.3 MB; a closed one lets go
+    of its latest part an hour after it closed, when it can no longer re-open and its events.csv holds both ends as
+    written, so for the rest of its 6 hours it holds its first part alone: 19 long incidents closed over 6 hours hold
+    0.34 MB of latest parts, those of the last hour, where keeping them for the 6 hours held 9.2 MB, `BothEndsTests`)
+    and the members of its first three owners only (its reports are byte-identical); at most 20 closed incidents
     stay in memory; the summarizer asks the worktree-delete expression only of a command line with "tree" in it, and
     the detector reads each tag's series into one array, each row's place of a tag found once per shared list.
   An incident open longer than the raw history keeps its onset and start level instead of moving them to the
@@ -151,20 +167,26 @@ on), and every lasting one is listed under Active changes, where it can be put b
   points are long runs; a real PC's are busier), 10 incidents growing all day and 40 more every 4 hours. On 9144b20's
   code that world took 2.6% of one core and 40 MB a sample over 4 hours, its heap after a full collection 45 MB at half
   an hour and 101 MB at 4 hours, still rising (this change as first reviewed: 54 MB at 4 hours, about 70 MB at 24).
-  Now: 0.115% of one core and 3.8 MB a sample (incidents 0.082% and 2.3 MB, registry 0.009% and 0.46 MB, detector
-  0.007% and 30 KB, summarizer 0.006% and 0.59 MB, the diagnostics' core parts 0.008%), the heap 37 MB at 4 hours and
-  38 to 42 MB from 6 hours to the day's end, a slope of about 0.15 MB an hour as the minutes' tags fill their 25 hours,
-  the hours' incidents moving it up and down by about 2 MB. It asserts a 48 MB ceiling, a slope over hours 6 to 26
-  under 0.25 MB an hour, under 3 MB more in the last 6 hours than in hours 6 to 12, under 0.45% of one core (three
-  times what it measures, for a slower runner; the old 30 s ranking alone is 1.3%) and under 6 MB a sample. What is
-  held at 26 hours, part by part (each cleared in turn): the raw history's process runs 4.8 MB and tag rows 2.7, the
+  Now, with both ends of each incident's window kept: 0.12% of one core and 4.1 MB a sample (incidents 0.087% and
+  2.6 MB, registry 0.008% and 0.46 MB, detector 0.007% and 30 KB, summarizer 0.006% and 0.59 MB, the diagnostics' core
+  parts 0.009%), the heap 39 MB at 4 hours and 39 to 44 MB from 6 hours to the day's end, a slope of about 0.16 MB an
+  hour as the minutes' tags fill their 25 hours, the hours' incidents moving it up and down by about 2 MB. 976632c,
+  which kept the first 1,000 alone, run the same way right after it: 0.15% of one core (the two runs' CPU differs
+  within the noise between runs), 3.8 MB a sample (incidents 2.3 MB), the heap 37 MB at 4 hours and 38 to 42 MB after.
+  Keeping both ends holds about 1.4 MB of it (every window there passes 1,000 events: the events the incidents hold
+  went from 32,000 to about 78,000, most of the latest also in the 90-minute buffer; hours 6 to 26 averaged 41.3 MB
+  against 39.9, and 41.8 MB when closed incidents kept their latest parts for their 6 hours). It asserts a 48 MB
+  ceiling, a slope over hours 6 to 26 under 0.25 MB an hour, under 3 MB more in the last 6 hours than in hours 6 to 12,
+  under 0.45% of one core (three times what it measures, for a slower runner; the old 30 s ranking alone is 1.3%) and
+  under 6 MB a sample. What was held at 26 hours before both ends were kept, part by part (each cleared in turn, not
+  measured again since): the raw history's process runs 4.8 MB and tag rows 2.7, the
   90 minutes of events 3.8, 20 closed incidents 4.5, the registry's full records 6.0, compact 2.5, named 2.5 and
   per-PID 2.2, the handle scans 0.6, the string pool 1.0, the spawn tracker, census and tokens 3.4; the other 7 MB
   (the minutes among them) clearing part by part does not split.
   The target for that heap is not met. PoolWatch's own trim empties its working set at 75 MB only while the heap is at
   most half of it (`MemoryTrim`), 37.5 MB; in the CI soak with the window open the working set peaked at 84 MB beside
   a 15 MB heap (about 69 MB that is not heap), which leaves about 30 MB of heap under the 100 MB budget, the app's own
-  share (the window, the tag knowledge, the CSV files' state) included; this load's parts alone hold 38 to 42 MB. On
+  share (the window, the tag knowledge, the CSV files' state) included; this load's parts alone hold 39 to 44 MB. On
   the owner's PC the memory outside the heap is larger still: 118.5 MB private at 32 s beside a 13.9 MB heap, 285 MB of
   working set beside 196 MB committed by the GC at 7 hours; what holds it is not in `profile.json` and is outside this
   part. The CPU, projected for the owner's PC from its beta.2 profile (each part changed here scaled by what it took in
@@ -704,33 +726,57 @@ with when its folder was last written and why it can be behind; a closed inciden
 summary is built again only when what it says can have changed (`LiveSummaries`: a ranking, at most every 30 s while
 the incident changes, an alert, a re-open, a trace, its end or a write; its growth alone moves at nearly every sample
 and is brought up to date by the next ranking), so it is never behind what its folder says. Export report writes
-an open incident's folder whole first, every event it kept included (`IncidentManager.WriteNow`, a write a reader needs
-at once), and does not export it when that write fails. `report.md`, `report.json`,
+an open incident's folder whole first, every event of its first part included (`IncidentManager.WriteNow`, a write a
+reader needs at once), puts both ends of its `events.csv` in the zip from memory in place of the folder's, with a
+`report.md` that counts them (`IncidentManager.ExportFilesNow`: the file as the incident's close would write it now,
+and the report as a write would make it beside that file, so the zip agrees with itself), and does not export it when
+that write fails; a closed incident's export reads its files. `report.md`, `report.json`,
 `timeline.csv`, `processes.csv` and `timeline.png` are each replaced in one step (temp file and move), and only when
 what they say changed since this run last wrote them (the chart is drawn again only when what it shows changed), so a
-closed incident's CSVs and chart are written once. `events.csv` is appended to, in whole rows sorted by time within
-each write, from what the incident kept of its window's events: an open incident takes each event from the shared
-buffer as it comes (the buffer keeps 90 minutes, the incident its window's first 1,000 from the onset less 2 minutes
-as it was when it first kept them), so the earliest kept event not written yet is always there to write and the file
-has every event from its first row to its last, however long the budget held it back. Each write adds at most 100
-(every one left at the end of a run). Once it has all an incident kept that stopped keeping (1,000 kept, or the
-buffer let events go before a closed incident re-opened and looked at them), a last `Note` row says to when it holds
-the window's events, and so does a last row when the incident leaves memory (6 hours after closing, or as the oldest
-of more than 20 closed) with rows the budget
-never had room for; with Detailed recording the day's `data\<yyyyMMdd>\events.csv` has every event, and the row says so;
-with Reports only it says the later ones are not recorded, and after a switch in the incident's window, that the day's
-file has them only for the time Detailed recording was on (`IIncidentHost.DayRecords`: what the day's files record and
-since when). An alert is one row per growth rule and
-onset (a rule that keeps firing keeps its bigger alert under the first one's onset; a re-opening's has its own), at
-the time the file first saw it, and one row per release. While open it can hold rows from after the growth ended, up
-to the close. It is written whole again only when it is not as this run last wrote it, or when a closed incident's
-onset moved later than rows it holds: those rows are left out and the rest stay as written (they are all among what it
-kept). Its rows are written in single appends and read by others as they are: a crash in the moment of an append can
-leave its last row cut short, which a later write in the same run repairs (a file not as written is written whole
-again) and a later run leaves as it is. An export and a vendor bundle read it, and a storm folder's `spawns.csv`, beside
-their writer (sharing writes) and up to their last whole row (`Csv.ReadCompleteRows`: the last line break outside a
-quoted value), so a row being appended in that moment is never in the zip as half a row (it is in the folder).
-At the end of a run everything left is written.
+closed incident's CSVs and chart are written once. `events.csv` holds both ends of the window (the owner's choice,
+2026-11-10: at 9,400 events an hour the first 1,000 alone were only the first 6 minutes). The incident takes each event
+from the shared buffer as it comes (the buffer keeps 90 minutes): its first part, the window's earliest 1,000 by time
+from the onset less 2 minutes as it was when it first kept them (the summarizer's rollups, over half of the owner's
+events, come up to a minute late at their first start: a late event earlier than the first part's last takes that
+one's place, and that one moves on), then its latest part, a rolling tail in memory: the latest 1,000 up to the
+window's end as it would be if the incident closed now (500 more before them while it is open, so an end measured a
+little earlier still leaves 1,000), the earlier ones let go and counted (how many, the first and last of their times),
+and those after that end (its quiet minutes, then the time since it closed, at most 4,000, the earliest of more
+counted apart) while the window can still take them in: until an hour after it closes, when it can no longer re-open.
+By time the three never interleave: a late event among those let go is counted with them, and when the window's end
+reaches events counted apart, every event of the latest part before them is let go with them, so the latest part has
+no hole and the `Gap` row's range holds no row of the file. While the incident is open, `events.csv` holds the first
+part, appended to in whole rows sorted by time within each write, so the earliest kept event not written yet is
+always there to write and the file has every event from its first row to its last, however long the budget held it
+back; each write adds at most 100 (every one left at the end of a run), and once it has all of a full first part a
+last `Note` row says to when it holds them, as a fact about the file (a crash or a power loss leaves it true): no
+event row follows it, a late event that takes a place in the first part since waiting for the close. The open
+incident's write cost is as before. When the incident closes, its closing write (a write that must be made, through
+the budget like the rest of it) replaces the file whole in one step (temp file and move, as `timeline.csv` is) with
+both ends: the first part, a `Gap` row between the two parts (placed there, at the time of the first one left out),
+saying how many and the first and last of their times, and the latest 1,000, all sorted by time, each event once (a
+window of under 2,000 events has every one and no `Gap` row). It is written so once per close; a re-opened incident
+that closes again writes it again (its first part is still its first episode's), a trace attached after the close
+that measures the window's end again does too, and the end of a run (PoolWatch stopping, Windows shutting down) and an
+incident leaving memory (6 hours after closing, or as the oldest of more than 20 closed) write it when its file does
+not hold both ends yet (its closing write failed, say), so a later run keeps them. An hour after it closes, when it
+can no longer re-open, a closed incident whose file holds both ends as written lets go of its latest part (counted
+among those left out): the file is final then, and a later onset does not write it again without them. A closed
+incident without a latest part (its window has under 1,000 events) whose rows the budget never had room for gets a
+last `Gap` row as it leaves memory, saying how many it leaves out and between which times; with Detailed recording the day's
+`data\<yyyyMMdd>\events.csv` has every event. When the buffer let events go before a closed incident looked at them
+and it re-opens, its first part ends where it was and they are counted among those left out. An alert is one row per
+growth rule and onset (a rule that keeps firing keeps its bigger alert under the first one's onset; a re-opening's has
+its own), at the time the file first saw it, and one row per release. While open it can hold rows from after the
+growth ended, up to the close; the closing write holds the window's alone. It is written whole otherwise only when it is
+not as this run last wrote it, or when a closed incident's onset moved later than rows it holds: those rows are left out
+and the rest stay as written (they are all among what it kept). Its rows are written in single appends while the
+incident is open, and read by others as they are: a crash in the moment of an append can leave its last row cut short,
+which a later write in the same run repairs (a file not as written is written whole again) and a later run leaves as
+it is. An export reads it, and a vendor bundle a storm folder's `spawns.csv`, beside their writer (sharing writes) and
+up to their last whole row (`Csv.ReadCompleteRows`: the last line break outside a quoted value), so a row being
+appended in that moment is never in the zip as half a row (it is in the folder). At the end of a run everything left
+is written.
 
 **Spawn storms** (`Core.Spawn.SpawnTracker`, `StormReports`). A parent that starts more than 30 short-lived children
 (each exited within 10 s) within 30 s, by default, opens a storm, which closes once its rate stayed under half that for a minute. A fork copy (a child

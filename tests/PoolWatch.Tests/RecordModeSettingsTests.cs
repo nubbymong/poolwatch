@@ -107,27 +107,24 @@ public sealed class RecordModeSettingsTests : IDisposable
     }).ToList();
 
     /// <summary>
-    /// With Reports only a growth incident's folder is written as before (its report and its events.csv), and neither its
-    /// report nor its events.csv names the day's data\&lt;yyyyMMdd&gt;\events.csv, which is not there: its last row says the
-    /// events past the ones it keeps are not recorded. With Detailed recording they name it, as before. After a switch in
-    /// the middle of the incident, each says what the day's file holds of the events it means: from the window's start
-    /// (the report) or from its last row's time (that row), all of them when Detailed recording was on since before then,
-    /// otherwise those of the time it was on.
+    /// With Reports only a growth incident's folder is written as before (its report and its events.csv), and its report
+    /// does not name the day's data\&lt;yyyyMMdd&gt;\events.csv, which is not there. With Detailed recording it names it, as
+    /// before. After a switch in the middle of the incident, it says what the day's file holds of the window's events from
+    /// its start: all of them when Detailed recording was on since before then, otherwise those of the time it was on. The
+    /// last row of an open incident's full first part is a fact about the file alone, in every mode: it names no day file.
     /// </summary>
     [Fact]
     public void AReportWrittenWithReportsOnlyNamesNoDayFile()
     {
-        const string AllAfter = @"the later ones are in the day's data\<yyyyMMdd>\events.csv";
         // The window's 1,500 events are a second apart from its start; the incident keeps the first 1,000, to 16 min 39 s in.
-        var cases = new (string Name, bool Detailed, DateTime Since, string? Report, string Note)[]
+        var cases = new (string Name, bool Detailed, DateTime Since, string? Report)[]
         {
-            ("1", false, DateTime.MinValue, null, "the later ones are not recorded (Reports only)"),
-            ("2", true, DateTime.MinValue, @"and the day's `data\<yyyyMMdd>\events.csv` has every one", AllAfter),
-            // Detailed recording turned on 10 minutes into the window: from the last row on, all of them; before, not.
-            ("3", true, T0.AddMinutes(10), @"and the day's `data\<yyyyMMdd>\events.csv` has those of the time Detailed recording was on", AllAfter),
-            // Turned off 20 minutes in, after the incident's last kept event: some of the later ones are there, the rest not.
-            ("4", false, T0.AddMinutes(20), @"and the day's `data\<yyyyMMdd>\events.csv` has those of the time Detailed recording was on",
-                AllAfter + " only for the time Detailed recording was on"),
+            ("1", false, DateTime.MinValue, null),
+            ("2", true, DateTime.MinValue, @"and the day's `data\<yyyyMMdd>\events.csv` has every one"),
+            // Detailed recording turned on 10 minutes into the window: not all of the window's events are in the day's file.
+            ("3", true, T0.AddMinutes(10), @"and the day's `data\<yyyyMMdd>\events.csv` has those of the time Detailed recording was on"),
+            // Turned off 20 minutes in: the day's file has the window's first 20 minutes only.
+            ("4", false, T0.AddMinutes(20), @"and the day's `data\<yyyyMMdd>\events.csv` has those of the time Detailed recording was on"),
         };
         foreach (var c in cases)
         {
@@ -137,15 +134,14 @@ public sealed class RecordModeSettingsTests : IDisposable
             writer.Write(new History(), inc, events, maxRows: 300); // the window's first 300; the rest left for later
             string report = File.ReadAllText(Path.Combine(inc.Dir, "report.md"));
             Assert.True(File.Exists(Path.Combine(inc.Dir, "report.json")));
-            Assert.Contains("events.csv gets the rest when PoolWatch's write budget has room", report);
+            Assert.Contains("events.csv gets the rest of the window's first 1,000 events as PoolWatch's write budget allows", report);
             if (c.Report is { } said) Assert.Contains(said, report);
             else Assert.DoesNotContain(@"data\<yyyyMMdd>\events.csv", report);
             writer.AppendEvents(inc, events, maxRows: 10_000); // up to the 1,000 it keeps, then the row that says so
             string last = File.ReadAllLines(Path.Combine(inc.Dir, "events.csv"))[^1];
             Assert.Contains(",Note,", last);
-            Assert.Contains("events.csv holds the incident window's events to this row's time (an incident keeps at most 1,000); " + c.Note, last);
-            if (c.Note == AllAfter) Assert.DoesNotContain(" only for the time", last);
-            if (!c.Detailed && c.Since == DateTime.MinValue) Assert.DoesNotContain(@"data\", last);
+            Assert.Contains("events.csv holds the incident window's first 1,000 events, to this row's time; the window's later events are not in this file", last);
+            Assert.DoesNotContain(@"data\", last);
         }
     }
 }
