@@ -37,7 +37,7 @@ internal sealed class AdvancedSettingsDialog : Form
         CancelButton = close;
         var note = new Label
         {
-            Text = "Save applies automatic clearing, the token-leak guard and update notices at once; the other settings apply the next time PoolWatch starts.",
+            Text = "Save applies automatic clearing, the token-leak guard, notifications and update notices at once; the other settings apply the next time PoolWatch starts.",
             AutoSize = true, MaximumSize = new Size(LogicalToDeviceUnits(420), 0), ForeColor = SystemColors.GrayText, Anchor = AnchorStyles.Left, Margin = Px(4, 8, 4, 4),
         };
         var bar = new TableLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 3, RowCount = 1, Padding = Px(8, 6, 8, 8) };

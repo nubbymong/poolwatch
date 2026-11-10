@@ -158,6 +158,8 @@ hour, such as a release, a cache clear, a warning or an alert, leaves the cell e
 
 **Settings** is a short form in plain words: starting at sign-in; update notices; automatic cache clearing, by name
 (**On a schedule**, **At a pool size** or **Whichever comes first**, recommended) with how often and at what pool size;
+**Notifications**, which kernel pool notices you get (**Every growth**, the default; **Only when it needs attention**,
+only when the tray icon turns red; or **Off**; the token-leak guard's notices, which need your click, always appear);
 deeper automatic captures (traces PoolWatch records by itself also record file activity); and the token-leak guard.
 Under automatic clearing it says that clearing takes a few seconds, and video or the mouse may stutter while it runs.
 When the Codex app is installed, PoolWatch was installed with its setup and its Codex shortcut is not on your desktop,
@@ -165,8 +167,8 @@ Settings offers **Create shortcut**. **Advanced...** opens the settings in a gri
 the one selected in the box under it: what it does and its default, its unit, and the limits PoolWatch keeps
 it within (a number's range, a text's length, a local drive path), where it has them. Three are set elsewhere:
 starting at sign-in (in this form), **Show RAM** (on the graph) and the service profiles (on the Services tab).
-Starting at sign-in changes as soon as you tick it; **Save** puts automatic clearing, the token-leak guard and
-update notices into effect at once, and the other settings when PoolWatch next starts. The sign-in box is ticked
+Starting at sign-in changes as soon as you tick it; **Save** puts automatic clearing, the token-leak guard,
+notifications and update notices into effect at once, and the other settings when PoolWatch next starts. The sign-in box is ticked
 only while PoolWatch really starts when you sign in. When its task is there but does not start PoolWatch, the box
 is not ticked and a line under it says why: the task or its sign-in trigger is turned off (in Task Scheduler, or
 kept so when PoolWatch replaced it with its own), it has no sign-in trigger, it runs without the highest privileges
@@ -413,10 +415,18 @@ The binoculars by the clock, with a dot in the state's colour:
   whose cause a trace confirmed.
 - **Grey binoculars**: starting, no reading yet.
 
-When PoolWatch opens an incident for a growth, a notice by the clock says so ("Kernel pool: Open files (File) is
-growing."). It names a likely cause only when the evidence is strong; otherwise it says "Open PoolWatch for details."
-A pool that falls gives no notice. When PoolWatch's own check finds the token leak while the guard is off, a notice
-says so; a click on it opens the window on the guard.
+When PoolWatch opens an incident for a growth, a notice by the clock says so, with what grows as its title ("Kernel
+pool: Open files (File) is growing", or "Non-paged pool over the limit"). It names a likely cause only when the
+evidence is strong; otherwise it says "Click here to open PoolWatch for details." A pool that falls gives no notice.
+To get fewer, choose under **Notifications** in Settings **Only when it needs attention**: a notice only when the icon
+turns red, once (for a growth, that is when a trace confirms its cause, which comes after the growth started, so its
+notice names that cause); or **Off**. The change applies at once. When PoolWatch's own check finds the token leak while
+the guard is off, a notice says so; a click on it opens the window on the guard.
+
+A click on a notice opens PoolWatch's window and brings it to the front (a notice about changes PoolWatch made at start
+opens Active changes instead). Starting PoolWatch while it runs, from the Start menu, does the same. If PoolWatch's
+icon goes from the tray when Windows' taskbar restarts, it comes back by itself. To turn PoolWatch's notices off in
+Windows, or see their settings there, use Settings > System > Notifications.
 
 The token-leak guard shows a small window at the bottom right of the screen only when it needs your click, and only
 for its check when PoolWatch starts (or you turn the guard on) or for what you clicked. Windows lets only the program

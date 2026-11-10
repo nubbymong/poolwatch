@@ -4316,7 +4316,7 @@ public sealed class UninstallerTests
         // so after the upgrade an empty place whose file this version has (one Inno Setup was told to skip) keeps its old
         // file set aside, and only a file this version does not have is put back. No old file goes back beside new ones.
         var entries = Regex.Matches(Section("Files"), @"(?m)^Source: ""\{#PublishDir\}.*$").Select(m => m.Value.TrimEnd('\r')).ToList();
-        Assert.Equal(8, entries.Count);
+        Assert.Equal(9, entries.Count); // the build's 8, and the notices' icon (poolwatch.png, TrayAppNoticeTests)
         Assert.All(entries, e => Assert.EndsWith("; BeforeInstall: Shipping", e));
         Assert.DoesNotContain("AfterInstall", Script());
         Assert.Contains("N := GetArrayLength(Shipped); SetArrayLength(Shipped, N + 1); Shipped[N] := ExpandConstant(CurrentFileName);", Whole("Shipping"));
@@ -4742,7 +4742,7 @@ public sealed class UninstallerTests
         Assert.StartsWith("procedure WhenToReplace(const App: String); var Held, Uninstaller: Boolean; Quarter: Integer; begin LookForRestartWork(App);",
             Whole("WhenToReplace"));
         var entries = Regex.Matches(Section("Files"), @"(?m)^Source: ""\{#PublishDir\}.*$");
-        Assert.Equal(8, entries.Count);
+        Assert.Equal(9, entries.Count); // the build's 8, and the notices' icon (poolwatch.png, TrayAppNoticeTests)
         Assert.All(entries, e => Assert.Matches(@"; DestDir: ""\{code:ProgramDir\}(\\app)?"";", e.Value));
         Assert.DoesNotContain("DestDir: \"{app}", Script());
         Assert.DoesNotMatch(@"(?m)^\[(InstallDelete|Dirs)\]", Script()); // nothing else Inno Setup's check would look at
@@ -5413,7 +5413,7 @@ public sealed class UninstallerTests
         Assert.Contains(@"Source: ""{#PublishDir}\PoolWatch.exe""; DestDir: ""{code:ProgramDir}""; Flags: ignoreversion; BeforeInstall: Shipping", lines);
         Assert.Contains(@"Source: ""{#PublishDir}\PoolWatch.exe""; DestDir: ""{code:ProgramDir}""; DestName: ""PoolWatch-selfcontained.exe""; Flags: ignoreversion; Check: SelfContainedNameThere; BeforeInstall: Shipping", lines);
         Assert.Contains(@"Source: ""{#PublishDir}\app\PoolWatch.exe""; DestDir: ""{code:ProgramDir}\app""; Flags: ignoreversion; BeforeInstall: Shipping", lines);
-        Assert.Contains(@"Excludes: ""\PoolWatch.exe,\PoolWatch-selfcontained.exe,\app\PoolWatch.exe,\chatgpt-no-shader-cache.ps1,\AGENTS.md,\LICENSE,\THIRD-PARTY-NOTICES.md""", script);
+        Assert.Contains(@"Excludes: ""\PoolWatch.exe,\PoolWatch-selfcontained.exe,\app\PoolWatch.exe,\chatgpt-no-shader-cache.ps1,\AGENTS.md,\LICENSE,\THIRD-PARTY-NOTICES.md,\poolwatch.png""", script);
         Assert.Contains("CloseApplicationsFilter=*.closes-no-program\n", script.Replace("\r\n", "\n")); // TheSetupClosesNoProgram
         Assert.DoesNotMatch(@"(?m)^\[InstallDelete\]", script);
 

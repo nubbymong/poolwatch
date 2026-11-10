@@ -22,8 +22,9 @@ internal interface INamespaceNative
 internal sealed class AdminNamespaceException(string message) : Exception(message);
 
 /// <summary>
-/// The private object namespace that holds PoolWatch's one-instance mutex, its exit event and the mark of a tray app whose
-/// token guard shows its notices. A private namespace is found by its boundary, not by its name. This one's boundary
+/// The private object namespace that holds PoolWatch's one-instance mutex, its exit event, the mark of a tray app whose
+/// token guard shows its notices, and the event a second start sets to have the running tray app show its window. A
+/// private namespace is found by its boundary, not by its name. This one's boundary
 /// holds the Administrators group and the high integrity level, so only an elevated administrator or SYSTEM can create
 /// it (Windows refuses a creator whose token lacks a SID of the boundary, or whose integrity level is below the
 /// boundary's), and its permissions let only Administrators and SYSTEM open it, or create anything in it: a program
@@ -39,7 +40,7 @@ internal sealed class AdminNamespaceException(string message) : Exception(messag
 /// </summary>
 internal sealed class AdminNamespace
 {
-    /// <summary>The boundary's name and the alias the objects are named through (<c>PoolWatch\Monitor</c>, <c>PoolWatch\Exit</c>, <c>PoolWatch\GuardNotices-1</c> for session 1).</summary>
+    /// <summary>The boundary's name and the alias the objects are named through (<c>PoolWatch\Monitor</c>, <c>PoolWatch\Exit</c>, <c>PoolWatch\GuardNotices-1</c> and <c>PoolWatch\Show-1</c> for session 1).</summary>
     public const string BoundaryName = "PoolWatch", Alias = "PoolWatch";
     /// <summary>The one-instance mutex a running PoolWatch holds, and the event the setup and the uninstaller set to ask it to exit.</summary>
     public const string MonitorLeaf = "Monitor", ExitLeaf = "Exit";
@@ -50,7 +51,12 @@ internal sealed class AdminNamespace
     /// headless run included.
     /// </summary>
     public const string GuardNoticesLeaf = "GuardNotices";
-    /// <summary>The permissions of the namespace and of the exit event: Administrators and SYSTEM, full access; nobody else, and nothing inherited.</summary>
+    /// <summary>
+    /// The start of the name of the event the tray app listens on, one for each Windows session (<see cref="ShowEventName"/>):
+    /// a second start of the tray app in that session sets it, and the running one shows its window (<see cref="ShowSignal"/>).
+    /// </summary>
+    public const string ShowLeaf = "Show";
+    /// <summary>The permissions of the namespace and of its events (exit, show): Administrators and SYSTEM, full access; nobody else, and nothing inherited.</summary>
     internal const string AdminOnly = "D:P(A;;GA;;;BA)(A;;GA;;;SY)";
     /// <summary>
     /// The namespace's whole security: owned by the Administrators group, never by the account that created it (which
@@ -97,6 +103,13 @@ internal sealed class AdminNamespace
     /// protect.
     /// </summary>
     public string GuardNoticesMutexName(int sessionId) => NameOf(GuardNoticesLeaf + "-" + sessionId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// The show event of the Windows session <paramref name="sessionId"/>: <see cref="ShowLeaf"/>, a dash and the session's
+    /// number. One for each session, as the guard-notices mark is (the namespace is one for the whole PC): a start in one
+    /// session never shows the window of a tray app in another, and finds none of its own to set there.
+    /// </summary>
+    public string ShowEventName(int sessionId) => NameOf(ShowLeaf + "-" + sessionId.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
     /// <summary>
     /// PoolWatch's namespace, created or opened on first use and then kept. Throws <see cref="AdminNamespaceException"/>

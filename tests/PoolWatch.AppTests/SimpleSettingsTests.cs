@@ -15,10 +15,64 @@ public class SimpleSettingsTests
     [Fact]
     public void TheFormShowsTheSettingsItMaps()
     {
-        var s = new Settings { AutoClearEnabled = true, AutoClearEveryHours = 2.5, AutoClearPoolGb = 12, DeeperCapture = true, TokenGuardEnabled = true, CheckForUpdates = false };
-        Assert.Equal(new SimpleSettings(true, 2.5m, 12m, true, true, false), SimpleSettings.From(s));
-        // The defaults: off, every hour, over 8 GB, no deeper capture, no token-leak guard, update notices on.
-        Assert.Equal(new SimpleSettings(false, 1m, 8m, false, false, true), SimpleSettings.From(new Settings()));
+        var s = new Settings { AutoClearEnabled = true, AutoClearEveryHours = 2.5, AutoClearPoolGb = 12, DeeperCapture = true, TokenGuardEnabled = true, CheckForUpdates = false,
+            PoolNotices = PoolNoticeLevel.NeedsAttention };
+        Assert.Equal(new SimpleSettings(true, 2.5m, 12m, true, true, false, PoolNoticeLevel.NeedsAttention), SimpleSettings.From(s));
+        // The defaults: off, every hour, over 8 GB, no deeper capture, no token-leak guard, update notices on, a notice for every growth.
+        Assert.Equal(new SimpleSettings(false, 1m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth), SimpleSettings.From(new Settings()));
+    }
+
+    /// <summary>
+    /// Notifications: the form's three choices show the kernel pool notices' setting and write it back, each choice its
+    /// own value, in the owner's words, with the line under them saying what they are for and that the notices needing a
+    /// click still appear.
+    /// </summary>
+    [Fact]
+    public void TheNotificationsChoicesMapToPoolNoticesBothWays()
+    {
+        Assert.Equal(PoolNoticeLevel.EveryGrowth, new Settings().PoolNotices); // today's behaviour stays the default
+        foreach (var level in Enum.GetValues<PoolNoticeLevel>())
+        {
+            var s = new Settings();
+            Assert.True((SimpleSettings.From(s) with { PoolNotices = level }).ApplyTo(s, out _));
+            Assert.Equal(level, s.PoolNotices);
+            Assert.Equal(level, SimpleSettings.From(s).PoolNotices);
+        }
+        var fields = new SimpleSettingsFields();
+        Assert.Equal([SimpleSettings.EveryGrowthChoice, SimpleSettings.NeedsAttentionChoice, SimpleSettings.NoticesOffChoice], fields.NoticeChoices.Select(c => c.Text));
+        Assert.Equal(["Every growth", "Only when it needs attention", "Off"], fields.NoticeChoices.Select(c => c.Text));
+        Assert.Equal(PoolNoticeLevel.EveryGrowth, fields.Values().PoolNotices); // a new form: the default picked
+        var choice = new Dictionary<PoolNoticeLevel, RadioButton>
+        {
+            [PoolNoticeLevel.EveryGrowth] = fields.EveryGrowth, [PoolNoticeLevel.NeedsAttention] = fields.NeedsAttention, [PoolNoticeLevel.Off] = fields.NoticesOff,
+        };
+        foreach (var level in Enum.GetValues<PoolNoticeLevel>())
+        {
+            fields.Fill(SimpleSettings.From(new Settings { PoolNotices = level }));
+            Assert.Equal([level], choice.Where(c => c.Value.Checked).Select(c => c.Key)); // one choice, the setting's
+            Assert.Equal(level, fields.Values().PoolNotices);
+        }
+        foreach (var level in Enum.GetValues<PoolNoticeLevel>())
+        {
+            choice[level].Checked = true; // the owner picks it: the others clear, wherever they are laid out
+            Assert.Equal([level], choice.Where(c => c.Value.Checked).Select(c => c.Key));
+            Assert.Equal(level, fields.Values().PoolNotices);
+        }
+        Assert.Equal("Notifications", SimpleSettings.NoticesHeading);
+        // The line under the choices says what they are for (the kernel pool's notices) and that the notices needing a click
+        // always appear.
+        Assert.Equal("Notices about the kernel pool. The token-leak guard's need your click and always appear.", SimpleSettings.NoticesHint);
+        Assert.Contains("A click on a notice opens PoolWatch.", SimpleSettings.EveryGrowthTip);
+        Assert.Contains("red", SimpleSettings.NeedsAttentionTip);
+        foreach (var text in new[] { SimpleSettings.NoticesHint, SimpleSettings.EveryGrowthTip, SimpleSettings.NeedsAttentionTip, SimpleSettings.NoticesOffTip })
+        {
+            Assert.DoesNotContain(nameof(Settings.PoolNotices), text);
+            Assert.All(text.Split('\n'), line => Assert.True(line.Length <= 100, line)); // a tooltip breaks its own lines
+        }
+        // The UI smoke test finds the line under the choices by a -like pattern, which matches it as it is now.
+        string m4 = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "ci", "m4-ui.ps1"));
+        string like = System.Text.RegularExpressions.Regex.Match(m4, @"\$_ -like '(?<p>Notices about the kernel pool(?:[^']|'')+)'").Groups["p"].Value.Replace("''", "'");
+        Assert.Equal(SimpleSettings.NoticesHint, like);
     }
 
     [Fact]
@@ -29,12 +83,12 @@ public class SimpleSettingsTests
         var off = SimpleSettings.From(s) with { TokenGuard = false }; // the box unticked
         Assert.True(off.ApplyTo(s, out _));
         Assert.False(s.TokenGuardEnabled);
-        Assert.True(new SimpleSettings(false, 1m, 8m, false, true, true).ApplyTo(s, out var problems));
+        Assert.True(new SimpleSettings(false, 1m, 8m, false, true, true, PoolNoticeLevel.EveryGrowth).ApplyTo(s, out var problems));
         Assert.Empty(problems);
         Assert.True(s.TokenGuardEnabled);
         // A refused form writes nothing, the guard included.
         var t = new Settings();
-        Assert.False(new SimpleSettings(true, 0m, 0m, false, true, true).ApplyTo(t, out _));
+        Assert.False(new SimpleSettings(true, 0m, 0m, false, true, true, PoolNoticeLevel.EveryGrowth).ApplyTo(t, out _));
         Assert.False(t.TokenGuardEnabled);
     }
 
@@ -82,8 +136,9 @@ public class SimpleSettingsTests
         var fields = new SimpleSettingsFields();
         foreach (var v in new SimpleSettings[]
                  {
-                     new(true, 2.5m, 12m, false, false, false), new(false, 6m, 0m, true, false, false),
-                     new(false, 1m, 8m, false, true, false), new(false, 0.5m, 1m, false, false, true),
+                     new(true, 2.5m, 12m, false, false, false, PoolNoticeLevel.Off), new(false, 6m, 0m, true, false, false, PoolNoticeLevel.Off),
+                     new(false, 1m, 8m, false, true, false, PoolNoticeLevel.Off), new(false, 0.5m, 1m, false, false, true, PoolNoticeLevel.Off),
+                     new(false, 0.5m, 1m, false, false, false, PoolNoticeLevel.NeedsAttention), new(false, 0.5m, 1m, false, false, false, PoolNoticeLevel.EveryGrowth),
                  })
         {
             fields.Fill(v);
@@ -134,13 +189,20 @@ public class SimpleSettingsTests
     [Fact]
     public void TheFormSaysWhatSaveAppliesAtOnceAndWhatWaits()
     {
+        // The notifications are said with the others, since the tray reads them at each notice.
         foreach (var text in new[] { SimpleSettings.Saved, SimpleSettings.WhenChangesApply })
         {
-            Assert.Contains("automatic clearing, the token-leak guard and update notices", text, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("automatic clearing, the token-leak guard, notifications and update notices", text, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("the next time PoolWatch starts", text);
         }
         // With --config nothing is saved for the next start, and Save says so.
-        Assert.Contains("automatic clearing, the token-leak guard and update notices apply now", SimpleSettings.NotSavedWithConfig, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("automatic clearing, the token-leak guard, notifications and update notices apply now", SimpleSettings.NotSavedWithConfig, StringComparison.OrdinalIgnoreCase);
+        // The UI smoke test (ci/m4-ui.ps1) finds the bottom line by a -like pattern, which matches it as it is now.
+        string m4 = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "ci", "m4-ui.ps1"));
+        string like = System.Text.RegularExpressions.Regex.Match(m4, @"\$_ -like '(?<p>\*Save puts [^']+)'").Groups["p"].Value;
+        Assert.NotEqual("", like);
+        Assert.Matches(new System.Text.RegularExpressions.Regex("^" + System.Text.RegularExpressions.Regex.Escape(like).Replace(@"\*", ".*") + "$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline), SimpleSettings.WhenChangesApply);
         Assert.Contains("Nothing is saved for the next time PoolWatch starts", SimpleSettings.NotSavedWithConfig);
         Assert.DoesNotContain("CaptureOnAlert", SimpleSettings.DeeperCaptureHint(new Settings())); // a setting's name is not plain words
     }
@@ -156,11 +218,11 @@ public class SimpleSettingsTests
     }
 
     [Fact]
-    public void SavingWritesExactlyTheSixSettingsAndNothingElse()
+    public void SavingWritesExactlyTheSevenSettingsAndNothingElse()
     {
         var s = new Settings();
         string before = s.ToJson();
-        Assert.True(new SimpleSettings(true, 6m, 10.5m, true, true, false).ApplyTo(s, out var problems));
+        Assert.True(new SimpleSettings(true, 6m, 10.5m, true, true, false, PoolNoticeLevel.Off).ApplyTo(s, out var problems));
         Assert.Empty(problems);
         Assert.True(s.AutoClearEnabled);
         Assert.Equal(6, s.AutoClearEveryHours);
@@ -168,13 +230,51 @@ public class SimpleSettingsTests
         Assert.True(s.DeeperCapture);
         Assert.True(s.TokenGuardEnabled);
         Assert.False(s.CheckForUpdates);
+        Assert.Equal(PoolNoticeLevel.Off, s.PoolNotices);
         // Every other setting is as it was.
         var back = new Settings();
         var other = Settings.Parse(s.ToJson());
+        Assert.Equal(PoolNoticeLevel.Off, other.PoolNotices); // as settings.json keeps it
         other.AutoClearEnabled = back.AutoClearEnabled; other.AutoClearEveryHours = back.AutoClearEveryHours;
         other.AutoClearPoolGb = back.AutoClearPoolGb; other.DeeperCapture = back.DeeperCapture;
         other.TokenGuardEnabled = back.TokenGuardEnabled; other.CheckForUpdates = back.CheckForUpdates;
+        other.PoolNotices = back.PoolNotices;
         Assert.Equal(Settings.Parse(before).ToJson(), other.ToJson());
+    }
+
+    /// <summary>
+    /// The notifications take effect at once, as the other at-once settings: Save puts the form's choice into the running
+    /// settings and settings.json (LiveSettings.Apply), and the tray reads the running value at each notice, so the next
+    /// incident's notice follows it with no restart. A choice the form left alone never undoes one made elsewhere.
+    /// </summary>
+    [Fact]
+    public void TheNotificationsChoiceAppliesAtOnce()
+    {
+        var shown = AtOnceSettings.Of(new Settings());
+        var running = new Settings();
+        var apply = AtOnceSettings.ToApply(shown, shown with { PoolNotices = PoolNoticeLevel.Off }, AtOnceSettings.Of(running));
+        Assert.Equal(PoolNoticeLevel.Off, apply.PoolNotices);
+        using var f = new ChangeFixture();
+        Directory.CreateDirectory(f.Paths.DataRoot);
+        var live = f.Live(running, persist: true);
+        live.Apply("Settings", apply.ApplyTo); // as SettingsEditor.Save does
+        Assert.Equal(PoolNoticeLevel.Off, live.Running.PoolNotices);
+        Assert.Equal(PoolNoticeLevel.Off, Settings.Load(f.Paths.SettingsFile).PoolNotices);
+        // The tray's handler, given the running value as it reads it at each notice, shows nothing now.
+        var info = new Core.Tags.TagInfo("<unknown>", "File objects", "pooltag.txt");
+        var growth = new Core.Incidents.Incident { Id = "x", Dir = @"C:\data\incidents\x", Tag = PoolTag.Parse("File"), Kind = Core.Incidents.IncidentKind.Growth };
+        Assert.Null(PoolCauses.TrayNotice(growth, live.Running.PoolNotices, _ => info, [], _ => { }));
+        live.Apply("Settings", s => s.PoolNotices = PoolNoticeLevel.EveryGrowth);
+        Assert.NotNull(PoolCauses.TrayNotice(growth, live.Running.PoolNotices, _ => info, [], _ => { }));
+        // Left alone in the form, a value set elsewhere stays.
+        var elsewhere = AtOnceSettings.Of(new Settings { PoolNotices = PoolNoticeLevel.NeedsAttention });
+        Assert.Equal(PoolNoticeLevel.NeedsAttention, AtOnceSettings.ToApply(shown, shown with { CheckForUpdates = false }, elsewhere).PoolNotices);
+        // The tray reads it at each notice and at each refresh of its icon (the wiring needs the running app, so its lines
+        // are held).
+        string tray = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "TrayApp.cs"));
+        Assert.Contains("_notices.Opened(inc, _live.Running.PoolNotices)", tray);
+        Assert.Contains("_notices.TurnedRed(_analysis.Incidents.Open, _live.Running.PoolNotices)", tray);
+        Assert.Contains("PoolCauses.TrayNotice(i, level, lookup, services(), log)", File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "PoolCauses.cs")));
     }
 
     [Fact]
@@ -260,24 +360,24 @@ public class SimpleSettingsTests
     public void AutomaticClearingNeedsSomethingToGoBy()
     {
         var s = new Settings();
-        Assert.False(new SimpleSettings(true, 0m, 0m, false, false, true).ApplyTo(s, out var problems));
+        Assert.False(new SimpleSettings(true, 0m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth).ApplyTo(s, out var problems));
         Assert.Contains(problems, p => p.Contains("nothing to go by"));
         Assert.False(s.AutoClearEnabled); // nothing was written
         // Off, the two zeros are fine; on, either rule alone is fine.
-        Assert.Empty(new SimpleSettings(false, 0m, 0m, false, false, true).Problems());
-        Assert.Empty(new SimpleSettings(true, 0m, 8m, false, false, true).Problems());
-        Assert.Empty(new SimpleSettings(true, 1m, 0m, false, false, true).Problems());
+        Assert.Empty(new SimpleSettings(false, 0m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth).Problems());
+        Assert.Empty(new SimpleSettings(true, 0m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth).Problems());
+        Assert.Empty(new SimpleSettings(true, 1m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth).Problems());
     }
 
     [Fact]
     public void OutOfRangeValuesAreRefusedInPlainWords()
     {
-        Assert.Contains(new SimpleSettings(true, 0.2m, 0m, false, false, true).Problems(), p => p.Contains("half hour"));
-        Assert.Contains(new SimpleSettings(false, 200m, 8m, false, false, true).Problems(), p => p.StartsWith("How often"));
-        Assert.Contains(new SimpleSettings(false, -1m, 8m, false, false, true).Problems(), p => p.StartsWith("How often"));
-        Assert.Contains(new SimpleSettings(false, 1m, 2000m, false, false, true).Problems(), p => p.StartsWith("Pool size"));
-        Assert.Contains(new SimpleSettings(false, 1m, -0.5m, false, false, true).Problems(), p => p.StartsWith("Pool size"));
-        Assert.Empty(new SimpleSettings(true, SimpleSettings.MinHours, SimpleSettings.MaxPoolGb, true, false, true).Problems());
+        Assert.Contains(new SimpleSettings(true, 0.2m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth).Problems(), p => p.Contains("half hour"));
+        Assert.Contains(new SimpleSettings(false, 200m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth).Problems(), p => p.StartsWith("How often"));
+        Assert.Contains(new SimpleSettings(false, -1m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth).Problems(), p => p.StartsWith("How often"));
+        Assert.Contains(new SimpleSettings(false, 1m, 2000m, false, false, true, PoolNoticeLevel.EveryGrowth).Problems(), p => p.StartsWith("Pool size"));
+        Assert.Contains(new SimpleSettings(false, 1m, -0.5m, false, false, true, PoolNoticeLevel.EveryGrowth).Problems(), p => p.StartsWith("Pool size"));
+        Assert.Empty(new SimpleSettings(true, SimpleSettings.MinHours, SimpleSettings.MaxPoolGb, true, false, true, PoolNoticeLevel.EveryGrowth).Problems());
     }
 
     [Fact]
@@ -300,10 +400,10 @@ public class SimpleSettingsTests
         Assert.DoesNotContain("0 hours", hint);
         Assert.Equal(["On a schedule", "At a pool size", "Whichever comes first"], new[] { SimpleSettings.ScheduleChoice, SimpleSettings.SizeChoice, SimpleSettings.EitherChoice });
         // And either rule alone can be saved: a schedule with no size rule, a size rule with no schedule.
-        Assert.Empty(new SimpleSettings(true, 1m, 0m, false, false, true).Problems());
-        Assert.Empty(new SimpleSettings(true, 0m, 8m, false, false, true).Problems());
+        Assert.Empty(new SimpleSettings(true, 1m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth).Problems());
+        Assert.Empty(new SimpleSettings(true, 0m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth).Problems());
         var s = new Settings();
-        Assert.True(new SimpleSettings(true, 0m, 8m, false, false, true).ApplyTo(s, out _));
+        Assert.True(new SimpleSettings(true, 0m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth).ApplyTo(s, out _));
         Assert.Equal((true, 0.0, 8.0), (s.AutoClearEnabled, s.AutoClearEveryHours, s.AutoClearPoolGb));
     }
 
@@ -321,7 +421,7 @@ public class SimpleSettingsTests
         var fields = new SimpleSettingsFields();
         Assert.Equal([SimpleSettings.ScheduleChoice, SimpleSettings.SizeChoice, SimpleSettings.EitherChoice], new[] { fields.Schedule.Text, fields.PoolSize.Text, fields.Either.Text });
         // A schedule alone: the size field shows the usual 8 GB, unused, and is saved as no size rule.
-        fields.Fill(new SimpleSettings(true, 2m, 0m, false, false, true));
+        fields.Fill(new SimpleSettings(true, 2m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth));
         Assert.Equal((ClearRule.Schedule, 2m, 8m), (fields.Rule, fields.Hours.Value, fields.PoolGb.Value));
         Assert.Equal((2m, 0m), (fields.Values().EveryHours, fields.Values().PoolGb));
         // The owner picks whichever comes first: both numbers count.
@@ -332,7 +432,7 @@ public class SimpleSettingsTests
         Assert.Equal((0m, 8m), (fields.Values().EveryHours, fields.Values().PoolGb));
         Assert.Empty(fields.Values().Problems());
         // A size alone, read back as a size alone (the schedule field shows the usual hour).
-        fields.Fill(new SimpleSettings(true, 0m, 12m, false, false, true));
+        fields.Fill(new SimpleSettings(true, 0m, 12m, false, false, true, PoolNoticeLevel.EveryGrowth));
         Assert.Equal((ClearRule.PoolSize, 1m, 12m), (fields.Rule, fields.Hours.Value, fields.PoolGb.Value));
     }
 }

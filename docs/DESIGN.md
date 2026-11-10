@@ -557,11 +557,35 @@ notices are on; it opens that release's page, section 18), the tools that are no
 boot report, Open incident folder, Export vendor bundle, Copy latest incident summary, Mark, the experiments), Remove my
 clear task and Remove old clear-cache tasks (only while there is one to remove), Report an issue..., About PoolWatch
 (version, overhead, data folder, what PoolWatch changes, credits and licences) and Exit. When a growth incident (or one
-of the non-paged pool over its limit) opens, a notice says so in the status sentence's words: "Kernel pool: Open files
-(File) is growing." (", with non-paged pool over the limit" for the second), then "PoolWatch is keeping an eye on X."
-only at strong evidence or a trace, else "Open PoolWatch for details." (`PoolCauses.IncidentNotice`). A release or a
-capture gives no notice. The token-leak watch (section 16) also looks in from the tray every 30 minutes, so it runs
-while the window is hidden (with no facts about the PC yet, as after an upgrade, it reads the PC first); its notice,
+of the non-paged pool over its limit) opens, a notice says so in the status sentence's words, with its headline as its
+title (Windows 11 shows a notice as a toast with PoolWatch's name and icon above it, so no notice's title is
+"PoolWatch"): "Kernel pool: Open files (File) is growing" ("Non-paged pool over the limit" for the second, whose text
+starts with that sentence; "Kernel pool growing" when a tag's words are too long for a title, which shows 63
+characters), then "PoolWatch is keeping an eye on X." only at strong evidence or a trace, else "Click here to open
+PoolWatch for details." (`PoolCauses.IncidentNotice`). A release or a capture gives no notice. Which of these notices
+show is Settings' Notifications choice (`Settings.PoolNotices`, read at each notice and at each refresh of the tray
+icon, so a change applies at once): every one, as the incident opens (the default, also for a `settings.json` without
+it); only one the tray icon shows red, by the icon's own rule (`PoolCauses.NoticeWanted`), told as the incident opens
+when it is red then (the non-paged pool over its limit, or a re-opened growth that still carries its trace) and
+otherwise at the icon's 10-second refresh once it turns red (a growth whose cause a trace confirmed: the incident
+manager raises its event before any trace, so a new growth is never red as it opens); or none. Each episode of an
+incident gets at most one notice, under any choice, so a change of the choice repeats none (`IncidentNotices`); one
+held back as the incident opens is a line in `poolwatch.log`. The token-leak guard's notices are not these, and always
+show. A click on any notice opens the main window in the view last
+used and brings it to the front, unless that notice offers a place of its own (Active changes for the service profile's,
+the guard's offer for the token-leak watch's). Windows says only that a notice of the icon was clicked, never which, and
+a close changes nothing: the latest notice's own place runs once, and every other click opens the window
+(`BalloonClick`), so a click Windows passes on after the notice left the screen (from the notification centre) opens it
+too, and a close that comes late, after the next notice showed, never takes that notice's place away. Whether Windows
+passes on a click in the notification centre to a legacy notice of a running program, or starts the program's Start menu
+entry for it instead, is to be seen on a real PC: PoolWatch opens its window either way. Each notice shown, each click
+and the first close after each notice is one line in `poolwatch.log`. A start of PoolWatch while its tray app runs in
+the same session (from the Start menu, or by Windows for a click on a notice in the notification centre, if it does so)
+shows that window and brings it to the front instead of saying "already running" (`ShowSignal`, section 19); one
+started with `--tray`, or with no tray app of its session listening, says "already running" as before. The icon comes
+back after Explorer restarts: Explorer's "TaskbarCreated", which Windows stops on its way to an elevated program
+(UIPI), is let through to a hidden window of the tray app's own, and the icon is added again then (`TaskbarWatch`). The
+token-leak watch (section 16) also looks in from the tray every 30 minutes, so it runs while the window is hidden (with no facts about the PC yet, as after an upgrade, it reads the PC first); its notice,
 when a check it started found the leak with the guard off, opens the window on the guard's offer (the Simple view's
 card, or the switch in Settings in the Advanced view). The token-leak guard's own notices (`GuardNotices`: small
 windows at the bottom right, not balloons) show only when the user's click is needed, and only for the start's check
@@ -699,7 +723,11 @@ graph's row gives its room to the tab (`MainForm.AdvancedRows`); the graph is ba
   not, and put back when the change is not made) and update notices (`CheckForUpdates`); automatic cache clearing
   (`AutoClearEnabled`, `AutoClearEveryHours`, `AutoClearPoolGb`), named as its three rules (On a schedule, At a pool
   size, Whichever comes first, recommended), with the line under it saying first that a clear takes a few seconds and
-  video or the mouse may stutter while it runs, then the 30-minute spacing; deeper captures (`DeeperCapture`, with a
+  video or the mouse may stutter while it runs, then the 30-minute spacing; under it, **Notifications**
+  (`PoolNotices`): which kernel pool notices the tray shows, as three choices (Every growth, the default; Only when it
+  needs attention, the ones the tray icon shows red; Off), each with a tooltip, and the line under them that these are
+  the notices about the kernel pool and that the token-leak guard's, which need your click, always appear (in that
+  column because the form must fit a 1024 x 600 screen); deeper captures (`DeeperCapture`, with a
   line saying when it has no
   effect); the token-leak guard (`TokenGuardEnabled`: a line under the box with its trade-off, that it lasts until
   sign-out, that PoolWatch turns it on again each time it starts and that unticking it ends it; the rest in its tooltip,
@@ -714,7 +742,9 @@ graph's row gives its room to the tab (`MainForm.AdvancedRows`); the graph is ba
   `SettingsVersion` (the file's format, which every save writes). Every setting the grid shows has a short description
   (`[Description]`, in plain words: what it does and its default, its unit where it has one, and the limits `Normalize`
   holds it to: a number's range, a text's length, a list's size, a local drive path), which the box under the grid
-  shows for the selected one. A text that is empty by default says "Empty (the default)" and what empty means; the
+  shows for the selected one. A choice of a few (`PoolNotices`, which the grid offers as a list) names each value and
+  its default as "EveryGrowth (default)". A text that is empty by default says "Empty (the default)" and what empty
+  means; the
   watched apps give how many there are by default and two of them; a growth alert's own two values give the defaults
   of an alert added in the list's editor (that editor, WinForms' own, shows no description box). The box shows two
   lines, so each description in the grid is at most two lines at the dialog's own size; tests measure that, and hold
@@ -722,10 +752,10 @@ graph's row gives its room to the tab (`MainForm.AdvancedRows`); the graph is ba
   this form's sign-in box sets the scheduled task itself, through `LogonTask.Set`
   (a `startAtLogon` an earlier build saved in `settings.json`, never read, is skipped when read and left out at the next
   save); the form and the grid edit the same settings and share one Save. Save puts the
-  automatic clear, the token-leak guard and update notices into effect at once (section 14), only those the form
-  changed; every other setting applies at PoolWatch's next start, and the form says which. Each opening
+  automatic clear, the token-leak guard, the notifications and update notices into effect at once (section 14), only
+  those the form changed; every other setting applies at PoolWatch's next start, and the form says which. Each opening
   starts from `settings.json`, so a change saved for the next start (deeper capture, an Advanced value) shows again and
-  is never written back over, with the three at-once settings as they run (with `--config`, from the running settings,
+  is never written back over, with the four at-once settings as they run (with `--config`, from the running settings,
   and Save then keeps nothing for the next start: section 14). Both forms are created each time they open.
 - **Pool causes** is one list merging what were four tabs: open incidents and those of the last 7 days; tags the
   detector marks growing, retained or released that no open incident covers; live processes whose handles rose 5,000 or
@@ -1245,8 +1275,8 @@ turned off and what it could not, with the log file's path for why (when it woul
 shows: fewer names, then no "Click here", then "The profile applied at start" for the profile's name when that is
 shorter; the log's path and "says why." stay whole, and no word is cut; only a log folder so long, one given with
 `--out`, that the notice is still too long makes the words before the log's path give way from the first one on, marked
-"...", and a log path too long even for that ends the notice where a word ends), and a click on it opens Active changes (`BalloonClick`: each notice its own action, run once, so a click
-never runs an older notice's). The self-repair warning for a service turned back on names the profile only when it lists
+"...", and a log path too long even for that ends the notice where a word ends), and a click on it opens Active changes (`BalloonClick`: the latest notice's own action, run once, so a click
+never runs an older notice's; any other click opens the main window, section 11). The self-repair warning for a service turned back on names the profile only when it lists
 the service and would turn it off as it is now (`ServicePlan.OnAt`). Nothing asks the user at start: ticking "Apply this
 profile when PoolWatch starts" in the save dialog is the consent, and a save that makes a profile apply at start while
 some of its services are on offers to turn exactly those off now, through Turn off's own question, recorded as the
@@ -1281,9 +1311,11 @@ switches made before this version (they are only in `findings.jsonl`).
 
 ## 14. Live settings
 
-A saved setting takes effect at PoolWatch's next start, except three: the automatic clear and the token-leak guard
+A saved setting takes effect at PoolWatch's next start, except four: the automatic clear and the token-leak guard
 apply at once when setup, a card, Settings' Save or Active changes changes them, and update notices when setup or
-Settings does, or the next-clear line, Active changes and the update notice would be wrong until a restart.
+Settings does, or the next-clear line, Active changes and the update notice would be wrong until a restart; and the
+notifications (`PoolNotices`) when Settings does, since the tray reads the running value at each notice and at each
+refresh of its icon.
 Show RAM and the service profiles (section 13) are saved the same way whenever the window changes them.
 `LiveSettings.Apply` loads `settings.json`, changes it, normalises it, writes it to a temporary file and moves it over
 the old one (not with `--config`, which is read-only); a failed write throws and changes nothing. Then it changes the
@@ -1295,7 +1327,7 @@ file is never written, so it returns nothing and Settings starts from the runnin
 setting for the next start through `LiveSettings.SaveForNextStart`, with the service profiles as `settings.json` holds
 them then (the Services tab owns them, so an older copy never puts back a profile changed since). With `--config` it
 writes nothing at all, so a `--config` file's settings, its service profiles included, never become PoolWatch's own:
-Save then puts only the three at-once settings into effect and says that nothing was kept for the next start.
+Save then puts only the four at-once settings into effect and says that nothing was kept for the next start.
 
 ## 15. The automatic cache clear
 
@@ -1484,8 +1516,12 @@ shortcut it was started from are passed on (`Native.ForChild`), so a window of a
 groups with it and a pin of it is that shortcut; a PoolWatch started any other way (the logon task, Explorer, a console)
 gets the launcher's AppUserModelID with `STARTF_PREVENTPINNING` instead, so none of its windows can be pinned, as such a
 pin would name `app\PoolWatch.exe` itself (the setup's Start menu entry carries that same AppUserModelID, so PoolWatch's
-windows and notices are one app with that entry however PoolWatch was started); PoolWatch is started in its own app
-folder, so nothing loaded by a bare name before its own code runs comes from the folder the caller was in, and that
+windows and notices are one app with that entry however PoolWatch was started; the setup also registers that
+AppUserModelID in Windows' own list, as Microsoft documents it for an unpackaged app's notifications:
+`HKLM\Software\Classes\AppUserModelId\PoolWatch.Monitor` with `DisplayName` and an `IconUri` naming `poolwatch.png`,
+the emblem as a PNG installed beside the launcher; the owner's PC had no such entry while the "..." menu on a notice did
+nothing, and whether the entry is what that menu needs is to be seen on a real PC; the uninstaller removes it);
+PoolWatch is started in its own app folder, so nothing loaded by a bare name before its own code runs comes from the folder the caller was in, and that
 folder is passed on in the block instead (`POOLWATCH_STARTED_IN`, the launcher's own current folder, never a variable of
 its environment); it waits and ends with PoolWatch's exit code. In PoolWatch, `LaunchGate.Check` runs first in
 `Program.Main`: not elevated, it hands the start to the launcher through the shell (the administrator prompt is then the
@@ -1818,8 +1854,16 @@ and the token-leak guard's failsafe runs. `--stop-running` and the cleanup set i
 the one-instance mutex (which an exiting PoolWatch leaves abandoned; the cleanup takes it either way). An event that
 already exists, which PoolWatch did not create, is not used.
 
+**The show signal** (`Engine/ShowSignal.cs`) is the same kind of event, with the same admin-only DACL, one for each
+Windows session (`PoolWatch\Show-<session>`, `AdminNamespace.ShowEventName`), created by the tray app (not in the CI UI
+test) and listened on with a wait that runs each time it is set. A tray app started while the one-instance mutex is held
+lets the running one take the foreground (`AllowSetForegroundWindow`) and sets its own session's event, and the running
+one shows its main window and brings it to the front; setting it does nothing else. With no event of its session to set (a headless run holds the mutex, or the tray app runs in another
+session) it says "already running" in a box as before, and so does one started with `--tray`, which opens no window.
+
 **PoolWatch's private names** (`Engine/AdminNamespace.cs`). The event and the one-instance mutex are named
-`PoolWatch\Exit` and `PoolWatch\Monitor` in a private object namespace, not in the global or the session namespace. The
+`PoolWatch\Exit` and `PoolWatch\Monitor` (and the show signal `PoolWatch\Show-<session>`) in a private object
+namespace, not in the global or the session namespace. The
 namespace's boundary holds the Administrators SID and the high integrity level, so Windows lets only an elevated
 administrator or SYSTEM create it (a creator whose
 token lacks a boundary SID, or whose integrity level is below the boundary's, is refused); its DACL lets only

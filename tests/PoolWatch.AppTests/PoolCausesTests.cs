@@ -224,28 +224,43 @@ public class PoolCausesTests
         Assert.Null(PoolCauses.TagCause(view with { Answer = view.Answer with { Growth = 0 } }, Running));
     }
 
+    /// <summary>
+    /// The notice's headline is its title, and the rest its text: Windows 11 shows the notice as a toast with PoolWatch's
+    /// name above it, so a title of "PoolWatch" said the name twice and left the headline to the text. A notice that names
+    /// no cause says that a click opens PoolWatch (it does: <see cref="TrayAppNoticeTests"/>).
+    /// </summary>
     [Fact]
     public void TheTraysIncidentNoticeSaysKernelPoolAndNamesACauseOnlyAtStrongEvidence()
     {
         var info = new TagInfo("<unknown>", "File objects", "pooltag.txt");
         var strong = Open(owners: [Ranked(LeakerByPid, Confidence.StronglyCorrelated)], suspects: [Process("Leaker.exe")]);
-        Assert.Equal("Kernel pool: Open files (File) is growing. PoolWatch is keeping an eye on Leaker.", PoolCauses.IncidentNotice(strong, info, Running));
+        Assert.Equal(new NoticeText("Kernel pool: Open files (File) is growing", "PoolWatch is keeping an eye on Leaker."), PoolCauses.IncidentNotice(strong, info, Running));
 
         // A weaker suspect is not named, as on the status line: growth often goes away by itself.
         var weak = Process("Leaker.exe");
         weak.Confidence = Confidence.Correlated;
-        Assert.Equal("Kernel pool: Open files (File) is growing. Open PoolWatch for details.", PoolCauses.IncidentNotice(Open(suspects: [weak]), info, Running));
-        Assert.Equal("Kernel pool: Open files (File) is growing. Open PoolWatch for details.", PoolCauses.IncidentNotice(Open(), info, Running));
+        var details = new NoticeText("Kernel pool: Open files (File) is growing", "Click here to open PoolWatch for details.");
+        Assert.Equal(details, PoolCauses.IncidentNotice(Open(suspects: [weak]), info, Running));
+        Assert.Equal(details, PoolCauses.IncidentNotice(Open(), info, Running));
         // A cause nobody knows by a name is not named either.
         var system = Open(owners: [Ranked(new Owner(OwnerKind.System, "system", "the kernel (System worker threads)"), Confidence.StronglyCorrelated)]);
-        Assert.EndsWith("is growing. Open PoolWatch for details.", PoolCauses.IncidentNotice(system, info, Running));
+        Assert.Equal(details, PoolCauses.IncidentNotice(system, info, Running));
 
-        string? total = PoolCauses.IncidentNotice(Open(IncidentKind.NonPagedTotal, traced: [new TraceOwner { Owner = new Owner(OwnerKind.App, "app:codex", "Codex") }]), info, Running);
-        Assert.Equal("Kernel pool: Open files (File) is growing, with non-paged pool over the limit. PoolWatch is keeping an eye on Codex.", total);
-        foreach (var text in new[] { PoolCauses.IncidentNotice(strong, info, Running)!, total! })
+        var total = PoolCauses.IncidentNotice(Open(IncidentKind.NonPagedTotal, traced: [new TraceOwner { Owner = new Owner(OwnerKind.App, "app:codex", "Codex") }]), info, Running);
+        Assert.Equal(new NoticeText("Non-paged pool over the limit", "Kernel pool: Open files (File) is growing. PoolWatch is keeping an eye on Codex."), total);
+
+        // A tag whose words are too long for a title: the title says what happens, and the text what grows.
+        var wordy = new TagInfo("examplenetworkdriver.sys", "Receive buffers of the example network", "pooltag.txt");
+        var other = new Incident { Id = "20261027-140000-Abcd-64636241", Dir = @"C:\data\incidents\y", Tag = PoolTag.Parse("Abcd"), Kind = IncidentKind.Growth };
+        var longOne = PoolCauses.IncidentNotice(other, wordy, Running)!;
+        Assert.Equal("Kernel pool growing", longOne.Title);
+        Assert.Equal("Kernel pool: Receive buffers of the example network (Abcd, examplenetworkdriver.sys) is growing. Click here to open PoolWatch for details.", longOne.Text);
+        foreach (var notice in new[] { PoolCauses.IncidentNotice(strong, info, Running)!, total!, details, longOne })
         {
-            Assert.DoesNotMatch(new Regex(@"\.exe\b|\(PID \d+\)|>"), text); // no exe, no PID, no detector rule
-            Assert.True(text.Length <= 250, text); // what a notification shows
+            Assert.DoesNotMatch(new Regex(@"\.exe\b|\(PID \d+\)|>"), notice.Title + " " + notice.Text); // no exe, no PID, no detector rule
+            Assert.True(notice.Text.Length <= 250, notice.Text); // what a notification shows
+            Assert.True(notice.Title.Length <= PoolCauses.MaxNoticeTitle, notice.Title);
+            Assert.NotEqual("PoolWatch", notice.Title); // the toast names the app already
         }
 
         // A pool released (a tag that dropped with no growth incident, often after PoolWatch's own clear) is no alarm:
@@ -267,8 +282,10 @@ public class PoolCausesTests
         var row = PoolCauses.ForIncident(Incident(IncidentKind.NonPagedTotal, 300 * MB, open: true), "Open files (File)", Now);
         Assert.Equal("Open files (File), with " + Words, row.What);
         Assert.StartsWith(row.What + ": ", row.Title);
-        Assert.Equal($"Kernel pool: Open files (File) is growing, with {Words}. Open PoolWatch for details.",
+        // The notice says it as its title, the headline (in capitals: it starts the title).
+        Assert.Equal(new NoticeText("Non-paged pool over the limit", "Kernel pool: Open files (File) is growing. Click here to open PoolWatch for details."),
             PoolCauses.IncidentNotice(Open(IncidentKind.NonPagedTotal), new TagInfo("<unknown>", "File objects", "pooltag.txt"), Running));
+        Assert.Equal(Words, PoolCauses.NonPagedTitle.ToLowerInvariant());
         Assert.Equal($"h\r\nIncident x ({Words}), tag File\r\n",
             PoolWatch.Core.Util.CopyText.IncidentDetails("""{ "id": "x", "kind": "NonPagedTotal", "tag": "File", "headline": "h" }"""));
     }
@@ -280,12 +297,128 @@ public class PoolCausesTests
         var log = new List<string>();
         var asked = new List<PoolTag>();
         var strong = Open(owners: [Ranked(LeakerByPid, Confidence.StronglyCorrelated)]);
-        Assert.Equal("Kernel pool: Open files (File) is growing. PoolWatch is keeping an eye on Leaker.",
-            PoolCauses.TrayNotice(strong, t => { asked.Add(t); return info; }, Running, log.Add)); // never the bare tag code
+        Assert.Equal(new NoticeText("Kernel pool: Open files (File) is growing", "PoolWatch is keeping an eye on Leaker."),
+            PoolCauses.TrayNotice(strong, PoolNoticeLevel.EveryGrowth, t => { asked.Add(t); return info; }, Running, log.Add)); // never the bare tag code
         Assert.Equal([PoolTag.Parse("File")], asked);
-        Assert.Null(PoolCauses.TrayNotice(Open(IncidentKind.Release, owners: [Ranked(LeakerByPid, Confidence.StronglyCorrelated)]), _ => info, Running, log.Add));
+        Assert.Null(PoolCauses.TrayNotice(Open(IncidentKind.Release, owners: [Ranked(LeakerByPid, Confidence.StronglyCorrelated)]), PoolNoticeLevel.EveryGrowth, _ => info, Running, log.Add));
         Assert.Empty(log);
-        Assert.Null(PoolCauses.TrayNotice(strong, _ => throw new InvalidOperationException("no knowledge"), Running, log.Add));
+        Assert.Null(PoolCauses.TrayNotice(strong, PoolNoticeLevel.EveryGrowth, _ => throw new InvalidOperationException("no knowledge"), Running, log.Add));
+        Assert.Equal(["incident notice: no knowledge"], log);
+    }
+
+    /// <summary>
+    /// Settings' Notifications choice decides which kernel pool notices the tray shows, as the incident is when it opens:
+    /// every one (the default); only those the tray icon shows red, by the icon's own rule (the non-paged pool over its
+    /// limit and still rising, or a growth whose cause a trace confirmed), so a growth with strong evidence, which is
+    /// amber, shows none; or none. One held back is a line in the log, with its title. A release never has a notice.
+    /// </summary>
+    [Fact]
+    public void EachNotificationsChoiceShowsTheKernelPoolNoticesItSays()
+    {
+        var info = new TagInfo("<unknown>", "File objects", "pooltag.txt");
+        var growth = Open();
+        var strong = Open(owners: [Ranked(LeakerByPid, Confidence.StronglyCorrelated)]);
+        var traced = Open(traced: [new TraceOwner { Owner = new Owner(OwnerKind.App, "app:codex", "Codex") }]);
+        var nonPaged = Open(IncidentKind.NonPagedTotal);
+        var release = Open(IncidentKind.Release, owners: [Ranked(LeakerByPid, Confidence.StronglyCorrelated)]);
+        var log = new List<string>();
+        bool Shown(Incident i, PoolNoticeLevel level) => PoolCauses.TrayNotice(i, level, _ => info, Running, log.Add) is not null;
+
+        Assert.All(new[] { growth, strong, traced, nonPaged }, i => Assert.True(Shown(i, PoolNoticeLevel.EveryGrowth), i.Kind.ToString()));
+        Assert.Empty(log);
+        Assert.Equal([false, false, true, true], new[] { growth, strong, traced, nonPaged }.Select(i => Shown(i, PoolNoticeLevel.NeedsAttention)));
+        Assert.Equal(["notice not shown (NeedsAttention): Kernel pool: Open files (File) is growing",
+                      "notice not shown (NeedsAttention): Kernel pool: Open files (File) is growing"], log);
+        log.Clear();
+        Assert.All(new[] { growth, strong, traced, nonPaged }, i => Assert.False(Shown(i, PoolNoticeLevel.Off), i.Kind.ToString()));
+        Assert.Equal(4, log.Count);
+        Assert.Contains("notice not shown (Off): Non-paged pool over the limit", log);
+        log.Clear();
+        foreach (var level in Enum.GetValues<PoolNoticeLevel>()) Assert.False(Shown(release, level));
+        Assert.Empty(log); // a release is no notice to hold back
+
+        // The red rule is the tray icon's own: what it shows red, and nothing else.
+        foreach (var kind in Enum.GetValues<IncidentKind>())
+            foreach (Confidence? cause in Enum.GetValues<Confidence>().Cast<Confidence?>().Append(null))
+                Assert.Equal(UiData.State([(kind, cause)], retained: false) == TrayState.Red, PoolCauses.NoticeWanted(PoolNoticeLevel.NeedsAttention, kind, cause));
+        Assert.True(PoolCauses.NoticeWanted(PoolNoticeLevel.EveryGrowth, IncidentKind.Growth, null));
+        Assert.False(PoolCauses.NoticeWanted(PoolNoticeLevel.Off, IncidentKind.NonPagedTotal, Confidence.ConfirmedByTrace));
+    }
+
+    /// <summary>
+    /// "Only when it needs attention" tells of a growth once it turns red, not only as it opens: a new growth incident has
+    /// no trace when it opens (the incident manager raises its event before any capture), so a choice judged only then
+    /// would never tell of the growth a trace confirms later, which turns the tray icon red. Its notice comes at the tray's
+    /// next refresh, once for the episode, naming the cause the trace confirmed; the non-paged pool's comes as it opens and
+    /// not again; a re-opened incident is a new episode. Every growth tells as it opens and adds nothing later, Off tells
+    /// nothing, and a change of the choice repeats no notice. Closed incidents are forgotten, and a notice that cannot be
+    /// worded is logged once, not at every refresh.
+    /// </summary>
+    [Fact]
+    public void OnlyWhenItNeedsAttentionTellsOfAGrowthOnceItTurnsRedAndOncePerEpisode()
+    {
+        var info = new TagInfo("<unknown>", "File objects", "pooltag.txt");
+        var log = new List<string>();
+        var notices = new IncidentNotices(_ => info, () => Running, log.Add);
+        const PoolNoticeLevel attention = PoolNoticeLevel.NeedsAttention;
+        static Incident New(string id, IncidentKind kind = IncidentKind.Growth) =>
+            new() { Id = id, Dir = @"C:\data\incidents\" + id, Tag = PoolTag.Parse("File"), Kind = kind };
+        static List<TraceOwner> Codex() => [new TraceOwner { Owner = new Owner(OwnerKind.App, "app:codex", "Codex") }];
+
+        // A growth opens amber (no cause yet): no notice, then or at a refresh, nor with strong evidence (still amber).
+        var growth = New("growth");
+        var open = new List<Incident> { growth };
+        Assert.Null(notices.Opened(growth, attention));
+        Assert.Equal(["notice not shown (NeedsAttention): Kernel pool: Open files (File) is growing"], log);
+        Assert.Empty(notices.TurnedRed(open, attention));
+        growth.Owners = [Ranked(LeakerByPid, Confidence.StronglyCorrelated)];
+        Assert.Empty(notices.TurnedRed(open, attention));
+        // A trace confirms its cause: the icon turns red, and its notice comes at the next refresh, once.
+        growth.TraceOwners = Codex();
+        Assert.Equal(new[] { new NoticeText("Kernel pool: Open files (File) is growing", "PoolWatch is keeping an eye on Codex.") }, notices.TurnedRed(open, attention));
+        Assert.Empty(notices.TurnedRed(open, attention));
+        Assert.Empty(notices.TurnedRed(open, attention));
+        // The non-paged pool over its limit is red as it opens: its notice then, and none at a refresh.
+        var nonPaged = New("nonpaged", IncidentKind.NonPagedTotal);
+        open.Add(nonPaged);
+        Assert.Equal(PoolCauses.NonPagedTitle, notices.Opened(nonPaged, attention)?.Title);
+        Assert.Empty(notices.TurnedRed(open, attention));
+        // The growth re-opens (a new episode, its trace still on it): red as it opens, told then, and not again.
+        growth.Reopened++;
+        Assert.NotNull(notices.Opened(growth, attention));
+        Assert.Empty(notices.TurnedRed(open, attention));
+        Assert.Single(log); // nothing more was held back or failed
+        // Closed incidents are forgotten; open ones whose notice was shown are kept.
+        Assert.Equal(2, notices.Held);
+        open.Remove(growth);
+        Assert.Empty(notices.TurnedRed(open, attention));
+        Assert.Equal(1, notices.Held);
+        open.Clear();
+        Assert.Empty(notices.TurnedRed(open, PoolNoticeLevel.EveryGrowth)); // forgotten under any choice
+        Assert.Equal(0, notices.Held);
+
+        // Every growth: told as it opens, nothing added when it turns red, nor after a change to "only when it needs attention".
+        var every = New("every");
+        Assert.NotNull(notices.Opened(every, PoolNoticeLevel.EveryGrowth));
+        every.TraceOwners = Codex();
+        Assert.Empty(notices.TurnedRed([every], PoolNoticeLevel.EveryGrowth));
+        Assert.Empty(notices.TurnedRed([every], attention));
+        // Off: nothing as it opens or when it turns red; changed to "only when it needs attention" while it is red, told
+        // once then (nothing was told before).
+        var off = New("off");
+        Assert.Null(notices.Opened(off, PoolNoticeLevel.Off));
+        off.TraceOwners = Codex();
+        Assert.Empty(notices.TurnedRed([off], PoolNoticeLevel.Off));
+        Assert.Single(notices.TurnedRed([off], attention));
+        Assert.Empty(notices.TurnedRed([off], attention));
+
+        // A notice that cannot be worded: logged once, never thrown, and not tried at every refresh.
+        log.Clear();
+        var failing = new IncidentNotices(_ => throw new InvalidOperationException("no knowledge"), () => Running, log.Add);
+        var traced = New("traced");
+        traced.TraceOwners = Codex();
+        Assert.Empty(failing.TurnedRed([traced], attention));
+        Assert.Empty(failing.TurnedRed([traced], attention));
         Assert.Equal(["incident notice: no knowledge"], log);
     }
 

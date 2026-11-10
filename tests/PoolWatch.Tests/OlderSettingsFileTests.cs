@@ -133,6 +133,17 @@ public sealed class OlderSettingsFileTests : IDisposable
         return File.ReadAllText(path);
     }
 
+    /// <summary>The line a save adds that the beta's file does not have: the kernel pool notices' choice, at its default.</summary>
+    private const string NoticesLine = "  \"poolNotices\": \"EveryGrowth\",\n";
+
+    /// <summary><paramref name="beta"/> with <see cref="NoticesLine"/> where a save writes it, after update notices.</summary>
+    private static string WithNotices(string beta)
+    {
+        const string Updates = "  \"checkForUpdates\": true,\n";
+        Assert.Contains(Updates, beta);
+        return beta.Replace(Updates, Updates + NoticesLine, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -144,10 +155,44 @@ public sealed class OlderSettingsFileTests : IDisposable
         var s = Settings.Load(path);
         string saved = Saved(s);
         Assert.DoesNotContain("startAtLogon", saved, StringComparison.OrdinalIgnoreCase);
-        // Every other line as the beta wrote it, but one: of the watched apps' names that differ only in case ("claude",
-        // "Claude"), a load keeps the first (Normalize), in this build as in the beta.
+        // Every other line as the beta wrote it, but two: of the watched apps' names that differ only in case ("claude",
+        // "Claude"), a load keeps the first (Normalize), in this build as in the beta; and the kernel pool notices'
+        // choice, which the beta did not have, is written at its default (a notice for every growth, as the beta did).
         Assert.Contains("    \"claude\",\n    \"Claude\",\n", without);
-        Assert.Equal(without.Replace("    \"Claude\",\n", "", StringComparison.Ordinal), Lf(saved));
+        Assert.Equal(WithNotices(without).Replace("    \"Claude\",\n", "", StringComparison.Ordinal), Lf(saved));
+        Assert.Equal(PoolNoticeLevel.EveryGrowth, s.PoolNotices);
+    }
+
+    /// <summary>
+    /// The kernel pool notices' choice in settings.json: by its name, whatever the case, or its number. A file without it
+    /// (every file before 1.0.0) reads as a notice for every growth, today's behaviour; a value this build does not know
+    /// reads so too, and never keeps the rest of the file from loading. A save writes the name.
+    /// </summary>
+    [Fact]
+    public void TheNotificationsChoiceIsReadByNameAndAnyOtherValueIsTheDefault()
+    {
+        string beta = Lf(Beta);
+        Assert.DoesNotContain("poolNotices", beta);
+        Assert.Equal(PoolNoticeLevel.EveryGrowth, Settings.Parse(beta).PoolNotices);
+        Assert.Equal(PoolNoticeLevel.EveryGrowth, Settings.Parse("{}").PoolNotices);
+        string With(string value) => WithNotices(beta).Replace(NoticesLine, $"  \"poolNotices\": {value},\n", StringComparison.Ordinal);
+        Assert.Equal(PoolNoticeLevel.Off, Settings.Parse(With("\"Off\"")).PoolNotices);
+        Assert.Equal(PoolNoticeLevel.NeedsAttention, Settings.Parse(With("\"needsattention\"")).PoolNotices);
+        Assert.Equal(PoolNoticeLevel.NeedsAttention, Settings.Parse(With("1")).PoolNotices);
+        foreach (string odd in new[] { "\"loud\"", "\"\"", "7", "-1", "null", "true", "[ \"Off\" ]", "{ \"x\": 1 }", "\"Off, NeedsAttention\"" })
+        {
+            var s = Settings.Parse(With(odd));
+            Assert.Equal(PoolNoticeLevel.EveryGrowth, s.PoolNotices);
+            Assert.Equal(300, s.HandleIntervalSeconds); // the rest of the file is read as written
+            Assert.Equal(Settings.Parse(beta).ToJson(), s.ToJson());
+        }
+        var off = new Settings { PoolNotices = PoolNoticeLevel.Off };
+        Assert.Contains("\"poolNotices\": \"Off\"", off.ToJson());
+        Assert.Equal(PoolNoticeLevel.Off, Settings.Parse(off.ToJson()).PoolNotices);
+        // A value set in code that is no choice (the grid offers only the three) is the default once normalized.
+        var bad = new Settings { PoolNotices = (PoolNoticeLevel)9 };
+        bad.Normalize();
+        Assert.Equal(PoolNoticeLevel.EveryGrowth, bad.PoolNotices);
     }
 
     /// <summary>A value other than the default for a setting the beta's file holds that is not a switch or a number.</summary>
@@ -200,8 +245,12 @@ public sealed class OlderSettingsFileTests : IDisposable
         var s = Settings.Load(path);
         var saved = JsonNode.Parse(Saved(s))!.AsObject();
         Assert.False(saved.ContainsKey("startAtLogon"));
-        Assert.Equal(changed.Select(p => p.Key).Where(k => k != "startAtLogon"), saved.Select(p => p.Key));
-        Assert.All(saved, p => Assert.True(changed[p.Key]!.ToJsonString() == p.Value!.ToJsonString(),
+        // The save adds the kernel pool notices' choice, which the beta did not have, at its default, after update notices.
+        Assert.Equal("\"EveryGrowth\"", saved["poolNotices"]!.ToJsonString());
+        var keys = changed.Select(p => p.Key).Where(k => k != "startAtLogon").ToList();
+        keys.Insert(keys.IndexOf("checkForUpdates") + 1, "poolNotices");
+        Assert.Equal(keys, saved.Select(p => p.Key));
+        Assert.All(saved.Where(p => p.Key != "poolNotices"), p => Assert.True(changed[p.Key]!.ToJsonString() == p.Value!.ToJsonString(),
             $"{p.Key}: wrote {changed[p.Key]!.ToJsonString()}, read back {p.Value!.ToJsonString()}"));
         // The same settings as the same file without startAtLogon.
         changed.Remove("startAtLogon");

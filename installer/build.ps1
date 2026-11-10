@@ -27,11 +27,13 @@ if (-not (Test-Path "$inno\ISCC.exe")) {
 }
 
 # What is installed: the build (the launcher PoolWatch.exe, and app\ with PoolWatch itself and its DLLs), the ChatGPT
-# launcher script, the guide for AI assistants and the licences.
+# launcher script, the guide for AI assistants, the licences, and the emblem as poolwatch.png (the icon of PoolWatch's
+# notices that the setup registers with Windows).
 $stage = Join-Path $Out 'stage'
 New-Item -ItemType Directory -Path $stage | Out-Null
 Copy-Item -Path (Join-Path $Publish '*') -Destination $stage -Recurse
 Copy-Item -Destination $stage -Path "$PSScriptRoot\chatgpt-no-shader-cache.ps1", "$repo\src\PoolWatch\Assets\AGENTS.md", "$repo\LICENSE", "$repo\THIRD-PARTY-NOTICES.md"
+Copy-Item -LiteralPath "$PSScriptRoot\poolwatch-small-124x124.png" -Destination (Join-Path $stage 'poolwatch.png')
 if ($SignTool) {
     & $SignTool sign /fd sha256 /tr http://ts.ssl.com /td sha256 /sha1 $Thumbprint "$stage\chatgpt-no-shader-cache.ps1"
     if ($LASTEXITCODE -ne 0) { throw "signtool failed on the launcher script (exit $LASTEXITCODE)" }

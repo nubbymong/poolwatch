@@ -12,6 +12,8 @@ installer-e2e.ps1 installer-ready-page-fits
 installer-e2e.ps1 installer-every-icon-shown
 installer-e2e.ps1 installer-helper-runs-in-a-job
 installer-e2e.ps1 installer-uninstall-entry-logs
+installer-e2e.ps1 installer-notices-app-id-registered
+installer-e2e.ps1 installer-notices-app-id-removed
 installer-e2e.ps1 installer-checked-after-uninstall
 installer-e2e.ps1 installer-checked-after-upgrade
 installer-e2e.ps1 installer-finishes-at-restart-log

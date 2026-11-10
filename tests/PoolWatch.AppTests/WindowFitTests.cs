@@ -183,8 +183,13 @@ public class WindowFitTests
         // Every part the CI checks, in plain words, and the three rules by name.
         foreach (var item in new[] { "Start at logon", "Start PoolWatch when I sign in", "Automatic cache clearing", "Clear the standby cache automatically",
                      SimpleSettings.ScheduleChoice, SimpleSettings.SizeChoice, SimpleSettings.EitherChoice, "Deeper capture", "Token-leak guard",
-                     SimpleSettings.TokenGuardLabel, "Update notices", SimpleSettings.UpdatesLabel, SimpleSettings.UpdatesHint, "Advanced...", "Save", "Close" })
+                     SimpleSettings.TokenGuardLabel, "Update notices", SimpleSettings.UpdatesLabel, SimpleSettings.UpdatesHint, "Advanced...", "Save", "Close",
+                     "Notifications", SimpleSettings.EveryGrowthChoice, SimpleSettings.NeedsAttentionChoice, SimpleSettings.NoticesOffChoice, SimpleSettings.NoticesHint })
             Assert.Contains(item, texts);
+        // The notifications' three choices show whole, one under another, within their column.
+        var choices = settings.Fields.NoticeChoices;
+        Assert.All(choices, c => Assert.True(c.Right <= c.Parent!.ClientSize.Width && c.Parent.Right <= c.Parent.Parent!.ClientSize.Width, $"{c.Text}: {c.Bounds} in {c.Parent!.Bounds}"));
+        Assert.True(choices[0].Bottom <= choices[1].Top && choices[1].Bottom <= choices[2].Top, string.Join(", ", choices.Select(c => c.Bounds)));
         Assert.Contains(texts, t => t.StartsWith(SimpleSettings.ClearStutter, StringComparison.Ordinal)); // said where clearing is turned on
         Assert.Equal(shortcut, texts.Contains(ShortcutOffer.Button));
         Assert.Equal(shortcut, texts.Contains(ShortcutOffer.Text));

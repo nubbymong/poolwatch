@@ -71,6 +71,9 @@ $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\P
 $appId = (Select-String -Path "$PSScriptRoot\..\installer\PoolWatch.iss" -Pattern '^AppId=\{\{([0-9A-F-]+)\}').Matches[0].Groups[1].Value
 $uninstallSubKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{$appId}_is1"
 $uninstallKey = "HKLM:\$uninstallSubKey"
+# The entry the setup writes for the AppUserModelID of PoolWatch's notices (PoolWatch.iss [Registry]), with its name and
+# the icon it installs, in the 64-bit view the setup writes (it installs in 64-bit mode); the uninstaller removes it.
+$aumidKey = 'HKLM:\SOFTWARE\Classes\AppUserModelId\PoolWatch.Monitor'
 $silent = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
 # The lines the setup's page code logs (LayOutWelcomePage and LayOutReadyPage in PoolWatch.iss; InstallerPagesTests
 # holds these patterns to the script's own lines): the page's width and height, then where its parts are.
@@ -907,7 +910,7 @@ Write-Host 'CHECK-RAN: installer-ready-page-fits'
 Assert-True ($installLog -notmatch "The Ready page's icon \S+ could not be shown") 'the setup showed every icon on its Ready page'
 Write-Host 'CHECK-RAN: installer-every-icon-shown'
 foreach ($f in 'PoolWatch.exe', 'app\PoolWatch.exe', 'unins000.exe', 'chatgpt-no-shader-cache.ps1', 'AGENTS.md', 'LICENSE',
-               'THIRD-PARTY-NOTICES.md', 'app\amd64\KernelTraceControl.dll', 'licenses\Microsoft.NETCore.App\LICENSE.TXT',
+               'THIRD-PARTY-NOTICES.md', 'poolwatch.png', 'app\amd64\KernelTraceControl.dll', 'licenses\Microsoft.NETCore.App\LICENSE.TXT',
                'licenses\Microsoft.DotNet.ILCompiler\LICENSE.TXT', 'licenses\Microsoft.DotNet.ILCompiler\THIRD-PARTY-NOTICES.TXT') {
     Assert-True (Test-Path (Join-Path $app $f)) "installed $f"
     Write-Host 'CHECK-RAN: installer-installed-each-file'
@@ -929,6 +932,10 @@ Assert-True ($entry.DisplayName -eq 'PoolWatch') "Uninstall entry ($($entry.Disp
 # none).
 Assert-True ("$($entry.UninstallString)" -eq "`"$(Join-Path $app 'unins000.exe')`" /LOG") "the Uninstall entry starts the uninstaller with /LOG ($($entry.UninstallString))"
 Write-Host 'CHECK-RAN: installer-uninstall-entry-logs'
+# The notices' AppUserModelID is registered with PoolWatch's name and the icon the setup installed beside the launcher.
+$aumid = Get-ItemProperty -LiteralPath $aumidKey -ErrorAction SilentlyContinue
+Assert-True ($aumid.DisplayName -eq 'PoolWatch' -and $aumid.IconUri -eq (Join-Path $app 'poolwatch.png') -and (Test-Path -LiteralPath $aumid.IconUri)) "the notices' AppUserModelID is registered with its name and icon ($($aumid.DisplayName), $($aumid.IconUri))"
+Write-Host 'CHECK-RAN: installer-notices-app-id-registered'
 
 $code = Invoke-Installed 'selftest' @('--selftest', '--out', "$Out\selftest")
 Assert-True ($code -eq 0) "the installed PoolWatch runs from its install folder (selftest exit $code)"
@@ -958,6 +965,8 @@ Assert-True (-not (Test-Path $app)) 'the install folder is gone'
 if (Test-Path $app) { Show-InstallFolder 'uninstall-1' }
 Assert-True (-not (Test-Path $startMenu)) 'the Start menu entry is gone'
 Assert-True (-not (Test-Path $uninstallKey)) 'the Uninstall entry is gone'
+Assert-True (-not (Test-Path -LiteralPath $aumidKey)) "the notices' AppUserModelID entry is gone"
+Write-Host 'CHECK-RAN: installer-notices-app-id-removed'
 $summary = Get-Content (Join-Path $data 'uninstall-summary.txt') -Raw -ErrorAction SilentlyContinue
 Write-Host $summary
 # This build turned the service off itself, seeing whether it was running then, so the uninstaller is expected to put it

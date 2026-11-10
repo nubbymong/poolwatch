@@ -216,8 +216,18 @@ public class AdvancedSettingsTests
     {
         var defaults = new Settings();
         var shown = Shown(defaults);
-        Assert.All(shown, p => Assert.True(p.PropertyType == typeof(bool) || IsNumber(p.PropertyType) || p.PropertyType == typeof(string)
+        Assert.All(shown, p => Assert.True(p.PropertyType == typeof(bool) || IsNumber(p.PropertyType) || p.PropertyType == typeof(string) || p.PropertyType.IsEnum
             || p.Name is nameof(Settings.WatchedApps) or nameof(Settings.GrowthRules), $"{p.Name}: a kind of setting this test does not check"));
+
+        // A choice of a few (the grid offers its values in a list) names each value as the grid shows it, and its default
+        // as "<value> (default)".
+        var choices = shown.Where(p => p.PropertyType.IsEnum).ToList();
+        Assert.Equal([nameof(Settings.PoolNotices)], choices.Select(p => p.Name));
+        foreach (var p in choices)
+        {
+            Assert.Contains(p.GetValue(defaults) + " (default)", p.Description);
+            foreach (string value in Enum.GetNames(p.PropertyType)) Assert.Contains(value, p.Description);
+        }
 
         var texts = shown.Where(p => p.PropertyType == typeof(string)).ToList();
         foreach (var p in texts)

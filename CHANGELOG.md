@@ -25,6 +25,11 @@ want, trims background work. Every change it makes is listed, with a way to put 
 - **Watches the kernel pool.** The kernel pool is the memory Windows and its drivers keep for themselves. PoolWatch
   sits in the tray, checks it every 10 seconds with little overhead, and when it grows works out which program,
   service or driver is behind it, and says how sure it is.
+- **Notices you can click, and choose.** When the kernel pool grows, a notice by the clock says what grows; a click
+  on it opens PoolWatch's window. Under **Notifications** in Settings, choose a notice for every growth (the
+  default), only when it needs attention (when the tray icon turns red, so a growth's notice comes once a trace
+  confirms its cause), or none; the token-leak guard's notices, which need your click, always appear. Starting
+  PoolWatch while it runs brings its window to the front, and its tray icon comes back after Windows' taskbar restarts.
 - **A Simple view that shows, not tells.** The kernel pool now, an arrow for which way it went in the last 10
   minutes, when the next cache clear runs (with a ring that fills as it comes) and what the last one freed; four tiles
   for the last 6 hours (growth per hour with the clears added back, what the clears freed, the net change, and the

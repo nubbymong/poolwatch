@@ -989,21 +989,50 @@ public sealed class ProfileAtStartTests : IDisposable
         Assert.DoesNotContain(log, l => l.Contains("not applied at start", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// A click on a notice runs only the latest notice's own action, once; every other click opens the main window, a
+    /// notice with nothing of its own included. It pinned that a click on such a notice opened nothing, and that a click
+    /// after the notice closed opened nothing: the owner's growth notices, which had no action, opened nothing at all,
+    /// and a click from the notification centre, which Windows sends after the notice left the screen, was dropped. A
+    /// close changes nothing now, so a close that comes late, after the next notice showed, keeps that notice's action.
+    /// </summary>
     [Fact]
-    public void AClickOnABalloonRunsOnlyItsOwnActionOnce()
+    public void AClickOnANoticeRunsOnlyItsOwnActionOnceAndElseOpensTheWindow()
     {
         var opened = new List<string>();
-        var click = new Ui.BalloonClick();
-        click.Shown(() => opened.Add("Active changes"));
+        var log = new List<string>();
+        var click = new Ui.BalloonClick(() => opened.Add("window"), log.Add);
+        click.Shown("Service profile at start", () => opened.Add("Active changes"));
         click.Clicked();
-        click.Clicked();                                    // once
+        click.Clicked();                                    // its own action once, then the window
+        Assert.Equal(["Active changes", "window"], opened);
+        opened.Clear();
+        click.Shown("Windows token leak found", () => opened.Add("guide"));
+        click.Shown("Kernel pool: Open files (File) is growing", null); // a newer notice with nothing of its own: the window
+        click.Clicked();
+        Assert.Equal(["window"], opened);
+        opened.Clear();
+        click.Shown("Service profile at start", () => opened.Add("Active changes"));
+        click.Closed();                                     // into the notification centre: a click from there still counts
+        click.Clicked();
         Assert.Equal(["Active changes"], opened);
-        click.Shown(() => opened.Add("guide"));
-        click.Shown(null);                                  // a newer balloon with nothing to open
+        opened.Clear();
+        click.Shown("Capture now", null);
+        click.Shown("Windows token leak found", () => opened.Add("guide"));
+        click.Closed();                                     // the first notice's close, late, after the second showed
         click.Clicked();
-        click.Shown(() => opened.Add("Active changes"));
-        click.Closed();                                     // gone (timed out or closed): a click later opens nothing
-        click.Clicked();
-        Assert.Equal(["Active changes"], opened);
+        Assert.Equal(["guide"], opened);
+
+        // One line for each notice shown, each click and the first close after each notice; none for a second close.
+        click.Shown("Timeline mark", null);
+        click.Closed();
+        click.Closed();
+        Assert.Equal(1, log.Count(l => l == "notice closed (the latest was \"Timeline mark\")"));
+        Assert.Contains("notice shown: Kernel pool: Open files (File) is growing", log);
+        Assert.Contains("notice clicked: \"Service profile at start\" opens its place", log);
+        Assert.Contains("notice clicked (the latest was \"Kernel pool: Open files (File) is growing\"): the main window opens", log);
+        Assert.Equal(7, log.Count(l => l.StartsWith("notice shown: ", StringComparison.Ordinal)));
+        Assert.Equal(5, log.Count(l => l.StartsWith("notice clicked", StringComparison.Ordinal)));
+        Assert.Equal(3, log.Count(l => l.StartsWith("notice closed", StringComparison.Ordinal)));
     }
 }

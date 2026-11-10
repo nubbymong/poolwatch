@@ -75,11 +75,7 @@ internal static class Program
             // that this thread holds that mutex, and make their paths with it.
             return RunAsTheOnlyMonitor(MonitorMutexName,
                 hold => opt.Headless ? HeadlessRunner.Run(opt, hold) : Ui.UiRunner.Run(opt, hold),
-                () =>
-                {
-                    if (opt.Headless) Console.Error.WriteLine("PoolWatch is already running.");
-                    else MessageBox.Show("PoolWatch is already running (see the tray).", "PoolWatch");
-                },
+                () => AlreadyRunning(opt, Engine.ShowSignal.Send, Console.Error.WriteLine, text => MessageBox.Show(text, "PoolWatch")),
                 message => TellNotStarted(tell, message));
         }
         catch (Engine.DataRootRefusedException ex)
@@ -175,6 +171,23 @@ internal static class Program
             failed(NotStarted(ex));
             return Engine.ExitCodes.NamesNotSafe;
         }
+    }
+
+    /// <summary>What a second tray app says when the running one could not be asked to show its window.</summary>
+    internal const string AlreadyRunningText = "PoolWatch is already running (see the tray).";
+
+    /// <summary>
+    /// Another PoolWatch holds the one-instance mutex. A headless run says so on the console (<paramref name="console"/>).
+    /// A tray app started to show its window (from the Start menu, or by Windows for a click on a notice in the
+    /// notification centre) asks the running tray app of its session to show its window and bring it to the front
+    /// (<paramref name="showRunning"/>: <see cref="Engine.ShowSignal.Send()"/>), and says nothing more when it could; it
+    /// says "already running" in a box (<paramref name="box"/>) when it could not (a headless run holds the mutex, or the
+    /// tray app runs in another session), and so does one started with --tray (the logon task), which opens no window.
+    /// </summary>
+    internal static void AlreadyRunning(CommandLineOptions opt, Func<bool> showRunning, Action<string> console, Action<string> box)
+    {
+        if (opt.Headless) console("PoolWatch is already running.");
+        else if (opt.Tray || !showRunning()) box(AlreadyRunningText);
     }
 
     /// <summary>What a failed start says: why, and that PoolWatch is not running.</summary>

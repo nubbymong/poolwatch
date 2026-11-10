@@ -106,6 +106,8 @@ public sealed class AdminNamespaceTests
         Assert.Equal(@"PoolWatch\Exit", names.ExitEventName);
         Assert.Equal(@"PoolWatch\GuardNotices-1", names.GuardNoticesMutexName(1));
         Assert.Equal(@"PoolWatch\GuardNotices-12", names.GuardNoticesMutexName(12));
+        Assert.Equal(@"PoolWatch\Show-1", names.ShowEventName(1));
+        Assert.Equal(@"PoolWatch\Show-12", names.ShowEventName(12));
     }
 
     [Fact]

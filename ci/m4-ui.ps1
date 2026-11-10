@@ -110,17 +110,19 @@ if (Test-Path $smokeFile) {
     Assert-True (@($f.layoutProblems).Count -eq 0) "Pool causes, Services and Tasks and startup apps: nothing clipped or overlapping at $($f.size.width) x $($f.size.height) ($($f.size.dpi) dpi): $(@($f.layoutProblems) -join '; ')"
     Assert-True ([int]$f.rows.Services -ge 1) "the Services tab was checked with its list loaded ($($f.rows.Services) services)"
     Assert-True (@($f.settingsLayoutProblems).Count -eq 0) "Settings and Settings Advanced: nothing clipped or overlapping: $(@($f.settingsLayoutProblems) -join '; ')"
-    # The plain Settings form: its five parts in plain words, the lines under the token-leak guard and update notices, and
-    # Advanced for the full grid. (The layout check above covers the whole form at its own size: it sizes itself.)
+    # The plain Settings form: its six parts in plain words, the lines under the token-leak guard, update notices and
+    # Notifications, and Advanced for the full grid. (The layout check above covers the whole form at its own size: it
+    # sizes itself.)
     $form = @($f.settingsForm)
     foreach ($item in 'Start at logon', 'Start PoolWatch when I sign in', 'Automatic cache clearing', 'Clear the standby cache automatically',
                       'Deeper capture', 'Deeper automatic captures', 'Token-leak guard', 'Guard against a kernel pool leak in Windows 11 24H2 and 25H2',
                       'Update notices', 'Tell me when a new version is out.', 'Checks GitHub once a day; information only, nothing is downloaded or installed.',
-                      'Advanced...', 'Save', 'Close') {
+                      'Notifications', 'Advanced...', 'Save', 'Close') {
         Assert-True ($item -in $form) "Settings shows '$item'"
     }
     Assert-True (@($form | Where-Object { $_ -like 'While it is on, other programs can bring their windows to the front*until you untick this to end it.' }).Count -eq 1) "Settings says what the token-leak guard does to you and how long it lasts"
-    Assert-True (@($form | Where-Object { $_ -like '*Save puts automatic clearing, the token-leak guard and update notices into effect at once*' }).Count -eq 1) "Settings says what Save applies at once"
+    Assert-True (@($form | Where-Object { $_ -like 'Notices about the kernel pool. The token-leak guard''s need your click and always appear.' }).Count -eq 1) "Settings says under Notifications what it is for and that the notices needing a click always appear"
+    Assert-True (@($form | Where-Object { $_ -like '*Save puts automatic clearing, the token-leak guard, notifications and update notices into effect at once*' }).Count -eq 1) "Settings says what Save applies at once"
     Assert-Plain 'the Settings form' $form
     Assert-True (@($f.layoutProblemsAtMinimumSize).Count -eq 0) "the three tabs at the window's smallest size: nothing clipped or overlapping: $(@($f.layoutProblemsAtMinimumSize) -join '; ')"
     Assert-True ($f.timerWhileVisible -eq $true -and $f.timerWhileHidden -eq $false) "refresh timer runs only while visible (visible=$($f.timerWhileVisible), hidden=$($f.timerWhileHidden))"

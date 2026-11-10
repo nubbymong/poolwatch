@@ -4,9 +4,9 @@ using PoolWatch.Core.Recommendations;
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// The values on the plain Settings form (automatic cache clearing, deeper capture, the token-leak guard and update
-/// notices; Start at logon is a scheduled task, not a setting) and how they map onto <see cref="Settings"/>. Pure, so the
-/// mapping and the checks are unit-tested; the full set of settings stays in Advanced.
+/// The values on the plain Settings form (automatic cache clearing, deeper capture, the token-leak guard, update notices
+/// and the kernel pool notices; Start at logon is a scheduled task, not a setting) and how they map onto
+/// <see cref="Settings"/>. Pure, so the mapping and the checks are unit-tested; the full set of settings stays in Advanced.
 /// </summary>
 /// <param name="AutoClear"><see cref="Settings.AutoClearEnabled"/>.</param>
 /// <param name="EveryHours"><see cref="Settings.AutoClearEveryHours"/>: clear every this many hours; 0 = no schedule.</param>
@@ -14,7 +14,9 @@ namespace PoolWatch.Ui;
 /// <param name="DeeperCapture"><see cref="Settings.DeeperCapture"/>.</param>
 /// <param name="TokenGuard"><see cref="Settings.TokenGuardEnabled"/>: the token-leak guard.</param>
 /// <param name="CheckForUpdates"><see cref="Settings.CheckForUpdates"/>: tell me when a new version is out.</param>
-internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decimal PoolGb, bool DeeperCapture, bool TokenGuard, bool CheckForUpdates)
+/// <param name="PoolNotices"><see cref="Settings.PoolNotices"/>: which kernel pool notices the tray shows (Notifications).</param>
+internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decimal PoolGb, bool DeeperCapture, bool TokenGuard, bool CheckForUpdates,
+    PoolNoticeLevel PoolNotices)
 {
     /// <summary>The ranges <see cref="Settings.Normalize"/> keeps them in (a week; a terabyte).</summary>
     public const decimal MaxHours = 168, MaxPoolGb = 1024;
@@ -22,7 +24,8 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
     public const decimal MinHours = 0.5m;
 
     public static SimpleSettings From(Settings s) =>
-        new(s.AutoClearEnabled, Field(s.AutoClearEveryHours, MaxHours), Field(s.AutoClearPoolGb, MaxPoolGb), s.DeeperCapture, s.TokenGuardEnabled, s.CheckForUpdates);
+        new(s.AutoClearEnabled, Field(s.AutoClearEveryHours, MaxHours), Field(s.AutoClearPoolGb, MaxPoolGb), s.DeeperCapture, s.TokenGuardEnabled, s.CheckForUpdates,
+            s.PoolNotices);
 
     /// <summary>A setting as the form shows it: one decimal, within the form's range.</summary>
     private static decimal Field(double v, decimal max) => double.IsFinite(v) ? Math.Clamp(Math.Round((decimal)v, 1), 0, max) : 0;
@@ -53,6 +56,7 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
         s.DeeperCapture = DeeperCapture;
         s.TokenGuardEnabled = TokenGuard;
         s.CheckForUpdates = CheckForUpdates;
+        s.PoolNotices = PoolNotices;
         return true;
     }
 
@@ -78,18 +82,29 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
     public const string UpdatesLabel = "Tell me when a new version is out.";
     public const string UpdatesHint = "Checks GitHub once a day; information only, nothing is downloaded or installed.";
 
+    /// <summary>The kernel pool notices' heading, its three choices and the line under them (<see cref="Settings.PoolNotices"/>).</summary>
+    public const string NoticesHeading = "Notifications";
+    public const string EveryGrowthChoice = "Every growth", NeedsAttentionChoice = "Only when it needs attention", NoticesOffChoice = "Off";
+    public const string NoticesHint = "Notices about the kernel pool. The token-leak guard's need your click and always appear.";
+    /// <summary>The choices' tooltips, a line each (a tooltip wraps only at the screen's edge): what each lets through.</summary>
+    public const string EveryGrowthTip =
+        "A notice by the clock for each growth PoolWatch finds,\nand when the non-paged pool goes over its limit.\nA click on a notice opens PoolWatch.";
+    public const string NeedsAttentionTip =
+        "Only for what turns the tray icon red:\nthe non-paged pool over its limit and still rising, or a growth whose cause a trace confirmed.";
+    public const string NoticesOffTip = "No notice about the kernel pool.\nThe tray icon still shows its colour, and the window shows what grew.";
+
     /// <summary>What Save says: which settings apply at once, and that the rest wait for the next start.</summary>
     public const string Saved =
-        "Saved. Automatic clearing, the token-leak guard and update notices apply now; any other change applies the next time PoolWatch starts.";
+        "Saved. Automatic clearing, the token-leak guard, notifications and update notices apply now; any other change applies the next time PoolWatch starts.";
 
     /// <summary>What Save says when PoolWatch was started with --config, whose file it never writes (nor its own settings then).</summary>
     public const string NotSavedWithConfig =
-        "Automatic clearing, the token-leak guard and update notices apply now. Nothing is saved for the next time PoolWatch starts: " +
+        "Automatic clearing, the token-leak guard, notifications and update notices apply now. Nothing is saved for the next time PoolWatch starts: " +
         "it was started with --config, so it keeps no settings.";
 
     /// <summary>The line at the bottom of the form.</summary>
     public const string WhenChangesApply =
-        "Start at logon changes as soon as you tick it. Save puts automatic clearing, the token-leak guard and update notices into effect at once; " +
+        "Start at logon changes as soon as you tick it. Save puts automatic clearing, the token-leak guard, notifications and update notices into effect at once; " +
         "deeper capture and the other settings under Advanced apply the next time PoolWatch starts.";
 
     /// <summary>The one-line explanation under Deeper capture, honest about whether it does anything with the current settings.</summary>

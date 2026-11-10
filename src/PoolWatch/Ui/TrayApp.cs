@@ -11,7 +11,11 @@ namespace PoolWatch.Ui;
 /// The tray app: an icon coloured by state (grey while starting, then green / amber / red; amber also while the token-leak
 /// guard says this sign-in is not protected, with a line that says so in the tooltip and at the top of the menu, and a
 /// click on the icon or on that menu line turns it on: <see cref="GuardTray"/>) with the paged + non-paged totals in its
-/// tooltip, a balloon when an incident opens, and the main window on demand. Until the first setup is done,
+/// tooltip, a notice when an incident opens, or once it turns red (as Settings' Notifications choice lets it:
+/// <see cref="Core.Settings.PoolNotices"/>, <see cref="IncidentNotices"/>),
+/// and the main window on demand: a click on any of its notices opens it, unless the notice offers a place of its own
+/// (<see cref="BalloonClick"/>), and so does a second start of PoolWatch (<see cref="ShowSignal"/>). The icon comes back
+/// after Explorer restarts (<see cref="TaskbarWatch"/>). Until the first setup is done,
 /// setup is the way in: it opens by itself at every start, and anything that would show the main window brings setup
 /// instead (<see cref="FirstRunGate"/>). Its menu runs setup again and opens Active changes, says when a newer release is
 /// out (update notices, information only), and holds the tools that are not on the main window (DESIGN.md section 11):
@@ -55,8 +59,14 @@ internal sealed class TrayApp : ApplicationContext, IShell
     /// <summary>Where each way into the app leads: setup until it was completed once (never in the CI UI test).</summary>
     private readonly FirstRunGate _gate;
     private ActiveChangesForm? _activeChanges;
-    /// <summary>What a click on the balloon showing now opens (Active changes, or the token-leak guard where the window offers it), if anything.</summary>
-    private readonly BalloonClick _balloonClick = new();
+    /// <summary>What a click on the latest notice opens: the main window, or Active changes or the token-leak guard where that notice offers it.</summary>
+    private readonly BalloonClick _balloonClick;
+    /// <summary>Which kernel pool notices show, once each episode of an incident: as it opens, or once it turns red (<see cref="IncidentNotices"/>).</summary>
+    private readonly IncidentNotices _notices;
+    /// <summary>A second start of PoolWatch shows the window (none in the CI UI test, or when its event could not be made).</summary>
+    private readonly IDisposable? _showSignal;
+    /// <summary>Adds the tray icon again once Explorer's taskbar is back after a restart of Explorer.</summary>
+    private readonly TaskbarWatch _taskbar;
     /// <summary>The token-leak guard in the tray while this sign-in is not protected: the amber dot, its line, and a click that turns it on.</summary>
     private readonly GuardTray _guardTray;
     /// <summary>Windows' setting-change message, passed to the token-leak guard (<see cref="TokenLeakGuard.SettingChanged"/>).</summary>
@@ -79,7 +89,10 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _actions = new UiActions(engine, analysis, _ui);
         _view = smoke ? null : new ViewState(engine.Paths, engine.Log);
         _live = live;
-        Setup = new SetupContext(engine, analysis, _actions, live, ledger, this, smoke, new UpdateSwitch(live));
+        // A click on a notice: what that notice offers, else the main window (also a click from the notification centre).
+        _balloonClick = new BalloonClick(ShowWindow, engine.Log.Info);
+        _notices = new IncidentNotices(analysis.Knowledge.Lookup, () => engine.Services, engine.Log.Info);
+        Setup =new SetupContext(engine, analysis, _actions, live, ledger, this, smoke, new UpdateSwitch(live));
         if (!smoke)
         {
             // The check reads the setting at each wake, so turning notices off or on needs no call here.
@@ -108,7 +121,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         {
             var i = _analysis.CaptureNow();
             string what = Core.Incidents.CaptureGovernor.ScopeFor(Core.Incidents.CaptureSource.Manual, _engine.Settings).Describe();
-            Balloon(i is null ? "A capture is already running." : $"Capture started ({what}): {i.Id}");
+            Balloon("Capture now", i is null ? "A capture is already running." : $"Capture started ({what}): {i.Id}");
         }));
         menu.Items.Add("Since boot report", null, (_, _) => _actions.Guarded(null, "Since boot", () => _actions.SinceBoot(null)));
         menu.Items.Add("Open incident folder", null, (_, _) => _actions.OpenIncidentFolder());
@@ -152,13 +165,15 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _icon.BalloonTipClicked += (_, _) => _balloonClick.Clicked();
         _icon.BalloonTipClosed += (_, _) => _balloonClick.Closed();
         // Raised on the sampler's thread under the history lock: the notice is worded here, from the incident as it is now,
-        // and only the text goes to the UI thread.
+        // as the Notifications setting is now (Settings' Save changes it at once), and only the words go to the UI thread.
+        // A click on it opens the main window (a notice with no place of its own). One that turns red later is told by
+        // UpdateIcon, when "Only when it needs attention" is chosen.
         _onOpened = (inc, _) =>
         {
-            if (PoolCauses.TrayNotice(inc, _analysis.Knowledge.Lookup, _engine.Services, _engine.Log.Info) is { } text) _ui.Post(_ => Balloon(text), null);
+            if (_notices.Opened(inc, _live.Running.PoolNotices) is { } notice) _ui.Post(_ => Balloon(notice.Title, notice.Text), null);
         };
         _analysis.Incidents.Opened += _onOpened;
-        _onExperiment = step => _ui.Post(_ => Balloon(step.Prompt, step.Phase == Core.Experiments.ExperimentPhase.Done ? 20_000 : 10_000), null);
+        _onExperiment = step => _ui.Post(_ => Balloon("Experiment", step.Prompt, step.Phase == Core.Experiments.ExperimentPhase.Done ? 20_000 : 10_000), null);
         _analysis.Diagnostics.ExperimentStep += _onExperiment;
         if (Core.Experiments.Hotkey.Parse(engine.Settings.MarkHotkey) is not null && !_hotkey.Registered)
             engine.Log.Info($"mark hotkey {engine.Settings.MarkHotkey} is held by another app; use the tray Mark item");
@@ -170,6 +185,13 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _onSettingChange = (_, _) => guard.SettingChanged();
         Microsoft.Win32.SystemEvents.UserPreferenceChanged += _onSettingChange;
         _exitSignal = ExitSignal.Listen(() => _ui.Post(_ => ExitThread(), null), engine.Log.Info);
+        // A second start of PoolWatch in this session (from the Start menu, or Windows starting it for a click on a notice
+        // in the notification centre) shows the window instead of saying "already running" (never in the CI UI test).
+        _showSignal = smoke ? null : ShowSignal.Listen(() => _ui.Post(_ => ShowWindow(), null), engine.Log.Info);
+        // Explorer restarted: its new taskbar gets the icon again (the message that says so is let through to this
+        // elevated app's own window for it).
+        _taskbar = new TaskbarWatch(AddIconAgain);
+        if (!_taskbar.Allowed) engine.Log.Info("the tray icon may not come back after Explorer restarts: Windows would not let its message through");
         // Tray refresh every 10 s: the pool's state and the guard's setting, two cheap reads (no painting, no animation).
         _timer.Tick += (_, _) => UpdateIcon();
         _timer.Start();
@@ -212,6 +234,9 @@ internal sealed class TrayApp : ApplicationContext, IShell
     /// </summary>
     internal const string TokenLeakFoundNotice = "PoolWatch found the Windows token leak on this PC. Click here to see the guard that stops it.";
 
+    /// <summary>That notice's title.</summary>
+    internal const string TokenLeakFoundTitle = "Windows token leak found";
+
     /// <summary>Whether the tray's watch looks in now: once setup was completed, and only where the check could run at all.</summary>
     internal static bool WatchFromTray(bool setupCompleted, Core.Setup.TokenLeakStatus? leak) =>
         setupCompleted && leak == Core.Setup.TokenLeakStatus.NeedsTest;
@@ -241,7 +266,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
             if (!WatchFromTray(Setup.Store.GuideCompleted, facts?.TokenLeak)) return;
             if (Setup.Recommendations.WatchTokenLeak(Setup.Inputs()) is not { } check) return;
             await check;
-            if (WatchNotice(Setup.Recommendations.LeakTestNow, _live.Running.TokenGuardEnabled) is { } notice) Balloon(notice, 10_000, ShowTokenGuard);
+            if (WatchNotice(Setup.Recommendations.LeakTestNow, _live.Running.TokenGuardEnabled) is { } notice) Balloon(TokenLeakFoundTitle, notice, 10_000, ShowTokenGuard);
         }
         catch (Exception ex)
         {
@@ -393,16 +418,16 @@ internal sealed class TrayApp : ApplicationContext, IShell
             var when = DateTime.UtcNow; // the moment the owner noticed, not when they finished typing
             if (PromptDialog.Ask("PoolWatch mark", "Note for the timeline (e.g. \"lag\", \"closed ChatGPT\"):") is { } text &&
                 _analysis.Diagnostics.AddMark(text, "tray", when) is { } f)
-                Balloon($"Marked at {Fmt.Clock(when)}: {f.Title[6..]}");
+                Balloon("Timeline mark", $"Marked at {Fmt.Clock(when)}: {f.Title[6..]}");
         }
         finally { _markOpen = false; }
     }
 
     private void ToggleExperiment()
     {
-        if (_analysis.Diagnostics.AnyExperimentActive) { _analysis.Diagnostics.CancelExperiment(); Balloon("Experiment cancelled."); return; }
+        if (_analysis.Diagnostics.AnyExperimentActive) { _analysis.Diagnostics.CancelExperiment(); Balloon("Experiment", "Experiment cancelled."); return; }
         if (PromptDialog.AskExperiment(_engine.Settings.ExperimentPhaseMinutes) is not { } x) return;
-        Balloon(_analysis.Diagnostics.StartExperiment(x.app, TimeSpan.FromMinutes(x.minutes))
+        Balloon("Experiment", _analysis.Diagnostics.StartExperiment(x.app, TimeSpan.FromMinutes(x.minutes))
             ? $"Experiment with {x.app}: the baseline starts now. Leave {x.app} closed; PoolWatch tells you when to start it." : "An experiment is already running.");
     }
 
@@ -410,17 +435,19 @@ internal sealed class TrayApp : ApplicationContext, IShell
     private void StartClearExperiment()
     {
         double m = _engine.Settings.ExperimentPhaseMinutes;
-        Balloon(_analysis.Diagnostics.StartExperiment(Core.Experiments.ClearLagExperiment.PresetName, TimeSpan.FromMinutes(m))
+        Balloon("Experiment", _analysis.Diagnostics.StartExperiment(Core.Experiments.ClearLagExperiment.PresetName, TimeSpan.FromMinutes(m))
             ? $"Experiment: {m:0.#} min of lag measurements, then PoolWatch clears the standby cache and measures {m:0.#} min more." : "An experiment is already running.");
     }
 
     /// <summary>
     /// The icon's colour once there is a reading (grey until the first sample), amber over green too while the token-leak
     /// guard says this sign-in is not protected (<see cref="GuardTray"/>), and the totals in its tooltip, with the guard's
-    /// line while it is not protected.
+    /// line while it is not protected. Under Notifications' "Only when it needs attention", an open incident that turned
+    /// red since it opened gets its notice now, once (<see cref="NoticesTurnedRed"/>).
     /// </summary>
     internal void UpdateIcon()
     {
+        foreach (var notice in NoticesTurnedRed()) Balloon(notice.Title, notice.Text);
         var t = _engine.Latest?.Totals;
         bool guardNotProtected = _guardTray.NotProtected;
         var state = GuardTray.State(UiData.State(_analysis), guardNotProtected);
@@ -431,18 +458,50 @@ internal sealed class TrayApp : ApplicationContext, IShell
     }
 
     /// <summary>
+    /// The notices of the open incidents that turned red since they opened, while the Notifications setting is "Only when
+    /// it needs attention" (<see cref="IncidentNotices.TurnedRed"/>), under the history lock the incidents are read under.
+    /// </summary>
+    private IReadOnlyList<NoticeText> NoticesTurnedRed()
+    {
+        lock (_analysis.History.SyncRoot) return _notices.TurnedRed(_analysis.Incidents.Open, _live.Running.PoolNotices);
+    }
+
+    /// <summary>
     /// A notice in the tray from any thread about changes PoolWatch made by itself (a service profile applied at start): a
     /// click on it opens Active changes, which lists them, each with a way to put it back.
     /// </summary>
-    public void NotifyChanges(string text) => _ui.Post(_ => Balloon(text, 10_000, OpenActiveChanges), null);
+    public void NotifyChanges(string text) => _ui.Post(_ => Balloon(ChangesTitle, text, 10_000, OpenActiveChanges), null);
 
-    /// <param name="onClick">What a click on this balloon opens; null: nothing (a click on it never runs an older balloon's).</param>
-    private void Balloon(string text, int ms = 5000, Action? onClick = null)
+    /// <summary>The title of the notice about changes PoolWatch made by itself at start (<see cref="NotifyChanges"/>).</summary>
+    internal const string ChangesTitle = "Service profile at start";
+
+    /// <summary>
+    /// A notice by the clock (Windows 11 shows it as a toast, with PoolWatch's name and icon above it, so the title is the
+    /// headline, never "PoolWatch" again), each cut to what a notice holds.
+    /// </summary>
+    /// <param name="onClick">What a click on this notice opens; null: the main window (a click on it never runs an older notice's).</param>
+    private void Balloon(string title, string text, int ms = 5000, Action? onClick = null)
     {
-        _balloonClick.Shown(onClick);
-        _icon.BalloonTipTitle = "PoolWatch";
+        title = NoticeTitle(title);
+        _balloonClick.Shown(title, onClick);
+        _icon.BalloonTipTitle = title;
         _icon.BalloonTipText = text.Length > ProfileAtStart.MaxNotice ? text[..ProfileAtStart.MaxNotice] : text;
         _icon.ShowBalloonTip(ms);
+    }
+
+    /// <summary>A notice's title as it is shown: whole up to <see cref="PoolCauses.MaxNoticeTitle"/> characters, else cut there, marked "...".</summary>
+    internal static string NoticeTitle(string title) =>
+        title.Length <= PoolCauses.MaxNoticeTitle ? title : title[..(PoolCauses.MaxNoticeTitle - 3)].TrimEnd() + "...";
+
+    /// <summary>
+    /// Explorer's taskbar is back after a restart of Explorer (<see cref="TaskbarWatch"/>): the icon is added to it again,
+    /// with its colour, tooltip and menu as they are (taken off what Windows still lists for it, then put on).
+    /// </summary>
+    private void AddIconAgain()
+    {
+        _engine.Log.Info("Explorer's taskbar was created again: the tray icon is added to it again");
+        _icon.Visible = false;
+        _icon.Visible = true;
     }
 
     /// <summary>Opens Active changes from the tray (its menu, or a notice about changes): a failure is shown, never thrown.</summary>
@@ -451,6 +510,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
     protected override void ExitThreadCore()
     {
         _exitSignal?.Dispose(); // first: a second request finds nothing to signal
+        _showSignal?.Dispose(); // and a start from now on says "already running"
         _updates?.Dispose();
         _analysis.Incidents.Opened -= _onOpened; // the sampler may still raise it until the engine stops
         _analysis.Diagnostics.ExperimentStep -= _onExperiment;
@@ -462,6 +522,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _timer.Dispose();
         _watchTimer.Stop();
         _watchTimer.Dispose();
+        _taskbar.Dispose(); // before the icon goes, so it is never added again
         _icon.Visible = false;
         _icon.Dispose();
         _menu.Dispose();
@@ -605,24 +666,44 @@ internal sealed class GuardTray(Func<bool> notProtected, Func<Task<bool>> turnOn
 }
 
 /// <summary>
-/// What a click on the tray's balloon does: each balloon sets its own action, or none, so a click never runs an older
-/// balloon's; it runs once, and not after the balloon closed.
+/// What a click on one of the tray's notices does. Every click opens something: the place the latest notice offers (Active
+/// changes, the token-leak guard), once, else the main window (<paramref name="openWindow"/>), which is also what a notice
+/// with nothing of its own opens. Windows says only that a notice of this icon was clicked, never which, and it can still
+/// send that click after the notice left the screen (from the notification centre), so a close changes nothing: a close
+/// that comes late, after the next notice showed, can never take that notice's action away. Each notice shown, each
+/// click and the first close after each notice is one line in <paramref name="log"/>.
 /// </summary>
-internal sealed class BalloonClick
+internal sealed class BalloonClick(Action openWindow, Action<string> log)
 {
     private Action? _action;
+    private string _title = "";
+    private bool _closeLogged = true;
 
-    /// <summary>A balloon is shown, with what a click on it opens (null: nothing).</summary>
-    public void Shown(Action? onClick) => _action = onClick;
+    /// <summary>A notice titled <paramref name="title"/> is shown, with what a click on it opens (null: the main window).</summary>
+    public void Shown(string title, Action? onClick)
+    {
+        _action = onClick;
+        _title = title;
+        _closeLogged = false;
+        log($"notice shown: {title}");
+    }
 
+    /// <summary>A notice was clicked: the latest notice's own place (once), else the main window.</summary>
     public void Clicked()
     {
         var action = _action;
-        _action = null;
-        action?.Invoke();
+        _action = null; // run once: a later click (an older notice in the notification centre) opens the window
+        log(action is null ? $"notice clicked (the latest was \"{_title}\"): the main window opens" : $"notice clicked: \"{_title}\" opens its place");
+        (action ?? openWindow)();
     }
 
-    public void Closed() => _action = null;
+    /// <summary>A notice left the screen (timed out into the notification centre, closed, or replaced): its click still counts.</summary>
+    public void Closed()
+    {
+        if (_closeLogged) return;
+        _closeLogged = true;
+        log($"notice closed (the latest was \"{_title}\")");
+    }
 }
 
 /// <summary>

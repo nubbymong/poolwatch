@@ -17,6 +17,44 @@ public sealed record GrowthRule
     public override string ToString() => $"{Bytes / (1024 * 1024)} MB in {WindowMinutes:0.#} min";
 }
 
+/// <summary>Which kernel pool notices the tray shows (<see cref="Settings.PoolNotices"/>).</summary>
+public enum PoolNoticeLevel
+{
+    /// <summary>A notice for each growth incident and for the non-paged pool over its limit (the default).</summary>
+    EveryGrowth,
+    /// <summary>
+    /// Only for an incident the tray icon shows red (the tray's red rule): the non-paged pool over its limit and still
+    /// rising, as it opens; a growth once a trace confirmed its cause, which comes after it opened, so its notice comes
+    /// then. Once for each episode of an incident.
+    /// </summary>
+    NeedsAttention,
+    /// <summary>No kernel pool notice.</summary>
+    Off,
+}
+
+/// <summary>
+/// How settings.json holds <see cref="Settings.PoolNotices"/>: by name ("EveryGrowth"), read whatever its case, or by number.
+/// Any other value (a name this build does not know, a hand-written mistake) reads as the default, so it never stops the
+/// rest of the file from loading.
+/// </summary>
+public sealed class PoolNoticeLevelJson : JsonConverter<PoolNoticeLevel>
+{
+    public override PoolNoticeLevel Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String && reader.GetString() is { } name)
+        {
+            foreach (var level in Enum.GetValues<PoolNoticeLevel>())
+                if (string.Equals(level.ToString(), name.Trim(), StringComparison.OrdinalIgnoreCase)) return level;
+        }
+        else if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out int n) && Enum.IsDefined((PoolNoticeLevel)n))
+            return (PoolNoticeLevel)n;
+        reader.Skip(); // an object or a list: its whole value
+        return PoolNoticeLevel.EveryGrowth;
+    }
+
+    public override void Write(Utf8JsonWriter writer, PoolNoticeLevel value, JsonSerializerOptions options) => writer.WriteStringValue(value.ToString());
+}
+
 /// <summary>
 /// User-configurable settings, persisted as JSON in the data root: %ProgramData%\PoolWatch\settings.json on Windows
 /// (administrators only), %LOCALAPPDATA%\PoolWatch\settings.json on the Linux build.
@@ -78,6 +116,15 @@ public sealed class Settings
     /// </summary>
     [Description("Tell me when a new version is out. Checks GitHub once a day; information only, nothing is downloaded or installed. On by default. Applied when you save.")]
     public bool CheckForUpdates { get; set; } = true;
+    /// <summary>
+    /// Which kernel pool notices the tray shows (a growth incident, the non-paged pool over its limit): every one (the
+    /// default, also for an older settings.json without it), only those the tray icon shows red (as it opens, or once it
+    /// turns red), or none. The notices that need the user's click (the token-leak guard's windows) are not these and
+    /// always show. Read at each notice and at each refresh of the tray icon, so a change applies at once.
+    /// </summary>
+    [Description("Kernel pool notices in the tray: EveryGrowth (default), one for each growth; NeedsAttention, only those shown in red; Off, none. Notices that need your click (the token-leak guard's) still appear. Applied when you save.")]
+    [JsonConverter(typeof(PoolNoticeLevelJson))]
+    public PoolNoticeLevel PoolNotices { get; set; } = PoolNoticeLevel.EveryGrowth;
     [Description("Length of the CPU trace, when one is recorded (CpuTraceEnabled), in seconds (5 to 120; default 30).")]
     public int CpuTraceSeconds { get; set; } = 30;
     [Description("Local admin-only folders of Windows symbols (PDBs) to name kernel functions in CPU traces, ';'-separated, at most 2,048 characters. Empty (the default) = the 'symbols' folder in the data folder. Never a network drive or a symbol server.")]
@@ -327,6 +374,7 @@ public sealed class Settings
         AutoClearMode = AutoClearMode is "lowpriority" or "standby" ? AutoClearMode : "auto";
         CpuTraceSeconds = Math.Clamp(CpuTraceSeconds, 5, 120);
         TokenGuardRecheckMinutes = double.IsFinite(TokenGuardRecheckMinutes) ? Math.Clamp(TokenGuardRecheckMinutes, 1, 60) : 3;
+        PoolNotices = Enum.IsDefined(PoolNotices) ? PoolNotices : PoolNoticeLevel.EveryGrowth;
         RawHistoryMinutes = double.IsFinite(RawHistoryMinutes) ? Math.Clamp(RawHistoryMinutes, 5, 300) : 70;
         ShortLivedKeepMinutes = double.IsFinite(ShortLivedKeepMinutes) ? Math.Clamp(ShortLivedKeepMinutes, 1, 600) : 15;
         IncidentEventKeepMinutes = double.IsFinite(IncidentEventKeepMinutes) ? Math.Clamp(IncidentEventKeepMinutes, 5, 600) : 90;

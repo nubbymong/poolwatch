@@ -8,9 +8,10 @@ namespace PoolWatch.Ui;
 /// <summary>
 /// Settings, opened from the main window's Settings button: a short form in plain words with what most people change, in
 /// three columns (Start at logon, update notices, and the Codex shortcut when it can be made again; automatic cache
-/// clearing with its three rules by name; deeper capture and the token-leak guard) and an Advanced button for every
-/// setting (the old grid). Start at logon is a scheduled task and changes at once. Save writes the rest to settings.json and puts
-/// automatic clearing, the token-leak guard and update notices into effect at once; the other settings apply at
+/// clearing with its three rules by name, and the kernel pool notices' three choices under Notifications; deeper capture
+/// and the token-leak guard) and an Advanced button for every setting (the old grid). Start at logon is a scheduled task and changes
+/// at once. Save writes the rest to settings.json and puts automatic clearing, the token-leak guard, the notifications
+/// and update notices into effect at once; the other settings apply at
 /// PoolWatch's next start. A change made elsewhere while the form is open shows here at once. The form sizes itself to its
 /// content, so nothing is cut off at any scaling, and fits a 1024 x 600 screen; on a shorter one it scrolls. Created for
 /// each opening and disposed when it closes, so it always starts from what is saved, with the settings in effect now.
@@ -168,6 +169,20 @@ internal sealed class SettingsDialog : Form
         _tips.SetToolTip(_fields.Schedule, "Clears every so many hours, whatever the size of the kernel pool.");
         _tips.SetToolTip(_fields.PoolSize, "Clears when the kernel pool reaches the size you set, however long that takes.");
         _tips.SetToolTip(_fields.Either, "Clears on the schedule, or sooner when the kernel pool reaches the size you set. Recommended.");
+        // Under it, which kernel pool notices the tray shows (the column with room for its three choices: the form fits a
+        // 1024 x 600 screen).
+        Row(second, Heading(SimpleSettings.NoticesHeading));
+        var notices = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        foreach (var level in _fields.NoticeChoices)
+        {
+            level.Margin = Padding.Empty;
+            notices.Controls.Add(level);
+        }
+        Row(second, notices, indent, bottom: 0);
+        Row(second, Hint(SimpleSettings.NoticesHint), indent, bottom: 0);
+        _tips.SetToolTip(_fields.EveryGrowth, SimpleSettings.EveryGrowthTip);
+        _tips.SetToolTip(_fields.NeedsAttention, SimpleSettings.NeedsAttentionTip);
+        _tips.SetToolTip(_fields.NoticesOff, SimpleSettings.NoticesOffTip);
 
         // The third column: what PoolWatch records, and the token-leak guard.
         var third = Column();
@@ -444,20 +459,32 @@ internal sealed class SimpleSettingsFields
     public CheckBox Deeper { get; } = new WrapCheckBox { Text = "Deeper automatic captures", AutoSize = true };
     public CheckBox TokenGuard { get; } = new WrapCheckBox { Text = SimpleSettings.TokenGuardLabel, AutoSize = true };
     public CheckBox Updates { get; } = new WrapCheckBox { Text = SimpleSettings.UpdatesLabel, AutoSize = true };
+    /// <summary>The kernel pool notices' three choices, under Notifications (one is always picked).</summary>
+    public RadioButton EveryGrowth { get; } = new() { Text = SimpleSettings.EveryGrowthChoice, AutoSize = true, Checked = true };
+    public RadioButton NeedsAttention { get; } = new() { Text = SimpleSettings.NeedsAttentionChoice, AutoSize = true };
+    public RadioButton NoticesOff { get; } = new() { Text = SimpleSettings.NoticesOffChoice, AutoSize = true };
+
+    /// <summary>The notices' choices, in the form's order.</summary>
+    public RadioButton[] NoticeChoices => [EveryGrowth, NeedsAttention, NoticesOff];
 
     public SimpleSettingsFields()
     {
-        // One rule at a time, whatever holds the choices (radio buttons only clear each other inside one container).
-        foreach (var choice in new[] { Schedule, PoolSize, Either })
-            choice.CheckedChanged += (_, _) =>
-            {
-                if (!choice.Checked) return;
-                foreach (var other in new[] { Schedule, PoolSize, Either }) if (other != choice) other.Checked = false;
-            };
+        // One choice at a time in each group, whatever holds the choices (radio buttons only clear each other inside one
+        // container).
+        foreach (var group in new[] { new[] { Schedule, PoolSize, Either }, NoticeChoices })
+            foreach (var choice in group)
+                choice.CheckedChanged += (_, _) =>
+                {
+                    if (!choice.Checked) return;
+                    foreach (var other in group) if (other != choice) other.Checked = false;
+                };
     }
 
     /// <summary>The rule picked now.</summary>
     public ClearRule Rule => Schedule.Checked ? ClearRule.Schedule : PoolSize.Checked ? ClearRule.PoolSize : ClearRule.Either;
+
+    /// <summary>The kernel pool notices picked now.</summary>
+    public PoolNoticeLevel Notices => NeedsAttention.Checked ? PoolNoticeLevel.NeedsAttention : NoticesOff.Checked ? PoolNoticeLevel.Off : PoolNoticeLevel.EveryGrowth;
 
     /// <summary>The schedule and the size the fields show when the rule in effect does not use one (the defaults).</summary>
     private const decimal ShownHours = 1, ShownPoolGb = 8;
@@ -475,13 +502,16 @@ internal sealed class SimpleSettingsFields
         Deeper.Checked = v.DeeperCapture;
         TokenGuard.Checked = v.TokenGuard;
         Updates.Checked = v.CheckForUpdates;
+        EveryGrowth.Checked = v.PoolNotices == PoolNoticeLevel.EveryGrowth;
+        NeedsAttention.Checked = v.PoolNotices == PoolNoticeLevel.NeedsAttention;
+        NoticesOff.Checked = v.PoolNotices == PoolNoticeLevel.Off;
     }
 
     /// <summary>What the form holds: the rule keeps the numbers it uses, and turns the other rule off (0).</summary>
     public SimpleSettings Values()
     {
         var (hours, gb) = SimpleSettings.ForRule(Rule, Hours.Value, PoolGb.Value);
-        return new(AutoClear.Checked, hours, gb, Deeper.Checked, TokenGuard.Checked, Updates.Checked);
+        return new(AutoClear.Checked, hours, gb, Deeper.Checked, TokenGuard.Checked, Updates.Checked, Notices);
     }
 }
 

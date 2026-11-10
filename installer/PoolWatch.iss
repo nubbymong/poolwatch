@@ -190,15 +190,26 @@ Source: "{#PublishDir}\chatgpt-no-shader-cache.ps1"; DestDir: "{code:ProgramDir}
 Source: "{#PublishDir}\AGENTS.md"; DestDir: "{code:ProgramDir}"; Flags: ignoreversion; BeforeInstall: Shipping
 Source: "{#PublishDir}\LICENSE"; DestDir: "{code:ProgramDir}"; Flags: ignoreversion; BeforeInstall: Shipping
 Source: "{#PublishDir}\THIRD-PARTY-NOTICES.md"; DestDir: "{code:ProgramDir}"; Flags: ignoreversion; BeforeInstall: Shipping
+; The emblem as a PNG of its own (build.ps1 stages it), for the AppUserModelID's entry under [Registry]: Windows reads the
+; icon of an app's notices from an image file, which Microsoft documents as a PNG for that entry.
+Source: "{#PublishDir}\poolwatch.png"; DestDir: "{code:ProgramDir}"; Flags: ignoreversion; BeforeInstall: Shipping
 ; The rest of the build: the native DLLs PoolWatch loads from its own folder (app\amd64\), and the .NET runtime's
 ; licences (licenses\).
-Source: "{#PublishDir}\*"; DestDir: "{code:ProgramDir}"; Excludes: "\PoolWatch.exe,\PoolWatch-selfcontained.exe,\app\PoolWatch.exe,\chatgpt-no-shader-cache.ps1,\AGENTS.md,\LICENSE,\THIRD-PARTY-NOTICES.md"; Flags: ignoreversion recursesubdirs createallsubdirs; BeforeInstall: Shipping
+Source: "{#PublishDir}\*"; DestDir: "{code:ProgramDir}"; Excludes: "\PoolWatch.exe,\PoolWatch-selfcontained.exe,\app\PoolWatch.exe,\chatgpt-no-shader-cache.ps1,\AGENTS.md,\LICENSE,\THIRD-PARTY-NOTICES.md,\poolwatch.png"; Flags: ignoreversion recursesubdirs createallsubdirs; BeforeInstall: Shipping
 
 [Icons]
 ; The launcher, which asks for administrator rights and starts PoolWatch with a clean environment. The entry carries the
 ; AppUserModelID the launcher gives a PoolWatch it starts any other way (the logon task, Explorer; the launcher's
 ; Native.AppUserModelId), so PoolWatch's windows and notices are one app's however it was started, the app this entry is.
 Name: "{autoprograms}\PoolWatch"; Filename: "{app}\PoolWatch.exe"; AppUserModelID: "PoolWatch.Monitor"
+
+[Registry]
+; That AppUserModelID's own entry, which Windows reads through HKEY_CLASSES_ROOT: the name and icon of PoolWatch's
+; notices, as Microsoft documents it for an unpackaged app that shows notifications. The owner's PC had no such entry
+; while the "..." menu on a notice did nothing; whether this entry is what that menu needs is to be seen on a real PC.
+; The uninstaller removes it.
+Root: HKLM; Subkey: "Software\Classes\AppUserModelId\PoolWatch.Monitor"; ValueType: string; ValueName: "DisplayName"; ValueData: "PoolWatch"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Classes\AppUserModelId\PoolWatch.Monitor"; ValueType: string; ValueName: "IconUri"; ValueData: "{app}\poolwatch.png"; Flags: uninsdeletekey
 
 [Run]
 ; The setup guide opens at this first start. The launcher requires administrator rights, so it starts with Setup's:
