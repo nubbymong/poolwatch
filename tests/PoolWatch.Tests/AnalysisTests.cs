@@ -15,11 +15,16 @@ namespace PoolWatch.Tests;
 internal sealed class World
 {
     public static readonly DateTime T0 = new(2026, 10, 20, 6, 0, 0, DateTimeKind.Utc);
-    public readonly History History = new();
+    public readonly History History;
     /// <summary>The registry, its clock reading the world's two clocks (how long exited records are kept is timed on it).</summary>
     public readonly ProcessRegistry Registry;
 
-    public World() => Registry = new(clock: () => new Moment(Wall, Clocks.At(Now).Ms));
+    /// <param name="history">The history to sample into (by default the raw history's 70 minutes).</param>
+    public World(History? history = null)
+    {
+        History = history ?? new();
+        Registry = new(clock: () => new Moment(Wall, Clocks.At(Now).Ms));
+    }
     public readonly Dictionary<int, ProcessSample> Procs = new();
     private readonly Dictionary<int, Dictionary<string, int>> _handles = new();
     public int Index;

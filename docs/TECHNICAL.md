@@ -55,7 +55,11 @@ Per pool tag it looks for **growth** (by default 200 MB in 10 minutes, 1 GB in 6
 5 GB and still rising), **retention** (still held 15 minutes after the activity stopped) and **release** (a sharp drop:
 whatever exited or was deleted then was holding the memory). Suspects are ranked on direct charge (handles of the
 matching type, quota pool), activity correlation (Spearman, with a lag), lifecycle (started at onset, exited at the
-end, orphaned) and ancestry. Each suspect's confidence is *weak evidence*, *some evidence*, *strong evidence* or
+end, orphaned) and ancestry. While an incident is open its growth is measured every 30 s and its suspects ranked again
+before each rewrite of its report, every 2 minutes while the disk budget has room and at least every 10 minutes; its
+onset stays where the growth began when it is open longer than the 70 minutes of samples PoolWatch keeps, and what
+PoolWatch's own cache clears freed of it still counts after they leave those 70 minutes. Each
+suspect's confidence is *weak evidence*, *some evidence*, *strong evidence* or
 *confirmed by a trace*, in the same words in the window, Copy summary, the reports and the exports (report.json keeps
 their names, such as `StronglyCorrelated`, which are what PoolWatch reads back); PoolWatch never claims causation from
 correlation alone. What the pool does from just before PoolWatch's own cache clear until the clear is measured 2 minutes
@@ -125,7 +129,7 @@ and removed, with the first few names:
 - `incidents\<id>\`: `report.md`, `report.json`, `timeline.csv`, `processes.csv`, `events.csv`, `timeline.png`, and
   `capture.etl` when a trace was taken (a trace can add far more than the CSV files). `events.csv` holds the incident's
   events from 2 minutes before its onset, every one from its first row to its last, added as PoolWatch writes the
-  folder, at most 5,000; when it holds fewer than the window had, its last row says to when (the day's `events.csv` has
+  folder, at most 1,000; when it holds fewer than the window had, its last row says to when (the day's `events.csv` has
   every one). Its rows are appended in single writes: copying the folder at that moment can fail (try again), and a
   crash then can cut its last row short. What can wait in the report folders is held to 1 MB an hour (a 256 KB burst):
   an open incident's `report.json` and `report.md` first, then the rest. An incident's opening, re-opening and closing,

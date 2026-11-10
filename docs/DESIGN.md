@@ -93,10 +93,90 @@ on), and every lasting one is listed under Active changes, where it can be put b
   owner's event rate and command-line lengths, write 1.7 MB in that hour (1.0 MB of it the openings and the storm
   folders' first writes, which must be made), under its 2 MB share; each open incident's report there is at most an
   hour behind (an incident's report is about 90 KB, ten of them refreshed every 5 minutes would be 10 MB an hour).
-  It also measures the CPU of that work on its thread: about 6 s in the hour (0.17% of one core), most of it the
-  correlation ranking every open incident gets every 30 s, and asserts under 18 s, the 0.5% budget. The rest of the
-  overhead on the owner's PC (2.9% of one core and 254 MB in 1.0.0-beta.2, `cache\profile.json`: the ranking, the
-  handle scans' CSV flush, the day's CSV files at about 4.7 MB an hour, the allocations) is outside the report folders.
+  It also measures the CPU of that work on its thread, and asserts under 18 s in the hour, the 0.5% budget. The rest
+  of the overhead on the owner's PC (2.9% of one core and 254 MB in 1.0.0-beta.2, `cache\profile.json`: the ranking,
+  the handle scans' CSV flush, the day's CSV files at about 4.7 MB an hour, the allocations) is outside the report
+  folders; the next point is the ranking's and the memory's.
+- **CPU and memory under agentic load.** On the owner's PC (`cache\profile.json`, 1.0.0-beta.2 after 7 hours of
+  agentic load, about 236,000 process starts an hour) PoolWatch spent 2.4% of one core (`tick (all)` 1.46%, of it
+  `analysis.incidents` 0.43% and `diagnostics` 0.36%), allocated 15.5 MB a sample and 2.3 MB more in its ETW callbacks
+  (49 GB in the 7 hours, the GC's own CPU on top) and held 170 MB of heap, its floor after each full collection rising
+  from 14 MB to 120-200 MB. Most of the CPU was the suspect ranking every open incident got every 30 s (10 open at
+  once: 2,000 suspects each, 12 rank correlations a suspect); most of the heap what grew with the hours: every
+  process's points for 70 minutes at 48 bytes, compact records of every short command of a 2-hour incident window, the
+  registry's exited processes for a day with their kilobyte scripts, each incident's 5,000 events and every owner's 20
+  members for 8 hours, 26 incidents at once, the minutes' every busy process for 25 hours. Now:
+  - an open incident's episode (onset, end, growth: what its row and the tray read) is measured every 30 s, its
+    suspects ranked only before a rewrite of its report (each report holds the ranking of the moment it is written),
+    every 2 minutes while the write budget has room (a new top suspect is written then) and at least every 10 (the
+    cause shown from memory); a counter that is 0 in most samples is ranked without sorting its zeros (the ranking is
+    the same to the bit);
+  - a process's points are runs: a point equal to the one before (an idle process's) takes no space, a new one 28
+    bytes (its I/O counters packed as a rise from the oldest held), exactly as added; a handle scan is held as flat
+    arrays (18 scans of 700 processes with 15 types: 2.1 MB, 9.4 MB as the dictionaries they come in); the raw rows of
+    tags share their list of tags with the row before; a minute older than 2 hours keeps its tags and totals and its
+    processes are summed into its hour, the 10 busiest by name and the hour's total, which is all the since-boot report
+    reads of them (its report is the same, `CpuMemoryBoundsTests`; the oldest hour, partly past the 25 hours, is shared
+    out over all of it);
+  - a Git Bash fork copy holds its parent's command line; a short command past the newest 3,000 of an incident's window
+    stays as a compact record only when a ranking can name it (a snapshot listed it, or it is the ancestor of one) or a
+    trace is recording, and only within the raw history (less 10 minutes); an exited process past the raw history and
+    20 minutes more becomes a named record (name, services, label, times, a command line only when short) for the
+    rest of its day, at most 10,000, the first named going first (on the owner's load 3 to 4 hours past the 90 minutes;
+    the since-boot report names an hour's processes as it sums it, 2 to 3 hours after they ran); each PID's newest
+    instance and image are kept for the records held only; the string pool holds at most 4,096 strings;
+  - an incident keeps its window's first 1,000 events (events.csv says to when it holds them, the day's events.csv has
+    every one: 5,000 held 3.2 MB more in the test below at 6 hours, and about 29 MB more with all 32 incidents at the
+    cap) and the members of its first three owners only (its reports are byte-identical); at most 20 closed incidents
+    stay in memory; the summarizer asks the worktree-delete expression only of a command line with "tree" in it, and
+    the detector reads each tag's series into one array, each row's place of a tag found once per shared list.
+  An incident open longer than the raw history keeps its onset and start level instead of moving them to the
+  history's first sample (its growth no longer shrank as the history moved on, its events.csv no longer lost its rows
+  as "before the window"), and counts PoolWatch's own clears that freed part of it after they left the history, as
+  measured then, in its growth and in what they freed (the same as a history holding the whole incident gives).
+  `AgentLoadTests` replays a day of that load (26 hours) through every per-sample part of the core: about 600 process
+  starts a sample with Git Bash's fork copies, 600 long-running processes (560 of them idle in a sample, so their
+  points are long runs; a real PC's are busier), 10 incidents growing all day and 40 more every 4 hours. On 9144b20's
+  code that world took 2.6% of one core and 40 MB a sample over 4 hours, its heap after a full collection 45 MB at half
+  an hour and 101 MB at 4 hours, still rising (this change as first reviewed: 54 MB at 4 hours, about 70 MB at 24).
+  Now: 0.115% of one core and 3.8 MB a sample (incidents 0.082% and 2.3 MB, registry 0.009% and 0.46 MB, detector
+  0.007% and 30 KB, summarizer 0.006% and 0.59 MB, the diagnostics' core parts 0.008%), the heap 37 MB at 4 hours and
+  38 to 42 MB from 6 hours to the day's end, a slope of about 0.15 MB an hour as the minutes' tags fill their 25 hours,
+  the hours' incidents moving it up and down by about 2 MB. It asserts a 48 MB ceiling, a slope over hours 6 to 26
+  under 0.25 MB an hour, under 3 MB more in the last 6 hours than in hours 6 to 12, under 0.45% of one core (three
+  times what it measures, for a slower runner; the old 30 s ranking alone is 1.3%) and under 6 MB a sample. What is
+  held at 26 hours, part by part (each cleared in turn): the raw history's process runs 4.8 MB and tag rows 2.7, the
+  90 minutes of events 3.8, 20 closed incidents 4.5, the registry's full records 6.0, compact 2.5, named 2.5 and
+  per-PID 2.2, the handle scans 0.6, the string pool 1.0, the spawn tracker, census and tokens 3.4; the other 7 MB
+  (the minutes among them) clearing part by part does not split.
+  The target for that heap is not met. PoolWatch's own trim empties its working set at 75 MB only while the heap is at
+  most half of it (`MemoryTrim`), 37.5 MB; in the CI soak with the window open the working set peaked at 84 MB beside
+  a 15 MB heap (about 69 MB that is not heap), which leaves about 30 MB of heap under the 100 MB budget, the app's own
+  share (the window, the tag knowledge, the CSV files' state) included; this load's parts alone hold 38 to 42 MB. On
+  the owner's PC the memory outside the heap is larger still: 118.5 MB private at 32 s beside a 13.9 MB heap, 285 MB of
+  working set beside 196 MB committed by the GC at 7 hours; what holds it is not in `profile.json` and is outside this
+  part. The CPU, projected for the owner's PC from its beta.2 profile (each part changed here scaled by what it took in
+  the world before and after, the rest as measured there), is not within the 0.5% either:
+
+  | Part (owner's PC, % of one core) | beta.2 | projected | from |
+  |---|---|---|---|
+  | `analysis.incidents` (ranking, episodes; writes are `incident.write`) | 0.43 | 0.014 | world 2.50 → 0.082 |
+  | `analysis.detector` | 0.11 | 0.050 | world 0.0145 → 0.0068 |
+  | `tick.summarize` | 0.053 | 0.027 | world 0.0127 → 0.0064 |
+  | `tick.registry`, `analysis.history` | 0.047 | 0.047 | unchanged in the world |
+  | `diagnostics` (core parts in the world 0.008) | 0.36 | up to 0.36 | app-side parts not measured; now `diagnostics.*` by part |
+  | `tick.processes` (the kernel's process query) | 0.21 | 0.21 | not changed |
+  | handle scan, `incident.write`, CSV files (the other lane) | 0.23 | 0.23 | as measured |
+  | ETW callbacks (`etw.start`, `etw.stop`, `enrich`) | 0.15 | 0.15 | not changed |
+  | the window (`ui.*`) | 0.08 | 0.08 | not changed |
+  | the other stages (labels, trims, services, pool tags) | 0.02 | 0.02 | not changed |
+  | outside the stages (the GC, timers, the thread pool) | 0.73 | about 0.35 | allocations about 18 → about 8 MB a sample, ETW callbacks included |
+  | **all** | **2.42** | **about 1.5** | |
+
+  So the CPU still over budget on that PC is the diagnostics' app-side parts (load and PDH reads, services, the cache
+  clear, storm folders, lag, marks, findings; `diagnostics.*` in the next `profile.json` say which), the process
+  query, the ETW callbacks (3.4 KB allocated a start), the handle scan and the GC's share; under the CI soak's lighter
+  load PoolWatch keeps to it (0.46% with the window open).
 - **Where it writes**: only under its admin-only data folder `%ProgramData%\PoolWatch` (or an explicit headless
   `--out` folder), apart from the few writes SECURITY.md lists, never in its install folder, never through a link, and never
   on a ReFS volume (every Dev Drive is ReFS: its per-file metadata is the pool being measured). 7-day retention by
@@ -336,7 +416,10 @@ which powers direct attribution.
 ## 6. Detection
 
 Per tag, over 1-minute, 10-minute, 60-minute and since-boot windows. "What has grown since boot, and what drove it,
-hour by hour" is a first-class report (Since boot), from one-minute history.
+hour by hour" is a first-class report (Since boot), from one-minute history (25 hours): each minute's tags and each
+busy process's I/O in it; past 2 hours a minute's processes are summed into its hour, the 10 busiest kept by name and
+the hour's total, so each hour's three named processes and their shares are those its minutes gave (the oldest hour,
+partly past the 25 hours, is shared out over all of it).
 
 - **Growth**: by default 200 MB in 10 min, 1 GB in 60 min, or total non-paged pool over 5 GB and still rising (all
   configurable).
@@ -384,7 +467,9 @@ Limits of that baseline:
   been seen either way yet.
 - Growth is what a tag allocated, whatever PoolWatch freed of it. Growth before a clear and a refill after it add up in
   one window: a cache that refills about 1 GB an hour after every hourly clear is one long incident, closed at its
-  2-hour maximum and re-opened within the hour.
+  2-hour maximum and re-opened within the hour (while it is among the 20 closed incidents held in memory, section 10).
+  Once open longer than the raw history's 70 minutes, the clears that left the history still count, as each was
+  measured: its growth and what the clears freed are those a history holding the whole incident would give.
 - A window that starts inside a clear's interval is measured from the clear's measurement, so 10 or 60 minutes after a
   clear a finding can lapse for up to 2 minutes (found later, never sooner).
 - A retained tag stops being retained when it falls under half its rise, and that rise counts back what the clears
@@ -538,6 +623,12 @@ Each alert or capture creates `incidents\<yyyyMMdd-HHmmss>-<tag>-<raw hex>\` wit
   owning vendor;
 - `report.json`, `timeline.csv`, `processes.csv`, `events.csv`, `timeline.png`, and the `.etl` when a trace was taken.
 
+**How long an incident is held.** A closed incident stays in memory 6 hours (a release attaches to it, the same tag
+growing within the hour re-opens it), but at most 20 closed ones do (`IncidentManager.MaxClosed`; the owner's PC held
+16 after 4 hours of agentic load): past 20, the oldest closed leaves first. Its folder stays and the window lists it
+from there; a tag that grows again within the hour after its incident left memory opens a new folder instead of
+re-opening it, and a later release no longer attaches to it.
+
 **How the folder is written** (`IncidentWriter`, `IncidentManager.Write`). It is written when the incident opens or
 re-opens (`report.json` and `report.md`, what the window's details read), when it closes and when a trace is attached
 (everything); while it is open, its `report.json` and `report.md` on a new top suspect, 25% more growth or every 5
@@ -546,17 +637,19 @@ budget has room to spare, and the rows of `events.csv` only while no open incide
 new timeline entry, and every 30 minutes for alerts counted after it closed. All but the opening, re-opening, closing,
 trace and end-of-run writes wait while the report folders' write budget has no room (section 3), and are written at a
 later re-rank, the incident written longest ago first, so on a busy PC with many incidents open the report may be up
-to about an hour behind the window (the list, the tray and the notices are live). `report.md`, `report.json`,
+to about an hour behind the window (the list, the tray and the notices are live: the growth is measured every 30 s,
+the cause comes from a ranking at most 10 minutes old). `report.md`, `report.json`,
 `timeline.csv`, `processes.csv` and `timeline.png` are each replaced in one step (temp file and move), and only when
 what they say changed since this run last wrote them (the chart is drawn again only when what it shows changed), so a
 closed incident's CSVs and chart are written once. `events.csv` is appended to, in whole rows sorted by time within
 each write, from what the incident kept of its window's events: an open incident takes each event from the shared
-buffer as it comes (the buffer keeps 90 minutes, the incident its window's first 5,000 from the onset less 2 minutes
+buffer as it comes (the buffer keeps 90 minutes, the incident its window's first 1,000 from the onset less 2 minutes
 as it was when it first kept them), so the earliest kept event not written yet is always there to write and the file
 has every event from its first row to its last, however long the budget held it back. Each write adds at most 100
-(every one left at the end of a run). Once it has all an incident kept that stopped keeping (5,000 kept, or the
+(every one left at the end of a run). Once it has all an incident kept that stopped keeping (1,000 kept, or the
 buffer let events go before a closed incident re-opened and looked at them), a last `Note` row says to when it holds
-the window's events, and so does a last row when the incident leaves memory 6 hours after closing with rows the budget
+the window's events, and so does a last row when the incident leaves memory (6 hours after closing, or as the oldest
+of more than 20 closed) with rows the budget
 never had room for; the day's `data\<yyyyMMdd>\events.csv` has every event. An alert is one row per growth rule and
 onset (a rule that keeps firing keeps its bigger alert under the first one's onset; a re-opening's has its own), at
 the time the file first saw it, and one row per release. While open it can hold rows from after the growth ended, up

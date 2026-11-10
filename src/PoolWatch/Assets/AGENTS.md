@@ -119,7 +119,7 @@ Each incident folder has `report.md` (for people), `report.json` (the same, for 
 `processes.csv`, `events.csv`, `timeline.png` and, when a trace was taken, `capture.etl`. (A folder whose name has a
 finding's kind instead of a tag is a finding's report, described in the file map.) An incident's `events.csv` holds
 the events of its window from 2 minutes before the onset, every one from its first row to its last, in the order
-PoolWatch added them (sorted by time within each addition): the window's first 5,000 at most, and on a busy PC fewer
+PoolWatch added them (sorted by time within each addition): the window's first 1,000 at most, and on a busy PC fewer
 while the incident is open, as PoolWatch writes within a disk budget. When it holds fewer than the window had for good,
 its last row (`kind` `Note`) says so, and its time is when its events stop. An `Alert` row marks when each growth rule
 first fired (the report has its latest numbers). The day's `data\<yyyyMMdd>\events.csv` has every event. On a busy

@@ -41,11 +41,23 @@ public class MinuteHistoryTests
     public void AMinuteRecordsOnlyTheProcessesThatDidIO()
     {
         var w = ThreeHours(idlePerSample: 20);
-        Assert.True(w.History.Minutes.Count >= 170);
-        Assert.All(w.History.Minutes, m =>
+        var h = w.History;
+        Assert.True(h.Minutes.Count >= 170);
+        // The minutes of the last 2 hours hold their processes (counted from the sample that closed the newest, a minute
+        // after it began); the older ones' are summed into their hours.
+        long detailFrom = h.Minutes[^1].Ms + 60_000 - (long)h.MinuteDetailSpan.TotalMilliseconds;
+        Assert.All(h.Minutes.Where(m => m.Ms >= detailFrom), m =>
         {
             Assert.All(m.ProcessOps, ops => Assert.True(ops > 0));
             Assert.InRange(m.Processes.Length, 1, 5); // the busy ones, not the 120 short commands each minute caught
+        });
+        Assert.All(h.Minutes.Where(m => m.Processes.Length == 0), m => Assert.True(m.Ms < detailFrom));
+        var hours = h.SummedHours();
+        Assert.NotEmpty(hours);
+        Assert.All(hours, x =>
+        {
+            Assert.All(x.Ops, ops => Assert.True(ops > 0));
+            Assert.InRange(x.Processes, 1, 5);
         });
     }
 
@@ -101,8 +113,16 @@ public class MinuteHistoryTests
             foreach (var pid in live.Where(kv => kv.Value.left == 1).Select(kv => kv.Key).ToList()) live.Remove(pid);
         }
         Assert.InRange(h.Minutes.Count, 1490, 1501); // 25 hours of minutes: the history is full
-        long entries = h.Minutes.Sum(m => (long)m.Processes.Length);
-        Assert.All(h.Minutes, m => Assert.InRange(m.Processes.Length, 50, 300)); // 1,050 processes are seen each minute
-        Assert.True(entries * 24 < 12 << 20, $"{entries:N0} entries of 24 bytes"); // 50 MB when every new process was kept
+        // The last 2 hours' minutes hold the busy processes of each; the older ones are summed by the hour, each hour its
+        // 10 busiest and the I/O of all of them.
+        long detailFrom = h.Minutes[^1].Ms + 60_000 - (long)h.MinuteDetailSpan.TotalMilliseconds;
+        Assert.All(h.Minutes.Where(m => m.Ms >= detailFrom), m => Assert.InRange(m.Processes.Length, 50, 300)); // 1,050 processes are seen each minute
+        Assert.All(h.Minutes.Where(m => m.Ms < detailFrom - 3_600_000), m => Assert.Empty(m.Processes));
+        var hours = h.SummedHours();
+        Assert.InRange(hours.Count, 22, 25);
+        Assert.All(hours.SkipLast(1), x => { Assert.Equal(History.HourTop, x.Keys.Length); Assert.True(x.Processes > 1000, $"{x.Processes}"); });
+        long entries = h.MinuteProcessEntries;
+        // 50 MB when every new process was kept, 9 MB when every minute kept its busy ones; the last 2 to 3 hours' now.
+        Assert.True(entries * 24 < 2 << 20, $"{entries:N0} entries of 24 bytes");
     }
 }

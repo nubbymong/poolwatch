@@ -27,8 +27,18 @@ namespace PoolWatch.Core.Incidents;
 /// </summary>
 internal sealed class IncidentWriter
 {
-    /// <summary>The most event rows an incident's events.csv holds (the alerts' rows aside), and the most events an incident keeps.</summary>
-    public const int MaxEventRows = 5000;
+    /// <summary>
+    /// The most event rows an incident's events.csv holds (the alerts' rows aside), and the most events an incident keeps in
+    /// memory for it: the window's first 1,000 from the onset less 2 minutes, about 6 minutes of a busy agentic PC's events
+    /// (9,400 an hour), more on a quieter one. Its last row says to when it holds them; the day's events.csv has every one.
+    /// An incident is kept up to 8 hours (open 2, closed 6) and 26 were held at once on the maintainer's PC: 5,000 each held
+    /// up to 130,000 events, most of which the write budget could never write. An open incident shares its events with the
+    /// 90-minute buffer only for those 90 minutes; past them, and once closed, what it kept is its own: in AgentLoadTests'
+    /// world (10 incidents open all day, 20 closed) 5,000 held 3.2 MB more heap at 6 hours than 1,000 (42.1 against 38.9 MB),
+    /// and with all 32 incidents held at the cap it would be about 29 MB more (4,000 more events each, at the 225 bytes an
+    /// event the world's closed incidents hold), against a heap already over its target.
+    /// </summary>
+    public const int MaxEventRows = 1000;
 
     private static readonly UTF8Encoding Utf8 = new(false);
 

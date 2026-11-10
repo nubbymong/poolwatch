@@ -37,9 +37,29 @@ public sealed class IncidentManager
     private TimeSpan EventKeep => TimeSpan.FromMinutes(_settings.IncidentEventKeepMinutes);
     private static readonly TimeSpan ReleaseAttachWindow = TimeSpan.FromHours(6);
     private const int MaxEvents = 20_000;
+    /// <summary>
+    /// The most closed incidents held in memory (for 6 hours each): the maintainer's PC held 16 after 4 hours of agentic load.
+    /// Past it the oldest closed leaves memory first; its folder stays on disk and the window lists it from there.
+    /// </summary>
+    public const int MaxClosed = 20;
 
-    /// <summary>How often an open incident is re-ranked; its folder is rewritten only on a material change or every <see cref="MaxRewriteInterval"/>.</summary>
+    /// <summary>
+    /// How often an open incident's episode (its onset, end and growth) is measured again; its folder is rewritten only on a
+    /// material change or every <see cref="MaxRewriteInterval"/>, with its suspects ranked just before.
+    /// </summary>
     public TimeSpan RewriteInterval { get; set; } = TimeSpan.FromSeconds(30);
+    /// <summary>
+    /// While the write budget has room for a rewrite, an open incident's suspects are ranked again this often, to see whether
+    /// its top suspect changed (a new top suspect is rewritten then).
+    /// </summary>
+    public TimeSpan SuspectsInterval { get; set; } = TimeSpan.FromMinutes(2);
+    /// <summary>
+    /// An open incident's suspects are ranked again at least this often whatever the write budget, so the cause the window's
+    /// list and the tray show from memory is never older than this (its report.json is as old as its last rewrite).
+    /// </summary>
+    public TimeSpan SuspectsRefreshInterval { get; set; } = TimeSpan.FromMinutes(10);
+    /// <summary>How many times incidents' suspects were ranked (the costly part of a re-rank), for the cost report.</summary>
+    public long SuspectRankings { get; private set; }
     public TimeSpan MaxRewriteInterval { get; set; } = TimeSpan.FromMinutes(5);
     /// <summary>A closed incident's alerts counted after it closed ("fired 37 more times") are written at most this often.</summary>
     public TimeSpan ClosedRewriteInterval { get; set; } = TimeSpan.FromMinutes(30);
@@ -209,13 +229,26 @@ public sealed class IncidentManager
                 Close(h, inc, nowUtc, nowMs, $"open for the maximum {_settings.IncidentMaxMinutes:0} min");
             else if (inc.Dirty && nowMs - inc.LastRankMs >= Ms(RewriteInterval))
             {
-                Rank(h, inc, nowMs);
+                // The episode (onset, end, growth: what the window's row and the tray read) is measured again at once.
+                var window = Measure(h, inc, nowMs);
                 (inc.LastRankUtc, inc.LastRankMs) = (nowUtc, nowMs);
                 // Disk budget: rewrite on a new top suspect, 25% more growth, or every few minutes, while the write budget
-                // has room (else at a later re-rank).
-                var top = inc.Suspects.FirstOrDefault()?.Key;
-                if (top != inc.WrittenTop || inc.Growth > inc.WrittenGrowth + inc.WrittenGrowth / 4 + (1 << 20) || nowMs - inc.LastWriteMs >= Ms(MaxRewriteInterval))
-                    Write(h, inc, mustWrite: false);
+                // has room (else at a later re-rank). The suspects, the costly part, are ranked again just before every
+                // rewrite, so each report holds the ranking of the moment it is written; while the budget has room every
+                // SuspectsInterval, to see whether the top suspect changed; and at least every SuspectsRefreshInterval, for the
+                // cause shown from memory. Under load the budget lets few rewrites through: a ranking nothing would be
+                // written from is not made more often than that.
+                bool grew = inc.Growth > inc.WrittenGrowth + inc.WrittenGrowth / 4 + (1 << 20);
+                bool due = nowMs - inc.LastWriteMs >= Ms(MaxRewriteInterval);
+                bool room = Budget.HasRoom(nowMs);
+                long sinceRanked = inc.SuspectsRankMs is { } ranked ? nowMs - ranked : long.MaxValue;
+                if (!(room && (grew || due || sinceRanked >= Ms(SuspectsInterval))) && sinceRanked < Ms(SuspectsRefreshInterval))
+                {
+                    if (grew || due) Budget.Hold(); // a rewrite that was due waits for the budget
+                    continue;
+                }
+                if (window is not null) RankSuspects(h, inc, window, nowMs);
+                if (grew || due || inc.Suspects.FirstOrDefault()?.Key != inc.WrittenTop) Write(h, inc, mustWrite: false);
             }
         }
         // Rows come last: only while every open incident's report is up to date (none has waited for its refresh), so they
@@ -237,12 +270,22 @@ public sealed class IncidentManager
         // The processes of an incident's window plus 10 minutes on each side (sized by time, not by a count) stay
         // resolvable in the registry while the incident is open or closed in the last 15 min (its trace may still be
         // parsing), so the trace's PIDs resolve to who ran them.
-        var (since, until) = ProtectWindow(_open.Values.Concat(_closed.Where(c => nowMs - c.ClosedMs!.Value < Ms(TimeSpan.FromMinutes(15)))),
-            CaptureRunning?.Invoke() == true);
+        bool capturing = CaptureRunning?.Invoke() == true;
+        var (since, until) = ProtectWindow(_open.Values.Concat(_closed.Where(c => nowMs - c.ClosedMs!.Value < Ms(TimeSpan.FromMinutes(15)))), capturing);
+        // A ranking names only processes the raw history holds points for: one that exited before its first sample (less the
+        // margin) can be in no ranking, however early an incident open longer than the history began. A trace can name only
+        // processes of its own minutes, which are recent.
+        if (since is { } s0 && !capturing) since = Math.Max(s0, h.Ms[0] - Ms(ProtectMargin));
         _registry.ProtectSinceMs = since;
         _registry.ProtectUntilMs = until;
+        // While a trace records or parses, it may name any process of the window; else a ranking names only those a snapshot
+        // listed, and their ancestors (ProcessRegistry.ProtectAll).
+        _registry.ProtectAll = capturing;
         int old = _closed.FindIndex(i => nowMs - i.ClosedMs!.Value < Ms(ReleaseAttachWindow));
         if (old < 0) old = _closed.Count;
+        // At most MaxClosed closed incidents stay in memory, the oldest closed leaving first as at 6 hours: a PC that opens
+        // many in a few hours would otherwise hold each one's events and owners for 6 hours.
+        old = Math.Max(old, _closed.Count - MaxClosed);
         // Their folders stay on disk; an events.csv the write budget had not brought up to date says to when it holds its events.
         for (int i = 0; i < old; i++)
             try { Budget.Spend(_writer.NoteUnwritten(_closed[i]), nowMs, must: true); }
@@ -277,6 +320,11 @@ public sealed class IncidentManager
             foreach (var inc in _open.Values.Concat(_closed))
             {
                 if (inc.Kind is not (IncidentKind.Growth or IncidentKind.NonPagedTotal)) continue;
+                // What it freed of the tag, as Measure's stitch adds it back while the history holds the clear: kept, for when it
+                // no longer does (an incident open longer than the raw history).
+                var (bp, bnp) = h.TagAt(inc.Tag, c.Before);
+                var (mp, mnp) = h.TagAt(inc.Tag, c.Measured);
+                if (ClearSpan.Drop(bp + bnp, mp + mnp) is > 0 and var tagDrop) inc.ClearDrops.Add((h.Ms[c.Measured], spans.TimeOf(c), tagDrop));
                 long drop = ClearSpan.Drop(Level(h, inc, c.Before), Level(h, inc, c.Measured));
                 if (drop == 0) continue;
                 inc.HighestSeenBytes -= drop;
@@ -348,7 +396,7 @@ public sealed class IncidentManager
         foreach (var inc in All.Where(i => i.Suspects.Any(s => s.Key == key)))
         {
             inc.Dirty = true;
-            if (inc.IsOpen) inc.WrittenTop = null; // forces the next re-rank to write
+            if (inc.IsOpen) (inc.WrittenTop, inc.SuspectsRankMs) = (null, null); // forces the next re-rank to rank and write
         }
     }
 
@@ -624,7 +672,16 @@ public sealed class IncidentManager
     /// </summary>
     private void Rank(History.History h, Incident inc, long toMs)
     {
-        if (h.Count < 3) return;
+        if (Measure(h, inc, toMs) is { } window) RankSuspects(h, inc, window, toMs);
+    }
+
+    /// <summary>
+    /// The growth episode of <see cref="Rank"/> alone: its window, onset, end and levels (what the window's row, the tray and
+    /// a refresh's triggers read), without the suspects; null when the history cannot say (then nothing is ranked).
+    /// </summary>
+    private CorrelationWindow? Measure(History.History h, Incident inc, long toMs)
+    {
+        if (h.Count < 3) return null;
         toMs = Math.Min(toMs, h.Ms[^1]);
         // Anchor on the alerts' own onset so repeated re-ranks cannot drift the window earlier and earlier.
         var growthAlerts = inc.Alerts.Where(a => a.Kind != AlertKind.Release).ToList();
@@ -635,9 +692,9 @@ public sealed class IncidentManager
         long lead = Math.Max(60_000, (toMs - onsetMs) / 2);
         long fromMs = Math.Max(h.Ms[0], onsetMs - lead);
         int iFrom = h.IndexAtOrAfterMs(fromMs), iTo = Math.Max(iFrom, h.IndexAtOrAfterMs(toMs + 1) - 1);
-        if (iFrom >= h.Count) return;
+        if (iFrom >= h.Count) return null;
         var series = h.TagSeries(inc.Tag, iFrom);
-        if (series.Length == 0) return;
+        if (series.Length == 0) return null;
         if (iTo - iFrom + 1 < series.Length) series = series[..(iTo - iFrom + 1)];
         // PoolWatch's own clears, on the detector's stitch: their interval is neither the growth's start nor its end (it
         // takes the level just before it), and their drop is not the growth ending (`grown` adds it back). The levels said
@@ -654,7 +711,33 @@ public sealed class IncidentManager
 
         DateTime? end = null;
         long? endMs = null;
-        if (inc.Kind != IncidentKind.Release)
+        if (inc.Kind != IncidentKind.Release && growthOnset.Ms < h.Ms[0] && inc.OnsetMs < h.Ms[0])
+        {
+            // The raw history no longer reaches back to the onset (an incident open longer than the history keeps): the onset
+            // and the start level are as last measured, never moved to the history's first sample, which is not where the
+            // growth began (its growth would shrink as the history moves on, and its events.csv would lose its rows as "before
+            // the window"). Its end and its highest point are measured on what the history holds, with what PoolWatch's own
+            // clears freed of it since the onset added back: those the history holds on the stitch (`dropped`), those that left
+            // it as they were measured (Incident.ClearDrops), so a clear that left the history is still not the growth ending.
+            var cp = Detector.FindChangePoints(grown);
+            (onset, onsetMs) = (inc.OnsetUtc, inc.OnsetMs);
+            if (cp.Rise > 0 && cp.EndIndex is { } e && e < iTo - iFrom) (end, endMs) = (h.Times[iFrom + e], h.Ms[iFrom + e]);
+            (inc.EndUtc, inc.EndMs) = (end, endMs);
+            long gone = 0;
+            int goneCount = 0;
+            DateTime? goneAt = null;
+            foreach (var (ms, at, drop) in inc.ClearDrops)
+            {
+                if (ms <= inc.OnsetMs || dropped.Exists(s => h.Ms[s.Measured] == ms)) continue;
+                gone += drop;
+                goneCount++;
+                goneAt = at;
+            }
+            inc.PeakBytes = Math.Max(inc.PeakBytes, series[0] + gone + (grown.Max() - grown[0]));
+            inc.ClearedBytes = gone + grown[^1] - series[^1] - (grown[0] - series[0]);
+            inc.ClearedAtUtc = goneCount + dropped.Count == 1 ? goneCount == 1 ? goneAt : spans.TimeOf(dropped[0]) : null;
+        }
+        else if (inc.Kind != IncidentKind.Release)
         {
             // Refine the onset with change-point detection on the series after the baseline start.
             var cp = Detector.FindChangePoints(grown);
@@ -683,9 +766,19 @@ public sealed class IncidentManager
         inc.CurrentBytes = series[^1];
         var window = new CorrelationWindow(h.Times[iFrom], onset, end, h.Times[iTo]) { FromMs = fromMs, OnsetMs = onsetMs, EndMs = endMs, ToMs = toMs };
         inc.Window = window;
+        inc.Dirty = true;
+        return window;
+    }
+
+    /// <summary>
+    /// The suspects of <see cref="Rank"/> over the episode <see cref="Measure"/> found just now (<paramref name="window"/>): the
+    /// processes, the trace's attribution and the owners. <paramref name="nowMs"/> is when, on the forward clock.
+    /// </summary>
+    private void RankSuspects(History.History h, Incident inc, CorrelationWindow window, long nowMs)
+    {
         // Owners are grouped from every active process (a session's many short commands are one owner), then the
         // per-process list keeps its top 10 and the owners what the reports read (OwnerRanking.Keep).
-        inc.Suspects = Correlator.Rank(h, _registry, inc.Tag, window, maxSuspects: 2000);
+        using (Util.Profiler.Stage("incident.rank.suspects")) inc.Suspects = Correlator.Rank(h, _registry, inc.Tag, window, maxSuspects: 2000);
         // The confirmation trace's attribution survives re-ranks (applied to the full list, before the owners are built).
         if (inc.Capture is { } cap)
         {
@@ -704,11 +797,14 @@ public sealed class IncidentManager
         }
         try
         {
-            inc.Owners = OwnerRanking.Keep(OwnerRanking.Rank(h, inc.Suspects, inc.Tag, window, Math.Max(0, inc.Growth),
+            using var owners = Util.Profiler.Stage("incident.rank.owners");
+            inc.Owners = OwnerRanking.KeepForIncident(OwnerRanking.Rank(h, inc.Suspects, inc.Tag, window, Math.Max(0, inc.Growth),
                 s => Identity.ProcessIdentities.Of(_registry.Ancestry(s.Key) is { Count: > 0 } c ? c : [new ProcessRecord { Key = s.Key, Image = s.Image }])));
         }
         catch { inc.Owners = null; }
         inc.Suspects = inc.Suspects.Take(10).ToList();
+        inc.SuspectsRankMs = nowMs;
+        SuspectRankings++;
         inc.Dirty = true;
     }
 
@@ -879,7 +975,14 @@ public sealed class IncidentManager
         @"\bworktree\s+(remove|prune)\b|(^|[\s;&|""'])(rm\s+-[a-zA-Z]*r[a-zA-Z]*|rmdir\s+/s|rd\s+/s|Remove-Item\b.*-Recurse)\b[^;&|]*worktree",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
-    public static bool IsWorktreeDelete(string? commandLine) => commandLine is not null && WorktreeDelete.IsMatch(commandLine);
+    /// <summary>
+    /// Whether the command line deletes a git worktree (<see cref="WorktreeDelete"/>). Asked of every start and exit (the
+    /// summarizer lists such a command whatever its length): a line without "tree" in it (by ordinal case, which no character
+    /// of it has another form of) cannot match, and is not run through the expression; most of a busy PC's scripts are a
+    /// kilobyte and have none.
+    /// </summary>
+    public static bool IsWorktreeDelete(string? commandLine) =>
+        commandLine is not null && commandLine.Contains("tree", StringComparison.OrdinalIgnoreCase) && WorktreeDelete.IsMatch(commandLine);
 
     private string? WorktreeNote(History.History h, int iFrom, Alert a)
     {

@@ -101,6 +101,12 @@ public sealed class Incident
     public long ClearedBytes { get; set; }
     /// <summary>When the one own clear that freed part of it since the onset ran; null when none did or several did.</summary>
     public DateTime? ClearedAtUtc { get; set; }
+    /// <summary>
+    /// Each of PoolWatch's own clears that freed part of the tag while the incident was held, as it was measured (when, on the
+    /// forward clock; when it ran; what it freed of the tag): an incident open longer than the raw history still counts those
+    /// that left it in its growth and in <see cref="ClearedBytes"/>.
+    /// </summary>
+    internal List<(long Ms, DateTime? Utc, long Drop)> ClearDrops { get; } = [];
     /// <summary>"PoolWatch's own cache clear at 06:20:01 freed 413.3 MB" when its own clears freed part of the tag since the onset, else null.</summary>
     public string? OwnClearsFreed => ClearedBytes > 0 ? Fmt.OwnClearsFreed(ClearedBytes, ClearedAtUtc) : null;
     public long Growth => PeakBytes - StartBytes;
@@ -164,8 +170,10 @@ public sealed class Incident
     public long? EpisodeStartMs { get; set; }
     /// <summary><see cref="LastWriteUtc"/> on the forward clock.</summary>
     public long LastWriteMs { get; set; }
-    /// <summary><see cref="LastRankUtc"/> on the forward clock.</summary>
+    /// <summary><see cref="LastRankUtc"/> on the forward clock: when the episode was last measured.</summary>
     public long LastRankMs { get; set; }
+    /// <summary>When the suspects were last ranked, on the forward clock (null: not yet, or due at the next re-rank).</summary>
+    public long? SuspectsRankMs { get; set; }
     /// <summary>Window the last ranking used (for timeline.csv / processes.csv).</summary>
     public CorrelationWindow? Window { get; set; }
     public bool IsOpen => ClosedUtc is null;

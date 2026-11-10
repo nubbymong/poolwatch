@@ -138,7 +138,9 @@ public class FeatureFixesTests
     [Fact]
     public void EvictionOverTheCapKeepsWindowRecordsCompactAndTheTraceFillsTheirCommandLine()
     {
-        var reg = new ProcessRegistry(maxRecords: 300) { KeepShortLived = TimeSpan.FromMinutes(15), ProtectSinceMs = Moment.Now().MsOf(T0.AddMinutes(-10)) };
+        // A trace is recording or being parsed (ProtectAll): every short command of the window may be in it, also those no
+        // snapshot listed.
+        var reg = new ProcessRegistry(maxRecords: 300) { KeepShortLived = TimeSpan.FromMinutes(15), ProtectSinceMs = Moment.Now().MsOf(T0.AddMinutes(-10)), ProtectAll = true };
         reg.ObserveSnapshot([new() { Pid = 4, ImageName = "System" }], T0);
         var claude = reg.OnStart(4000, 4, T0.AddHours(-1).ToFileTimeUtc(), "claude.exe", null, "claude", null, T0.AddHours(-1));
         for (int i = 0; i < 400; i++)

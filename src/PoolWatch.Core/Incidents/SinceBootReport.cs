@@ -31,7 +31,13 @@ public static class SinceBootReport
         var firstByTag = new Dictionary<PoolTag, long>();
         for (int i = 0; i < first.Tags.Length; i++) firstByTag[first.Tags[i]] = first.TagBytes[i];
 
-        var hours = minutes.GroupBy(m => new DateTime(m.TimeUtc.Ticks - m.TimeUtc.Ticks % TimeSpan.TicksPerHour, DateTimeKind.Utc)).OrderBy(g => g.Key).ToList();
+        var hours = minutes.GroupBy(m => History.History.HourOf(m.TimeUtc)).OrderBy(g => g.Key).ToList();
+        // The minutes older than the history's detail span have their processes summed by the hour (the busiest
+        // History.HourTop, named as the hour was summed, and the hour's total): read before the minutes still holding theirs,
+        // in the order they came, each hour's shares are those its minutes gave. The oldest hour, partly past the minutes'
+        // 25 hours, is shared out over all of it.
+        var summed = h.SummedHours().ToLookup(x => x.HourUtc);
+        perHour = Math.Min(perHour, History.History.HourTop);
         foreach (var (tag, now) in nowByTag.OrderByDescending(kv => kv.Value).Take(topTags))
         {
             var info = knowledge.Lookup(tag);
@@ -45,15 +51,26 @@ public static class SinceBootReport
                 if (growth > 0)
                 {
                     var ops = new Dictionary<ProcessKey, long>();
+                    var names = new Dictionary<ProcessKey, string>();
+                    long unlisted = 0; // the I/O of processes a summed hour no longer lists by name
+                    foreach (var s in summed[g.Key])
+                    {
+                        for (int i = 0; i < s.Keys.Length; i++)
+                        {
+                            ops[s.Keys[i]] = ops.GetValueOrDefault(s.Keys[i]) + s.Ops[i];
+                            if (s.Names[i] is { } n) names.TryAdd(s.Keys[i], n);
+                        }
+                        unlisted += s.TotalOps - s.Ops.Sum();
+                    }
                     foreach (var m in ms)
                         for (int i = 0; i < m.Processes.Length; i++)
                             if (m.Processes[i].Pid != 0) ops[m.Processes[i]] = ops.GetValueOrDefault(m.Processes[i]) + m.ProcessOps[i];
-                    long total = ops.Values.Sum();
+                    long total = ops.Values.Sum() + unlisted;
                     if (total > 0)
                         foreach (var (key, o) in ops.OrderByDescending(kv => kv.Value).Take(perHour))
                         {
                             double share = o / (double)total;
-                            attribution.Add((registry.Get(key)?.DisplayName ?? "unknown process", key.Pid, share, (long)(growth * share)));
+                            attribution.Add((registry.Get(key)?.DisplayName ?? names.GetValueOrDefault(key) ?? "unknown process", key.Pid, share, (long)(growth * share)));
                         }
                 }
                 perHourList.Add(new SinceBootHour(g.Key, growth, attribution));

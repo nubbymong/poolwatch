@@ -32,6 +32,11 @@ public sealed class ProcessRecord
     /// <summary><see cref="OrphanedUtc"/> on the clock that only goes forward.</summary>
     public long? OrphanedMs { get; set; }
     public bool SeenStartEvent { get; set; }
+    /// <summary>
+    /// A snapshot listed it (it ran across a sample): only such a process has points in the history, so only it can be a
+    /// suspect of the correlation. Most commands of a busy PC (fork copies, sub-second tools) never are.
+    /// </summary>
+    public bool SeenInSnapshot { get; internal set; }
     /// <summary>Enrichment retries left (a process opened in its ETW start callback may not be queryable yet).</summary>
     internal int EnrichRetries { get; set; } = 2;
     /// <summary>
@@ -96,10 +101,17 @@ public sealed class ProcessRegistry
     /// <summary>Exited processes that lived less than <see cref="EventSummarizer.LongLived"/> (shell pipelines, git calls) are
     /// forgotten after this long: a busy PC starts tens of thousands a day and they were most of PoolWatch's memory.</summary>
     public TimeSpan KeepShortLived { get; set; } = TimeSpan.FromMinutes(15);
+    /// <summary>
+    /// An exited record kept longer than this (a process that ran 30 s or more is kept a day, for the since-boot report's
+    /// names) becomes a named record without its long command line: past the raw history (70 minutes) and the margin no
+    /// ranking or release reads it. Not an ancestor of a live process or of one a ranking can name, not inside an incident's
+    /// window.
+    /// </summary>
+    public static readonly TimeSpan ThinAfter = TimeSpan.FromMinutes(90);
     /// <summary>When the next full prune is due, on the forward clock.</summary>
     private long _nextPruneMs = long.MinValue;
     private readonly Func<Moment> _clock;
-    private readonly Dictionary<int, string> _lastImage = new();
+    private Dictionary<int, string> _lastImage = new();
     private readonly HashSet<ProcessKey> _orphanCandidates = new();
 
     /// <summary>
@@ -164,14 +176,19 @@ public sealed class ProcessRegistry
             long slack = 2 * TimeSpan.TicksPerSecond;
             if (_livePid.TryGetValue(pid, out var k)) return childCreateTime > 0 && k.CreateTime > childCreateTime + slack ? null : k;
             if (!_lastKey.TryGetValue(pid, out var last) || (childCreateTime > 0 && last.CreateTime > childCreateTime + slack)) return null;
-            // Exited before the child was created: not its parent (the PID's next process may not have been seen yet).
-            if (childCreateTime > 0 && _all.TryGetValue(last, out var r) && r.ExitUtc is { } x && x.ToFileTimeUtc() < childCreateTime - slack) return null;
+            // Exited before the child was created: not its parent (the PID's next process may not have been seen yet). Its
+            // record may be full, compact or named (a long-lived process exited hours ago is a named one).
+            if (childCreateTime > 0 && ExitUtcOf(last) is { } x && x.ToFileTimeUtc() < childCreateTime - slack) return null;
             return last;
         }
     }
 
+    /// <summary>When the instance exited, by whichever record holds it (null: alive, or not held). Under the lock; no record is built.</summary>
+    private DateTime? ExitUtcOf(ProcessKey key) =>
+        _all.TryGetValue(key, out var r) ? r.ExitUtc : _compact.TryGetValue(key, out var c) ? c.ExitUtc : _named.TryGetValue(key, out var n) ? n.ExitUtc : null;
+
     /// <summary>The newest instance seen with each PID (live or exited), for <see cref="ParentKeyOf"/>.</summary>
-    private readonly Dictionary<int, ProcessKey> _lastKey = new();
+    private Dictionary<int, ProcessKey> _lastKey = new();
 
     /// <summary>Called when a process record is created, to fill image path / command line / user (outside the lock).</summary>
     public Action<ProcessRecord>? Enricher { get; set; }
@@ -260,6 +277,7 @@ public sealed class ProcessRegistry
             rec.User ??= user;
             if (!string.IsNullOrEmpty(image)) rec.Image = image;
             Share(rec);
+            ShareWithParent(rec);
             if (!alreadyReported) _pending.Enqueue(StartEvent(rec, nowUtc));
         }
         return rec;
@@ -293,7 +311,11 @@ public sealed class ProcessRegistry
         {
             retry = new List<ProcessRecord>();
             foreach (var p in processes)
-                if (_all.TryGetValue(p.Key, out var r) && r.ImagePath is null && r.EnrichRetries > 0 && !IsRootPid(r.Pid)) { r.EnrichRetries--; retry.Add(r); }
+            {
+                if (!_all.TryGetValue(p.Key, out var r)) continue;
+                r.SeenInSnapshot = true;
+                if (r.ImagePath is null && r.EnrichRetries > 0 && !IsRootPid(r.Pid)) { r.EnrichRetries--; retry.Add(r); }
+            }
         }
         foreach (var r in retry) Enrich(r);
 
@@ -305,6 +327,7 @@ public sealed class ProcessRegistry
             .Select(p => new ProcessRecord
             {
                 Key = p.Key, ParentPid = p.ParentPid, Image = p.ImageName, FirstSeenUtc = snapshotUtc, FirstSeenMs = snapshotMs, StartMs = at.MsOf(p.Key.CreateTimeUtc),
+                SeenInSnapshot = true,
             }).ToList();
         foreach (var rec in fresh) Enrich(rec);
 
@@ -343,6 +366,7 @@ public sealed class ProcessRegistry
             {
                 if (rekeyed.Contains(rec.Key)) continue; // parent and Start event came from ETW
                 ResolveParent(rec);
+                ShareWithParent(rec);
                 if (_initialized) _pending.Enqueue(StartEvent(rec, snapshotUtc));
             }
             // Anything live that is missing has exited, unless it was created after the snapshot was taken
@@ -538,6 +562,18 @@ public sealed class ProcessRegistry
         Share(rec);
     }
 
+    /// <summary>
+    /// A fork copy (Git Bash runs a subshell or a pipeline stage as a copy of the shell, started with its exact command line)
+    /// holds its parent's command line, not one of its own: an agent's shell script is often a kilobyte, too long for the
+    /// string pool, and each command makes two or three copies. Under the lock.
+    /// </summary>
+    private void ShareWithParent(ProcessRecord rec)
+    {
+        if (rec.CommandLine is { Length: > Util.StringPool.MaxLength } cl && rec.ParentKey is { } pk && _all.TryGetValue(pk, out var parent) &&
+            parent.CommandLine is { } pcl && !ReferenceEquals(cl, pcl) && string.Equals(cl, pcl, StringComparison.Ordinal))
+            rec.CommandLine = pcl;
+    }
+
     /// <summary>Repeated strings (image, path, user, command line) point at one shared copy.</summary>
     private static void Share(ProcessRecord rec)
     {
@@ -566,19 +602,87 @@ public sealed class ProcessRegistry
     /// <summary>A hard ceiling on compact start records (about 130 bytes each), oldest dropped first.</summary>
     public const int MaxCompact = 100_000;
 
-    /// <summary>A short-lived process kept only so an incident's trace can name it.</summary>
+    /// <summary>
+    /// A short-lived process kept only so an incident's ranking or trace can name it (<see cref="Of"/>: no command line, the
+    /// trace carries it), or an exited one kept for its name past the raw history (<see cref="Named"/>).
+    /// </summary>
     private sealed record CompactRecord(ProcessKey Key, int ParentPid, ProcessKey? ParentKey, string Image, string? ImagePath, DateTime ExitUtc, long ExitMs,
-        long StartMs, int? ExitCode)
+        long StartMs, int? ExitCode, bool Seen)
     {
+        public string? CommandLine { get; init; }
+        public string? User { get; init; }
+        /// <summary>Its own copy (the live record's list is replaced, never shared); each record built from it gets a new list.</summary>
+        public string[]? Services { get; init; }
+        public string? Label { get; init; }
+        public DateTime? OrphanedUtc { get; init; }
+        public long? OrphanedMs { get; init; }
+
         public static CompactRecord Of(ProcessRecord r) =>
-            new(r.Key, r.ParentPid, r.ParentKey, r.Image, r.ImagePath, r.ExitUtc!.Value, r.ExitMs ?? r.StartMs, r.StartMs, r.ExitCode);
+            new(r.Key, r.ParentPid, r.ParentKey, r.Image, r.ImagePath, r.ExitUtc!.Value, r.ExitMs ?? r.StartMs, r.StartMs, r.ExitCode, r.SeenInSnapshot);
+
+        /// <summary>Everything but a command line too long for the string pool (an agent's script; events.csv has it).</summary>
+        public static CompactRecord Named(ProcessRecord r) => Of(r) with
+        {
+            CommandLine = r.CommandLine is { Length: <= Util.StringPool.MaxLength } cl ? cl : null, User = r.User,
+            Services = r.Services.Count > 0 ? [.. r.Services] : null, Label = r.Label, OrphanedUtc = r.OrphanedUtc, OrphanedMs = r.OrphanedMs,
+        };
 
         public ProcessRecord ToRecord() => new()
         {
             Key = Key, ParentPid = ParentPid, ParentKey = ParentKey, Image = Image, ImagePath = ImagePath, ExitUtc = ExitUtc, ExitMs = ExitMs, ExitCode = ExitCode,
-            FirstSeenUtc = Key.CreateTimeUtc, FirstSeenMs = StartMs, StartMs = StartMs, SeenStartEvent = true,
+            FirstSeenUtc = Key.CreateTimeUtc, FirstSeenMs = StartMs, StartMs = StartMs, SeenStartEvent = true, SeenInSnapshot = Seen,
+            CommandLine = CommandLine, User = User, Services = Services is { } s ? [.. s] : [], Label = Label, OrphanedUtc = OrphanedUtc, OrphanedMs = OrphanedMs,
         };
     }
+
+    /// <summary>
+    /// Exited processes kept for their names past <see cref="ThinAfter"/> (<see cref="CompactRecord.Named"/>), for the day the
+    /// registry keeps exited records, at most <see cref="MaxNamed"/>, in the order they were named (<see cref="_namedOrder"/>):
+    /// the first named goes first.
+    /// </summary>
+    private readonly Dictionary<ProcessKey, CompactRecord> _named = new();
+    /// <summary>The named records' keys in the order they were named (a key named again is in it twice; the first is passed over).</summary>
+    private readonly Queue<ProcessKey> _namedOrder = new();
+    /// <summary>
+    /// A ceiling on named records (about 190 bytes each with their place in the dictionary): on the maintainer's PC under
+    /// agentic load (about 2,800 processes of 30 s or more ending an hour) the 3 to 4 hours after the 90 minutes the full
+    /// records keep, more on a quieter PC. What reads them later than that: the since-boot report's names, which it takes
+    /// as each hour's processes are summed (<see cref="History.History.NameOf"/>), 2 to 3 hours after they ran.
+    /// </summary>
+    public const int MaxNamed = 10_000;
+    /// <summary>Named records held (exited past the raw history, kept for their names).</summary>
+    public int NamedCount { get { lock (_lock) return _named.Count; } }
+
+    /// <summary>
+    /// A confirmation trace is recording or being parsed (set by the incident manager): every short-lived process of the
+    /// protected window is kept as a compact record, since the trace may name any of them. Otherwise only those that can be
+    /// named by an incident: the processes a snapshot listed (the suspects of the correlation) and their ancestors (who
+    /// they worked for); the rest (fork copies, sub-second tools never sampled) are in no ranking and no trace to come.
+    /// </summary>
+    public bool ProtectAll { get; set; }
+
+    /// <summary>
+    /// The ancestors of every record a ranking can name: one a snapshot listed (<see cref="ProcessRecord.SeenInSnapshot"/>)
+    /// that is alive or exited within <see cref="ThinAfter"/> (the raw history and its margin), full or compact; the chains
+    /// a ranking names their owners by. Under the lock.
+    /// </summary>
+    private HashSet<ProcessKey> AncestorsOfSeen()
+    {
+        long sinceMs = _clock().Ms - (long)ThinAfter.TotalMilliseconds;
+        var keep = new HashSet<ProcessKey>();
+        void Walk(ProcessKey? cur)
+        {
+            for (int d = 0; d < 32 && cur is { } k && keep.Add(k); d++)
+                cur = _all.TryGetValue(k, out var r) ? r.ParentKey : _compact.TryGetValue(k, out var c) ? c.ParentKey : _named.TryGetValue(k, out var n) ? n.ParentKey : null;
+        }
+        foreach (var r in _all.Values) if (r.SeenInSnapshot && (r.ExitMs is not { } x || x >= sinceMs)) Walk(r.ParentKey);
+        foreach (var c in _compact.Values) if (c.Seen && c.ExitMs >= sinceMs) Walk(c.ParentKey);
+        return keep;
+    }
+
+    /// <summary>Whether a short-lived record about to leave the full registry is kept as a compact one (<see cref="ProtectAll"/>).</summary>
+    private bool KeepCompact(ProcessRecord r, ref HashSet<ProcessKey>? ancestors) =>
+        ProtectAll || r.SeenInSnapshot || (ancestors ??= AncestorsOfSeen()).Contains(r.Key);
 
     private readonly Dictionary<ProcessKey, CompactRecord> _compact = new();
 
@@ -587,9 +691,9 @@ public sealed class ProcessRegistry
 
     private bool Protected(long exitMs) => ProtectSinceMs is { } ps && exitMs >= ps && (ProtectUntilMs is not { } pu || exitMs <= pu);
 
-    /// <summary>A full record, else a compact one rebuilt as a record (a new object: changing it changes nothing here).</summary>
+    /// <summary>A full record, else a compact or named one rebuilt as a record (a new object: changing it changes nothing here).</summary>
     private ProcessRecord? Lookup(ProcessKey key) =>
-        _all.TryGetValue(key, out var r) ? r : _compact.TryGetValue(key, out var c) ? c.ToRecord() : null;
+        _all.TryGetValue(key, out var r) ? r : _compact.TryGetValue(key, out var c) ? c.ToRecord() : _named.TryGetValue(key, out var n) ? n.ToRecord() : null;
 
     /// <summary>
     /// The record of one process instance: by PID and create time when the create time is known (exactly, else within 2 s:
@@ -644,6 +748,37 @@ public sealed class ProcessRegistry
         return best;
     }
 
+    /// <summary>The record leaves the full registry as a named one (<see cref="CompactRecord.Named"/>). Under the lock.</summary>
+    private void Name(ProcessRecord r)
+    {
+        _named[r.Key] = CompactRecord.Named(r);
+        _namedOrder.Enqueue(r.Key);
+    }
+
+    /// <summary>
+    /// Named records go, the first named first, once the day exited records are kept is over for the first in line, and while
+    /// there are more than <see cref="MaxNamed"/>: no pass over all of them (once at the ceiling, a sort of 20,000 every minute
+    /// was most of a day's allocations here).
+    /// </summary>
+    private void PruneNamed(long cutoffMs)
+    {
+        while (_namedOrder.TryPeek(out var k))
+        {
+            if (!_named.TryGetValue(k, out var n)) { _namedOrder.Dequeue(); continue; } // gone already (a key named twice)
+            if (n.ExitMs >= cutoffMs && _named.Count <= MaxNamed) break;
+            _namedOrder.Dequeue();
+            _named.Remove(k);
+        }
+        // A key named twice (a late start event for an exited process brought it back) is in line twice and goes at its first
+        // place; the line never holds more than twice the records.
+        if (_namedOrder.Count > 2 * (_named.Count + 64))
+        {
+            var order = _namedOrder.Where(_named.ContainsKey).Distinct().ToArray();
+            _namedOrder.Clear();
+            foreach (var k in order) _namedOrder.Enqueue(k);
+        }
+    }
+
     /// <summary>Compact records outside the protected window are no longer needed; a hard ceiling drops the oldest first.</summary>
     private void PruneCompact()
     {
@@ -680,6 +815,8 @@ public sealed class ProcessRegistry
         var dead = new List<ProcessKey>();
         var shortLivedKept = new List<ProcessRecord>();
         var protectedShort = new List<ProcessRecord>();
+        long thinCutoff = nowMs - (long)ThinAfter.TotalMilliseconds;
+        HashSet<ProcessKey>? ancestors = null;
         foreach (var r in _all.Values)
         {
             if (r.ExitUtc is null || keep.Contains(r.Key)) continue;
@@ -694,16 +831,24 @@ public sealed class ProcessRegistry
             }
             if (exitMs < cutoff || (shortLived && exitMs < shortCutoff)) dead.Add(r.Key);
             else if (shortLived) shortLivedKept.Add(r);
+            // Past the raw history no ranking or release reads the record any more: it is kept as a named record (name,
+            // path, services, label, parent and times: the since-boot report's names, an ancestor's place in a chain, its
+            // command line only when short), for the rest of its day. Not an ancestor of anything a ranking can name.
+            else if (exitMs < thinCutoff && !(ancestors ??= AncestorsOfSeen()).Contains(r.Key))
+            {
+                Name(r);
+                dead.Add(r.Key);
+            }
         }
         // A long incident on a busy PC would hold every short command it saw as a full record: the newest
         // MaxProtectedShortLived stay full, older ones in the window become compact start records (never dropped for a
-        // count: the window is sized by time).
+        // count: the window is sized by time), those an incident can name (KeepCompact).
         if (protectedShort.Count > MaxProtectedShortLived)
         {
             protectedShort.Sort((a, b) => (b.ExitMs ?? nowMs).CompareTo(a.ExitMs ?? nowMs));
             foreach (var r in protectedShort.Skip(MaxProtectedShortLived))
             {
-                _compact[r.Key] = CompactRecord.Of(r);
+                if (KeepCompact(r, ref ancestors)) _compact[r.Key] = CompactRecord.Of(r);
                 dead.Add(r.Key);
             }
             protectedShort.RemoveRange(MaxProtectedShortLived, protectedShort.Count - MaxProtectedShortLived);
@@ -711,33 +856,53 @@ public sealed class ProcessRegistry
         shortLivedKept.AddRange(protectedShort);
         foreach (var k in dead) _all.Remove(k);
         PruneCompact();
+        PruneNamed(cutoff);
         if (_all.Count > _maxRecords)
         {
             // Over the cap: evict to 80%, so a busy PC (hundreds of starts per sample) is not over again for several samples
             // (each time over is a full pass), short-lived ones first (those outside an incident window before those inside
-            // it), oldest exit first.
+            // it, those no snapshot listed before those a ranking can name), oldest exit first.
             int excess = _all.Count - _maxRecords * 4 / 5;
-            var victims = shortLivedKept.OrderBy(r => Protected(r.ExitMs ?? nowMs)).ThenBy(r => r.ExitMs)
+            var victims = shortLivedKept.OrderBy(r => Protected(r.ExitMs ?? nowMs)).ThenBy(r => r.SeenInSnapshot).ThenBy(r => r.ExitMs)
                 .Concat(_all.Values.Where(r => !r.IsAlive && !keep.Contains(r.Key) && !(r.Key.CreateTime > 0 && (r.ExitMs ?? nowMs) - r.StartMs < (long)EventSummarizer.LongLived.TotalMilliseconds)).OrderBy(r => r.ExitMs))
                 .Take(excess).ToList();
             foreach (var r in victims)
             {
-                if (Protected(r.ExitMs ?? nowMs)) _compact[r.Key] = CompactRecord.Of(r);
+                bool shortLived = r.Key.CreateTime > 0 && (r.ExitMs ?? nowMs) - r.StartMs < (long)EventSummarizer.LongLived.TotalMilliseconds;
+                if (Protected(r.ExitMs ?? nowMs) && KeepCompact(r, ref ancestors)) _compact[r.Key] = CompactRecord.Of(r);
+                else if (!shortLived) Name(r); // its name for the rest of its day
                 _all.Remove(r.Key);
             }
         }
-        if (_lastImage.Count > 2 * _maxRecords)
+        // Each PID's newest instance and image are for the PIDs of the records held: once an eighth more PIDs are listed (each
+        // start of a busy PC brings a new PID, 3,600 a minute), they are made again from the records held, into new
+        // dictionaries with room for that many (a cleared one keeps its size: before, on a busy PC 40,000 PIDs' room each,
+        // about 4.6 MB, for good). A pass over the 30,000 records held, about every minute there.
+        int held = _all.Count + _compact.Count + _named.Count, room = held + held / 8 + 1024;
+        if (_lastKey.Count > room || _lastImage.Count > room) RebuildLastByPid(room);
+    }
+
+    /// <summary>Each PID's newest instance held (full, compact or named; a live one first) and the image of it. Under the lock.</summary>
+    private void RebuildLastByPid(int room)
+    {
+        var lastKey = new Dictionary<int, ProcessKey>(room);
+        var lastImage = new Dictionary<int, string>(room);
+        void Offer(ProcessKey k, string image)
         {
-            _lastImage.Clear();
-            foreach (var r in _all.Values) if (r.Image.Length > 0) _lastImage[r.Pid] = r.Image;
+            if (lastKey.TryGetValue(k.Pid, out var was) && was.CreateTime >= k.CreateTime) return;
+            lastKey[k.Pid] = k;
+            if (image.Length > 0) lastImage[k.Pid] = image;
+            else if (_lastImage.TryGetValue(k.Pid, out var before)) lastImage[k.Pid] = before;
         }
-        if (_lastKey.Count > 2 * _maxRecords)
+        foreach (var n in _named.Values) Offer(n.Key, n.Image);
+        foreach (var c in _compact.Values) Offer(c.Key, c.Image);
+        foreach (var r in _all.Values) Offer(r.Key, r.Image);
+        foreach (var (pid, k) in _livePid)
         {
-            _lastKey.Clear();
-            foreach (var r in _all.Values)
-                if (!_lastKey.TryGetValue(r.Pid, out var was) || was.CreateTime < r.Key.CreateTime) _lastKey[r.Pid] = r.Key;
-            foreach (var (pid, k) in _livePid) _lastKey[pid] = k;
+            lastKey[pid] = k;
+            if (_all.TryGetValue(k, out var live) && live.Image.Length > 0) lastImage[pid] = live.Image;
         }
+        (_lastKey, _lastImage) = (lastKey, lastImage);
     }
 
 }

@@ -11,7 +11,12 @@ namespace PoolWatch.Core.Util;
 /// </summary>
 public static class StringPool
 {
-    public const int Max = 20_000;
+    /// <summary>
+    /// The most strings held: the maintainer's PC held 1,541 after 7 hours of agentic load. A string it holds that no record
+    /// does any more (a short script that ran once) stays until the pool starts over: 20,000 such strings were about 10 MB in a
+    /// test world with two short unique scripts a sample; 4,096 hold at most about 2 MB.
+    /// </summary>
+    public const int Max = 4_096;
     public const int MaxLength = 256;
     private static readonly ConcurrentDictionary<string, string> Pool = new(StringComparer.Ordinal);
 

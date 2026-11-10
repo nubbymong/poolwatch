@@ -391,24 +391,30 @@ internal sealed class Diagnostics
     /// </summary>
     private void OnSample(Sample s)
     {
+        // Each part is its own stage in profile.json (diagnostics.*), inside this one: what a busy PC's diagnostics cost is
+        // read by part, not as one figure (0.36% of one core and 2.4 MB a sample in 1.0.0-beta.2 on the maintainer's PC).
         using var _ = Core.Util.Profiler.Stage("diagnostics");
         var events = _tickEvents.ToList();
         _tickEvents.Clear();
         while (_guardFindings.TryDequeue(out var gf)) Findings.Add(gf);
         TokeNow = Toke(s);
-        try { ObserveLoad(s); }
-        catch (Exception ex) { _engine.Log.Info("saturation / load failed: " + ex.Message); }
-        try
-        {
-            Services.CheckSelfRepair();
-            Services.ObserveSavings(_engine.Services);
-        }
-        catch (Exception ex) { _engine.Log.Info("service self-repair / savings check failed: " + ex.Message); }
+        using (Core.Util.Profiler.Stage("diagnostics.load"))
+            try { ObserveLoad(s); }
+            catch (Exception ex) { _engine.Log.Info("saturation / load failed: " + ex.Message); }
+        using (Core.Util.Profiler.Stage("diagnostics.services"))
+            try
+            {
+                Services.CheckSelfRepair();
+                Services.ObserveSavings(_engine.Services);
+            }
+            catch (Exception ex) { _engine.Log.Info("service self-repair / savings check failed: " + ex.Message); }
         if (_guardTask is not null)
             try { Guard.Recheck(TimeSpan.FromMinutes(_engine.Settings.TokenGuardRecheckMinutes), () => GuardUi); }
             catch (Exception ex) { _engine.Log.Info("token guard re-check failed: " + ex.Message); }
-        try { Cache.Observe(s); }
-        catch (Exception ex) { _engine.Log.Info("clear cache failed: " + ex.Message); }
+        using (Core.Util.Profiler.Stage("diagnostics.cache"))
+            try { Cache.Observe(s); }
+            catch (Exception ex) { _engine.Log.Info("clear cache failed: " + ex.Message); }
+        using (Core.Util.Profiler.Stage("diagnostics.spawns"))
         try
         {
             List<Finding> findings;
@@ -420,6 +426,7 @@ internal sealed class Diagnostics
             foreach (var f in findings) Findings.Add(f);
         }
         catch (Exception ex) { _engine.Log.Info("spawn diagnostics failed: " + ex.Message); }
+        using (Core.Util.Profiler.Stage("diagnostics.tokens"))
         try
         {
             Finding? token;
@@ -427,6 +434,7 @@ internal sealed class Diagnostics
             if (token is not null) Findings.Add(token);
         }
         catch (Exception ex) { _engine.Log.Info("token correlation failed: " + ex.Message); }
+        using (Core.Util.Profiler.Stage("diagnostics.lag"))
         try
         {
             if (_lagProber is not null)
@@ -449,6 +457,7 @@ internal sealed class Diagnostics
                 }
         }
         catch (Exception ex) { _engine.Log.Info("lag probe failed: " + ex.Message); }
+        using (Core.Util.Profiler.Stage("diagnostics.marks"))
         try
         {
             // One inbox for the run: the folder is listed only when it changed, and undeletable files never block new marks.
@@ -463,16 +472,19 @@ internal sealed class Diagnostics
         var due = _checks.At(s, _engine.Settings, _instancesRequested);
         if (due.Version)
         {
+            using var checks = Core.Util.Profiler.Stage("diagnostics.versions");
             try { CheckVersions(s.TimeUtc); }
             catch (Exception ex) { _engine.Log.Info("version markers failed: " + ex.Message); }
         }
         if (due.Crash)
         {
+            using var crashes = Core.Util.Profiler.Stage("diagnostics.crashes");
             // A log that filled its page has more records behind it: the next page in a minute, not at the next check.
             try { if (CheckCrashes(s.TimeUtc)) _checks.CrashPageFull(s); }
             catch (Exception ex) { _engine.Log.Info("crash markers failed: " + ex.Message); }
         }
         if (Accumulation.Due(Core.Model.Moment.Of(s)))
+        using (Core.Util.Profiler.Stage("diagnostics.census"))
         try
         {
             List<Finding> acc;
@@ -481,8 +493,10 @@ internal sealed class Diagnostics
             foreach (var f in acc) Findings.Add(f);
         }
         catch (Exception ex) { _engine.Log.Info("child accumulation failed: " + ex.Message); }
-        try { ObserveExperiment(s); }
-        catch (Exception ex) { _engine.Log.Info("experiment failed: " + ex.Message); }
+        using (Core.Util.Profiler.Stage("diagnostics.experiment"))
+            try { ObserveExperiment(s); }
+            catch (Exception ex) { _engine.Log.Info("experiment failed: " + ex.Message); }
+        using (Core.Util.Profiler.Stage("diagnostics.snapshots"))
         try
         {
             // Before-launch / after-exit tag snapshots of the watched apps, outside experiments too.
@@ -491,10 +505,12 @@ internal sealed class Diagnostics
             foreach (var t in taken) _engine.Log.Info($"tag snapshot kept: {t.App} {t.Moment} ({t.Tags.Count} tags)");
         }
         catch (Exception ex) { _engine.Log.Info("app snapshots failed: " + ex.Message); }
-        try { ObserveFilters(s, due, events); }
-        catch (Exception ex) { _engine.Log.Info("filter / container timeline failed: " + ex.Message); }
+        using (Core.Util.Profiler.Stage("diagnostics.filters"))
+            try { ObserveFilters(s, due, events); }
+            catch (Exception ex) { _engine.Log.Info("filter / container timeline failed: " + ex.Message); }
         if (due.StrayGit)
         {
+            using var strayGit = Core.Util.Profiler.Stage("diagnostics.strayGit");
             try
             {
                 foreach (var f in StrayGit.Run(StrayGitCandidates(), GitContext(), s.TimeUtc)) Findings.Add(f);

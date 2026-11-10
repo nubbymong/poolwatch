@@ -145,6 +145,7 @@ public sealed class Detector
         foreach (var (t, st) in _status) if (st.State == TagState.Released) _wasReleased.Add(t);
 
         _status.Clear();
+        var series = new long[n - minFrom]; // each significant tag's series in turn, one array for all of them
         foreach (var tag in h.KnownTags)
         {
             var (paged, nonPaged) = h.TagAt(tag, n - 1);
@@ -155,7 +156,7 @@ public sealed class Detector
             if (!significant) continue;
             // The tag's values with each own clear's drop added back: the difference of two of them (outside the intervals)
             // is the change between them with no clear's drop in it. Unchanged with no clear in the window.
-            var series = h.TagSeries(tag, minFrom);
+            h.FillTagSeries(tag, minFrom, series);
             spans.Stitch(series, minFrom);
             long At(int idx) => series[Math.Clamp(idx - minFrom, 0, series.Length - 1)];
             long latest = series[^1];

@@ -30,6 +30,8 @@ internal sealed class AnalysisPipeline
         Knowledge = new TagKnowledge(engine.Settings.PoolTagTxtPath, paths.Guard.CheckReal(Path.Combine(paths.EnsureDir(paths.CacheDir), "tagscan.json")), paths.Guard.CheckReal);
         Host = new WindowsIncidentHost(engine, Knowledge);
         History = History.ForInterval(engine.Settings.SampleIntervalSeconds, engine.Settings.RawHistoryMinutes);
+        // The since-boot report's names of an hour's busiest processes, taken as the minutes' processes are summed by the hour.
+        History.NameOf = key => engine.Registry.Get(key)?.DisplayName;
         Detector = new Detector(engine.Settings);
         Growth = new Core.Growth.GrowthLedger(CacheClearer.MeasureAfter, TimeSpan.FromSeconds(engine.Settings.SampleIntervalSeconds));
         Incidents = new IncidentManager(engine.Settings, Knowledge, Host, engine.Registry);

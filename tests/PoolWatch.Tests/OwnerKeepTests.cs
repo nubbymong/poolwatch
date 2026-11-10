@@ -150,6 +150,20 @@ public class OwnerKeepTests
             // The vendor bundle's incidents.md and the Pool causes row read the first meaningful owners' summary and strength.
             var shown = full.Where(o => o.Meaningful).Take(3).Select(o => (o.Name, o.Summary, o.Confidence)).ToList();
             Assert.Equal(shown, OwnerRanking.Keep(Owners()).Take(3).Select(o => (o.Name, o.Summary, o.Confidence)));
+
+            // What an incident keeps (KeepForIncident): the same reports, every owner with its summary, member count and
+            // evidence lines; the members of the first three only (the ChatGPT check reads theirs), one each for the rest.
+            var keep = OwnerRanking.Keep(Owners());
+            var forIncident = OwnerRanking.KeepForIncident(Owners());
+            var kept = Write(forIncident);
+            Assert.Equal(before.md, kept.md);
+            Assert.Equal(before.json, kept.json);
+            Assert.True(forIncident.Count > OwnerRanking.IncidentListedOwners);
+            Assert.Equal(keep.Select(o => (o.Name, o.Summary, o.MemberCount, o.Confidence, o.ExplainedBytes, string.Join("|", o.Plain))),
+                forIncident.Select(o => (o.Name, o.Summary, o.MemberCount, o.Confidence, o.ExplainedBytes, string.Join("|", o.Plain))));
+            Assert.Equal(keep.Take(3).Select(o => string.Join(",", o.Members.Select(m => m.Key))), forIncident.Take(3).Select(o => string.Join(",", o.Members.Select(m => m.Key))));
+            Assert.All(forIncident.Skip(3), o => Assert.True(o.Members.Count <= 2));
+            Assert.True(forIncident.Sum(o => o.Members.Count) < keep.Sum(o => o.Members.Count));
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }

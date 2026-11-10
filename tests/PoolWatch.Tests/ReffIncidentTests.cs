@@ -163,9 +163,10 @@ public class ReffIncidentTests
     [Fact]
     public void ProtectedRecordsAreSizedByTimeNotByACount()
     {
-        // Every short command of the window stays resolvable, however many: the newest keep their full record,
-        // older ones a compact start record (identity, parent, path; the trace carries the command line itself).
-        var reg = new ProcessRegistry { KeepShortLived = TimeSpan.FromMinutes(15), ProtectSinceMs = Moment.Now().MsOf(T0.AddMinutes(-10)) };
+        // While a trace records or parses (ProtectAll), every short command of the window stays resolvable, however many: the
+        // newest keep their full record, older ones a compact start record (identity, parent, path; the trace carries the
+        // command line itself).
+        var reg = new ProcessRegistry { KeepShortLived = TimeSpan.FromMinutes(15), ProtectSinceMs = Moment.Now().MsOf(T0.AddMinutes(-10)), ProtectAll = true };
         reg.ObserveSnapshot([new() { Pid = 4, ImageName = "System" }], T0);
         var claude = reg.OnStart(4000, 4, Ft(T0.AddHours(-1)), "claude.exe", null, "claude", null, T0.AddHours(-1));
         int n = ProcessRegistry.MaxProtectedShortLived + 500;

@@ -34,10 +34,11 @@ public sealed class IncidentPersistenceTests : IDisposable
     public void UnderTheOwnersLoadEventsCsvHoldsEveryEventFromItsFirstRowToItsLast()
     {
         // One growth incident open for 100 minutes on a PC that records 26 events every 10 s sample (9,400 an hour), with
-        // the default write budget: the window passes the 5,000 events an incident keeps long before its events.csv has
+        // the default write budget: the window passes the 1,000 events an incident keeps long before its events.csv has
         // caught up. Its rows are the window's events from its first row on, with none missing between its first row and
         // its last (each event's PID is one more than the one before, so a gap shows as a missing PID); at the end of the
-        // run it has all it kept, and a last row says to when.
+        // run it has all it kept, and a last row says to when. The incident outlives the raw history (70 minutes): its
+        // onset stays where the growth began, so the rows it kept stay in its window.
         Directory.CreateDirectory(_dir);
         var host = new CountingHost(_dir);
         var w = new World { Interval = TimeSpan.FromSeconds(10) };
@@ -72,7 +73,7 @@ public sealed class IncidentPersistenceTests : IDisposable
         mgr.Finish(w.History, w.Now);
         var rows = EventPids(inc.Dir);
         Assert.Equal(Enumerable.Range(rows.Min(), rows.Count), rows.Order());
-        // Every event it kept is there (the first 5,000 from the window's start as it first wrote it), less the rows a
+        // Every event it kept is there (the first 1,000 from the window's start as it first wrote it), less the rows a
         // later onset left before its window.
         Assert.Equal(open.Min() + IncidentWriter.MaxEventRows - 1, rows.Max());
         Assert.True(rows.Min() >= open.Min());

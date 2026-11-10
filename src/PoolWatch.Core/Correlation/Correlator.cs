@@ -191,17 +191,21 @@ public static class Correlator
         foreach (var (key, pts, ops, quota, hb, ha) in rows)
         {
             if (key.Pid == 0) continue; // Idle
-            var rec = registry.Get(key);
             double ioShare = totalOps > 0 ? Math.Max(0, ops) / (double)totalOps : 0;
             double hShare = totalHandleUp > 0 ? Math.Max(0, ha - hb) / (double)totalHandleUp : 0;
             double qShare = totalQuotaUp > 0 ? Math.Max(0, quota) / (double)totalQuotaUp : 0;
             bool directHandles = haveScans && growth > 0 && ha - hb >= MinHandleDelta && hShare >= MinHandleShare;
             // Quota alone counts only when it is large in absolute terms (it is charged for many object kinds).
             bool directQuota = growth > 0 && quota >= Math.Max(1L << 20, growth / 10) && qShare >= 0.5;
-            var direct = new DirectSignal(haveScans ? handleType : null, hb, ha, hShare, quota, qShare, directHandles || directQuota);
 
             // Start / exit timing only means something for a process that did something in the episode.
             bool active = ioShare >= 0.01 || ha - hb >= MinHandleDelta || quota >= 64 * 1024;
+            // Nothing to rank it on: no direct charge, no I/O or handles in the episode, and not active (every lifecycle
+            // signal needs the process to be active), so it is left out as below, without its record being read: on a busy
+            // PC most processes of the window are short commands that did nothing in the episode.
+            if (!directHandles && !directQuota && !active && ops <= 0 && ha - hb <= 0) continue;
+            var rec = registry.Get(key);
+            var direct = new DirectSignal(haveScans ? handleType : null, hb, ha, hShare, quota, qShare, directHandles || directQuota);
             var lifecycle = Lifecycle(rec, h, from, onset, end, to, ioShare, active);
 
             if (!direct.Present && !lifecycle.Present && ops <= 0 && ha - hb <= 0) continue;
@@ -281,44 +285,54 @@ public static class Correlator
     /// <param name="d">A buffer as long as the tag deltas, overwritten.</param>
     private static ActivitySignal Activity(TagRanks tag, ProcessPoints pts, int from, long ops, double ioShare, double[] d)
     {
-        ActivitySignal? best = null;
-        foreach (var counter in Counters)
+        // A delta exists only where the process has both points; its points are contiguous, so that is the window's deltas
+        // [lo, hi], and the rest are 0. The best counter is kept as numbers, and one signal made of it.
+        int lo = Math.Max(0, pts.First - from), hi = Math.Min(d.Length - 1, pts.Last - 1 - from);
+        int best = -1, bestLag = 0;
+        double bestR = double.NaN, bestLagged = double.NaN;
+        for (int c = 0; c < Counters.Length; c++)
         {
-            for (int i = 0; i < d.Length; i++)
+            Array.Clear(d);
+            for (int i = lo; i <= hi; i++)
             {
-                int at = from + i;
-                if (!pts.Has(at) || !pts.Has(at + 1)) { d[i] = 0; continue; }
-                ProcPoint a = pts[at], b = pts[at + 1];
-                long v = counter switch { "other" => b.OtherOps - a.OtherOps, "read" => b.ReadOps - a.ReadOps, _ => b.TotalOps - a.TotalOps };
+                ProcPoint a = pts[from + i], b = pts[from + i + 1];
+                long v = c switch { 1 => b.OtherOps - a.OtherOps, 2 => b.ReadOps - a.ReadOps, _ => b.TotalOps - a.TotalOps };
                 d[i] = Math.Max(0, v);
             }
             double r = tag.Spearman(d, 0);
-            double bestLagged = double.NaN; int bestLag = 0;
+            double lagged = double.NaN; int lagAt = 0;
             for (int lag = 1; lag <= MaxLag; lag++)
             {
                 double rl = tag.Spearman(d, lag);
-                if (!double.IsNaN(rl) && (double.IsNaN(bestLagged) || rl > bestLagged)) { bestLagged = rl; bestLag = lag; }
+                if (!double.IsNaN(rl) && (double.IsNaN(lagged) || rl > lagged)) { lagged = rl; lagAt = lag; }
             }
-            var cand = new ActivitySignal(counter, r, bestLag, bestLagged, ioShare, ops, false);
-            if (best is null || Better(cand.Best, best.Best)) best = cand;
+            if (best < 0 || Better(BestOf(r, lagged), BestOf(bestR, bestLagged))) (best, bestR, bestLag, bestLagged) = (c, r, lagAt, lagged);
         }
-        double rb = best!.Best;
+        double rb = BestOf(bestR, bestLagged);
         bool present = !double.IsNaN(rb) && ops > 0 &&
                        ((rb >= MinSpearman && ioShare >= MinIoShare) || (rb >= 0.3 && ioShare >= DominantIoShare));
-        return best with { Present = present };
+        return new ActivitySignal(Counters[best], bestR, bestLag, bestLagged, ioShare, ops, present);
     }
+
+    /// <summary><see cref="ActivitySignal.Best"/> of these two correlations.</summary>
+    private static double BestOf(double spearman, double lagged) =>
+        double.IsNaN(lagged) ? spearman : double.IsNaN(spearman) ? lagged : Math.Max(spearman, lagged);
 
     private static bool Better(double a, double b) => !double.IsNaN(a) && (double.IsNaN(b) || a > b);
 
     /// <summary>
     /// Spearman of the tag's growth deltas against one process counter at each lag, as Stats.Spearman (lag 0) and
-    /// Stats.SpearmanLagged compute it, without their allocations: the tag's series is ranked once per ranking, and each
-    /// counter is ranked into reused buffers. A rank depends only on the values (ties share their mean rank), so sorting
-    /// in place gives the same ranks, and Stats.Pearson the same result.
+    /// Stats.SpearmanLagged compute it, without their allocations: the tag's series is ranked once per ranking (and its
+    /// mean taken once), and each counter is ranked into reused buffers. A rank depends only on the values (ties share
+    /// their mean rank), so sorting in place gives the same ranks, and Stats.Pearson the same result. A counter is 0 in most
+    /// samples of a window (a short command is seen in one or two): its zeros, the lowest values, share one rank and only
+    /// the rest are sorted, which gives the same ranks; a counter that is 0 throughout has no correlation (NaN), as Pearson
+    /// finds for a constant series.
     /// </summary>
     internal sealed class TagRanks
     {
         private readonly double[]?[] _tag = new double[]?[MaxLag + 1];
+        private readonly double[] _tagMean = new double[MaxLag + 1];
         private readonly double[]?[] _counter = new double[]?[MaxLag + 1];
         private readonly double[] _keys;
         private readonly int[] _order;
@@ -331,17 +345,54 @@ public static class Correlator
             for (int lag = 0; lag <= MaxLag && n - lag >= 4; lag++)
             {
                 Rank(tagDeltas.AsSpan(lag), _tag[lag] = new double[n - lag]);
+                _tagMean[lag] = _tag[lag]!.Average(); // as Stats.Pearson takes it
                 _counter[lag] = new double[n - lag];
             }
         }
 
-        /// <summary>The tag's deltas against <paramref name="d"/> lagged by <paramref name="lag"/> samples; NaN when too short.</summary>
+        /// <summary>
+        /// The tag's deltas against <paramref name="d"/> (a counter's deltas, none below 0) lagged by
+        /// <paramref name="lag"/> samples; NaN when too short or when <paramref name="d"/> is 0 throughout.
+        /// </summary>
         public double Spearman(double[] d, int lag)
         {
             if (_tag[lag] is not { } rx) return double.NaN;
             var ry = _counter[lag]!;
-            Rank(d.AsSpan(0, ry.Length), ry);
-            return Stats.Pearson(rx, ry);
+            if (!RankCounter(d.AsSpan(0, ry.Length), ry)) return double.NaN;
+            return Stats.Pearson(rx, _tagMean[lag], ry);
+        }
+
+        /// <summary>
+        /// <see cref="Rank"/> of a counter's deltas (none below 0); false, with nothing ranked, when they are all 0 (each
+        /// rank would be the same, and Pearson NaN: the ranks are halves, so their mean is exact and every deviation 0).
+        /// </summary>
+        private bool RankCounter(ReadOnlySpan<double> values, double[] ranks)
+        {
+            int n = values.Length, nonZero = 0;
+            for (int i = 0; i < n; i++) if (values[i] != 0) nonZero++;
+            if (nonZero == 0) return false;
+            if (nonZero * 4 > n) { Rank(values, ranks); return true; }
+            // The zeros are the first `zeros` values in sorted order: one block, its mean rank; the rest after them.
+            int zeros = n - nonZero;
+            double zeroRank = (0 + (zeros - 1)) / 2.0 + 1;
+            var keys = _keys.AsSpan(0, nonZero);
+            var order = _order.AsSpan(0, nonZero);
+            int m = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (values[i] == 0) ranks[i] = zeroRank;
+                else { keys[m] = values[i]; order[m] = i; m++; }
+            }
+            keys.Sort(order);
+            for (int k = 0; k < nonZero;)
+            {
+                int j = k;
+                while (j + 1 < nonZero && keys[j + 1] == keys[k]) j++;
+                double r = (zeros + k + (zeros + j)) / 2.0 + 1;
+                for (int q = k; q <= j; q++) ranks[order[q]] = r;
+                k = j + 1;
+            }
+            return true;
         }
 
         /// <summary>Stats.Ranks into <paramref name="ranks"/>: 1-based, ties sharing their mean rank.</summary>

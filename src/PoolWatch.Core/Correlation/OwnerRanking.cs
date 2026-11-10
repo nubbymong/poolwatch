@@ -99,6 +99,8 @@ public static class OwnerRanking
         var tagDeltas = new double[Math.Max(0, n - 1)];
         for (int i = 0; i < tagDeltas.Length; i++) tagDeltas[i] = series[i + 1] - series[i];
 
+        // The tag's deltas ranked once for every owner's correlation (Stats.Spearman ranked them again for each).
+        var tagRanks = tagDeltas.Length >= 4 ? new Correlator.TagRanks(tagDeltas) : null;
         var groups = new Dictionary<string, OwnerSuspect>();
         foreach (var s in suspects)
         {
@@ -108,6 +110,7 @@ public static class OwnerRanking
             g.Members.Add(s);
             g.Identities.Add(id);
         }
+        var ops = new double[tagDeltas.Length]; // one owner's summed I/O deltas, reused
         foreach (var g in groups.Values)
         {
             g.IoShare = g.Members.Sum(m => m.Activity.IoShare);
@@ -115,16 +118,16 @@ public static class OwnerRanking
             g.ExplainedBytes = g.Members.Sum(m => Explained(m, growth));
             g.Confidence = g.Members.Max(m => m.Confidence);
             g.Score = g.Members.Max(m => m.Score) + 0.5 * g.Members.Skip(1).Sum(m => m.Score) / Math.Max(1, g.Members.Count);
-            if (tagDeltas.Length >= 4 && g.Members.Count > 1)
+            if (tagRanks is not null && g.Members.Count > 1)
             {
-                var ops = new double[tagDeltas.Length];
+                Array.Clear(ops);
                 foreach (var m in g.Members)
                 {
                     var pts = h.Points(m.Key);
                     for (int i = Math.Max(0, pts.First - from); i < ops.Length && from + i + 1 <= pts.Last; i++)
                         ops[i] += Math.Max(0, pts[from + i + 1].TotalOps - pts[from + i].TotalOps);
                 }
-                g.Correlation = Stats.Spearman(tagDeltas, ops);
+                g.Correlation = tagRanks.Spearman(ops, 0); // as Stats.Spearman(tagDeltas, ops): the same ranks, the same Pearson
                 if (g.Confidence < Confidence.Correlated && g.Correlation >= Correlator.MinSpearman && g.IoShare >= Correlator.MinIoShare)
                 {
                     g.Confidence = Confidence.Correlated;
@@ -152,6 +155,22 @@ public static class OwnerRanking
     {
         var kept = ranked.Where(o => o.Meaningful).Take(maxOwners).ToList();
         foreach (var o in kept) o.Trim(KeptMembers);
+        return kept;
+    }
+
+    /// <summary>Owners whose members an incident's readers list: its first three meaningful (report.md, the vendor bundle, the ChatGPT check).</summary>
+    public const int IncidentListedOwners = 3;
+
+    /// <summary>
+    /// What an incident keeps of a finished ranking (<see cref="Keep"/>): every meaningful owner, for the answer line that sums
+    /// them all, and the members of the first <see cref="IncidentListedOwners"/> only, the rest one member each (their
+    /// summary, member count and evidence lines stay as they were). An incident is held up to 8 hours, and its owners'
+    /// members were half of what it held.
+    /// </summary>
+    public static List<OwnerSuspect> KeepForIncident(IEnumerable<OwnerSuspect> ranked)
+    {
+        var kept = Keep(ranked);
+        for (int i = IncidentListedOwners; i < kept.Count; i++) kept[i].Trim(1);
         return kept;
     }
 

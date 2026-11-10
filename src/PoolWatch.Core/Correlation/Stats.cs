@@ -24,10 +24,13 @@ public static class Stats
         return Spearman(xs, ys);
     }
 
-    public static double Pearson(double[] a, double[] b)
+    public static double Pearson(double[] a, double[] b) => Pearson(a, a.Average(), b);
+
+    /// <summary><see cref="Pearson(double[], double[])"/> with <paramref name="a"/>'s mean taken already (a.Average()).</summary>
+    public static double Pearson(double[] a, double ma, double[] b)
     {
         int n = a.Length;
-        double ma = a.Average(), mb = b.Average();
+        double mb = b.Average();
         double num = 0, da = 0, db = 0;
         for (int i = 0; i < n; i++)
         {

@@ -72,7 +72,7 @@ public sealed class IncidentEventsFileTests : IDisposable
     }
 
     [Fact]
-    public void AWriteAddsAtMostItsRowsAndTheFileStopsAtFiveThousand()
+    public void AWriteAddsAtMostItsRowsAndTheFileStopsAtWhatTheIncidentKeeps()
     {
         var host = new CountingHost(_dir);
         var writer = new IncidentWriter(new TagKnowledge(null, null), host, new ProcessRegistry());
@@ -85,9 +85,10 @@ public sealed class IncidentEventsFileTests : IDisposable
         Assert.Contains("--step 0 ", File.ReadAllLines(Path.Combine(inc.Dir, "events.csv"))[1]);
         writer.AppendEvents(inc, events, maxRows: 10_000);
         var lines = File.ReadAllLines(Path.Combine(inc.Dir, "events.csv"));
-        Assert.Equal(1 + IncidentWriter.MaxEventRows + 1, lines.Length); // the header, 5,000 events and the row that says the rest are elsewhere
-        // The row says to when the file holds the window's events: the time of the first event not kept (the 5,001st).
-        Assert.Contains("events.csv holds the incident window's events to this row's time (an incident keeps at most 5,000)", lines[^1]);
+        Assert.Equal(1 + IncidentWriter.MaxEventRows + 1, lines.Length); // the header, the 1,000 events kept and the row that says the rest are elsewhere
+        // The row says to when the file holds the window's events: the time of the first event not kept (the 1,001st).
+        Assert.Equal(1000, IncidentWriter.MaxEventRows);
+        Assert.Contains("events.csv holds the incident window's events to this row's time (an incident keeps at most 1,000)", lines[^1]);
         Assert.StartsWith(PoolWatch.Core.Util.Csv.Line(T0.AddSeconds(IncidentWriter.MaxEventRows)), lines[^1]);
         Assert.Contains(",Note,", lines[^1]);
         Assert.False(writer.EventsPending(inc));

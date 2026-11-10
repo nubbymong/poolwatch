@@ -109,6 +109,23 @@ want, trims background work. Every change it makes is listed, with a way to put 
   allows (with many incidents open at once, up to about an hour behind; the list's figures are live). An incident's
   `events.csv` has every event from its first row to its last. The incident list always shows your incidents, however
   many storm reports came after them.
+- **Lighter on the CPU and memory under agentic load.** On a PC starting hundreds of processes a minute with ten
+  incidents open, 1.0.0-beta.2 spent 2.4% of one core and its memory rose for hours (170 MB of managed memory after
+  7 hours). An open incident's growth is still measured every 30 seconds, but its suspects are ranked again only before
+  its report is rewritten, every 2 minutes while the disk budget has room, and at least every 10 minutes, so the cause
+  the list shows is at most 10 minutes old; each report holds the ranking of the moment it was written. What PoolWatch
+  holds is bounded: an idle process's samples take no room and a busy one's half, Git Bash's copies share their
+  shell's command line, only processes a ranking can name are kept for an incident's window, a process that ended over
+  90 minutes ago keeps only its name and details (the latest 10,000 such), the one-minute history keeps each process's
+  I/O for 2 hours and then each hour's 10 busiest by name (what the Since boot report names), an incident keeps the
+  first 1,000 events of its window (its `events.csv` says to when; the day's `events.csv` has every one), and at most
+  20 closed incidents stay in memory (the rest are listed from their folders; a tag growing again an hour after its
+  incident left memory gets a new one). Replaying a day of that load through PoolWatch's per-sample analysis (not its
+  process query, event trace, window or files) takes 0.12% of one core where it took 2.6% before this change, and holds
+  38 to 42 MB of managed memory from the sixth hour to the day's end, where it held 101 MB after 4 hours and rose. PoolWatch
+  as a whole is still over its own budget on such a PC (About and every report say how much). An incident open longer
+  than 70 minutes keeps where its growth began, so its growth no longer shrinks in its report, and PoolWatch's own
+  cache clears still count in it after they leave the 70 minutes.
 - **A week of data, whatever the clock says.** PoolWatch keeps its data in `C:\ProgramData\PoolWatch`, which only
   administrators can change. A day's folder, an incident or an export is deleted once nothing in it was written for 7
   days (by default), counted on the PC's own timer while the PC is on and awake, so a change of the PC's clock never
