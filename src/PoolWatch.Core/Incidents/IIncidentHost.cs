@@ -27,4 +27,11 @@ public interface IIncidentHost
     /// a transcript search runs in the background and the incident is rewritten when it finishes.</summary>
     SessionDetails? DescribeSession(Correlation.Suspect suspect);
     void Log(string message);
+    /// <summary>
+    /// Whether the day's files are recorded now (Detailed recording, <see cref="Settings.RecordMode"/>), and since when
+    /// without a change: a report says that the day's data\&lt;yyyyMMdd&gt;\events.csv holds the events its own events.csv
+    /// left out only for a time Detailed recording was on throughout, and that they are not recorded only for a time
+    /// Reports only was. Default: recorded since ever (the tests' hosts); the Windows host says what the day's files do.
+    /// </summary>
+    (bool Detailed, DateTime SinceUtc) DayRecords => (true, DateTime.MinValue);
 }

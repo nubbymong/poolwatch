@@ -36,7 +36,34 @@ public sealed class CiConfigTests
         var m2 = Config("m2-config.json");
         m2.AutoClearEnabled = true;
         m2.AutoClearEveryHours = 1;
+        // The UI test is the run at the default record mode (it checks Reports only writes no day's files); the scenarios
+        // that read the day's files record them.
+        Assert.Equal((RecordMode.ReportsOnly, RecordMode.Detailed), (ui.RecordMode, m2.RecordMode));
+        m2.RecordMode = RecordMode.ReportsOnly;
         Assert.Equal(m2.ToJson(), ui.ToJson());
+    }
+
+    /// <summary>
+    /// The runs that judge PoolWatch's own cost (the soak, the agentic-load check, the churn soak, the overhead check) judge
+    /// the worst case, Detailed recording, so the day's files and the spawn-storm folders are measured against the 5 MB an
+    /// hour; and every run that reads the day's files (the end-to-end and diagnostics scenarios, the headless check) records
+    /// them. The default, Reports only, writes none of them, so a config that forgets it would leave those checks without
+    /// their files. The two scripts that ran without a config file pass the one that chooses only that.
+    /// </summary>
+    [Fact]
+    public void TheCostAndScenarioRunsRecordTheDayAndTheUiTestRunsAtTheDefault()
+    {
+        foreach (string name in new[] { "soak-config.json", "soak-agentic-config.json", "soak-churn-config.json", "detailed-config.json", "m2-config.json", "m3-config.json", "diag-config.json" })
+            Assert.True(Config(name).RecordMode == RecordMode.Detailed, $"{name} does not choose Detailed recording");
+        Assert.Equal(RecordMode.ReportsOnly, Config("ui-config.json").RecordMode);
+        // detailed-config.json is every default but that (and no update check, as every CI run).
+        var detailed = Config("detailed-config.json");
+        var defaults = new Settings { SettingsVersion = Settings.CurrentSettingsVersion, RecordMode = RecordMode.Detailed, CheckForUpdates = false };
+        defaults.Normalize();
+        Assert.Equal(defaults.ToJson(), detailed.ToJson());
+        foreach (string script in new[] { "overhead.ps1", "m1-headless.ps1" })
+            Assert.Contains("'--config', \"$PSScriptRoot\\detailed-config.json\"", File.ReadAllText(Path.Combine(CiFolder(), script)));
+        Assert.Equal(RecordMode.ReportsOnly, new Settings().RecordMode); // the control: Reports only by default
     }
 
     [Fact]

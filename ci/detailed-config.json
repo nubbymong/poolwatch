@@ -1,0 +1,8 @@
+{
+  // The runs at PoolWatch's defaults that read the day's files (ci/m1-headless.ps1) or judge PoolWatch's own overhead
+  // (ci/overhead.ps1): every setting at its default but Detailed recording, the worst case (the default, Reports only,
+  // writes none of the day's files), so its CSV files are there to read and its writes are judged against the 5 MB an hour.
+  "recordMode": "Detailed",
+  // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
+  "checkForUpdates": false
+}

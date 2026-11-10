@@ -83,16 +83,18 @@ internal sealed class SetupWizardView : ContainerControl
         _footer.Controls.AddRange([_duration, _how, _back, _next]);
 
         var c = new PageContext(session, scale, fonts, appIcon, owner, openWebPage, clock);
-        _pages = new()
+        // The pages of the steps this setup shows: every step, or the Records step alone after an upgrade.
+        _pages = session.Flow.Shown.ToDictionary(step => step, step => (StepPage)(step switch
         {
-            [SetupStep.Welcome] = new WelcomePage(c),
-            [SetupStep.YourPc] = new ImpactPage(c),
-            [SetupStep.Safety] = new SafetyPage(c),
-            [SetupStep.StandbyCache] = new CachePage(c),
-            [SetupStep.Fixes] = new FixesPage(c),
-            [SetupStep.Services] = new ServicesPage(c),
-            [SetupStep.Ready] = new ReadyPage(c),
-        };
+            SetupStep.Welcome => new WelcomePage(c),
+            SetupStep.YourPc => new ImpactPage(c),
+            SetupStep.Safety => new SafetyPage(c),
+            SetupStep.StandbyCache => new CachePage(c),
+            SetupStep.Fixes => new FixesPage(c),
+            SetupStep.Services => new ServicesPage(c),
+            SetupStep.Records => new RecordsPage(c),
+            _ => new ReadyPage(c),
+        }));
         foreach (var page in _pages.Values) _content.Controls.Add(page);
         // The content first in the tab order, then the footer's buttons.
         Controls.AddRange([_content, _footer, _rail]);
@@ -126,19 +128,20 @@ internal sealed class SetupWizardView : ContainerControl
 
     /// <summary>
     /// What the footer shows on the step: the explainer link on every step (after the setup time on Welcome); Back on the
-    /// steps between; the main button.
+    /// steps between (not on the Records step alone, which has none before it); the main button.
     /// </summary>
     private (bool Duration, bool How, bool Back) FooterParts => _session.Flow.Step switch
     {
         SetupStep.Welcome => (true, true, false),
         SetupStep.Ready => (false, true, false),
-        _ => (false, true, true),
+        _ => (false, true, !_session.Flow.RecordsOnly),
     };
 
     internal string NextText => _session.Busy ? SetupText.Working : _session.Flow.Step switch
     {
         SetupStep.Welcome => SetupText.GetStarted,
         SetupStep.Ready => SetupText.OpenApp,
+        SetupStep.Records when _session.Flow.RecordsOnly => SetupText.Done,
         _ => SetupText.Next,
     };
 
@@ -146,7 +149,7 @@ internal sealed class SetupWizardView : ContainerControl
     {
         if (IsDisposed) return;
         if (part == SetupPart.Step) { ShowStep(); return; }
-        if (part is SetupPart.Busy or SetupPart.Scan or SetupPart.Next) UpdateFooter(); // Next waits for a change, the scan, or its wait
+        if (part is SetupPart.Busy or SetupPart.Scan or SetupPart.Next or SetupPart.Records) UpdateFooter(); // Next waits for a change, the scan, or its wait
         foreach (var page in _pages.Values) page.Sync(part);
         LayoutPage(keepScroll: true);
     }

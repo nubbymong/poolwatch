@@ -56,6 +56,45 @@ public sealed class PoolNoticeLevelJson : JsonConverter<PoolNoticeLevel>
 }
 
 /// <summary>
+/// What PoolWatch keeps on disk (<see cref="Settings.RecordMode"/>). It watches the kernel pool live, and tells you when it
+/// grows, whichever is chosen.
+/// </summary>
+public enum RecordMode
+{
+    /// <summary>
+    /// The default (also for a settings.json without it, as every 1.0.0-beta.2 install has): a report folder each time the
+    /// pool grows, and no day folder (data\&lt;yyyyMMdd&gt;\) and no spawn-storm folder. Storms are still found, shown in
+    /// the window and told in the tray, from memory.
+    /// </summary>
+    ReportsOnly,
+    /// <summary>The reports, plus the day's records: every CSV file of data\&lt;yyyyMMdd&gt;\, findings.jsonl and the spawn-storm folders.</summary>
+    Detailed,
+}
+
+/// <summary>
+/// How settings.json holds <see cref="Settings.RecordMode"/>: by name ("Detailed"), read whatever its case, or by number. Any
+/// other value (a name this build does not know, a hand-written mistake) reads as Reports only, the default, so it never
+/// stops the rest of the file from loading and never turns recording on by mistake.
+/// </summary>
+public sealed class RecordModeJson : JsonConverter<RecordMode>
+{
+    public override RecordMode Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String && reader.GetString() is { } name)
+        {
+            foreach (var mode in Enum.GetValues<RecordMode>())
+                if (string.Equals(mode.ToString(), name.Trim(), StringComparison.OrdinalIgnoreCase)) return mode;
+        }
+        else if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out int n) && Enum.IsDefined((RecordMode)n))
+            return (RecordMode)n;
+        reader.Skip(); // an object or a list: its whole value
+        return RecordMode.ReportsOnly;
+    }
+
+    public override void Write(Utf8JsonWriter writer, RecordMode value, JsonSerializerOptions options) => writer.WriteStringValue(value.ToString());
+}
+
+/// <summary>
 /// User-configurable settings, persisted as JSON in the data root: %ProgramData%\PoolWatch\settings.json on Windows
 /// (administrators only), %LOCALAPPDATA%\PoolWatch\settings.json on the Linux build.
 /// </summary>
@@ -142,23 +181,31 @@ public sealed class Settings
     public double IncidentEventKeepMinutes { get; set; } = 90;
     [Description("How often PoolWatch reads the services and their states, in seconds (5 to 3,600; default 60), and also when a new service host starts.")]
     public double ServiceIntervalSeconds { get; set; } = 60;
-    [Description("How often PoolWatch reads the drives (file system, label, type and Dev Drive flag) into volumes.csv, in minutes (default 60).")]
+    [Description("How often PoolWatch reads the drives (file system, label, type and Dev Drive flag), in minutes (default 60); with Detailed recording, into volumes.csv.")]
     public double VolumeIntervalMinutes { get; set; } = 60;
     [Description("A handle count that takes longer than this many milliseconds skips the next one, to keep PoolWatch light (default 250).")]
     public double HandleScanBudgetMs { get; set; } = 250;
 
-    // CSV output.
-    [Description("How often the pool tags are checked for tags.csv, in seconds (default 60; never more often than SampleIntervalSeconds). After the day's first rows, a tag gets one when it moved 1 MB, at least every 10 minutes.")]
+    // CSV output: the day's files, written only with Detailed recording (RecordMode).
+    [Description("Detailed recording: how often the pool tags are checked for tags.csv, in seconds (default 60; never more often than SampleIntervalSeconds). After the day's first rows, a tag gets one when it moved 1 MB, at least every 10 minutes.")]
     public double TagCsvIntervalSeconds { get; set; } = 60;
-    [Description("How often the processes are checked for processes.csv, in seconds (default 60; never more often than SampleIntervalSeconds). After the day's first rows, a process gets one once seen at two checks, then while busy.")]
+    [Description("Detailed recording: how often the processes are checked for processes.csv, in seconds (default 60; never more often than SampleIntervalSeconds). After the day's first rows, a process gets one once seen at two checks, then while busy.")]
     public double ProcessCsvIntervalSeconds { get; set; } = 60;
-    [Description("tags.csv leaves out pool tags smaller than this many bytes, apart from the tags PoolWatch always tracks (default 1,048,576, which is 1 MB). A tag that falls under it gets one last row, then none until it is over it again.")]
+    [Description("Detailed recording: tags.csv leaves out pool tags smaller than this many bytes, apart from the tags PoolWatch always tracks (default 1,048,576: 1 MB). A tag that falls under it gets one last row, then none until it is over it again.")]
     public long TagCsvMinBytes { get; set; } = 1 * MB;
-    [Description("How many of the busiest processes processes.csv lists at each check: those with the most disk reads, writes and other I/O since the last check, of those that did any I/O (default 50).")]
+    [Description("Detailed recording: how many of the busiest processes processes.csv lists at each check, those with the most disk reads, writes and other I/O since the last check, of those that did any (default 50).")]
     public int ProcessCsvTopN { get; set; } = 50;
 
-    // Retention.
-    [Description("Data, reports and exports are deleted once nothing in them was written for this many days (1 to 90; default 7), checked every 6 hours. Only time the PC is awake counts, never its clock: a clock change never deletes them early.")]
+    // What PoolWatch keeps on disk, and for how long.
+    /// <summary>
+    /// What PoolWatch writes down (<see cref="RecordMode"/>): Reports only, the default (also for a settings.json without
+    /// it), or Detailed recording. Read at each write, so Settings' Save and setup apply it from the next sample.
+    /// </summary>
+    [Description("What PoolWatch keeps on disk. ReportsOnly (default): a report each time the pool grows. Detailed: the reports, plus records of the whole day and of each spawn storm, up to about 60 MB a day. Applied when you save.")]
+    [JsonConverter(typeof(RecordModeJson))]
+    public RecordMode RecordMode { get; set; } = RecordMode.ReportsOnly;
+
+    [Description("Reports, records and exports are deleted once nothing in them was written for this many days (1 to 90; default 7), checked every 6 hours. Only the PC's awake time counts, never its clock. Applied when you save.")]
     public int RetentionDays { get; set; } = 7;
 
     // Detection.
@@ -382,6 +429,7 @@ public sealed class Settings
         TagCsvIntervalSeconds = Math.Max(TagCsvIntervalSeconds, SampleIntervalSeconds);
         ProcessCsvIntervalSeconds = Math.Max(ProcessCsvIntervalSeconds, SampleIntervalSeconds);
         RetentionDays = Math.Clamp(RetentionDays, 1, 90);
+        RecordMode = Enum.IsDefined(RecordMode) ? RecordMode : RecordMode.ReportsOnly;
         CaptureSeconds = Math.Clamp(CaptureSeconds, 5, CaptureHardCapSeconds);
         // Never back to back; 1 minute is the floor (CI configs), the default an hour.
         AutoCaptureMinMinutes = double.IsFinite(AutoCaptureMinMinutes) ? Math.Clamp(AutoCaptureMinMinutes, 1, 24 * 60) : 60;

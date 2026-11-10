@@ -427,7 +427,7 @@ public sealed class RetentionTests : IDisposable
     /// <summary>A UTC time that is <paramref name="hour"/> o'clock on that day here, so the sink's folder is that day's.</summary>
     private static DateTime LocalTime(int year, int month, int day, int hour) => new DateTime(year, month, day, hour, 0, 0, DateTimeKind.Local).ToUniversalTime();
 
-    private CsvSink NewSink() => new(_paths, new Settings(), verbose: false);
+    private CsvSink NewSink() => new(_paths, new Settings { RecordMode = RecordMode.Detailed }, verbose: false); // the day's files: Detailed recording
 
     /// <summary>A sample at <paramref name="utc"/>: a row of totals.csv in that day's folder, with a tag and a process row.</summary>
     private void Sample(CsvSink sink, DateTime utc) =>

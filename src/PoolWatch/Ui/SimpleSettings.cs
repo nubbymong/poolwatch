@@ -4,9 +4,10 @@ using PoolWatch.Core.Recommendations;
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// The values on the plain Settings form (automatic cache clearing, deeper capture, the token-leak guard, update notices
-/// and the kernel pool notices; Start at logon is a scheduled task, not a setting) and how they map onto
-/// <see cref="Settings"/>. Pure, so the mapping and the checks are unit-tested; the full set of settings stays in Advanced.
+/// The values on the plain Settings form (automatic cache clearing, deeper capture, the token-leak guard, update notices,
+/// the kernel pool notices, and what PoolWatch keeps on disk with when it is cleaned up; Start at logon is a scheduled
+/// task, not a setting) and how they map onto <see cref="Settings"/>. Pure, so the mapping and the checks are unit-tested;
+/// the full set of settings stays in Advanced.
 /// </summary>
 /// <param name="AutoClear"><see cref="Settings.AutoClearEnabled"/>.</param>
 /// <param name="EveryHours"><see cref="Settings.AutoClearEveryHours"/>: clear every this many hours; 0 = no schedule.</param>
@@ -15,17 +16,21 @@ namespace PoolWatch.Ui;
 /// <param name="TokenGuard"><see cref="Settings.TokenGuardEnabled"/>: the token-leak guard.</param>
 /// <param name="CheckForUpdates"><see cref="Settings.CheckForUpdates"/>: tell me when a new version is out.</param>
 /// <param name="PoolNotices"><see cref="Settings.PoolNotices"/>: which kernel pool notices the tray shows (Notifications).</param>
+/// <param name="Records"><see cref="Settings.RecordMode"/>: Reports only or Detailed recording (Records).</param>
+/// <param name="RetentionDays"><see cref="Settings.RetentionDays"/>: reports, records and exports are cleaned up after this many days.</param>
 internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decimal PoolGb, bool DeeperCapture, bool TokenGuard, bool CheckForUpdates,
-    PoolNoticeLevel PoolNotices)
+    PoolNoticeLevel PoolNotices, RecordMode Records, int RetentionDays)
 {
     /// <summary>The ranges <see cref="Settings.Normalize"/> keeps them in (a week; a terabyte).</summary>
     public const decimal MaxHours = 168, MaxPoolGb = 1024;
     /// <summary>A schedule shorter than this would only be held back: automatic clears are never closer than 30 minutes.</summary>
     public const decimal MinHours = 0.5m;
+    /// <summary>The cleanup's range, as <see cref="Settings.Normalize"/> keeps it.</summary>
+    public const int MinDays = 1, MaxDays = 90;
 
     public static SimpleSettings From(Settings s) =>
         new(s.AutoClearEnabled, Field(s.AutoClearEveryHours, MaxHours), Field(s.AutoClearPoolGb, MaxPoolGb), s.DeeperCapture, s.TokenGuardEnabled, s.CheckForUpdates,
-            s.PoolNotices);
+            s.PoolNotices, s.RecordMode, s.RetentionDays);
 
     /// <summary>A setting as the form shows it: one decimal, within the form's range.</summary>
     private static decimal Field(double v, decimal max) => double.IsFinite(v) ? Math.Clamp(Math.Round((decimal)v, 1), 0, max) : 0;
@@ -42,6 +47,8 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
             p.Add($"Pool size: between 0 and {MaxPoolGb:0} GB (0 = no size rule).");
         if (AutoClear && EveryHours == 0 && PoolGb == 0)
             p.Add("Automatic clearing is on but has nothing to go by: set how often, a pool size, or both.");
+        if (RetentionDays is < MinDays or > MaxDays)
+            p.Add($"Clean up: after {MinDays} to {MaxDays} days.");
         return p;
     }
 
@@ -57,8 +64,31 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
         s.TokenGuardEnabled = TokenGuard;
         s.CheckForUpdates = CheckForUpdates;
         s.PoolNotices = PoolNotices;
+        s.RecordMode = Records;
+        s.RetentionDays = RetentionDays;
         return true;
     }
+
+    /// <summary>
+    /// What PoolWatch keeps on disk: its two choices with one short line each (from the setup step's approved words), the
+    /// line shown under the choices for the one chosen, and the cleanup's select, as setup's Records step says them. Each
+    /// choice's tooltip says more, in the step's words too.
+    /// </summary>
+    public const string RecordsHeading = "Records";
+    public const string ReportsOnlyChoice = Setup.SetupText.ReportsOnly, DetailedChoice = Setup.SetupText.Detailed;
+    public const string ReportsOnlyHint = "A report each time the pool grows.";
+    public const string DetailedHint = "The reports, plus a record of everything, all day.";
+    public const string CleanUpLabel = Setup.SetupText.CleanUpAfter;
+    public const string ReportsOnlyTip =
+        "A report each time the pool grows: what grew, the programs behind it,\nand a draft bug report for whoever makes the cause. " +
+        "Most people need nothing more.\nNothing is recorded until the pool grows.";
+    public const string DetailedTip =
+        "The reports, plus a record of everything PoolWatch watches, all day:\nthe pool and its memory tags, programs and their handles, services, " +
+        "and every program started.\nUp to about 60 MB a day on a PC doing heavy agentic coding.";
+    public const string CleanUpTip = "Reports, records and exports are deleted once nothing in them was written for this long,\ncounted in the PC's awake time.";
+
+    /// <summary>The line under the record modes, for the one chosen.</summary>
+    public static string RecordsLine(RecordMode mode) => mode == RecordMode.Detailed ? DetailedHint : ReportsOnlyHint;
 
     /// <summary>The token-leak guard's box.</summary>
     public const string TokenGuardLabel = "Guard against a kernel pool leak in Windows 11 24H2 and 25H2";
@@ -95,16 +125,16 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
 
     /// <summary>What Save says: which settings apply at once, and that the rest wait for the next start.</summary>
     public const string Saved =
-        "Saved. Automatic clearing, the token-leak guard, notifications and update notices apply now; any other change applies the next time PoolWatch starts.";
+        "Saved. Automatic clearing, the token-leak guard, notifications, update notices, records and their cleanup apply now; any other change applies the next time PoolWatch starts.";
 
     /// <summary>What Save says when PoolWatch was started with --config, whose file it never writes (nor its own settings then).</summary>
     public const string NotSavedWithConfig =
-        "Automatic clearing, the token-leak guard, notifications and update notices apply now. Nothing is saved for the next time PoolWatch starts: " +
+        "Automatic clearing, the token-leak guard, notifications, update notices, records and their cleanup apply now. Nothing is saved for the next time PoolWatch starts: " +
         "it was started with --config, so it keeps no settings.";
 
     /// <summary>The line at the bottom of the form.</summary>
     public const string WhenChangesApply =
-        "Start at logon changes as soon as you tick it. Save puts automatic clearing, the token-leak guard, notifications and update notices into effect at once; " +
+        "Start at logon changes as soon as you tick it. Save puts automatic clearing, the token-leak guard, notifications, update notices, records and their cleanup into effect at once; " +
         "deeper capture and the other settings under Advanced apply the next time PoolWatch starts.";
 
     /// <summary>The one-line explanation under Deeper capture, honest about whether it does anything with the current settings.</summary>

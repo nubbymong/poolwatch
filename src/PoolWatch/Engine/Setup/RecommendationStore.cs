@@ -6,7 +6,8 @@ using PoolWatch.Core.Recommendations;
 namespace PoolWatch.Engine.Setup;
 
 /// <summary>
-/// What the setup guide remembers between starts, in setup.json in the data root: when the guide was completed, the
+/// What the setup guide remembers between starts, in setup.json in the data root: when the guide was completed, when the
+/// owner chose what PoolWatch keeps on disk (the Records step; absent in 1.0.0-beta.2's file), the
 /// suggestions the owner hid (key and when, for 30 days on the clock that only goes forward), and the Simple view's feature
 /// cards the owner hid (for good). A hide keeps its time on both clocks within a run; the file keeps its time of day, read
 /// onto the forward clock as the file is loaded.
@@ -22,7 +23,7 @@ internal sealed class RecommendationStore
     private readonly Log _log;
     private readonly Func<Moment> _clock;
     private readonly object _lock = new();
-    private DateTime? _completedUtc;
+    private DateTime? _completedUtc, _recordsChosenUtc;
     private Dictionary<string, Moment> _dismissed = new(StringComparer.Ordinal);
     private HashSet<string> _hiddenFeatures = new(StringComparer.Ordinal);
 
@@ -45,6 +46,23 @@ internal sealed class RecommendationStore
         lock (_lock)
         {
             _completedUtc ??= utc;
+            Save();
+        }
+    }
+
+    /// <summary>
+    /// The owner chose what PoolWatch keeps on disk (setup's Records step, or the step alone after an upgrade). A setup.json
+    /// without it (1.0.0-beta.2's, which had no such step) says no choice was made, so that step opens by itself once setup
+    /// was completed, until one is.
+    /// </summary>
+    public bool RecordsChosen { get { lock (_lock) return _recordsChosenUtc is not null; } }
+
+    public void MarkRecordsChosen(DateTime utc)
+    {
+        lock (_lock)
+        {
+            if (_recordsChosenUtc is not null) return;
+            _recordsChosenUtc = utc;
             Save();
         }
     }
@@ -110,6 +128,8 @@ internal sealed class RecommendationStore
             if (root.ValueKind != JsonValueKind.Object) return;
             if (root.TryGetProperty("guideCompletedUtc", out var c) && c.ValueKind == JsonValueKind.String && c.TryGetDateTime(out var completed))
                 _completedUtc = completed.ToUniversalTime();
+            if (root.TryGetProperty("recordsChosenUtc", out var r) && r.ValueKind == JsonValueKind.String && r.TryGetDateTime(out var chosen))
+                _recordsChosenUtc = chosen.ToUniversalTime();
             if (root.TryGetProperty("dismissed", out var d) && d.ValueKind == JsonValueKind.Object)
             {
                 // Each hide's time of day is read onto the forward clock as the file loads (Moment.Read): its 30 days go on
@@ -138,6 +158,7 @@ internal sealed class RecommendationStore
             {
                 version = 1,
                 guideCompletedUtc = _completedUtc?.ToString("o", CultureInfo.InvariantCulture),
+                recordsChosenUtc = _recordsChosenUtc?.ToString("o", CultureInfo.InvariantCulture),
                 dismissed = _dismissed.ToDictionary(kv => kv.Key, kv => kv.Value.Utc.ToString("o", CultureInfo.InvariantCulture)),
                 hiddenFeatures = _hiddenFeatures.Order(StringComparer.Ordinal).ToList(),
             }, new JsonSerializerOptions { WriteIndented = true });

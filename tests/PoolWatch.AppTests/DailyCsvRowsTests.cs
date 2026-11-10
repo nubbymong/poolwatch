@@ -42,7 +42,7 @@ public sealed class DailyCsvRowsTests : IDisposable
     {
         var start = new LifecycleEvent { TimeUtc = Now, Kind = LifecycleKind.Start, Pid = 10, CreateTime = 111, ParentPid = 4, Image = "node.exe", User = "PC\\me", CommandLine = "node server.js --port 3000" };
         var unseen = new LifecycleEvent { TimeUtc = Now, Kind = LifecycleKind.Exit, Pid = 11, CreateTime = 222, ParentPid = 4, Image = "git.exe", CommandLine = "git fetch", ExitCode = 1 };
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false))
         {
             sink.WriteEvents([start], Now);
             sink.WriteEvents([start with { Kind = LifecycleKind.Orphaned, TimeUtc = Now.AddMinutes(1), User = null, Detail = "parent bash.exe (4) exited" }], Now.AddMinutes(1));
@@ -65,7 +65,7 @@ public sealed class DailyCsvRowsTests : IDisposable
     public void ATagHasARowWhenItMovedAMegabyteEveryTenMinutesAndOnceAsItFallsUnderTheMinimum()
     {
         PoolTag steady = PoolTag.Parse("Stdy"), growing = PoolTag.Parse("Grow"), falling = PoolTag.Parse("Fall");
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false))
             for (int m = 0; m <= 12; m++)
             {
                 var tags = new List<PoolTagEntry>
@@ -89,7 +89,7 @@ public sealed class DailyCsvRowsTests : IDisposable
     public void AProcessIsWrittenOnceItRanAtTwoWritesAndAgainWhileItIsBusy()
     {
         static ProcessSample P(int pid, long reads = 0, int handles = 50) => new() { Pid = pid, ParentPid = 4, CreateTime = pid, ImageName = $"p{pid}.exe", ReadOperationCount = reads, HandleCount = handles };
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false))
         {
             sink.WriteSample(S(0, [], [P(1), P(2)]), new ProcessRegistry());               // the day's first: every one
             sink.WriteSample(S(1, [], [P(1), P(2, 100), P(3), P(4)]), new ProcessRegistry()); // 2 busy; 3 and 4 new
@@ -103,7 +103,7 @@ public sealed class DailyCsvRowsTests : IDisposable
     [Fact]
     public void TheServicesListIsWrittenWholeThenEachServiceWhoseHostChanged()
     {
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false))
         {
             sink.WriteServices([new("A", "Alpha", 100), new("B", "Beta", 100), new("C", "Gamma", 0)], Now);
             sink.WriteServices([new("A", "Alpha", 100), new("B", "Beta", 100), new("C", "Gamma", 0)], Now.AddMinutes(1)); // unchanged
@@ -126,7 +126,7 @@ public sealed class DailyCsvRowsTests : IDisposable
         }
         var names = new Dictionary<int, string> { [1] = "File", [2] = "Event" };
         var procs = new[] { new ProcessSample { Pid = 500, CreateTime = 5, ImageName = "app.exe" } };
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false))
         {
             sink.WriteHandles(Counts(40), names, procs, Now);
             sink.WriteHandles(Counts(40), names, procs, Now.AddMinutes(5));
@@ -157,7 +157,7 @@ public sealed class DailyCsvRowsTests : IDisposable
     public void ACountThatLeavesTheSelectionGetsOneLastRowWithItsCountThen()
     {
         var names = new Dictionary<int, string> { [1] = "File", [2] = "Event" };
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false))
         {
             sink.WriteHandles(Census((500, 1, 50_000), (500, 2, 30), (501, 1, 800), (501, 2, 25), (600, 1, 700)), names, [P(500), P(501), P(600)], Now);
             sink.WriteHandles(Census((500, 1, 5), (500, 2, 30), (501, 2, 25)), names, [P(500), P(501)], Now.AddMinutes(5));
@@ -183,7 +183,7 @@ public sealed class DailyCsvRowsTests : IDisposable
         int fits = CsvSink.MaxHandleRowsPerScan;
         var fewer = Census(Enumerable.Range(0, fits).Select(i => (10_000 + i, 1, 500 + i)).ToArray()); // the 100 largest exited
         var names = new Dictionary<int, string> { [1] = "File" };
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false))
         {
             sink.WriteHandles(census, names, procs, Now);
             sink.WriteHandles(census, names, procs, Now.AddMinutes(5));
@@ -208,7 +208,7 @@ public sealed class DailyCsvRowsTests : IDisposable
     {
         var unread = new LifecycleEvent { TimeUtc = Now, Kind = LifecycleKind.Start, Pid = 20, CreateTime = 444, ParentPid = 4, Image = "node.exe" };
         var other = unread with { Pid = 21, CreateTime = 555, CommandLine = "node a.js" };
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false))
         {
             sink.WriteEvents([unread, other], Now);
             sink.WriteEvents([unread with { Kind = LifecycleKind.Exit, TimeUtc = Now.AddMinutes(1), CommandLine = "node server.js (enriched later)", ExitCode = 0 },
@@ -227,7 +227,7 @@ public sealed class DailyCsvRowsTests : IDisposable
     {
         int n = CsvSink.MaxStartsRemembered + 1;
         var starts = Enumerable.Range(0, n).Select(i => new LifecycleEvent { TimeUtc = Now, Kind = LifecycleKind.Start, Pid = 30_000 + i, CreateTime = 1 + i, ParentPid = 4, Image = "sleep.exe", CommandLine = $"sleep {i}" }).ToList();
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false))
         {
             sink.WriteEvents(starts, Now);
             sink.WriteEvents([starts[0] with { Kind = LifecycleKind.Exit, TimeUtc = Now.AddMinutes(1) }, starts[^1] with { Kind = LifecycleKind.Exit, TimeUtc = Now.AddMinutes(1) }], Now.AddMinutes(1));
@@ -276,7 +276,7 @@ public sealed class DailyCsvRowsTests : IDisposable
         var names = new Dictionary<int, string> { [1] = "File" };
         HandleCounts Handles(int m) => Census([(60, 1, 900), .. Enumerable.Range(0, 30).Select(i => (61 + i, 1, 500 + m * 10 + i))]);
         var handleProcs = Enumerable.Range(60, 31).Select(P).ToArray();
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false, log.Add, Open, maxKeptChars: 4096))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false, log.Add, Open, maxKeptChars: 4096))
         {
             // The day's whole picture, written.
             sink.WriteSample(S(0, [.. quiet, .. Moving(0)], [.. calm, .. Busy(0)]), new ProcessRegistry());
@@ -325,7 +325,7 @@ public sealed class DailyCsvRowsTests : IDisposable
         }
         var c = new HandleCounts();
         for (int i = 0; i < 40; i++) { c.Add(4, 1); c.Add(500, 1); }
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false, null, Open))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false, null, Open))
         {
             sink.WriteSample(S(0, [new(PoolTag.Parse("Leak"), 0, 0, 2UL << 20, 0, 0, 0)], [new ProcessSample { Pid = 500, CreateTime = 5, ImageName = "app.exe" }]), new ProcessRegistry());
             sink.WriteEvents([new LifecycleEvent { TimeUtc = Now, Kind = LifecycleKind.Finding, Image = "Alert", Detail = "kept until the sample's flush" }], Now);
@@ -365,7 +365,7 @@ public sealed class DailyCsvRowsTests : IDisposable
     {
         var summarizer = new EventSummarizer();
         int pid = 5000, starts = 0;
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false))
         {
             sink.MergeRollupsFrom(summarizer);
             for (int s = 0; s <= 72; s++) // a sample every 10 s for 12 minutes
@@ -400,7 +400,7 @@ public sealed class DailyCsvRowsTests : IDisposable
     {
         var summarizer = new EventSummarizer();
         int pid = 5000, handedOn = 0;
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: true))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: true))
         {
             sink.MergeRollupsFrom(summarizer);
             for (int s = 0; s <= 72; s++)
@@ -433,7 +433,7 @@ public sealed class DailyCsvRowsTests : IDisposable
     [Fact]
     public void PastTheRollupsMergedARollupIsWrittenAsItCame()
     {
-        using (var sink = new CsvSink(Paths(), new Settings(), verbose: false))
+        using (var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false))
         {
             sink.WriteEvents([], Now); // the day's folder
             for (int i = 0; i <= CsvSink.MaxRollupsMerged; i++) sink.AddRollup(Parts($"tool{i}.exe", Now));
@@ -452,7 +452,7 @@ public sealed class DailyCsvRowsTests : IDisposable
     [Fact]
     public void AMergedRollupKeepsNoneOfTheSummarysCollections()
     {
-        using var sink = new CsvSink(Paths(), new Settings(), verbose: false);
+        using var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false);
         sink.WriteEvents([], Now);
         var (parents, patterns) = Hand(sink);
         GC.Collect();

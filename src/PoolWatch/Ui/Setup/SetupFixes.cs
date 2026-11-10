@@ -154,6 +154,8 @@ internal static class FixRows
             LeakState.Checking => SetupText.CheckingNow,
             _ => "Watching for it",
         }));
+        // What PoolWatch keeps on disk and when it is cleaned up, as in effect now (the Records step applied it).
+        rows.Add(new(SetupIcon.Doc, "Records", RecordChoices.Summary(running)));
         rows.Add(new(SetupIcon.List, "Active changes", ActiveChangesWords(activeChanges, changesRead)));
         return rows;
     }

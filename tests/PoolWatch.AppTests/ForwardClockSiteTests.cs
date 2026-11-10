@@ -267,7 +267,7 @@ public sealed class ForwardClockSiteTests : IDisposable
         var c = new TwoClocks();
         var paths = new AppPaths(Path.Combine(_dir, "data"), null, secure: false);
         var registry = new ProcessRegistry();
-        using (var sink = new CsvSink(paths, new Settings(), verbose: false))
+        using (var sink = new CsvSink(paths, new Settings { RecordMode = RecordMode.Detailed }, verbose: false))
         {
             for (int i = 0; i < 13; i++)
             {

@@ -6,6 +6,8 @@ namespace PoolWatch.Ui.Setup;
 internal enum SetupIcon
 {
     Pool, Sweep, Wrench, Layers, Chip, Windows, Shield, ShieldCheck, Gear, Clock, Gauge, Both, Power, Key, Chat, List, Later, Book, Check,
+    /// <summary>The Records step's: a report (Reports only, and the Ready step's Records line), a record over time (Detailed recording), a lock (they stay on this PC).</summary>
+    Doc, Record, Lock,
     /// <summary>The small arrow before "Why?": closed, and open.</summary>
     ChevronRight, ChevronDown,
 }
@@ -48,6 +50,9 @@ internal static class SetupIcons
         [SetupIcon.Later] = new(20, 1.5f, [R(3, 4, 14, 13, 1.5f), P("M3 8h14M7 2.5v3M13 2.5v3")]),
         [SetupIcon.Book] = new(20, 1.4f, [P("M3 4.5c2.5-1 4.8-.8 7 .8v11c-2.2-1.6-4.5-1.8-7-.8zM17 4.5c-2.5-1-4.8-.8-7 .8v11c2.2-1.6 4.5-1.8 7-.8z")]),
         [SetupIcon.Check] = new(16, 2f, [P("M3.5 8.5l3 3 6-7")]),
+        [SetupIcon.Doc] = new(20, 1.5f, [P("M5 2.5h7l3.5 3.5v11.5H5z"), P("M12 2.5V6h3.5M7.5 10h5M7.5 13h5")]),
+        [SetupIcon.Record] = new(20, 1.5f, [P("M3 16.5h14"), P("M3 13l3.5-3.5 3 2.5L13 7l4 3.5"), P("M3 3.5v13")]),
+        [SetupIcon.Lock] = new(20, 1.5f, [R(4.5f, 9, 11, 8, 1.5f), P("M7 9V6.5a3 3 0 0 1 6 0V9")]),
         [SetupIcon.ChevronRight] = new(20, 2.4f, [P("M8 5.5l4.5 4.5L8 14.5")]),
         [SetupIcon.ChevronDown] = new(20, 2.4f, [P("M5.5 8l4.5 4.5L14.5 8")]),
     };

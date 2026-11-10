@@ -1,9 +1,10 @@
-# Overhead check (DESIGN.md section 3): run headless idle for 10 minutes at the default 10 s interval.
+# Overhead check (DESIGN.md section 3): run headless idle for 10 minutes at the default 10 s interval, every setting at
+# its default but Detailed recording (detailed-config.json), the worst case, so the day's files are judged too.
 param([Parameter(Mandatory)] [string]$Exe, [Parameter(Mandatory)] [string]$Out, [int]$Seconds = 600)
 . "$PSScriptRoot\common.ps1"
 
 New-Item -ItemType Directory -Force $Out | Out-Null
-$pw = Start-PoolWatch $Exe @('--headless', '--duration', "$Seconds", '--out', $Out)
+$pw = Start-PoolWatch $Exe @('--headless', '--duration', "$Seconds", '--config', "$PSScriptRoot\detailed-config.json", '--out', $Out)
 $code = Wait-PoolWatch $pw ($Seconds + 120)
 Assert-True ($code -eq 0) "headless exit code 0 (got $code)"
 $o = Get-Content "$Out\overhead.json" -Raw | ConvertFrom-Json

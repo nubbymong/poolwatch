@@ -30,7 +30,8 @@ internal sealed class IncidentWriter
     /// <summary>
     /// The most event rows an incident's events.csv holds (the alerts' rows aside), and the most events an incident keeps in
     /// memory for it: the window's first 1,000 from the onset less 2 minutes, about 6 minutes of a busy agentic PC's events
-    /// (9,400 an hour), more on a quieter one. Its last row says to when it holds them; the day's events.csv has every one.
+    /// (9,400 an hour), more on a quieter one. Its last row says to when it holds them; with Detailed recording the day's
+    /// events.csv has every one.
     /// An incident is kept up to 8 hours (open 2, closed 6) and 26 were held at once on the maintainer's PC: 5,000 each held
     /// up to 130,000 events, most of which the write budget could never write. An open incident shares its events with the
     /// 90-minute buffer only for those 90 minutes; past them, and once closed, what it kept is its own: in AgentLoadTests'
@@ -81,7 +82,8 @@ internal sealed class IncidentWriter
 
     /// <summary>
     /// The incident leaves memory with kept events its events.csv does not have yet (the write budget held them back): a
-    /// last row says to when the file holds the window's events (the rest are in the day's events.csv). A row, written
+    /// last row says to when the file holds the window's events (the rest are in the day's events.csv with Detailed
+    /// recording, and not recorded in Reports only). A row, written
     /// whatever the budget. Returns the bytes written.
     /// </summary>
     public long NoteUnwritten(Incident inc)
@@ -513,10 +515,17 @@ internal sealed class IncidentWriter
             sb.AppendLine($"- {Fmt.Clock(e.TimeUtc)} {e.Kind} {Md(e.Image)} (PID {e.Pid}){(e.ExitCode is { } c2 ? $" code {c2}" : "")}{(e.Detail is { } d ? $": {Md(d)}" : "")}");
         int more = events.Count - shown.Count;
         // events.csv holds the window's events from its start as written so far: to the time its last row says (the incident
-        // kept MaxEventRows), or fewer while the write budget has kept new rows for later. The day's data\<yyyyMMdd>\events.csv
-        // has every one.
-        string where = st.NotedAt is { } noted ? $"; events.csv holds the window's events to {Fmt.Clock(noted)} and the day's `data\\<yyyyMMdd>\\events.csv` every one"
-            : st.Pending ? "; events.csv gets the rest when PoolWatch's write budget has room, and the day's `data\\<yyyyMMdd>\\events.csv` has every one" : "";
+        // kept MaxEventRows), or fewer while the write budget has kept new rows for later. With Detailed recording on for the
+        // whole window the day's data\<yyyyMMdd>\events.csv has every one; in Reports only there is no such file, and the
+        // report names none; after a switch in the window, it has those of the time Detailed recording was on.
+        string day = more == 0 ? "" : DayEventsFrom(events[0].TimeUtc) switch
+        {
+            DayCopy.Every => "every one",
+            DayCopy.Part => "those of the time Detailed recording was on",
+            _ => "",
+        };
+        string where = st.NotedAt is { } noted ? $"; events.csv holds the window's events to {Fmt.Clock(noted)}" + (day.Length > 0 ? $" and the day's `data\\<yyyyMMdd>\\events.csv` {day}" : "")
+            : st.Pending ? "; events.csv gets the rest when PoolWatch's write budget has room" + (day.Length > 0 ? $", and the day's `data\\<yyyyMMdd>\\events.csv` has {day}" : "") : "";
         sb.AppendLine(more > 0 ? (where.Length == 0 ? $"\n({more} other events in events.csv)" : $"\n({more} other events in the window{where})") : "").AppendLine();
 
         AppendSystem(sb, system);
@@ -768,9 +777,32 @@ internal sealed class IncidentWriter
     private static string AlertLine(Alert a) => Csv.Line(a.TimeUtc, a.Kind == AlertKind.Release ? "Release" : "Alert", 0, 0, 0, "", null, null, null,
         $"{a.Tag.ToDisplay()} {a.Rule} ({Fmt.SignedBytes(a.Kind == AlertKind.Release ? -a.Bytes : a.Bytes)})");
 
-    /// <summary>The last row of an events.csv whose incident stopped keeping events: the file has none after <paramref name="t"/>.</summary>
-    private static string NoteLine(DateTime t) => Csv.Line(t, "Note", 0, 0, 0, "", null, null, null,
-        $"events.csv holds the incident window's events to this row's time (an incident keeps at most {MaxEventRows:N0}); the later ones are in the day's data\\<yyyyMMdd>\\events.csv");
+    /// <summary>What the day's events.csv holds of the events from a time on (<see cref="DayEventsFrom"/>).</summary>
+    private enum DayCopy { Every, None, Part }
+
+    /// <summary>
+    /// What the day's data\&lt;yyyyMMdd&gt;\events.csv holds of the events from <paramref name="fromUtc"/> on, by what the day's
+    /// files record and since when (<see cref="IIncidentHost.DayRecords"/>): every one when Detailed recording has been on
+    /// since before then; none when Reports only has; and those of the time Detailed recording was on when the choice was
+    /// changed since then (a switch in the middle of an incident).
+    /// </summary>
+    private DayCopy DayEventsFrom(DateTime fromUtc)
+    {
+        var (detailed, since) = _host.DayRecords;
+        return since > fromUtc ? DayCopy.Part : detailed ? DayCopy.Every : DayCopy.None;
+    }
+
+    /// <summary>
+    /// The last row of an events.csv whose incident stopped keeping events: the file has none after <paramref name="t"/>.
+    /// It says where the later ones are only where they are (<see cref="DayEventsFrom"/>).
+    /// </summary>
+    private string NoteLine(DateTime t) => Csv.Line(t, "Note", 0, 0, 0, "", null, null, null,
+        $"events.csv holds the incident window's events to this row's time (an incident keeps at most {MaxEventRows:N0}); " + DayEventsFrom(t) switch
+        {
+            DayCopy.Every => "the later ones are in the day's data\\<yyyyMMdd>\\events.csv",
+            DayCopy.None => "the later ones are not recorded (Reports only)",
+            _ => "the later ones are in the day's data\\<yyyyMMdd>\\events.csv only for the time Detailed recording was on",
+        });
 
     /// <summary>Rows of events and alerts, sorted by time (the alerts' rows among the events'), each ending a line; the note row last.</summary>
     private string Rows(IEnumerable<LifecycleEvent> events, IEnumerable<Alert> alerts, DateTime? noteAt)

@@ -5,7 +5,9 @@ namespace PoolWatch.Engine;
 /// <summary>
 /// Settings that take effect at once: the setup guide, a suggestion, Settings and Undo turn the automatic clear, the
 /// token-leak guard and update notices on or off while PoolWatch runs, or the "Next cache clear" line would be wrong until
-/// the next start; Settings also changes which kernel pool notices the tray shows (it reads the setting at each notice).
+/// the next start; Settings also changes which kernel pool notices the tray shows (it reads the setting at each notice),
+/// and Settings and setup what PoolWatch keeps on disk and when it is cleaned up (the sink reads the record mode at each
+/// write, retention the days at each check).
 /// <see cref="Apply"/> changes settings.json and the running engine's settings object (the sampler reads the automatic
 /// clear's values once per sample; a bool or double write is atomic on x64), then raises <see cref="Applied"/> so an
 /// open Settings form's copy follows. Every other setting still applies at the next start.

@@ -1,8 +1,9 @@
 namespace PoolWatch.Ui.Setup;
 
 /// <summary>
-/// "Set up PoolWatch": the first-run setup in seven steps, in a window of its own (the main window waits until it is
-/// done). It ends on the Ready step's "Open PoolWatch". On the first run its close button (or Esc, or Alt+F4) asks first
+/// "Set up PoolWatch": the first-run setup in eight steps, in a window of its own (the main window waits until it is
+/// done), or its Records step alone, which opens by itself after an upgrade from a version without it (ending on Done,
+/// and cancelled at once by its close button, Esc or Alt+F4). It ends on the Ready step's "Open PoolWatch". On the first run its close button (or Esc, or Alt+F4) asks first
 /// (<see cref="ISetupHost.ConfirmCloseFirstRun"/>, No the default): a yes closes it and PoolWatch keeps running in the
 /// tray, with any change already made with Next, and setup opens again when the owner opens PoolWatch and at the next
 /// start, as it does when PoolWatch exits before the end (or Windows shuts down), which closes it without asking. Opened
@@ -34,15 +35,16 @@ internal sealed class SetupWizardForm : Form
 
     /// <param name="firstRun">Setup was never completed: closing it asks first.</param>
     /// <param name="advanced">The view the app shows now, which the Welcome step starts with.</param>
-    public SetupWizardForm(SetupContext context, bool firstRun, bool advanced) : this(new SetupHost(context), firstRun, advanced) { }
+    /// <param name="recordsOnly">The Records step alone (after an upgrade from a version without it).</param>
+    public SetupWizardForm(SetupContext context, bool firstRun, bool advanced, bool recordsOnly = false) : this(new SetupHost(context), firstRun, advanced, recordsOnly: recordsOnly) { }
 
     /// <param name="text">The tests: a larger text, laid out as at a higher scaling.</param>
-    internal SetupWizardForm(ISetupHost host, bool firstRun, bool advanced, float text = 1f)
+    internal SetupWizardForm(ISetupHost host, bool firstRun, bool advanced, float text = 1f, bool recordsOnly = false)
     {
         _host = host;
-        _firstRun = firstRun;
+        _firstRun = firstRun && !recordsOnly;
         _text = text;
-        Session = new SetupSession(host, firstRun, advanced);
+        Session = new SetupSession(host, firstRun, advanced, recordsOnly: recordsOnly);
         Text = SetupText.WindowTitle;
         // The app's icon, from where the main window takes it.
         Icon = TrayIcons.App;
@@ -63,8 +65,11 @@ internal sealed class SetupWizardForm : Form
 
     internal SetupSession Session { get; }
 
-    /// <summary>"Open PoolWatch" was pressed: setup is complete.</summary>
+    /// <summary>"Open PoolWatch" (or Done, on the Records step alone) was pressed: setup is complete.</summary>
     public bool Finished => Session.Flow.Finished;
+
+    /// <summary>It is the Records step alone (after an upgrade).</summary>
+    public bool RecordsOnly => Session.Flow.RecordsOnly;
 
     /// <summary>The Welcome step's choice: the app's Advanced view.</summary>
     public bool Advanced => Session.Advanced;
@@ -206,10 +211,13 @@ internal sealed class SetupWizardForm : Form
 
     // ------------------------------------------------------------------ the CI UI test
 
-    /// <summary>The screenshot's name for a step: "6-setup-1-welcome.png" ... "6-setup-7-ready.png".</summary>
+    /// <summary>The screenshot's name for a step: "6-setup-1-welcome.png" ... "6-setup-7-records.png", "6-setup-8-ready.png".</summary>
     internal static string ShotName(SetupStep step) => $"6-setup-{(int)step}-{SetupText.Rail(step).ToLowerInvariant().Replace(' ', '-')}.png";
 
     internal const string HowItWorksShot = "6-setup-how-it-works.png";
+
+    /// <summary>The screenshot of the Records step alone, as it opens by itself after an upgrade.</summary>
+    internal const string RecordsAloneShot = "6-setup-records-alone.png";
 
     /// <summary>Straight to a step, nothing applied.</summary>
     internal Task ShowStepForTest(SetupStep step) => Session.GoTo(step);
@@ -291,15 +299,18 @@ internal sealed class SetupWizardForm : Form
             {
                 CachePage c => c.Cards.Select(kv => kv.Value.AccessibleName).ToList(),
                 WelcomePage w => [w.SimpleCard.AccessibleName, w.AdvancedCard.AccessibleName],
+                RecordsPage r => r.Cards.Select(kv => kv.Value.AccessibleName).ToList(),
                 _ => null,
             },
             chosen = page switch
             {
                 CachePage c => c.Cards.FirstOrDefault(kv => kv.Value.Selected).Value?.AccessibleName,
                 WelcomePage w => (w.AdvancedCard.Selected ? w.AdvancedCard : w.SimpleCard).AccessibleName,
+                RecordsPage r => r.Cards.FirstOrDefault(kv => kv.Value.Selected).Value?.AccessibleName,
                 _ => null,
             },
-            recommended = (page as CachePage)?.RecommendedShown,
+            recommended = (page as CachePage)?.RecommendedShown ?? (page as RecordsPage)?.RecommendedShown,
+            days = (page as RecordsPage)?.DaysShown,
             stutter = (page as CachePage)?.StutterShown,
             summary = (page as ReadyPage)?.RowsShown.Select(s => new { key = s.Key, value = s.Value }).ToList(),
             updates = (page as ReadyPage)?.UpdatesBox?.Checked,

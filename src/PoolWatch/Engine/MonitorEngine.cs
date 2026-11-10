@@ -53,6 +53,13 @@ internal sealed class MonitorEngine : IDisposable
     public ProcessRegistry Registry { get; }
     public SelfMeter Meter { get; }
     public Settings Settings => _settings;
+    /// <summary>
+    /// Detailed recording is chosen now (<see cref="Core.Settings.RecordMode"/>): the day's files, findings.jsonl and the
+    /// spawn-storm folders are written. In Reports only, the default, none of them is.
+    /// </summary>
+    public bool Recording => _sink.Recording;
+    /// <summary>What the day's files record and since when, as the day's sink follows the choice (the incidents' reports say so).</summary>
+    public CsvSink.RecordState Records => _sink.Records;
     public AppPaths Paths => _paths;
     public Log Log => _log;
     public bool EtwRunning => _etw.Running;
@@ -135,6 +142,14 @@ internal sealed class MonitorEngine : IDisposable
         // below asks whether it is due (a test holds that each job's work is under its own job's question).
         var at = _clock.Begin();
         var now = at.Time.Utc; // for the times shown and written; every interval is timed by the clock on its Ms
+        // Detailed recording turned on since the last tick (Settings, setup): the day's files start again with the whole
+        // picture in this tick, as at PoolWatch's start: the services and the volumes PoolWatch holds now, and a handle scan.
+        if (_sink.TurnedOn())
+        {
+            _handleScanRequest.Set();
+            _sink.WriteServices(Services, now);
+            _sink.WriteVolumes(Volumes, now);
+        }
         List<PoolTagEntry> tags;
         using (Profiler.Stage("tick.poolTags")) tags = _queries.QueryPoolTags();
         var (cPaged, cNonPaged, system) = SystemQueries.QueryPerformance();

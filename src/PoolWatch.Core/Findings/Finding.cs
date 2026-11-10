@@ -31,8 +31,9 @@ public enum FindingSeverity { Info, Warning, Alert }
 
 /// <summary>
 /// A diagnostic observation that is not a pool-tag incident: a spawn storm, a suspicious git root, a stray .git,
-/// and so on. Every finding goes to findings.jsonl and events.csv (and so onto the incident timelines); alert-level
-/// findings also get a report folder under incidents\.
+/// and so on. Every finding goes onto the incident timelines, and with Detailed recording to the day's findings.jsonl and
+/// events.csv too; alert-level findings also get a report folder under incidents\ (a spawn storm's only with Detailed
+/// recording).
 /// </summary>
 public sealed record Finding
 {

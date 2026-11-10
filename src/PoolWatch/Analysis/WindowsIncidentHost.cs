@@ -40,6 +40,18 @@ internal sealed class WindowsIncidentHost : IIncidentHost
     public string CheckWrite(string path) => _engine.Paths.CheckRealNoWait(path);
     public void RequestHandleScan() => _engine.RequestHandleScan();
     public string DisplayUser(string user) => ProcessDetails.DisplayUser(user);
+    /// <summary>
+    /// What the day's files record and since when, as the day's sink follows the choice (<see cref="Engine.CsvSink.Records"/>):
+    /// the reports name the day's events.csv only for a time Detailed recording was on (in Reports only there is none).
+    /// </summary>
+    public (bool Detailed, DateTime SinceUtc) DayRecords
+    {
+        get
+        {
+            var records = _engine.Records; // one read: the two halves of the same state
+            return (records.Detailed, records.SinceUtc);
+        }
+    }
 
     private readonly ConcurrentDictionary<ProcessKey, TranscriptHit?> _transcripts = new();
     private readonly ConcurrentDictionary<ProcessKey, byte> _searching = new();

@@ -33,9 +33,13 @@ internal interface ISetupHost
     /// <summary>The Standby cache step's choice (<see cref="StandbyCacheSetup"/>).</summary>
     /// <param name="replaceOwnTask">The step showed that a rule replaces your own RAMMap clear task (the scan found one).</param>
     Task<(bool Ok, string Message)> ApplyCache(CacheChoice choice, double hours, double gb, bool replaceOwnTask);
+    /// <summary>The Records step's choice: what PoolWatch keeps on disk and after how many days it is cleaned up (<see cref="RecordsSetup"/>).</summary>
+    Task<(bool Ok, string Message)> ApplyRecords(RecordMode mode, int days);
     /// <summary>Every change Active changes lists, and how many of them can be put back (worker thread); null when the list cannot be read.</summary>
     Task<(int All, int CanPutBack)?> ActiveChanges();
     void MarkCompleted();
+    /// <summary>The owner chose what PoolWatch keeps on disk (setup.json): the Records step no longer opens by itself.</summary>
+    void MarkRecordsChosen();
     void OpenWebPage(IWin32Window owner, string url);
     void Log(string line);
     /// <summary>
@@ -50,11 +54,14 @@ internal sealed class SetupHost : ISetupHost
 {
     private readonly SetupContext _c;
     private readonly StandbyCacheSetup _cache;
+    private readonly RecordsSetup _records;
 
     public SetupHost(SetupContext c)
     {
         _c = c;
-        _cache = new StandbyCacheSetup(new WindowsSetupSystem(c), c.Live, c.Smoke);
+        var system = new WindowsSetupSystem(c);
+        _cache = new StandbyCacheSetup(system, c.Live, c.Smoke);
+        _records = new RecordsSetup(system.Timeline, c.Live, c.Smoke);
     }
 
     public bool Smoke => _c.Smoke;
@@ -68,6 +75,8 @@ internal sealed class SetupHost : ISetupHost
     public Task<(bool Ok, string Message)> Run(Recommendation r, IWin32Window owner) => _c.Recommendations.Run(r, owner, SetupSession.Via);
     public Task<(bool Ok, string Message)> CheckTokenLeak(CancellationToken stop) => _c.Recommendations.CheckTokenLeak(stop);
     public Task<(bool Ok, string Message)> ApplyCache(CacheChoice choice, double hours, double gb, bool replaceOwnTask) => _cache.Apply(choice, hours, gb, replaceOwnTask);
+    public Task<(bool Ok, string Message)> ApplyRecords(RecordMode mode, int days) => _records.Apply(mode, days);
+    public void MarkRecordsChosen() => _c.Store.MarkRecordsChosen(DateTime.UtcNow);
 
     public async Task<(int All, int CanPutBack)?> ActiveChanges()
     {
@@ -169,10 +178,38 @@ internal sealed class StandbyCacheSetup(ISetupSystem system, LiveSettings live, 
     }
 }
 
+/// <summary>
+/// The Records step's choice, applied through the running settings as Settings' Save applies it (at once, and in
+/// settings.json): what PoolWatch keeps on disk (<see cref="Settings.RecordMode"/>, which the engine reads at each write,
+/// so it applies from the next sample) and after how many days it is cleaned up (<see cref="Settings.RetentionDays"/>).
+/// The timeline says what was chosen. Nothing happens in the CI UI test.
+/// </summary>
+internal sealed class RecordsSetup(Action<string> timeline, LiveSettings live, bool smoke)
+{
+    public async Task<(bool Ok, string Message)> Apply(RecordMode mode, int days)
+    {
+        if (smoke) return (false, RecommendationActions.Refused);
+        if (RecordChoices.InEffect(live.Running, mode, days)) return (true, "");
+        try
+        {
+            string words = $"{RecordChoices.Words(mode)}, cleaned up after {SetupText.Days(days)}";
+            // The mode and the days in one change, so settings.json and the engine never hold one without the other.
+            await Task.Run(() => live.Apply($"records: {words} ({SetupSession.Via})", s =>
+            {
+                s.RecordMode = mode;
+                s.RetentionDays = days;
+            }));
+            timeline($"Records: {words} (from {SetupSession.Via}).");
+            return (true, "");
+        }
+        catch (Exception ex) { return (false, "That did not work: " + ex.Message); }
+    }
+}
+
 /// <summary>What changed in a <see cref="SetupSession"/>, so the window updates only that part, in place.</summary>
 /// <see cref="Next"/>: Next's wait started by itself (the scan's facts landed on a step that applies changes, a change on one
 /// did not work, or a Fixes row appeared), so whether Next can be pressed changes again when it ends.
-internal enum SetupPart { Step, Scan, Leak, Cache, Fixes, Busy, Summary, Updates, Next }
+internal enum SetupPart { Step, Scan, Leak, Cache, Fixes, Busy, Summary, Updates, Next, Records }
 
 /// <summary>
 /// The setup window's state, without a window: the step, the scan and the token-leak check, every choice, what each
@@ -240,18 +277,27 @@ internal sealed class SetupSession
 
     /// <param name="scanWait">The tests: a shorter wait for the scan than <see cref="ScanWait"/>.</param>
     /// <param name="clock">The tests: a clock they move on (<see cref="System.Diagnostics.Stopwatch"/> ticks), for Next's wait (<see cref="NextWait"/>).</param>
-    public SetupSession(ISetupHost host, bool firstRun, bool advanced, TimeSpan? scanWait = null, Func<long>? clock = null)
+    /// <param name="recordsOnly">
+    /// The Records step alone, as it opens by itself after an upgrade (<see cref="SetupFlow.RecordsOnly"/>): it reads nothing
+    /// of the PC and runs no check, and its Done waits a moment from when it opens (<see cref="NextWait"/>), since it opens
+    /// without being asked for, while the owner may be typing elsewhere.
+    /// </param>
+    public SetupSession(ISetupHost host, bool firstRun, bool advanced, TimeSpan? scanWait = null, Func<long>? clock = null, bool recordsOnly = false)
     {
         _host = host;
         _scanWait = scanWait ?? ScanWait;
         _clock = clock ?? System.Diagnostics.Stopwatch.GetTimestamp;
-        Flow = new SetupFlow(firstRun);
+        Flow = new SetupFlow(firstRun, recordsOnly);
         Advanced = advanced;
         var running = host.Running;
         (_, Hours, PoolGb) = CacheChoices.Read(running);
         Cache = CacheChoices.Initial(running, firstRun);
+        // The first run starts on the recommended Reports only; opened again (or alone after an upgrade), on what is in effect.
+        Records = Flow.FirstRun ? RecordChoices.Recommended : running.RecordMode;
+        Days = _daysInEffect = running.RetentionDays;
         Leak = ImpactRows.Leak(null, running.TokenGuardEnabled, host.LeakTestNow, checking: false, notRun: false);
         _toldInputs = FixInputs();
+        if (recordsOnly) _heldFrom = _clock();
     }
 
     public SetupFlow Flow { get; }
@@ -264,6 +310,10 @@ internal sealed class SetupSession
     public CacheChoice Cache { get; private set; }
     public double Hours { get; private set; }
     public double PoolGb { get; private set; }
+    /// <summary>The Records step's choice: what PoolWatch keeps on disk.</summary>
+    public RecordMode Records { get; private set; }
+    /// <summary>The Records step's cleanup: reports, records and exports are cleaned up after this many days.</summary>
+    public int Days { get; private set; }
     /// <summary>The Fixes step's choices, each used only where its row offers it.</summary>
     public bool SignIn { get; private set; } = true;
     public bool Shortcut { get; private set; } = true;
@@ -293,11 +343,24 @@ internal sealed class SetupSession
     public bool ChangesRead { get; private set; }
     public CacheChoice Recommended => CacheChoices.Recommended;
 
-    /// <summary>The step's Next applies changes: the Standby cache and Fixes steps.</summary>
-    private bool AppliesChanges => Flow.Step is SetupStep.StandbyCache or SetupStep.Fixes;
+    /// <summary>The step's Next applies changes: the Standby cache, Fixes and Records steps.</summary>
+    private bool AppliesChanges => Flow.Step is SetupStep.StandbyCache or SetupStep.Fixes or SetupStep.Records;
+
+    /// <summary>The step's Next applies what the scan found: the Standby cache and Fixes steps (the Records step needs nothing of it).</summary>
+    private bool UsesScan => Flow.Step is SetupStep.StandbyCache or SetupStep.Fixes;
 
     /// <summary>The step's Next waits for the scan: the Standby cache and Fixes steps apply what it found.</summary>
-    public bool WaitsForScan => !Scanned && AppliesChanges;
+    public bool WaitsForScan => !Scanned && UsesScan;
+
+    /// <summary>The cleanup's days in effect as setup opened: the select keeps offering them, whatever is picked meanwhile.</summary>
+    private readonly int _daysInEffect;
+
+    /// <summary>
+    /// The Records step's select: the days it offers, with the number in effect as setup opened when Settings set another
+    /// (so it can be picked again after a different one), and the one picked now.
+    /// </summary>
+    public IReadOnlyList<int> DayOptions =>
+        RecordChoices.DayOptions(_daysInEffect) is var options && !options.Contains(Days) ? options.Append(Days).Order().ToList() : options;
 
     /// <summary>
     /// Next can be pressed now: no change is running, setup is not finished, the step does not wait for the scan, and Next's
@@ -384,7 +447,7 @@ internal sealed class SetupSession
     public string? Error(string key) => _errors.GetValueOrDefault(key);
 
     public static string Key(Fix fix) => fix.ToString();
-    public const string CacheKey = "cache";
+    public const string CacheKey = "cache", RecordsKey = "records";
 
     /// <summary>A suggestion's button as setup runs it: <see cref="RecommendationActions.Run"/> goes by its id (and a how-to's text).</summary>
     internal static Recommendation Rec(RecommendationId id, string title = "", string? instructions = null) =>
@@ -398,6 +461,12 @@ internal sealed class SetupSession
     public async Task LoadAsync(CancellationToken stop)
     {
         _stop = stop;
+        if (Flow.RecordsOnly)
+        {
+            // The Records step alone needs nothing of the PC: no scan, and never the token-leak check.
+            Scanned = true;
+            return;
+        }
         Task<EnvironmentFacts> scan;
         try { scan = _host.Scan(); }
         catch (Exception ex) { scan = Task.FromException<EnvironmentFacts>(ex); }
@@ -475,7 +544,7 @@ internal sealed class SetupSession
             _leakNotRun = _host.Smoke;
         }
         UpdateLeak();
-        Tell(SetupPart.Scan, hold: AppliesChanges);
+        Tell(SetupPart.Scan, hold: UsesScan);
         if (!wanted || !_checking) return;
         bool ok;
         try { (ok, _) = await _host.CheckTokenLeak(_stop); }
@@ -516,6 +585,24 @@ internal sealed class SetupSession
         PoolGb = gb;
         Forget(CacheKey);
         Tell(SetupPart.Cache);
+    }
+
+    /// <summary>A Records card: Reports only or Detailed recording. Held while a change runs, like every choice.</summary>
+    public void ChooseRecords(RecordMode mode)
+    {
+        if (Busy || mode == Records) return;
+        Records = mode;
+        Forget(RecordsKey);
+        Tell(SetupPart.Records);
+    }
+
+    /// <summary>The Records step's select: reports and records are cleaned up after this many days (1 to 90).</summary>
+    public void SetDays(int days)
+    {
+        if (Busy || days is < 1 or > 90 || days == Days) return;
+        Days = days;
+        Forget(RecordsKey);
+        Tell(SetupPart.Records);
     }
 
     /// <summary>A Fixes row's switch or Yes/No.</summary>
@@ -585,6 +672,7 @@ internal sealed class SetupSession
             {
                 SetupStep.StandbyCache => await ApplyCache(),
                 SetupStep.Fixes => await ApplyFixes(owner, shown),
+                SetupStep.Records => await ApplyRecords(),
                 _ => true,
             };
         }
@@ -598,6 +686,10 @@ internal sealed class SetupSession
             if (_late is not null) LateScan = TakeLate(); // a scan that ended while the change ran
         }
         if (!ok) return false;
+        // Past the Records step (applied, or on without it once it did not work): a mode was chosen, so the step alone
+        // never opens by itself again.
+        if (Flow.Step == SetupStep.Records) _host.MarkRecordsChosen();
+        if (Flow.Step == Flow.Last) return Finish(); // the Records step alone: Done
         Flow.Forward();
         Entered();
         if (Flow.Step == SetupStep.Ready) await ReadActiveChanges();
@@ -611,11 +703,18 @@ internal sealed class SetupSession
         return true;
     }
 
-    /// <summary>The Ready step's button: setup is complete (it does not open again by itself).</summary>
+    /// <summary>
+    /// The last step's button: setup is complete (it does not open again by itself). The whole setup marks itself completed,
+    /// its Records step chosen too; the Records step alone has marked its choice already (<see cref="NextAsync"/>).
+    /// </summary>
     public bool Finish()
     {
         if (Flow.Finished) return false;
-        _host.MarkCompleted();
+        if (!Flow.RecordsOnly)
+        {
+            _host.MarkCompleted();
+            _host.MarkRecordsChosen();
+        }
         Flow.Finish();
         Tell(SetupPart.Step);
         return true;
@@ -657,6 +756,15 @@ internal sealed class SetupSession
         return Outcome(CacheKey, choice, ok, message);
     }
 
+    /// <summary>The Records step's choice and days, as the Standby cache step applies its choice: a failure keeps the step with its message.</summary>
+    private async Task<bool> ApplyRecords()
+    {
+        string choice = $"{Records} {Days}";
+        if (_failedWith.GetValueOrDefault(RecordsKey) == choice) return true; // Next (or Done) again: on without it
+        var (ok, message) = await _host.ApplyRecords(Records, Days);
+        return Outcome(RecordsKey, choice, ok, message);
+    }
+
     /// <param name="shown">
     /// The switches and Yes/Nos the window showed when Next was pressed. One it did not show is left as it is: it appeared
     /// as Next was pressed, or its row changed with nothing told (the shortcut put back from Active changes), and the step
@@ -693,7 +801,7 @@ internal sealed class SetupSession
             return true;
         }
         _failedWith[key] = choice;
-        _errors[key] = message + " " + SetupText.NextAgain;
+        _errors[key] = message + " " + (Flow.RecordsOnly ? SetupText.DoneAgain : SetupText.NextAgain);
         return false;
     }
 }

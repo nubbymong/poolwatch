@@ -72,8 +72,9 @@ internal sealed class CommandLineOptions
           --out <dir>            write CSV / incidents / logs here instead of %ProgramData%\PoolWatch
           --config <file>        settings JSON to use (read-only)
           --interval <seconds>   override the sample interval
-          --verbose-csv          write every tag and process row every sample
-          --experiment <app>     run a guided A/B experiment with this app (prompts in the log and findings.jsonl)
+          --verbose-csv          with Detailed recording, write every tag and process row every sample
+          --experiment <app>     run a guided A/B experiment with this app (prompts in the log, and in findings.jsonl
+                                 with Detailed recording)
           --phase-minutes <m>    experiment phase length (default: the setting, 10 min)
           --export-bundle        write a vendor bundle zip at the end (redacted; add --no-redact to keep names)
         PoolWatch.exe --mark "<note>" [--out <dir>]  put a note on the running PoolWatch's timeline, then exit

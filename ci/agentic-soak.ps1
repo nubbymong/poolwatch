@@ -123,7 +123,7 @@ Write-Host 'CHECK-RAN: agentic-cpu'
 Assert-True ($null -ne $steadyMaxWs -and $steadyMaxWs -lt 100) ("working set max over the steady window {0} MB < 100 MB" -f $steadyMaxWs)
 Write-Host 'CHECK-RAN: agentic-working-set'
 Assert-True ([double]$overhead.diskWriteBytesPerHour -lt 5MB) ("disk writes {0:N2} MB/h < 5 MB/h" -f ([double]$overhead.diskWriteBytesPerHour / 1MB))
-Assert-True ($canWaitAllowed -gt 0 -and [double]$profile.writeBudget.canWaitMB -le $canWaitAllowed + 0.001) ("the report folders' writes that could wait, {0} MB, kept to what their budget allows ({1:N3} MB in {2:N2} h)" -f $profile.writeBudget.canWaitMB, $canWaitAllowed, $hours)
+Assert-True ($canWaitAllowed -gt 0 -and $null -ne $profile.writeBudget.canWaitMB -and [double]$profile.writeBudget.canWaitMB -le $canWaitAllowed + 0.001) ("the report folders' writes that could wait, {0} MB, kept to what their budget allows ({1:N3} MB in {2:N2} h)" -f $profile.writeBudget.canWaitMB, $canWaitAllowed, $hours)
 Write-Host 'CHECK-RAN: agentic-writes'
 Assert-True ($stormFolders.Count -le $stormsAllowed) ("{0} spawn-storm folders made, at most 10 an hour ({1} in {2} min)" -f $stormFolders.Count, $stormsAllowed, $Minutes)
 Write-Host 'CHECK-RAN: agentic-storm-folders'

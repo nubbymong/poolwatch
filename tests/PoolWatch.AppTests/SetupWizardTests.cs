@@ -24,7 +24,7 @@ namespace PoolWatch.AppTests;
 /// to a settings.json in TEMP. No window is shown.
 /// </summary>
 [Collection(nameof(WholeWindowLayout))] // lays windows out: one class at a time, after the parallel ones
-public sealed class SetupWizardTests : IDisposable
+public sealed partial class SetupWizardTests : IDisposable // the Records step's tests: SetupWizardRecordsTests.cs
 {
     private readonly ChangeFixture _f = new();
 
@@ -60,9 +60,9 @@ public sealed class SetupWizardTests : IDisposable
         var seen = new List<SetupStep> { flow.Step };
         while (flow.Forward()) seen.Add(flow.Step);
         Assert.Equal(SetupFlow.Steps, seen);
-        Assert.Equal(["Welcome", "Your PC", "Safety", "Standby cache", "Fixes", "Services", "Ready"], SetupFlow.Steps.Select(SetupText.Rail));
+        Assert.Equal(["Welcome", "Your PC", "Safety", "Standby cache", "Fixes", "Services", "Records", "Ready"], SetupFlow.Steps.Select(SetupText.Rail));
         Assert.False(flow.MayClose(CloseReason.UserClosing));      // the last step too (it asks), until its button
-        Assert.Equal((RailMark.Done, RailMark.Now), (flow.Mark(SetupStep.Services), flow.Mark(SetupStep.Ready)));
+        Assert.Equal((RailMark.Done, RailMark.Now), (flow.Mark(SetupStep.Records), flow.Mark(SetupStep.Ready)));
 
         flow.Finish();
         Assert.True(flow.MayClose(CloseReason.UserClosing));
@@ -317,10 +317,10 @@ public sealed class SetupWizardTests : IDisposable
         var session = new SetupSession(host, firstRun: true, advanced: false, clock: () => now);
         await session.LoadAsync(CancellationToken.None);
         session.Advanced = true;                    // the Welcome step's choice, which the app takes when setup is done
-        for (int i = 0; i < 6; i++)
+        for (int i = 0; i < 7; i++)                 // the seven steps before Ready (the Records step is the seventh)
         {
             Assert.True(await session.NextAsync(null!));
-            now += NextWaitTicks;                   // each step on screen for its moment (Standby cache and Fixes wait for it)
+            now += NextWaitTicks;                   // each step on screen for its moment (Standby cache, Fixes and Records wait for it)
         }
         Assert.Equal((SetupStep.Ready, 0), (session.Flow.Step, host.Completed));
         Assert.True(await session.NextAsync(null!)); // "Open PoolWatch"
@@ -1962,7 +1962,7 @@ public sealed class SetupWizardTests : IDisposable
         Assert.Equal("Listed under Active changes in the app", await Said(null));
 
         var keys = (await Session(Busy())).Summary.Select(r => r.Key);
-        Assert.Equal(["Standby cache", "Codex shortcut", "Token leak", "Active changes"], keys);
+        Assert.Equal(["Standby cache", "Codex shortcut", "Token leak", "Records", "Active changes"], keys); // Records: the approved design's place for it
     }
 
     [Fact]
@@ -2358,10 +2358,10 @@ public sealed class SetupWizardTests : IDisposable
     }
 
     /// <summary>
-    /// The Welcome step's choice picks only the view the app opens in, as its words now say: setup's seven steps, with every
+    /// The Welcome step's choice picks only the view the app opens in, as its words now say: setup's eight steps, with every
     /// text, row and choice, are the same with Simple and with Advanced, and the words claim nothing for setup but that.
     /// They said Simple's setup "picks safe settings for you" and Advanced's "shows every choice", while both ran the same
-    /// seven steps with the same choices.
+    /// steps with the same choices.
     /// </summary>
     [Fact]
     public async Task TheLevelChoicePicksOnlyTheAppsViewAsItsWordsSay()
@@ -2547,7 +2547,7 @@ public sealed class SetupWizardTests : IDisposable
     public void TheCiUiTestLooksForTheScreenshotsAndTheMenuItemSetupHas()
     {
         Assert.Equal(["6-setup-1-welcome.png", "6-setup-2-your-pc.png", "6-setup-3-safety.png", "6-setup-4-standby-cache.png", "6-setup-5-fixes.png",
-            "6-setup-6-services.png", "6-setup-7-ready.png", "6-setup-how-it-works.png"], SetupShots());
+            "6-setup-6-services.png", "6-setup-7-records.png", "6-setup-8-ready.png", "6-setup-how-it-works.png", "6-setup-records-alone.png"], SetupShots());
         CiUiTestChecksSetup(CiUiScript());
     }
 
@@ -2584,8 +2584,8 @@ public sealed class SetupWizardTests : IDisposable
     /// <summary>The block of ci/m4-ui.ps1 that reads smoke.json, where its checks of the windows are.</summary>
     private const string CiUiSmoke = "if (Test-Path $smokeFile) {";
 
-    /// <summary>The screenshots of setup's steps and of How PoolWatch works, by their file names.</summary>
-    private static List<string> SetupShots() => SetupFlow.Steps.Select(SetupWizardForm.ShotName).Append(SetupWizardForm.HowItWorksShot).ToList();
+    /// <summary>The screenshots of setup's steps, of How PoolWatch works and of the Records step alone, by their file names.</summary>
+    private static List<string> SetupShots() => SetupFlow.Steps.Select(SetupWizardForm.ShotName).Append(SetupWizardForm.HowItWorksShot).Append(SetupWizardForm.RecordsAloneShot).ToList();
 
     private static string CiUiScript()
     {
@@ -2863,8 +2863,23 @@ public sealed class SetupWizardTests : IDisposable
             return CacheResult;
         }
 
+        public (bool, string) RecordsResult = (true, "");
+        public int RecordsChosen;
+
+        public Task<(bool Ok, string Message)> ApplyRecords(RecordMode mode, int days)
+        {
+            Calls.Add($"records {mode} {days}");
+            if (RecordsResult.Item1)
+            {
+                Running.RecordMode = mode;
+                Running.RetentionDays = days;
+            }
+            return Task.FromResult(RecordsResult);
+        }
+
         public Task<(int All, int CanPutBack)?> ActiveChanges() => Task.FromResult<(int All, int CanPutBack)?>(Changes);
         public void MarkCompleted() => Completed++;
+        public void MarkRecordsChosen() => RecordsChosen++;
         public void OpenWebPage(IWin32Window owner, string url) => Calls.Add("open " + url);
         public void Log(string line) { }
 
@@ -3006,8 +3021,10 @@ public sealed class SetupWizardTests : IDisposable
         public Task<(bool Ok, string Message)> CheckTokenLeak(CancellationToken stop) => actions.CheckTokenLeak(stop);
         public Task<(bool Ok, string Message)> ApplyCache(CacheChoice choice, double hours, double gb, bool replaceOwnTask) =>
             cache.Apply(choice, hours, gb, replaceOwnTask);
+        public Task<(bool Ok, string Message)> ApplyRecords(RecordMode mode, int days) => new RecordsSetup(_ => { }, live, smoke: false).Apply(mode, days);
         public Task<(int All, int CanPutBack)?> ActiveChanges() => Task.FromResult<(int All, int CanPutBack)?>((0, 0));
         public void MarkCompleted() { }
+        public void MarkRecordsChosen() { }
         public void OpenWebPage(IWin32Window owner, string url) { }
         public void Log(string line) { }
         public bool ConfirmCloseFirstRun(IWin32Window owner) => false;

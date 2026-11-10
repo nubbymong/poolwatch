@@ -126,18 +126,20 @@ after PoolWatch starts, so no cache clear has run yet and the trend and the grow
 
 ### 1. It looks at your PC and sets it up with you
 
-At first start, **Set up PoolWatch** opens on its own, before the main window: seven short steps, about 3 minutes. It
+At first start, **Set up PoolWatch** opens on its own, before the main window: eight short steps, about 3 minutes. It
 reads your PC and lists each known cause of a growing kernel pool with how much it affects this PC, the highest first
 (high, medium, low, not known where it could not check, then none), and, for a cause setup has a fix for, the step with
 that fix. Then you choose when PoolWatch empties the standby cache (on a schedule, at a pool size, whichever comes
 first, or decide later) and the fixes that fit this PC: start PoolWatch when you sign in, the token-leak guard if this
 Windows build has the leak, and, if the Codex app is installed, a Codex shortcut without its shader cache. For Microsoft
 Defender on a Dev Drive it shows you where the setting is; PoolWatch never changes Defender. Setup changes no services:
-it shows where to trim them later, in the app. Nothing changes until you press **Next** on the step where you chose it
+it shows where to trim them later, in the app. Last, you choose what PoolWatch keeps on disk: **Reports only** (the
+default: a report each time the pool grows, and no record of the day) or **Detailed recording** (the reports, plus a
+record of the whole day). Nothing changes until you press **Next** on the step where you chose it
 ([setup in the user guide](docs/USER-GUIDE.md#at-first-start-set-up-poolwatch)).
 
 <p align="center">
-  <img alt="Set up PoolWatch, step 2 of 7, How your PC is impacted: each known cause of a growing kernel pool with its impact level. On the test machine each one is None, with Still watching, except Background services: Low impact, with Trim in the app" src="docs/screenshots/6-setup-2-your-pc.png">
+  <img alt="Set up PoolWatch, step 2 of 8, How your PC is impacted: each known cause of a growing kernel pool with its impact level. On the test machine each one is None, with Still watching, except Background services: Low impact, with Trim in the app" src="docs/screenshots/6-setup-2-your-pc.png">
 </p>
 
 ### 2. It watches, and says what grew
@@ -208,7 +210,9 @@ WSL, core) are never changed ([services, tasks and the AI agent in the user guid
 
 When something keeps growing, PoolWatch writes a report with a timeline, the likely causes and the evidence for each.
 The reports stay on your PC. **Export report** makes a copy to share, with your user and PC names, home paths and
-anything that looks like a password or key taken out, as best it can. Read it before you post it.
+anything that looks like a password or key taken out, as best it can. Read it before you post it. With **Detailed
+recording** (setup's Records step, or **Records** in Settings) it also keeps a record of the whole day, for a leak that
+builds up slowly over days: up to about 60 MB a day on a PC doing heavy agentic coding.
 
 ## You stay in control
 
@@ -270,6 +274,16 @@ for a program that runs under Claude Code, its working folder; for setup, it loo
 tools. It keeps what it finds in its data folder and sends none of it: Report an issue takes out session names and ids,
 project folders and command lines before it shows you the preview, and the update check sends nothing about your PC.
 An export you choose to share can contain session ids and project names (see below).
+
+**What it keeps on disk is your choice.** By default (**Reports only**) PoolWatch keeps no record of your day: it
+writes a report folder each time the pool grows (and one when Windows crashed or restarted by itself, or for an
+experiment you run), and beside the reports only its log, its settings, a summary of each boot and the Since boot report
+made from them. The window and the tray notices work from what it holds in memory. **Detailed recording** adds a record
+of the whole day in the data folder (the pool and its tags, programs and their handles, services, every program
+started, its findings) and report folders for its spawn storms. You choose in setup's Records
+step, and change it at any time under **Records** in Settings, which applies at once. Reports, records and exports are
+cleaned up after 7 days of the PC's awake time without a write (you choose 1 to 90 days there too). Both stay on your
+PC and are never sent.
 
 **The AI agent prompt is yours to give.** **Decide with your AI agent** shows every word of its prompt before you save
 or copy it: the names and publishers of the services, scheduled tasks and startup apps on this PC, what each does, and

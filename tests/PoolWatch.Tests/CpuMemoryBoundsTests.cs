@@ -289,6 +289,41 @@ public sealed class CpuMemoryBoundsTests : IDisposable
     }
 
     /// <summary>
+    /// The named records are at most <see cref="ProcessRegistry.MaxNamed"/> whenever a prune has run, also when the full
+    /// registry went over its cap in that pass and its eviction named more of them (profile.json's namedRecords, which the
+    /// CI soak holds to 10,000): the first named go first, the ones just named stay.
+    /// </summary>
+    [Fact]
+    public void TheNamedRecordsStayWithinTheirCeilingAlsoWhenTheEvictionNamesMore()
+    {
+        var now = T0;
+        var reg = new ProcessRegistry(maxRecords: 2_000, clock: () => At(now));
+        long ft = T0.ToFileTimeUtc();
+        // A day's worth of names: processes that ran a minute, named once past the raw history.
+        for (int i = 0; i < ProcessRegistry.MaxNamed; i++) reg.OnStart(100_000 + i, 4, ft + i, "build.exe", null, "build", null, T0);
+        now = T0.AddMinutes(1);
+        for (int i = 0; i < ProcessRegistry.MaxNamed; i++) reg.OnStop(100_000 + i, ft + i, 0, now);
+        now = T0.AddMinutes(1 + 95);
+        reg.ObserveSnapshot([], now);
+        Assert.Equal(ProcessRegistry.MaxNamed, reg.NamedCount);
+        // Then more long-lived processes than the registry holds, exited a minute ago: the eviction names the earliest 900.
+        var t1 = now;
+        long ft1 = t1.ToFileTimeUtc();
+        for (int i = 0; i < 2_500; i++) reg.OnStart(300_000 + i, 4, ft1 + i, "test.exe", null, "test", null, t1);
+        for (int i = 0; i < 2_500; i++)
+        {
+            now = t1.AddMinutes(1).AddMilliseconds(i);
+            reg.OnStop(300_000 + i, ft1 + i, 0, now);
+        }
+        now = t1.AddMinutes(2);
+        reg.ObserveSnapshot([], now);
+        Assert.True(reg.NamedCount <= ProcessRegistry.MaxNamed, $"{reg.NamedCount:N0} named records, past the {ProcessRegistry.MaxNamed:N0} they may be");
+        Assert.True(reg.Count <= 2_000, $"{reg.Count} full records");
+        Assert.Null(reg.Get(new ProcessKey(100_000, ft)));         // the first named went first
+        Assert.NotNull(reg.Get(new ProcessKey(300_000, ft1)));     // the eviction's first, just named, stays
+    }
+
+    /// <summary>
     /// A process that exited hours before a child was created is not that child's parent, also once its record is a named
     /// one (a long-lived process past the raw history): a storm is never credited to a process long gone.
     /// </summary>

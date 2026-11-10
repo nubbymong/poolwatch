@@ -198,6 +198,57 @@ public class StormFolderTests
         Assert.All(rig.Opened.Skip(1), f => Assert.Contains(f.Details, d => d.StartsWith("Written into the report folder of ", StringComparison.Ordinal)));
     }
 
+    /// <summary>
+    /// With Reports only (the app's Detailed recording off: <see cref="SpawnTracker.FoldersWanted"/> says no) the same hour's
+    /// storms are each found and told as before, and none gets a report folder: none is made or due to be written, none is
+    /// counted as withheld past the hourly limit, and each finding says why it has none. Detailed recording turned on: the
+    /// next storm gets one, and the storms after it join it.
+    /// </summary>
+    [Fact]
+    public void WithReportsOnlyEachStormIsFoundAndToldAndGetsNoFolder()
+    {
+        var rig = new Rig();
+        bool wanted = false;
+        rig.Tracker.FoldersWanted = () => wanted;
+        rig.Start(4, "Leaker.exe", @"C:\t\Leaker.exe agent-session --dir C:\t\session0 --seconds 3600 --index 0", pid: 900);
+        rig.Registry.DrainEvents();
+        double owed = 0;
+        int k = 0;
+        void Run(int seconds)
+        {
+            for (int s = 0; s < seconds; s++, rig.Now = rig.Now.AddSeconds(1))
+            {
+                owed += (s % 150 < 60 ? 100 : 20) / 60.0;
+                for (; owed >= 1; owed--) rig.Stop(rig.Start(900, "bash.exe", $"bash -c \"cd /tmp && echo {k++:x8} > /dev/null\""));
+                if (s % 10 == 9) rig.Tick();
+            }
+        }
+        Run(1800);
+        Assert.InRange(rig.Opened.Count, 10, 13); // a storm every 2.5 minutes, as with folders
+        Assert.Empty(rig.Folders);
+        Assert.Equal(0, rig.Writes);
+        Assert.Empty(rig.Tracker.Folders);
+        Assert.Equal(0, rig.Tracker.FoldersWithheld);
+        Assert.All(rig.Findings.Where(f => f.Kind == FindingKind.SpawnStorm), f =>
+        {
+            Assert.Null(f.ReportDir);
+            Assert.Contains("No report folder: this storm began while Reports only was chosen, and only Detailed recording keeps spawn-storm folders; " +
+                            "this storm is in its findings and the log", f.Details);
+        });
+
+        wanted = true; // Detailed recording turned on
+        // A storm still going on says the same of itself: it began while Reports only was chosen, and has no folder.
+        var going = rig.Tracker.OpenStorms.ToList();
+        Assert.All(going, s => Assert.True(s.FolderNotWanted && s.Folder is null));
+        int before = rig.Opened.Count;
+        Run(1800);
+        Assert.True(rig.Opened.Count > before);
+        var folder = Assert.Single(rig.Folders);
+        Assert.Equal(rig.Opened.Count - before, folder.StormCount);
+        Assert.True(rig.Writes >= 1);
+        Assert.DoesNotContain(rig.Opened.Skip(before), f => f.Details.Any(d => d.StartsWith("No report folder", StringComparison.Ordinal)));
+    }
+
     [Fact]
     public void FiveHundredStormsInAnHourMakeAtMostTenFolders()
     {

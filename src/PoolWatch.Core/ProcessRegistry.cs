@@ -856,7 +856,6 @@ public sealed class ProcessRegistry
         shortLivedKept.AddRange(protectedShort);
         foreach (var k in dead) _all.Remove(k);
         PruneCompact();
-        PruneNamed(cutoff);
         if (_all.Count > _maxRecords)
         {
             // Over the cap: evict to 80%, so a busy PC (hundreds of starts per sample) is not over again for several samples
@@ -874,6 +873,9 @@ public sealed class ProcessRegistry
                 _all.Remove(r.Key);
             }
         }
+        // After every record named in this pass, the eviction's too: so the named records are at most MaxNamed whenever a
+        // prune has run (profile.json's namedRecords, which the CI soak holds to it).
+        PruneNamed(cutoff);
         // Each PID's newest instance and image are for the PIDs of the records held: once an eighth more PIDs are listed (each
         // start of a busy PC brings a new PID, 3,600 a minute), they are made again from the records held, into new
         // dictionaries with room for that many (a cleared one keeps its size: before, on a busy PC 40,000 PIDs' room each,

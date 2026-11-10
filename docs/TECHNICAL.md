@@ -109,8 +109,17 @@ said "NOT REDACTED" at the top, and with the older confidence words: "strongly c
 
 ## Where it stores data
 
-Everything goes under `C:\ProgramData\PoolWatch\` (administrators can change it; your account can read it). A daily
-folder, an incident or an export is deleted once nothing in it was written for 7 days by default. The days are counted
+Everything goes under `C:\ProgramData\PoolWatch\` (administrators can change it; your account can read it). What it
+keeps is your choice (setup's Records step, or **Records** in Settings, which applies from the next sample, without a
+restart): **Reports only**, the default (also after an upgrade from 1.0.0-beta.2, until you choose in the Records step,
+which then opens alone at each start until you press Done), writes a report folder each time the pool grows and no
+daily folder and no spawn-storm folder, so storms are found, shown in the window and noticed from memory; **Detailed
+recording** also writes the daily folder and the spawn-storm folders below. Either way it keeps the files listed last
+here (the log, the settings, `boots\`, `cache\` and the others). Turned off, the day's files stop at once
+and are closed (a handle scan being written then ends first, on its own thread, which closes its two files after it);
+turned on, they start again with the whole picture at the next sample. A daily folder, an incident or an export is deleted once
+nothing in it was written for 7 days by default (1 to 90, the same setting for all three, in the Records step and in
+Settings), whichever mode wrote it, so what an older version wrote goes by the same rule. The days are counted
 on the PC's own timer, never on its clock, from the check (every 6 hours) that first sees it as it is: for a file its
 last-write time and size, for a folder that is not a link also the name, size and last-write time of every file in it
 but a link or what is behind one, so rows added to a day's files count as a write into its folder, and a change of the
@@ -119,8 +128,8 @@ time this version runs, what is already there is kept the whole period from then
 files' times, which a clock set back can make look old). `poolwatch.log` has one line for each check: what it judged
 and removed, with the first few names:
 
-- `data\<yyyyMMdd>\`: the CSV files (totals, tags, processes, handles, events, services, volumes, lag, load) and
-  `findings.jsonl`: on a PC doing heavy agentic coding about 2.5 MB an hour (about 400 MB over the 7 days kept), much
+- `data\<yyyyMMdd>\`, with Detailed recording only: the CSV files (totals, tags, processes, handles, events, services,
+  volumes, lag, load) and `findings.jsonl`: on a PC doing heavy agentic coding about 2.5 MB an hour (about 400 MB over the 7 days kept), much
   less on a quieter one, as the CSV files hold what changed after each day's first rows (the data folder's `AGENTS.md`
   says how to read them; 1.0.0-beta.2 wrote 4.7 MB an hour there). A CSV file whose columns changed in
   an update, or whose open or write another program refuses, is passed over: its rows go on in its next numbered file
@@ -133,8 +142,10 @@ and removed, with the first few names:
 - `incidents\<id>\`: `report.md`, `report.json`, `timeline.csv`, `processes.csv`, `events.csv`, `timeline.png`, and
   `capture.etl` when a trace was taken (a trace can add far more than the CSV files). `events.csv` holds the incident's
   events from 2 minutes before its onset, every one from its first row to its last, added as PoolWatch writes the
-  folder, at most 1,000; when it holds fewer than the window had, its last row says to when (the day's `events.csv` has
-  every one). Its rows are appended in single writes: copying the folder at that moment can fail (try again; Export
+  folder, at most 1,000; when it holds fewer than the window had, its last row says to when (with Detailed recording
+  the day's `events.csv` has every one; with Reports only the row says the later ones are not recorded; after a switch
+  in the incident's window, that the day's file has them only for the time Detailed recording was on). Its rows are
+  appended in single writes: copying the folder at that moment can fail (try again; Export
   report reads it beside the write, its whole rows only), and a crash then can cut its last row short. What can wait in
   the report folders is held to 1 MB an hour (a 256 KB burst):
   an open incident's `report.json` and `report.md` first, then the rest. An incident's opening, re-opening and closing,
@@ -143,9 +154,10 @@ and removed, with the first few names:
   report was up to about an hour behind (the row's figures, its details and Copy summary are live, built from memory;
   Export report writes the folder whole first; About and `cache\profile.json` say what the budget held back). It is
   written again when the incident closes;
-- `incidents\<yyyyMMdd-HHmmss>-SpawnStorm-<program>\`: a program's spawn storms (by default, more than 30 short commands
-  in 30 s from one parent); its storms within an hour of each other share the folder, Git Bash's fork copies are not
-  counted, and at most 10 such folders are made an hour (the rest are in `findings.jsonl`);
+- `incidents\<yyyyMMdd-HHmmss>-SpawnStorm-<program>\`, with Detailed recording only: a program's spawn storms (by
+  default, more than 30 short commands in 30 s from one parent); its storms within an hour of each other share the
+  folder, Git Bash's fork copies are not counted, and at most 10 such folders are made an hour (the rest are in
+  `findings.jsonl`). With Reports only a storm gets no folder: it is in the window's Pool causes and in the log;
 - `settings.json` (your settings and service profiles), `poolwatch.log` (and, only for a run during which an append
   to the log kept being refused — another program held it so the line could not be written, or opening the log to add
   the line would otherwise have had to wait for another program, which PoolWatch gives up at once rather than wait —
@@ -154,7 +166,7 @@ and removed, with the first few names:
   its `.1` once it has rolled over at 2 MB; the newest five are kept, and any of another PoolWatch still running),
   `service-changes.json` and `applied-changes.json` (what Active changes needs to put a change back; the file keeps its
   older name, so an installed copy's records stay readable), `removed-tasks\`, `setup.json` (when setup was completed,
-  and the suggestions and feature cards you hid), `ui-state.json` (Simple or Advanced view), `uninstall-summary.txt`
+  when you chose what PoolWatch keeps on disk, and the suggestions and feature cards you hid), `ui-state.json` (Simple or Advanced view), `uninstall-summary.txt`
   (and `uninstall-summary-kept.txt` while a cleanup's summary could not be written there: the next cleanup writes it
   in), `uninstall-list.json` (only while the uninstaller runs), `boots\`, `cache\`, `exports\`, `reports\`, `requests\`
   (notes sent with `--mark` to the running PoolWatch);

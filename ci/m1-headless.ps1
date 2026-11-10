@@ -1,9 +1,10 @@
-# Milestone 1 acceptance: collectors + headless mode + CSV output produce sane numbers on a real Windows box.
+# Milestone 1 acceptance: collectors + headless mode + CSV output produce sane numbers on a real Windows box. The CSV
+# files are the day's records: Detailed recording (detailed-config.json; the default, Reports only, writes none).
 param([Parameter(Mandatory)] [string]$Exe, [Parameter(Mandatory)] [string]$Out)
 . "$PSScriptRoot\common.ps1"
 
 New-Item -ItemType Directory -Force $Out | Out-Null
-$pw = Start-PoolWatch $Exe @('--headless', '--duration', '90', '--interval', '5', '--out', $Out)
+$pw = Start-PoolWatch $Exe @('--headless', '--duration', '90', '--interval', '5', '--config', "$PSScriptRoot\detailed-config.json", '--out', $Out)
 
 # Reference values from an independent source while PoolWatch runs: PDH (PoolWatch reads GetPerformanceInfo). One read
 # can land on a paged-pool spike shorter than a sample interval (a runner once read 299 MB from PDH while PoolWatch's

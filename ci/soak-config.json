@@ -9,6 +9,9 @@
   // that spikes working set and disk while it records and parses a 30 s ETL, so it is off here. The diag/lag scenario
   // still exercises the CPU-trace-on-lag-trip path.
   "cpuTraceEnabled": false,
+  // The worst case: Detailed recording, so the day's files and the spawn-storm folders are judged against the 5 MB an
+  // hour too (the default, Reports only, writes neither).
+  "recordMode": "Detailed",
   // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
   "checkForUpdates": false
 }

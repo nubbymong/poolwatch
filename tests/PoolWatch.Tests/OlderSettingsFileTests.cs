@@ -144,6 +144,20 @@ public sealed class OlderSettingsFileTests : IDisposable
         return beta.Replace(Updates, Updates + NoticesLine, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The other line a save adds: what PoolWatch keeps on disk, which the beta did not have (it always recorded the day), at
+    /// its default, Reports only: an upgraded install stops recording the day until its owner chooses Detailed recording.
+    /// </summary>
+    private const string RecordsLine = "  \"recordMode\": \"ReportsOnly\",\n";
+
+    /// <summary><paramref name="beta"/> with <see cref="RecordsLine"/> where a save writes it, before the cleanup's days.</summary>
+    private static string WithRecords(string beta)
+    {
+        const string Retention = "  \"retentionDays\": 7,\n";
+        Assert.Contains(Retention, beta);
+        return beta.Replace(Retention, RecordsLine + Retention, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -155,12 +169,14 @@ public sealed class OlderSettingsFileTests : IDisposable
         var s = Settings.Load(path);
         string saved = Saved(s);
         Assert.DoesNotContain("startAtLogon", saved, StringComparison.OrdinalIgnoreCase);
-        // Every other line as the beta wrote it, but two: of the watched apps' names that differ only in case ("claude",
-        // "Claude"), a load keeps the first (Normalize), in this build as in the beta; and the kernel pool notices'
-        // choice, which the beta did not have, is written at its default (a notice for every growth, as the beta did).
+        // Every other line as the beta wrote it, but three: of the watched apps' names that differ only in case ("claude",
+        // "Claude"), a load keeps the first (Normalize), in this build as in the beta; the kernel pool notices' choice,
+        // which the beta did not have, is written at its default (a notice for every growth, as the beta did); and so is
+        // what PoolWatch keeps on disk, which the beta did not have either: Reports only, the default.
         Assert.Contains("    \"claude\",\n    \"Claude\",\n", without);
-        Assert.Equal(WithNotices(without).Replace("    \"Claude\",\n", "", StringComparison.Ordinal), Lf(saved));
+        Assert.Equal(WithRecords(WithNotices(without)).Replace("    \"Claude\",\n", "", StringComparison.Ordinal), Lf(saved));
         Assert.Equal(PoolNoticeLevel.EveryGrowth, s.PoolNotices);
+        Assert.Equal(RecordMode.ReportsOnly, s.RecordMode);
     }
 
     /// <summary>
@@ -245,12 +261,15 @@ public sealed class OlderSettingsFileTests : IDisposable
         var s = Settings.Load(path);
         var saved = JsonNode.Parse(Saved(s))!.AsObject();
         Assert.False(saved.ContainsKey("startAtLogon"));
-        // The save adds the kernel pool notices' choice, which the beta did not have, at its default, after update notices.
+        // The save adds the kernel pool notices' choice, which the beta did not have, at its default, after update notices;
+        // and what PoolWatch keeps on disk, which it did not have either, at its default (Reports only), before the days.
         Assert.Equal("\"EveryGrowth\"", saved["poolNotices"]!.ToJsonString());
+        Assert.Equal("\"ReportsOnly\"", saved["recordMode"]!.ToJsonString());
         var keys = changed.Select(p => p.Key).Where(k => k != "startAtLogon").ToList();
         keys.Insert(keys.IndexOf("checkForUpdates") + 1, "poolNotices");
+        keys.Insert(keys.IndexOf("retentionDays"), "recordMode");
         Assert.Equal(keys, saved.Select(p => p.Key));
-        Assert.All(saved.Where(p => p.Key != "poolNotices"), p => Assert.True(changed[p.Key]!.ToJsonString() == p.Value!.ToJsonString(),
+        Assert.All(saved.Where(p => p.Key is not ("poolNotices" or "recordMode")), p => Assert.True(changed[p.Key]!.ToJsonString() == p.Value!.ToJsonString(),
             $"{p.Key}: wrote {changed[p.Key]!.ToJsonString()}, read back {p.Value!.ToJsonString()}"));
         // The same settings as the same file without startAtLogon.
         changed.Remove("startAtLogon");

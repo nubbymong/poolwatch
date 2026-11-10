@@ -8,7 +8,7 @@ GitHub's), and update notices are off on it. The figures in the text are example
 
 ## At first start: Set up PoolWatch
 
-At first start, **Set up PoolWatch** opens on its own, in a window of its own: seven short steps, about 3 minutes. The
+At first start, **Set up PoolWatch** opens on its own, in a window of its own: eight short steps, about 3 minutes. The
 main window waits until you finish: setup is how PoolWatch fits itself to your PC. The first time, its close button (or
 Esc) asks before it closes setup; if you close it, PoolWatch keeps running in the tray and watching the kernel pool,
 any change you already made with Next stays, and setup opens again when you open PoolWatch and at its next start, as
@@ -22,10 +22,10 @@ safe.
 | ![Setup, step 1: Welcome](screenshots/6-setup-1-welcome.png) | ![Setup, step 2: How your PC is impacted](screenshots/6-setup-2-your-pc.png) |
 | ![Setup, step 3: You stay in control](screenshots/6-setup-3-safety.png) | ![Setup, step 4: the standby cache](screenshots/6-setup-4-standby-cache.png) |
 | ![Setup, step 5: Fixes for this PC](screenshots/6-setup-5-fixes.png) | ![Setup, step 6: Services, for later in the app](screenshots/6-setup-6-services.png) |
-| ![Setup, step 7: PoolWatch is watching](screenshots/6-setup-7-ready.png) | ![How PoolWatch works](screenshots/6-setup-how-it-works.png) |
+| ![How PoolWatch works](screenshots/6-setup-how-it-works.png) | |
 
 1. **Welcome.** What PoolWatch does, and a choice: **Simple** or **Advanced**. It picks the view the app opens in;
-   you can switch it later in the app. Both run the same seven steps.
+   you can switch it later in the app. Both run the same eight steps.
 2. **How your PC is impacted.** PoolWatch reads your PC (the Windows version, memory, drives, Microsoft Defender, AI
    tools and background services) and shows, for each known cause of a growing kernel pool, how much it affects this PC:
    **None**, **Low impact**, **Medium impact** or **High impact**, and where setup fixes it ("Fix in step 4"; for
@@ -71,9 +71,25 @@ safe.
 6. **Trim background services, when you're ready.** For later, in the app: setup changes no services. Windows services
    PoolWatch knows, and the services of other apps, which you decide about with your AI agent (see
    [Services](#services)).
-7. **PoolWatch is watching.** What setup set (the standby cache, the Codex shortcut, the token leak, Active changes),
-   **Tell me when a new version is out** (ticked to begin with; see [Privacy](../README.md#privacy)) and where PoolWatch
-   lives: next to the clock. **Open PoolWatch** finishes setup.
+7. **What should PoolWatch keep on disk?** PoolWatch watches the kernel pool and tells you when it grows either way;
+   this decides what it writes down. **Reports only** (recommended, and chosen to begin with): a report each time the
+   pool grows (what grew, the programs behind it, and a draft bug report), and no record of the day. **Detailed
+   recording**: the reports, plus a record of everything PoolWatch watches, all day (the pool and its memory tags,
+   programs and their handles, services, every program started), for a leak that builds up over days, to compare a
+   good day with a bad one, or when a developer asks for more than a report: up to about 60 MB a day on a PC doing
+   heavy agentic coding. Under them, **Clean up reports and records after** (7 days to begin with; 1 to 90): the same
+   cleanup for reports, records and exports, counted in the time the PC is awake. You can change both later under
+   **Records** in Settings. Both stay on this PC and are never sent; they hold full command lines, which can contain
+   passwords, so look before you share one.
+8. **PoolWatch is watching.** What setup set (the standby cache, the Codex shortcut, the token leak, the records,
+   Active changes), **Tell me when a new version is out** (ticked to begin with; see [Privacy](../README.md#privacy))
+   and where PoolWatch lives: next to the clock. **Open PoolWatch** finishes setup.
+
+**After an upgrade from 1.0.0-beta.2**, whose setup had no Records step and which always recorded, PoolWatch uses
+Reports only and opens that step alone at its first start (the same page, its rail listing only Records, with **Done**
+and no Back). Done keeps your choice and it does not open again; closed without Done, Reports only stays and the step
+opens again at each start until you press Done. What beta.2 recorded is cleaned up by the usual rule, 7 days of the
+PC's awake time without a write.
 
 Steps 4 and 5 wait until PoolWatch has read the PC ("Looking at your PC... Next is ready in a moment."), at most a
 minute; after that, setup goes on with what it knows. Nothing changes until you press **Next** on step 4 (the cache
@@ -147,8 +163,9 @@ Switch on **Advanced view** for the details. The header stays, and the window ad
     **Report an issue** offers the same live summary. About says what the write budget held back. A **spawn storm** row
     is a program starting more than 30
     short commands in 30 seconds; the copies Git Bash makes of itself to run a pipeline are not counted, what they
-    start is. One program's storms within an hour share one report folder, and PoolWatch makes at most 10 new ones an hour
-    (a storm past that has its row and no folder).
+    start is. With Detailed recording, one program's storms within an hour share one report folder, and PoolWatch makes
+    at most 10 new ones an hour (a storm past that has its row and no folder); with Reports only, the default, a storm
+    has its row and its notice, and no folder.
   - **Services**: see [Services](#services).
   - **Tasks and startup apps**: see [Tasks and startup apps](#tasks-and-startup-apps).
 
@@ -169,7 +186,12 @@ hour, such as a release, a cache clear, a warning or an alert, leaves the cell e
 (**On a schedule**, **At a pool size** or **Whichever comes first**, recommended) with how often and at what pool size;
 **Notifications**, which kernel pool notices you get (**Every growth**, the default; **Only when it needs attention**,
 only when the tray icon turns red; or **Off**; the token-leak guard's notices, which need your click, always appear);
-deeper automatic captures (traces PoolWatch records by itself also record file activity); and the token-leak guard.
+deeper automatic captures (traces PoolWatch records by itself also record file activity); the token-leak guard; and
+**Records**, what PoolWatch keeps on disk, as setup's Records step asks it: **Reports only** (the default: a report each
+time the pool grows) or **Detailed recording** (the reports, plus a record of everything, all day), with the line of the
+one chosen under them and more on each in its tooltip, and **Clean up reports and records after** (1 to 90 days, 7 to
+begin with). Turning Detailed recording on starts the day's files at the next sample; turning it off stops them at once
+(a handle scan being written then is finished first, on its own thread, and its two files closed after it).
 Under automatic clearing it says that clearing takes a few seconds, and video or the mouse may stutter while it runs.
 When the Codex app is installed, PoolWatch was installed with its setup and its Codex shortcut is not on your desktop,
 Settings offers **Create shortcut**. **Advanced...** opens the settings in a grid, with a short description of
@@ -177,7 +199,7 @@ the one selected in the box under it: what it does and its default, its unit, an
 it within (a number's range, a text's length, a local drive path), where it has them. Three are set elsewhere:
 starting at sign-in (in this form), **Show RAM** (on the graph) and the service profiles (on the Services tab).
 Starting at sign-in changes as soon as you tick it; **Save** puts automatic clearing, the token-leak guard,
-notifications and update notices into effect at once, and the other settings when PoolWatch next starts. The sign-in box is ticked
+notifications, update notices, records and their cleanup into effect at once, and the other settings when PoolWatch next starts. The sign-in box is ticked
 only while PoolWatch really starts when you sign in. When its task is there but does not start PoolWatch, the box
 is not ticked and a line under it says why: the task or its sign-in trigger is turned off (in Task Scheduler, or
 kept so when PoolWatch replaced it with its own), it has no sign-in trigger, it runs without the highest privileges
@@ -457,8 +479,8 @@ changed it.
 
 Once the guard finds the setting on, or you turn the guard off, a window of the guard's still asking
 for your click closes. `poolwatch.log` in the data folder (or, for a run during which another program kept refusing
-its appends, the `poolwatch-<date>-<time>-<process id>-<n>.log` file next to it, whose first line says why), and
-`findings.jsonl` in that day's folder under it (`data\<yyyyMMdd>\`), say what the guard did.
+its appends, the `poolwatch-<date>-<time>-<process id>-<n>.log` file next to it, whose first line says why), and,
+with Detailed recording, `findings.jsonl` in that day's folder under it (`data\<yyyyMMdd>\`), say what the guard did.
 
 Point at the icon for the paged and non-paged pool; double-click it to open the window. Right-click it for the
 token-leak guard's line while it is not protected (above), **Open PoolWatch**, **Run setup again...**, **Active

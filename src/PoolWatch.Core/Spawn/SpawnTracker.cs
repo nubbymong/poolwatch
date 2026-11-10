@@ -76,8 +76,10 @@ public sealed class SpawnStorm
     public Dictionary<string, int> PeakByImage { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, int> Patterns { get; } = new(StringComparer.Ordinal);
     public Dictionary<string, (GitRootInfo Info, int Count)> GitRoots { get; } = new(StringComparer.OrdinalIgnoreCase);
-    /// <summary>The report folder it is written to (shared with its identity's other storms); null: none, past the hourly limit.</summary>
+    /// <summary>The report folder it is written to (shared with its identity's other storms); null: none, past the hourly limit or not wanted.</summary>
     public StormFolder? Folder { get; set; }
+    /// <summary>It got no folder because none was wanted as it opened (<see cref="SpawnTracker.FoldersWanted"/>: Reports only).</summary>
+    public bool FolderNotWanted { get; set; }
     /// <summary>The most recent finding about this storm (gets the report folder once it is written).</summary>
     public Finding? LastFinding { get; set; }
 
@@ -259,7 +261,10 @@ public sealed class SpawnTracker
 
     /// <summary>A storm of an identity whose last storm closed less than this long ago is written into that storm's folder.</summary>
     public static readonly TimeSpan ReopenWindow = TimeSpan.FromMinutes(60);
-    /// <summary>At most this many new report folders an hour; a storm past it has its findings (log, findings.jsonl) and no folder.</summary>
+    /// <summary>
+    /// At most this many new report folders an hour (folders are made only with Detailed recording); a storm past it has its
+    /// findings (the log and, with Detailed recording, findings.jsonl) and no folder.
+    /// </summary>
     public const int MaxNewFoldersPerHour = 10;
     /// <summary>A folder is written when it is made, then while its numbers change at most this often (30 min) ...</summary>
     public static readonly TimeSpan FolderRefresh = TimeSpan.FromMinutes(30);
@@ -276,6 +281,13 @@ public sealed class SpawnTracker
         _cwdOf = cwdOf;
         _rekeysSeen = registry.Rekeys;
     }
+
+    /// <summary>
+    /// Whether a storm gets a report folder now (the app: Detailed recording). When it says no, a storm that opens gets
+    /// none, as one past <see cref="MaxNewFoldersPerHour"/> does (its findings, without a folder), and none is counted as
+    /// withheld; the folders already held stay until they leave memory. Read as each storm opens. Default: yes.
+    /// </summary>
+    public Func<bool> FoldersWanted { get; set; } = static () => true;
 
     public IReadOnlyCollection<SpawnStorm> OpenStorms => _open.Values;
     /// <summary>The report folders held (open storms', and those within their re-open window).</summary>
@@ -542,6 +554,11 @@ public sealed class SpawnTracker
     /// </summary>
     private void AssignFolder(SpawnStorm storm, string image, long nowMs)
     {
+        if (!FoldersWanted())
+        {
+            storm.FolderNotWanted = true; // Reports only: no folder, not even its identity's (it would not be written)
+            return;
+        }
         if (_folders.TryGetValue(storm.Identity, out var f))
         {
             if (f.IsActive || nowMs - f.LastActiveMs < (long)ReopenWindow.TotalMilliseconds)
@@ -642,7 +659,10 @@ public sealed class SpawnTracker
         if (s.Folder is { StormCount: > 1 } f && opened)
             details.Add($"Written into the report folder of {f.StormCount - 1:N0} earlier storm{(f.StormCount == 2 ? "" : "s")} of {f.Name} (one folder while they keep coming within {ReopenWindow.TotalMinutes:0} min)");
         if (s.Folder is null)
-            details.Add($"No report folder: PoolWatch makes at most {MaxNewFoldersPerHour} new spawn-storm folders an hour, so this storm is only in this finding (the log and findings.jsonl)");
+            details.Add(s.FolderNotWanted
+                // Said of the storm, as it began, so it stays true when the choice changes while the storm goes on.
+                ? "No report folder: this storm began while Reports only was chosen, and only Detailed recording keeps spawn-storm folders; this storm is in its findings and the log"
+                : $"No report folder: PoolWatch makes at most {MaxNewFoldersPerHour} new spawn-storm folders an hour, so this storm is only in this finding (the log and findings.jsonl)");
         return new Finding
         {
             TimeUtc = now.Utc, Kind = FindingKind.SpawnStorm, Severity = opened ? FindingSeverity.Alert : FindingSeverity.Info, Title = title,

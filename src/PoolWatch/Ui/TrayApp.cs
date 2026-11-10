@@ -17,7 +17,8 @@ namespace PoolWatch.Ui;
 /// (<see cref="BalloonClick"/>), and so does a second start of PoolWatch (<see cref="ShowSignal"/>). The icon comes back
 /// after Explorer restarts (<see cref="TaskbarWatch"/>). Until the first setup is done,
 /// setup is the way in: it opens by itself at every start, and anything that would show the main window brings setup
-/// instead (<see cref="FirstRunGate"/>). Its menu runs setup again and opens Active changes, says when a newer release is
+/// instead (<see cref="FirstRunGate"/>); once it is done, while what PoolWatch keeps on disk was never chosen (after an
+/// upgrade from 1.0.0-beta.2), setup's Records step opens alone at each start. Its menu runs setup again and opens Active changes, says when a newer release is
 /// out (update notices, information only), and holds the tools that are not on the main window (DESIGN.md section 11):
 /// Capture now, Since boot report, Open incident folder, Export vendor bundle, Copy latest incident summary, the
 /// clear-task removals (shown only while there is something to remove), Report an issue and About. It is the shell setup
@@ -204,9 +205,12 @@ internal sealed class TrayApp : ApplicationContext, IShell
         Application.Idle += _onIdle;
         // Until setup was completed once, it opens on its own at every start (started at sign-in too), and the main window
         // waits for it. The update check starts once setup has been completed, so the owner has seen its switch first.
+        // Once setup was completed (1.0.0-beta.2's included) but what PoolWatch keeps on disk was never chosen, the Records
+        // step opens alone at each start until its Done; meanwhile Reports only, the default, is in force.
         _gate = new FirstRunGate(completed: () => Setup.Store.GuideCompleted, smoke: smoke, openSetup: OpenGuide, showMain: ShowMain,
             switchToAdvanced: tab => Form.ShowAdvanced(tab), switchToSimple: () => Form.ShowView(advanced: false),
-            rememberView: advanced => _view?.Remember(advanced), startUpdates: () => _updates?.Start());
+            rememberView: advanced => _view?.Remember(advanced), startUpdates: () => _updates?.Start(),
+            recordsChosen: () => Setup.Store.RecordsChosen, openRecords: OpenRecords);
         _gate.Start(showWindow);
         // The token-leak watch also runs while the window is hidden (never in the CI UI test, where it refuses anyway).
         _watchTimer = WatchTimer(smoke, WatchTokenLeak);
@@ -362,6 +366,26 @@ internal sealed class TrayApp : ApplicationContext, IShell
             _gate.SetupClosed(guide.Finished, guide.Advanced, advancedBefore);
         };
         Open(guide);
+    }
+
+    /// <summary>The Records step alone, at a start after an upgrade (<see cref="FirstRunGate.Start"/>): a failure to open it is shown, never thrown.</summary>
+    private void OpenRecords() => _actions.Guarded(null, "Set up PoolWatch", ShowRecords);
+
+    /// <summary>
+    /// The Records step alone, in setup's window (one setup window at a time: setup itself, from the menu, brings this one
+    /// to the front while it is open). When it closes, <see cref="FirstRunGate.RecordsClosed"/> shows the main window when
+    /// the start asked for it; Done has recorded the choice (setup.json), and without it the step opens again at the next start.
+    /// </summary>
+    private void ShowRecords()
+    {
+        if (_guide is { IsDisposed: false } open) { Bring(open); return; }
+        var records = _guide = new SetupWizardForm(Setup, firstRun: false, advanced: _view?.Advanced == true, recordsOnly: true);
+        records.FormClosed += (_, _) =>
+        {
+            _guide = null;
+            _gate.RecordsClosed();
+        };
+        Open(records);
     }
 
     /// <summary>The setup guide's update switch: the setting itself, applied at once.</summary>
@@ -540,6 +564,9 @@ internal sealed class TrayApp : ApplicationContext, IShell
 /// Closed unfinished (a re-run closed, or a first run closed after a yes to its question): nothing happens, PoolWatch
 /// keeps running in the tray, and a first run opens again at the next way in and the next start. Never in the CI UI
 /// test, which opens the main window at once.
+/// Once setup was completed but what PoolWatch keeps on disk was never chosen (an upgrade from 1.0.0-beta.2, whose setup
+/// had no Records step), the Records step opens alone at each start, until its Done (<paramref name="recordsChosen"/>);
+/// the main window, when the start asked for it, shows once that step closes, Done or not. Every other way in is as usual.
 /// Without a window: the tray app passes what each of those does, and the tests pass fakes.
 /// </summary>
 /// <param name="completed">Setup was completed once (read each time: finishing setup marks it).</param>
@@ -550,8 +577,10 @@ internal sealed class TrayApp : ApplicationContext, IShell
 /// <param name="switchToSimple">Switches the main window to its Simple view (setup run again chose it).</param>
 /// <param name="rememberView">Keeps the view chosen in setup (true: Advanced) for the next start.</param>
 /// <param name="startUpdates">Starts the update check (once; again does nothing).</param>
+/// <param name="recordsChosen">What PoolWatch keeps on disk was chosen once (read each time: the Records step marks it). Null: always.</param>
+/// <param name="openRecords">Opens the Records step alone, or brings the setup window open to the front.</param>
 internal sealed class FirstRunGate(Func<bool> completed, bool smoke, Action openSetup, Action showMain, Action<int> switchToAdvanced, Action switchToSimple,
-    Action<bool> rememberView, Action startUpdates)
+    Action<bool> rememberView, Action startUpdates, Func<bool>? recordsChosen = null, Action? openRecords = null)
 {
     /// <summary>The tray menu's item that opens setup (again).</summary>
     public const string MenuItem = "Run setup again...";
@@ -559,17 +588,40 @@ internal sealed class FirstRunGate(Func<bool> completed, bool smoke, Action open
     /// <summary>Setup comes first: it was never completed, and this is not the CI UI test.</summary>
     public static bool SetupFirst(bool setupCompleted, bool smoke) => !setupCompleted && !smoke;
 
+    /// <summary>
+    /// The Records step opens alone at this start: setup was completed, what PoolWatch keeps on disk was never chosen (an
+    /// upgrade from 1.0.0-beta.2), and this is not the CI UI test.
+    /// </summary>
+    public static bool RecordsFirst(bool setupCompleted, bool recordsChosen, bool smoke) => setupCompleted && !recordsChosen && !smoke;
+
     private bool SetupFirstNow => SetupFirst(completed(), smoke);
 
+    /// <summary>The start asked for the main window, which waits for the Records step to close.</summary>
+    private bool _mainAfterRecords;
+
     /// <summary>
-    /// The tray app starts: setup while it was never completed, else the main window when it was asked for (not when
-    /// started at sign-in). The update check starts only once setup was completed, so its switch was seen first.
+    /// The tray app starts: setup while it was never completed; else the Records step alone while no record mode was
+    /// chosen (the main window, when it was asked for, once that closes); else the main window when it was asked for (not
+    /// when started at sign-in). The update check starts only once setup was completed, so its switch was seen first.
     /// </summary>
     public void Start(bool showWindow)
     {
         if (SetupFirstNow) openSetup();
+        else if (openRecords is not null && RecordsFirst(completed(), recordsChosen?.Invoke() ?? true, smoke))
+        {
+            _mainAfterRecords = showWindow;
+            openRecords();
+        }
         else if (showWindow) showMain();
         if (completed()) startUpdates();
+    }
+
+    /// <summary>The Records step alone closed (Done or not): the main window, when the start asked for it.</summary>
+    public void RecordsClosed()
+    {
+        if (!_mainAfterRecords) return;
+        _mainAfterRecords = false;
+        ShowWindow();
     }
 
     /// <summary>A way into the main window: setup instead while it was never completed.</summary>

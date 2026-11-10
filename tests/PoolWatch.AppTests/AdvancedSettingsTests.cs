@@ -222,7 +222,7 @@ public class AdvancedSettingsTests
         // A choice of a few (the grid offers its values in a list) names each value as the grid shows it, and its default
         // as "<value> (default)".
         var choices = shown.Where(p => p.PropertyType.IsEnum).ToList();
-        Assert.Equal([nameof(Settings.PoolNotices)], choices.Select(p => p.Name));
+        Assert.Equal([nameof(Settings.PoolNotices), nameof(Settings.RecordMode)], choices.Select(p => p.Name)); // RecordMode: what PoolWatch keeps on disk
         foreach (var p in choices)
         {
             Assert.Contains(p.GetValue(defaults) + " (default)", p.Description);

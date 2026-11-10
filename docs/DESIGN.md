@@ -80,7 +80,8 @@ on), and every lasting one is listed under Active changes, where it can be put b
   wrote 140 to 225 MB an hour in 1.0.0-beta.2: every open incident's whole folder (events.csv alone 1.2 to 1.3 MB) every
   5 minutes, and a folder for every spawn storm (about 3,000 a day, most of them Git Bash fork copies). They now share
   one write budget (`Core.Incidents.WriteBudget`, section 10), the report folders' share of the 5 MB an hour beside the
-  day's CSV files' 2.5 MB (the next item): what can wait is written while the budget has room, 1 MB an hour with a burst
+  day's CSV files' 2.5 MB with Detailed recording (below; with Reports only there are no day files and no storm
+  folders): what can wait is written while the budget has room, 1 MB an hour with a burst
   of 256 KB, first an open incident's `report.json` and `report.md` (what an export and an AI assistant read; the
   window's details and Copy summary of an open incident are built from the incident in memory, so they are never behind
   it, and Export report writes its folder whole first), the one
@@ -135,9 +136,10 @@ on), and every lasting one is listed under Active changes, where it can be put b
     rest of its day, at most 10,000, the first named going first (on the owner's load 3 to 4 hours past the 90 minutes;
     the since-boot report names an hour's processes as it sums it, 2 to 3 hours after they ran); each PID's newest
     instance and image are kept for the records held only; the string pool holds at most 4,096 strings;
-  - an incident keeps its window's first 1,000 events (events.csv says to when it holds them, the day's events.csv has
-    every one: 5,000 held 3.2 MB more in the test below at 6 hours, and about 29 MB more with all 32 incidents at the
-    cap) and the members of its first three owners only (its reports are byte-identical); at most 20 closed incidents
+  - an incident keeps its window's first 1,000 events (events.csv says to when it holds them, and with Detailed
+    recording the day's events.csv has every one: 5,000 held 3.2 MB more in the test below at 6 hours, and about 29 MB
+    more with all 32 incidents at the cap) and the members of its first three owners only (its reports are
+    byte-identical); at most 20 closed incidents
     stay in memory; the summarizer asks the worktree-delete expression only of a command line with "tree" in it, and
     the detector reads each tag's series into one array, each row's place of a tag found once per shared list.
   An incident open longer than the raw history keeps its onset and start level instead of moving them to the
@@ -187,7 +189,20 @@ on), and every lasting one is listed under Active changes, where it can be put b
   clear, storm folders, lag, marks, findings; `diagnostics.*` in the next `profile.json` say which), the process
   query, the ETW callbacks (3.4 KB allocated a start), the handle scan's query and the GC's share; under the CI soak's
   lighter load PoolWatch keeps to it (0.46% with the window open).
-- **The day's CSV files inside their share.** On the owner's PC in 1.0.0-beta.2 the day's folder took 112 MB a day:
+- **Recording is a choice.** On the owner's PC 1.0.0-beta.2 kept about 860 MB of day folders and 16,057 incident
+  folders, written whether or not anyone would read them. The day's files and the spawn-storm folders are now written
+  only with **Detailed recording** (`Settings.RecordMode`, set in setup's Records step and in Settings, read at each
+  write so it applies from the next sample); the default, **Reports only**, writes a report folder each time the pool
+  grows (and the reports of a crash or restart and of an experiment, as before) and no record of the day: beside the
+  reports it keeps the log, the settings, the caches, `setup.json`, each boot's baseline and summary (`boots\`) and, at
+  each exit, the Since boot report and `boots.md` made from them, while storms are still found, shown and noticed from
+  memory. Most people need only the reports; a leak that builds up over days, or a developer asking for more, needs the
+  day. People upgrading from 1.0.0-beta.2 get Reports only and are asked once to choose, by the Records step alone,
+  which opens at each start until they press Done. The budget below is judged in the worst case, Detailed recording,
+  which the CI's soak, overhead and agentic-load runs use (`recordMode` in their settings files); the CI UI test runs at
+  the default and checks that it writes none of the day's files and no spawn-storm folder, while a short burst of
+  commands it starts is found as a storm and listed in Pool causes with no folder to open.
+- **The day's CSV files inside their share** (Detailed recording). On the owner's PC in 1.0.0-beta.2 the day's folder took 112 MB a day:
   `events.csv` 2.2 MB an hour, `tags.csv` 0.95, `processes.csv` 0.75, `services.csv` 0.31, `handles.csv` 0.19. Their
   share is now 2.5 MB an hour, which with the report folders' 1 MB leaves 1.5 MB for `findings.jsonl` (0.3 to 0.6 MB an
   hour there), the log and the caches. Outside verbose mode (`CsvSink`, AGENTS.md's file guide says the same) each day's
@@ -702,7 +717,10 @@ has every event from its first row to its last, however long the budget held it 
 buffer let events go before a closed incident re-opened and looked at them), a last `Note` row says to when it holds
 the window's events, and so does a last row when the incident leaves memory (6 hours after closing, or as the oldest
 of more than 20 closed) with rows the budget
-never had room for; the day's `data\<yyyyMMdd>\events.csv` has every event. An alert is one row per growth rule and
+never had room for; with Detailed recording the day's `data\<yyyyMMdd>\events.csv` has every event, and the row says so;
+with Reports only it says the later ones are not recorded, and after a switch in the incident's window, that the day's
+file has them only for the time Detailed recording was on (`IIncidentHost.DayRecords`: what the day's files record and
+since when). An alert is one row per growth rule and
 onset (a rule that keeps firing keeps its bigger alert under the first one's onset; a re-opening's has its own), at
 the time the file first saw it, and one row per release. While open it can hold rows from after the growth ended, up
 to the close. It is written whole again only when it is not as this run last wrote it, or when a closed incident's
@@ -723,12 +741,14 @@ process with the parent's PID that can have started it (`ProcessRegistry.ParentK
 remembered one that had not exited before the child started, for a child seen after its parent exited), by the key it
 has now: a key a snapshot re-keyed (an estimated create time made exact) is followed (`ProcessRegistry.CurrentKey`),
 and an open storm moves with it (should it meet another open storm of that key, it ends there as a storm ends), so one
-parent is one storm. The owner's 20261109-231314-SpawnStorm-bash, 48 fork copies of one bash, is no storm now. Each storm
+parent is one storm. The owner's 20261109-231314-SpawnStorm-bash, 48 fork copies of one bash, is no storm now. With
+Reports only a storm is found, listed and told as below but gets no folder (`SpawnTracker.FoldersWanted`), and its
+finding says so. With Detailed recording each storm
 is written into its parent identity's report folder (`StormFolder`: the image, its role and its owner, as
 `ProcessIdentities.Of` gives them, so one Claude Code session's bash storms share one): a storm that opens while another
 of that identity is open, or within 60 minutes of the last one closing, goes into the same folder, as a growth incident
-re-opens; after that a new one is made, at most 10 an hour (a storm past that is in its findings, the log and
-findings.jsonl, and says why it has no folder). The folder is written when it is made, then while its storms change at
+re-opens; after that a new one is made, at most 10 an hour (a storm past that is in its findings, the log and the
+day's findings.jsonl, and says why it has no folder). The folder is written when it is made, then while its storms change at
 most every 10 minutes (every 30 while only the numbers of an open one change), while the write budget has room to
 spare (the open incidents' reports come first), and once more when it leaves memory an hour after its last storm
 closed, at the end of a run, or when a storm of its identity opens in the very sample its hour ended. Its `report.md`
@@ -847,8 +867,8 @@ does not say which setting changed, so a value unchanged since the guard's last 
 did not tell PoolWatch of the change, the recheck names the program in front at its own look, and says that this can
 be minutes after the change. The workaround turned
 on at the start's check, again after something set the timeout back or after the click, a build that needs no
-workaround, and the guard turned off show nothing: the guard writes them to `poolwatch.log` and its findings
-(`findings.jsonl`), and takes back what no longer needs the click (`IGuardUi.Withdraw`): the not-protected notice, and
+workaround, and the guard turned off show nothing: the guard writes them to `poolwatch.log` and its findings (with
+Detailed recording, `findings.jsonl` too), and takes back what no longer needs the click (`IGuardUi.Withdraw`): the not-protected notice, and
 the prompt when it finds the workaround on (the live value 0) or is turned off (also when Turn off fails part-way).
 That prompt then ends as a cancel, and its caller tries once more: finding the workaround on or the guard off, it
 shows nothing. The recheck takes both back too when it finds the workaround on, set by other means, also while a check
@@ -1132,7 +1152,7 @@ its bracketed aside, and otherwise reads "Pool tag Abcd (foo.sys)". A tag row's 
 driver and the full technical description.
 
 **Setup** (`Ui/Setup`: `SetupWizardForm`, "Set up PoolWatch"; its state in `SetupSession`, without a window, so it is
-tested) is a window of its own with seven steps on a rail: Welcome (the mission, the four pillars, and the level
+tested) is a window of its own with eight steps on a rail: Welcome (the mission, the four pillars, and the level
 choice, Simple or Advanced, which sets the app's view; both run the same steps), Your PC ("How your PC is impacted":
 each known cause with its impact level from `ImpactRules.FromFacts`, section 16, or Not known where PoolWatch could not
 tell, and "Fix in step N", "Trim in the app" or "Still watching"; listed by level, the highest first, with Not known and
@@ -1141,8 +1161,11 @@ schedule, At a pool size, Whichever comes first (recommended, preselected on eve
 small chart of the kernel pool; the stutter line; and, with a RAMMap clear task of the user's own, the note that
 choosing a rule replaces it), Fixes (start when you sign in, Defender performance mode with its instructions, the Codex
 shortcut as a Yes/No, and the token-leak guard when the check found the leak, its "Why?" open with what you will notice
-and how to undo it, with the pages it cites), Services (for later, in the app: setup changes no services) and Ready
-(what setup set, the update-notice box, where PoolWatch lives). "How PoolWatch works" (`HowItWorksForm`) opens from
+and how to undo it, with the pages it cites), Services (for later, in the app: setup changes no services), Records
+(what PoolWatch keeps on disk: Reports only, recommended and preselected, or Detailed recording, each with what it
+writes, who needs it and what it costs; under them when reports and records are cleaned up, 1 to 90 days, the same
+setting for both; Next writes both, `LiveSettings.Apply`) and Ready (what setup set, the Records line among it, the
+update-notice box, where PoolWatch lives). "How PoolWatch works" (`HowItWorksForm`) opens from
 every step's footer. The window is laid out from its fonts at any scaling, cut to the working area with the page
 scrolling, opens on the screen of the window it opens over (else the one with the pointer), and is built once: a change
 updates its rows in place, so a press never rebuilds the page. Switches, choice cards and the Yes/No report their
@@ -1164,10 +1187,16 @@ next start. PoolWatch exiting, Windows shutting down or Task Manager close it wi
 the Ready step's Open PoolWatch completes it, applies the level choice, starts the update check and shows the main
 window. Opened again from the tray (**Run setup again...**), closing it (the close box, Esc, Alt+F4) cancels it at
 once, without asking, and finishing it with Simple picked switches an open window to the Simple view at once.
+Once setup was completed but no record mode was ever chosen (`setup.json` without `recordsChosenUtc`: every
+1.0.0-beta.2 install, whose setup had no Records step), the Records step opens alone at each start (`FirstRunGate`,
+`SetupFlow.RecordsOnly`): the same page and words, the rail listing only Records, no Back, and Done, which applies the
+choice and records it; closed without Done it is cancelled at once (Reports only stays in force), and it opens again
+at the next start. Passing the Records step of the whole setup records the choice too.
 
 The lag chart, the since-start chart and the raw numbers block (commit, memory lists, lag, CPU and page faults, the
-token-leak guard's state) are not on the window. The data is still recorded in the data folder (`totals.csv`,
-`lag.csv`, `load.csv`, `findings.jsonl`), and the Since boot report and the exports have it.
+token-leak guard's state) are not on the window. With Detailed recording the data is still recorded in the data
+folder (`totals.csv`, `lag.csv`, `load.csv`, `findings.jsonl`); the Since boot report and the exports have it from
+memory in either mode.
 
 ## 12. Build and test
 
@@ -1187,8 +1216,9 @@ The code builds anywhere the .NET 10 SDK runs (`EnableWindowsTargeting`); it run
   and the user guide use (in `docs/screenshots`; the README's with and without picture is an illustration): the Simple
   view (`1-simple-view.png`), the Advanced view with the top cause selected (`2-advanced-view.png`), Services
   (`3-services.png`), Tasks and startup apps with its top row selected (`3b-tasks-and-startup-apps.png`), Settings and
-  its grid (`4-settings.png`, `5-settings-advanced.png`), each of setup's seven steps once it has read the PC
-  (`6-setup-1-welcome.png` to `6-setup-7-ready.png`) and How PoolWatch works (`6-setup-how-it-works.png`), Active
+  its grid (`4-settings.png`, `5-settings-advanced.png`), each of setup's eight steps once it has read the PC
+  (`6-setup-1-welcome.png` to `6-setup-8-ready.png`), How PoolWatch works (`6-setup-how-it-works.png`) and the
+  Records step alone, as it opens after an upgrade (`6-setup-records-alone.png`), Active
   changes (`7-active-changes.png`), Report an issue (`8-report-issue.png`) and About (`9-about.png`). It also takes the
   window with an update notice for a sample release (`10-update-notice.png`), which it checks but those pages do not
   show (the test never asks GitHub). Nothing it presses changes anything, setup runs no token-leak check there, and it

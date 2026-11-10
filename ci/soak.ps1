@@ -178,8 +178,9 @@ if ($Assert) {
     Assert-True ($null -ne $steadyMaxWs -and $steadyMaxWs -lt 100) ("working set max over the steady window (from 15 min, {0} samples) {1} < 100 MB" -f $steady.Count, $steadyWsText)
     Assert-True ($overhead.diskWriteBytesPerHour -lt 5MB) ("disk writes {0:N2} MB/h < 5 MB/h" -f ($overhead.diskWriteBytesPerHour / 1MB))
     Assert-True $memoryFlat "memory flat: $memoryText"
-    Assert-True ([int]$profile.held.registryRecords -le 20000) "registry bounded ($($profile.held.registryRecords) <= 20000)"
-    Assert-True ([int]$profile.held.namedRecords -le 10000) "named records bounded ($($profile.held.namedRecords) <= 10000)"
+    # Each count must be there before it is judged: a missing one reads as 0 ([int]$null) and would pass unread.
+    Assert-True ($null -ne $profile.held.registryRecords -and [int]$profile.held.registryRecords -le 20000) "registry bounded ($($profile.held.registryRecords) <= 20000)"
+    Assert-True ($null -ne $profile.held.namedRecords -and [int]$profile.held.namedRecords -le 10000) "named records bounded ($($profile.held.namedRecords) <= 10000)"
     Assert-True ($handleSlope -lt 50) ("own handles flat: trend {0:N0}/h < 50/h" -f $handleSlope)
     if ($Ui) {
         # A CHECK-RAN line follows each check the tests pin: CI fails a run that does not print it (ci/expected-checks.txt).

@@ -24,6 +24,9 @@
   "cpuTraceEnabled": true,
   "deeperCapture": true,
   "cpuTraceSeconds": 10,
+  // The scenarios check the day's files, findings.jsonl and the spawn-storm folders: Detailed recording (the default,
+  // Reports only, writes none of them).
+  "recordMode": "Detailed",
   // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
   "checkForUpdates": false
 }

@@ -5,7 +5,9 @@
 # and How PoolWatch works, Active changes and the update notice.
 # Nothing in them is clipped or overlaps, no internal name shows, everything taken off the window is in the tray menu,
 # every window made for the test is closed again, and the app exits cleanly. Runs a small File-handle leak meanwhile so
-# Pool causes has content, and turns one harmless service off first so Active changes has a service to list.
+# Pool causes has content, and beside it a short burst of short commands, a spawn storm, which with Reports only (the
+# default, which this run keeps) is found and listed but gets no report folder; and turns one harmless service off first
+# so Active changes has a service to list.
 param([Parameter(Mandatory)] [string]$Exe, [Parameter(Mandatory)] [string]$Leaker, [Parameter(Mandatory)] [string]$Out)
 . "$PSScriptRoot\common.ps1"
 
@@ -27,7 +29,11 @@ if ($service) {
 # ui-config.json: m2-config.json's thresholds plus the hourly automatic clear; the default 10 s interval.
 $pw = Start-PoolWatch $Exe @('--ui-smoke', '80', '--config', "$PSScriptRoot\ui-config.json", '--interval', '10', '--out', $Out)
 Start-Sleep -Seconds 15
+# 90 short git commands in 20 s from one parent (ci/diag-e2e.ps1's spawn scenario starts 150 in 30 s), beside the leak: a
+# spawn storm, past the default 30 in 30 s, that the Reports-only check below must find listed and given no folder.
+$burst = Start-Process -FilePath $Leaker -ArgumentList @('spawn', '--dir', (Join-Path $work 'spawn'), '--count', '90', '--seconds', '20') -PassThru -NoNewWindow
 & $Leaker leak-handles --dir $work --count 30000 --ramp 30 --hold 40
+if (-not $burst.WaitForExit(120000)) { $burst.Kill() }
 $code = Wait-PoolWatch $pw 300
 Assert-True ($code -eq 0) "UI smoke exit code 0 (got $code)"
 Get-Content "$Out\poolwatch.log" | Select-String 'ui smoke|incident|failed' | ForEach-Object { Write-Host "  log: $_" }
@@ -35,6 +41,16 @@ if ($service) {
     $r = Start-Process -FilePath $Exe -ArgumentList @('--service-restore', 'all', '--out', $Out, $script:AnyLocation) -Wait -PassThru -NoNewWindow -RedirectStandardOutput "$Out\service-restore.txt"
     Assert-True ($r.ExitCode -eq 0 -and (Get-Service $service).StartType -ne 'Disabled') "put $service back (exit $($r.ExitCode))"
 }
+
+# Reports only, the default (ui-config.json chooses no record mode), as the run left the data folder: the day's files
+# (with --out they would be in $Out itself, under these names), the spawn-storm folders and the incidents' folders, which
+# the check where smoke.json is read judges with what Pool causes listed.
+$dayFiles = @('totals.csv', 'tags.csv', 'processes.csv', 'events.csv', 'handles.csv', 'services.csv', 'volumes.csv', 'system-handles.csv', 'lag.csv', 'load.csv', 'findings.jsonl' |
+    Where-Object { Test-Path -LiteralPath (Join-Path $Out $_) })
+$uiFolders = @(if (Test-Path -LiteralPath "$Out\incidents") { Get-ChildItem -LiteralPath "$Out\incidents" -Directory })
+$uiStorms = @($uiFolders | Where-Object { $_.Name -clike '*-SpawnStorm-*' })
+# An incident's folder is named <yyyyMMdd-HHmmss>-<tag>-<tag in hex> (IncidentManager.IsFolderName).
+$uiIncidents = @($uiFolders | Where-Object { $_.Name -cmatch '^[0-9]{8}-[0-9]{6}-[A-Za-z0-9_]{0,4}-[0-9a-f]{8}(-[0-9]+)?$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'report.json')) })
 
 # Setting names and run-together setting-like words never reach the owner (the plain-words rule). $internal adds every
 # setting's own name, which the app lists in smoke.json, so a new setting is covered without a change here.
@@ -56,7 +72,7 @@ if (Test-Path $smokeFile) {
     $shots = @($s.screenshots)
     $names = '1-simple-view.png', '2-advanced-view.png', '3-services.png', '3b-tasks-and-startup-apps.png', '4-settings.png', '5-settings-advanced.png',
              '6-setup-1-welcome.png', '6-setup-2-your-pc.png', '6-setup-3-safety.png', '6-setup-4-standby-cache.png', '6-setup-5-fixes.png', '6-setup-6-services.png',
-             '6-setup-7-ready.png', '6-setup-how-it-works.png',
+             '6-setup-7-records.png', '6-setup-8-ready.png', '6-setup-how-it-works.png', '6-setup-records-alone.png',
              '7-active-changes.png', '8-report-issue.png', '9-about.png', '10-update-notice.png'
     Assert-True ($shots.Count -eq $names.Count) "$($names.Count) screenshots ($($shots -join ', '))"
     # A CHECK-RAN line follows each check the tests pin: CI fails a run that does not print it (ci/expected-checks.txt).
@@ -103,6 +119,13 @@ if (Test-Path $smokeFile) {
     Assert-True ([double]$f.identityKept -ge 0.8) "a refresh updates rows in place: $([math]::Round([double]$f.identityKept * 100))% of row objects kept (no clear-and-rebuild)"
     Assert-True ($f.selectionKept -eq $true) "a refresh keeps the selected row"
     Assert-True ($f.copyMatches -eq $true) "Ctrl+C copies the header and exactly the selected row's cells: $($f.copiedSample)"
+    # Reports only: the burst's spawn storm is found and listed in Pool causes with no report folder to open, none of the
+    # day's files was written, no spawn-storm folder was made, and the leak's growth incident has its report folder. A
+    # storm row missing from an older smoke.json is no row ($null is filtered out, never counted as one).
+    $stormRows = @($f.stormRows | Where-Object { $null -ne $_ })
+    $stormLinks = @($stormRows | Where-Object { "$($_.folder)" -ne '' })
+    Assert-True ($stormRows.Count -ge 1 -and $stormLinks.Count -eq 0 -and $dayFiles.Count -eq 0 -and $uiStorms.Count -eq 0 -and $uiIncidents.Count -ge 1) ("Reports only: the spawn storm listed ({0} rows: {1}) with no folder to open ({2}), none of the day's files ({3}), no spawn-storm folder ({4}), and the leak's incident folder written ({5})" -f $stormRows.Count, (@($stormRows | ForEach-Object { $_.title }) -join ' | '), $stormLinks.Count, ($dayFiles -join ', '), $uiStorms.Count, $uiIncidents.Count)
+    Write-Host 'CHECK-RAN: ui-reports-only-writes-no-records'
 
     # Nothing clipped or overlapping (text that does not fit, controls outside their parent or on their siblings, the
     # chart's labels on its title), checked with each tab selected (Services and Tasks and startup apps once their lists
@@ -122,7 +145,12 @@ if (Test-Path $smokeFile) {
     }
     Assert-True (@($form | Where-Object { $_ -like 'While it is on, other programs can bring their windows to the front*until you untick this to end it.' }).Count -eq 1) "Settings says what the token-leak guard does to you and how long it lasts"
     Assert-True (@($form | Where-Object { $_ -like 'Notices about the kernel pool. The token-leak guard''s need your click and always appear.' }).Count -eq 1) "Settings says under Notifications what it is for and that the notices needing a click always appear"
-    Assert-True (@($form | Where-Object { $_ -like '*Save puts automatic clearing, the token-leak guard, notifications and update notices into effect at once*' }).Count -eq 1) "Settings says what Save applies at once"
+    Assert-True (@($form | Where-Object { $_ -like '*Save puts automatic clearing, the token-leak guard, notifications, update notices, records and their cleanup into effect at once*' }).Count -eq 1) "Settings says what Save applies at once"
+    # Records, in the plain form (it is no advanced option): its two choices, the line of the one chosen (Reports only, the
+    # default), and the cleanup's select with its 7 days.
+    foreach ($item in 'Records', 'Reports only', 'Detailed recording', 'A report each time the pool grows.', 'Clean up reports and records after', '7 days') {
+        Assert-True ($item -in $form) "Settings shows '$item'"
+    }
     Assert-Plain 'the Settings form' $form
     Assert-True (@($f.layoutProblemsAtMinimumSize).Count -eq 0) "the three tabs at the window's smallest size: nothing clipped or overlapping: $(@($f.layoutProblemsAtMinimumSize) -join '; ')"
     Assert-True ($f.timerWhileVisible -eq $true -and $f.timerWhileHidden -eq $false) "refresh timer runs only while visible (visible=$($f.timerWhileVisible), hidden=$($f.timerWhileHidden))"
@@ -135,8 +163,8 @@ if (Test-Path $smokeFile) {
     Write-Host 'CHECK-RAN: ui-hidden-window-holds-nothing'
 
     # Setup as on a first run, after it read the PC (no leak check in the test): its own window, whose close button works
-    # and asks first, the seven steps of the approved design, nothing clipped or overlapping, no tour, and "How PoolWatch
-    # works".
+    # and asks first, the eight steps of the approved designs, nothing clipped or overlapping, no tour, and "How PoolWatch
+    # works"; then its Records step alone, as it opens by itself after an upgrade from 1.0.0-beta.2.
     $g = $s.guide
     Assert-True ($g.ready -eq $true) "setup read the PC"
     Assert-True ($g.window.fits -eq $true) "the setup window fits the working area ($($g.window.width) x $($g.window.height) in $($g.window.area))"
@@ -145,7 +173,7 @@ if (Test-Path $smokeFile) {
     Write-Host 'CHECK-RAN: ui-setup-close-button'
     $steps = @($g.steps | ForEach-Object { $_.stats })
     $rail = @($steps | ForEach-Object { $_.rail }) -join '|'
-    Assert-True ($rail -eq 'Welcome|Your PC|Safety|Standby cache|Fixes|Services|Ready') "setup has its seven steps: $rail"
+    Assert-True ($rail -eq 'Welcome|Your PC|Safety|Standby cache|Fixes|Services|Records|Ready') "setup has its eight steps: $rail"
     foreach ($st in $steps) {
         Assert-True (@($st.layoutProblems).Count -eq 0) "setup step $($st.number) ($($st.rail)): nothing clipped or overlapping: $(@($st.layoutProblems) -join '; ')"
         Assert-Plain "setup step $($st.number)" (@($st.texts) + @($st.buttons))
@@ -168,8 +196,24 @@ if (Test-Path $smokeFile) {
     Assert-True ((@($cache.choices) -join '|') -eq 'On a schedule|At a pool size|Whichever comes first|Decide later') "Standby cache has four choices: $(@($cache.choices) -join ', ')"
     Assert-True ("$($cache.recommended)" -eq 'Whichever comes first') "Whichever comes first is the recommended choice, on any PC: $($cache.recommended)"
     Assert-True (($cache.stutter -eq $true) -eq ($cache.chosen -ne 'Decide later')) "the stutter warning shows where clearing is turned on (chosen: $($cache.chosen))"
-    Assert-True ($null -ne $steps[6].updates) "the Ready step has the update notices tick"
-    Assert-True ((@($steps[6].buttons) -join '|') -eq 'Open PoolWatch') "the Ready step ends with Open PoolWatch: $(@($steps[6].buttons) -join ', ')"
+    # Records: Reports only and Detailed recording, Reports only recommended and chosen (the default), the cleanup's 7 days.
+    $records = $steps[6]
+    Assert-True ((@($records.choices) -join '|') -eq 'Reports only|Detailed recording') "Records offers Reports only and Detailed recording: $(@($records.choices) -join ', ')"
+    Assert-True ("$($records.recommended)" -eq 'Reports only' -and "$($records.chosen)" -eq 'Reports only') "Reports only is recommended and chosen (recommended: $($records.recommended), chosen: $($records.chosen))"
+    Assert-True ("$($records.days)" -eq '7 days') "Records cleans up after 7 days by default: $($records.days)"
+    Assert-True ('Nothing is recorded until the pool grows.' -in @($records.texts)) "Records says nothing is recorded until the pool grows"
+    Assert-True ((@($records.buttons) -join '|') -eq 'Back|Next') "the Records step has Back and Next: $(@($records.buttons) -join ', ')"
+    $ready = $steps[7]
+    Assert-True ($null -ne $ready.updates) "the Ready step has the update notices tick"
+    Assert-True ((@($ready.buttons) -join '|') -eq 'Open PoolWatch') "the Ready step ends with Open PoolWatch: $(@($ready.buttons) -join ', ')"
+    Assert-True (@($ready.summary | Where-Object { $_.key -eq 'Records' -and $_.value -eq 'Reports only, cleaned up after 7 days' }).Count -eq 1) "the Ready step says Records: Reports only, cleaned up after 7 days: $(@($ready.summary | ForEach-Object { "$($_.key): $($_.value)" }) -join ' | ')"
+    # The Records step alone, as after an upgrade: the rail lists only it, no Back, and Done.
+    $alone = $s.recordsAlone
+    Assert-True ($alone.ready -eq $true -and "$($alone.stats.rail)" -eq 'Records') "the Records step alone opens on Records ($($alone.stats.rail))"
+    Assert-True ((@($alone.stats.buttons) -join '|') -eq 'Done') "the Records step alone has Done and no Back: $(@($alone.stats.buttons) -join ', ')"
+    Assert-True (@($alone.stats.layoutProblems).Count -eq 0) "the Records step alone: nothing clipped or overlapping: $(@($alone.stats.layoutProblems) -join '; ')"
+    Assert-True ($alone.window.fits -eq $true -and $alone.window.closeAsksFirst -eq $false) "the Records step alone fits the working area and closes without asking (fits=$($alone.window.fits), asks=$($alone.window.closeAsksFirst))"
+    Assert-Plain 'the Records step alone' (@($alone.stats.texts) + @($alone.stats.buttons))
     Assert-True (@($steps | ForEach-Object { $_.texts } | Where-Object { "$_" -match 'Show me around|restore point' }).Count -eq 0) "setup offers no tour and no restore point"
     $how = $g.howItWorks.stats
     Assert-True ($how.fits -eq $true) "How PoolWatch works fits the working area"

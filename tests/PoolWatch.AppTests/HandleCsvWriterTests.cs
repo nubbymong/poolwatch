@@ -39,6 +39,14 @@ public sealed class HandleCsvWriterTests(ITestOutputHelper output) : IDisposable
         return c;
     }
 
+    /// <summary>The census with the System process's 10 File handles too, so the scan writes system-handles.csv as well (under the 20 a row needs).</summary>
+    private static HandleCounts WithSystem(int file)
+    {
+        var c = Census(file);
+        for (int i = 0; i < 10; i++) c.Add(4, 1);
+        return c;
+    }
+
     private static readonly ProcessSample[] Procs = [new() { Pid = 500, CreateTime = 5, ImageName = "app.exe" }];
 
     /// <summary>A stream whose writes wait at <paramref name="gate"/> (an open file another program holds up, a slow disk).</summary>
@@ -79,7 +87,7 @@ public sealed class HandleCsvWriterTests(ITestOutputHelper output) : IDisposable
         using var gate = new ManualResetEventSlim(false);
         using var entered = new ManualResetEventSlim(false);
         using var handedOver = new ManualResetEventSlim(false);
-        var sink = new CsvSink(Paths(), new Settings(), verbose: false, null, HoldingUpHandles(gate, entered));
+        var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false, null, HoldingUpHandles(gate, entered));
         try
         {
             // The sampler's tick, on a thread of its own here so that a hand-over that waited for the write fails the test
@@ -106,7 +114,7 @@ public sealed class HandleCsvWriterTests(ITestOutputHelper output) : IDisposable
         using var gate = new ManualResetEventSlim(false);
         using var entered = new ManualResetEventSlim(false);
         var log = new List<string>();
-        var sink = new CsvSink(Paths(), new Settings(), verbose: false, l => { lock (log) log.Add(l); }, HoldingUpHandles(gate, entered));
+        var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false, l => { lock (log) log.Add(l); }, HoldingUpHandles(gate, entered));
         try
         {
             sink.PostHandles(Census(40), Names, Procs, Now);
@@ -131,7 +139,7 @@ public sealed class HandleCsvWriterTests(ITestOutputHelper output) : IDisposable
         using var gate = new ManualResetEventSlim(false);
         using var entered = new ManualResetEventSlim(false);
         using var stopped = new ManualResetEventSlim(false);
-        var sink = new CsvSink(Paths(), new Settings(), verbose: false, null, HoldingUpHandles(gate, entered));
+        var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false, null, HoldingUpHandles(gate, entered));
         try
         {
             sink.PostHandles(Census(40), Names, Procs, Now);
@@ -145,6 +153,98 @@ public sealed class HandleCsvWriterTests(ITestOutputHelper output) : IDisposable
         Assert.Equal(["00:-1:40", "00:500:40", "05:-1:50", "05:500:50"], Rows("handles.csv").Select(r => $"{r[0][14..16]}:{r[1]}:{r[4]}"));
         sink.PostHandles(Census(60), Names, Procs, Now.AddMinutes(10));
         Assert.Equal(4, Rows("handles.csv").Count);
+    }
+
+    /// <summary>A file no program holds open: it opens with no sharing at all.</summary>
+    private static bool LetGoOf(string path)
+    {
+        try
+        {
+            using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) return true;
+        }
+        catch (IOException) { return false; }
+    }
+
+    private string DayFile(string name) => Path.Combine(Paths().CsvDir(Now), name);
+
+    /// <summary>
+    /// The sampler's tick, on a thread of its own so that one that waits for the handle scan's write fails the test rather
+    /// than holding it up for the writer's 10 s: whether it returned within 2 s.
+    /// </summary>
+    private static bool TickReturnsAtOnce(CsvSink sink, int minute)
+    {
+        using var ticked = new ManualResetEventSlim(false);
+        new Thread(() => { sink.WriteSample(new Sample(Now.AddMinutes(minute), default, [], []) { TickMs = minute * 60_000L }, new ProcessRegistry()); ticked.Set(); })
+            { IsBackground = true }.Start();
+        return ticked.Wait(TimeSpan.FromSeconds(2));
+    }
+
+    /// <summary>
+    /// Detailed recording turned off while a handle scan's write is held up (a slow disk; in 1.0.0-beta.2 one took 41.9 s):
+    /// the tick that turns it off returns at once, never waiting for that write; the scan waiting behind it is not written;
+    /// and once the write ends, its own thread lets go of handles.csv and system-handles.csv with nothing more asked of it.
+    /// </summary>
+    [Fact]
+    public void TurningRecordingOffNeverWaitsForTheHandleScansWriteAndItsFilesAreClosedOnceItEnds()
+    {
+        using var gate = new ManualResetEventSlim(false);
+        using var entered = new ManualResetEventSlim(false);
+        var log = new List<string>();
+        var settings = new Settings { RecordMode = RecordMode.Detailed };
+        var sink = new CsvSink(Paths(), settings, verbose: false, l => { lock (log) log.Add(l); }, HoldingUpHandles(gate, entered));
+        try
+        {
+            sink.PostHandles(WithSystem(40), Names, Procs, Now);
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)), "the scan's write began on its own thread");
+            sink.PostHandles(WithSystem(50), Names, Procs, Now.AddMinutes(5)); // waits behind it
+            settings.RecordMode = RecordMode.ReportsOnly; // Settings' Save
+            Assert.True(TickReturnsAtOnce(sink, 6), "turning recording off waited for the handle scan's write");
+            lock (log) Assert.Contains(log, l => l.StartsWith("Detailed recording turned off", StringComparison.Ordinal));
+            Assert.False(LetGoOf(DayFile("handles.csv"))); // the write still holds it
+        }
+        finally { gate.Set(); }
+        Assert.True(SpinWait.SpinUntil(() => LetGoOf(DayFile("handles.csv")) && LetGoOf(DayFile("system-handles.csv")), TimeSpan.FromSeconds(10)),
+            "handles.csv or system-handles.csv stayed open after the write ended");
+        // The scan being written was made with Detailed recording on: written whole. The one waiting behind it was not.
+        Assert.Equal(["00:-1:50", "00:500:40"], Rows("handles.csv").Select(r => $"{r[0][14..16]}:{r[1]}:{r[4]}"));
+        Assert.Equal(0, sink.HandleScansNotWritten);
+        sink.Dispose();
+        Assert.Equal(2, Rows("handles.csv").Count);
+    }
+
+    /// <summary>
+    /// Turned off during a held-up write and on again before it ended: no second writer starts on the same two files until
+    /// that write has ended and its thread let go of them. A scan handed over meanwhile is not written, counted
+    /// (profile.json's handleScansNotWritten) and logged; the next one after that starts the day's files with the whole picture.
+    /// </summary>
+    [Fact]
+    public void TurnedOnAgainBeforeAHeldUpWriteEndedNoSecondWriterStartsOnItsFiles()
+    {
+        using var gate = new ManualResetEventSlim(false);
+        using var entered = new ManualResetEventSlim(false);
+        var log = new List<string>();
+        var settings = new Settings { RecordMode = RecordMode.Detailed };
+        var sink = new CsvSink(Paths(), settings, verbose: false, l => { lock (log) log.Add(l); }, HoldingUpHandles(gate, entered));
+        try
+        {
+            sink.PostHandles(WithSystem(40), Names, Procs, Now);
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)), "the scan's write began on its own thread");
+            settings.RecordMode = RecordMode.ReportsOnly;
+            Assert.True(TickReturnsAtOnce(sink, 6), "turning recording off waited for the handle scan's write");
+            settings.RecordMode = RecordMode.Detailed;
+            Assert.True(sink.TurnedOn()); // the engine asks for a handle scan
+            sink.PostHandles(WithSystem(60), Names, Procs, Now.AddMinutes(10));
+            Assert.Equal(1, sink.HandleScansNotWritten);
+            lock (log)
+                Assert.Contains("handles.csv: the handle scan of 10:10:00 UTC was not written: the write going on when recording was turned off has not ended yet (1 not written so far)", log);
+        }
+        finally { gate.Set(); }
+        Assert.True(SpinWait.SpinUntil(() => LetGoOf(DayFile("handles.csv")) && LetGoOf(DayFile("system-handles.csv")), TimeSpan.FromSeconds(10)),
+            "handles.csv or system-handles.csv stayed open after the write ended");
+        sink.PostHandles(WithSystem(70), Names, Procs, Now.AddMinutes(15)); // a new writer, a fresh picture
+        sink.Dispose();
+        Assert.Equal(["00:-1:50", "00:500:40", "15:-1:80", "15:500:70"], Rows("handles.csv").Select(r => $"{r[0][14..16]}:{r[1]}:{r[4]}"));
+        Assert.Equal(1, sink.HandleScansNotWritten);
     }
 
     /// <summary>
@@ -180,7 +280,7 @@ public sealed class HandleCsvWriterTests(ITestOutputHelper output) : IDisposable
         var procs = Enumerable.Range(0, 600).Select(p => new ProcessSample { Pid = 4_000_000 + 4 * p, CreateTime = 77 + p, ImageName = p % 2 == 0 ? "node.exe" : "bash.exe" })
             .Append(new ProcessSample { Pid = 4, ImageName = "System" }).ToArray();
         var names = Enumerable.Range(1, 40).ToDictionary(t => t, t => $"Type{t}");
-        using var sink = new CsvSink(Paths(), new Settings(), verbose: false);
+        using var sink = new CsvSink(Paths(), new Settings { RecordMode = RecordMode.Detailed }, verbose: false);
         foreach (var (census, at, what) in new[] { (first, Now, "first"), (second, Now.AddMinutes(5), "second") })
         {
             long cpu0 = PoolWatch.Native.NativeMethods.CurrentThreadCpuTicks();

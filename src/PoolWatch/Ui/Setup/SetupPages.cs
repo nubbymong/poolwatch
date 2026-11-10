@@ -1,3 +1,4 @@
+using PoolWatch.Core;
 using PoolWatch.Core.Impact;
 
 namespace PoolWatch.Ui.Setup;
@@ -883,7 +884,185 @@ internal sealed class ServicesPage : StepPage
     }
 }
 
-/// <summary>Step 7: what setup set, the update notices' box, and where PoolWatch lives (next to the clock).</summary>
+/// <summary>
+/// Step 7, Records: what PoolWatch keeps on disk, in two choice cards (Reports only, recommended, and Detailed recording),
+/// each saying what it writes, who needs it and what it costs; under them the select of when reports and records are
+/// cleaned up, with the line that both can be changed later in Settings; then that both stay on this PC. Next applies the
+/// choice and the days (Done, when the step opens alone after an upgrade); while it does, the cards and the select are
+/// held, and a change that did not work is said under the select.
+/// </summary>
+internal sealed class RecordsPage : StepPage
+{
+    private sealed record Mode(RecordMode Choice, ChoiceCard Card, TextBlock Title, TextBlock Rec, IconBox Icon, TextBlock What, TextBlock Why, RuleLine Rule, TextBlock Cost);
+
+    private readonly TextBlock _title, _lead, _keep, _later, _error, _local;
+    private readonly ComboBox _days;
+    private readonly RoundedBox _localBox;
+    private readonly IconBox _lock;
+    private readonly List<Mode> _modes = [];
+    private bool _syncing;
+
+    public RecordsPage(PageContext c) : base(c)
+    {
+        _title = Words(SetupText.RecordsTitle, Fonts.H1);
+        _lead = Words(SetupText.RecordsLead, Fonts.Body, SetupTheme.Muted);
+        Add(RecordMode.ReportsOnly, SetupText.ReportsOnly, SetupIcon.Doc, SetupText.ReportsWhat, SetupText.ReportsWhy, SetupText.ReportsCost);
+        Add(RecordMode.Detailed, SetupText.Detailed, SetupIcon.Record, SetupText.DetailedWhat, SetupText.DetailedWhy, SetupText.DetailedCost);
+        _keep = Words(SetupText.CleanUpAfter, Fonts.Body);
+        _days = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Font = Fonts.Body, FlatStyle = FlatStyle.System, AccessibleName = SetupText.CleanUpAfter };
+        Fill(Session.DayOptions);
+        _days.SelectedIndexChanged += (_, _) =>
+        {
+            if (_syncing || _days.SelectedItem is not Item item) return;
+            Session.SetDays(item.Value);
+        };
+        Controls.Add(_days);
+        _later = Words(SetupText.ChangeLater, Fonts.Small, SetupTheme.Faint);
+        _error = Words("", Fonts.Small, SetupTheme.Error);
+        _localBox = new RoundedBox { Fill = SetupTheme.Soft, Radius = c.Scale.K * 8 };
+        Controls.Add(_localBox);
+        _lock = Icon(_localBox, SetupIcon.Lock);
+        _local = Words(_localBox, SetupText.StayLocal, Fonts.Small);
+        Sync(SetupPart.Records);
+    }
+
+    /// <summary>The cards by choice (the tests and the CI UI test).</summary>
+    internal IReadOnlyDictionary<RecordMode, ChoiceCard> Cards => _modes.ToDictionary(m => m.Choice, m => m.Card);
+    internal ComboBox DaysField => _days;
+    /// <summary>The days the select shows chosen ("7 days").</summary>
+    internal string? DaysShown => (_days.SelectedItem as Item)?.Text;
+    internal string? RecommendedShown => _modes.FirstOrDefault(m => Shown(m.Rec))?.Title.Text;
+    internal bool ErrorShown => Shown(_error);
+
+    private void Add(RecordMode choice, string title, SetupIcon icon, string what, string why, string cost)
+    {
+        var card = new ChoiceCard(C.Scale, title);
+        Controls.Add(card);
+        var mode = new Mode(choice, card, Words(card, title, Fonts.Card), Words(card, SetupText.Recommended, Fonts.SmallBold, SetupTheme.Accent), Icon(card, icon),
+            Words(card, what, Fonts.Small), Words(card, why, Fonts.Small, SetupTheme.Muted), new RuleLine(), Words(card, cost, Fonts.Small, SetupTheme.Muted));
+        card.Controls.Add(mode.Rule);
+        card.Controls.SetChildIndex(mode.Rule, card.Controls.GetChildIndex(mode.Cost)); // before the cost, in reading order
+        foreach (var t in new Control[] { mode.Title, mode.Rec, mode.Icon, mode.What, mode.Why, mode.Cost }) card.Clickable(t);
+        card.Chosen += () => Session.ChooseRecords(choice);
+        _modes.Add(mode);
+    }
+
+    private sealed record Item(int Value, string Text)
+    {
+        public override string ToString() => Text;
+    }
+
+    private void Fill(IReadOnlyList<int> days)
+    {
+        _days.BeginUpdate();
+        _days.Items.Clear();
+        foreach (int d in days) _days.Items.Add(new Item(d, SetupText.Days(d)));
+        _days.EndUpdate();
+    }
+
+    public override void Sync(SetupPart part)
+    {
+        if (part is not (SetupPart.Records or SetupPart.Step or SetupPart.Busy)) return;
+        foreach (var m in _modes)
+        {
+            m.Card.Selected = m.Choice == Session.Records;
+            ShowIf(m.Rec, m.Choice == RecordChoices.Recommended);
+            // Held while Next applies the choice, so the step never goes on with one choice while showing another.
+            m.Card.Enabled = !Session.Busy;
+        }
+        _syncing = true;
+        try
+        {
+            var days = Session.DayOptions;
+            if (_days.Items.Count != days.Count) Fill(days);
+            int i = days.ToList().IndexOf(Session.Days);
+            if (_days.SelectedIndex != i) _days.SelectedIndex = i;
+        }
+        finally { _syncing = false; }
+        _days.Enabled = !Session.Busy;
+        _error.Text = Session.Error(SetupSession.RecordsKey) ?? "";
+        ShowIf(_error, _error.Text.Length > 0);
+    }
+
+    private int Pad => S(18);
+    private int PadY => S(16);
+    private int Radio => S(18);
+    private int TextX => Pad + Radio + S(10);
+
+    private int TopHeight(Mode m) => Math.Max(Radio, Math.Max(m.Title.Measure(1000), Fonts.SmallBold.Height));
+    private int WhatWidth(int w) => w - 2 * Pad - S(20 + 10);
+
+    private int CardHeight(Mode m, int w)
+    {
+        int inner = w - 2 * Pad;
+        return PadY + TopHeight(m) + S(10) + Math.Max(S(18), m.What.Measure(WhatWidth(w))) + S(10) + m.Why.Measure(inner) + S(10) + 1 + S(10) + m.Cost.Measure(inner) + PadY;
+    }
+
+    private void PlaceCard(Mode m, int x, int y, int w, int h)
+    {
+        m.Card.Bounds = new Rectangle(x, y, w, h);
+        int inner = w - 2 * Pad, line = TopHeight(m), top = PadY;
+        m.Card.RadioAt = new Point(Pad, top + (line - Radio) / 2);
+        int recW = Shown(m.Rec) ? m.Rec.OneLine : 0;
+        int titleRoom = Math.Max(1, w - Pad - TextX - (recW > 0 ? recW + S(8) : 0));
+        PutLine(m.Title, TextX, top + (line - m.Title.Measure(1000)) / 2, titleRoom);
+        if (recW > 0) PutLine(m.Rec, w - Pad - recW, top + (line - Fonts.SmallBold.Height) / 2, recW);
+        int ty = top + line + S(10), whatW = WhatWidth(w), whatH = m.What.Measure(whatW);
+        m.Icon.Bounds = new Rectangle(Pad, ty + S(1), S(18), S(18));
+        Put(m.What, Pad + S(20 + 10), ty, whatW);
+        ty += Math.Max(S(18), whatH) + S(10);
+        Put(m.Why, Pad, ty, inner);
+        // The cost sits at the card's foot, under a thin line, as the design puts it (both cards end level).
+        int costH = m.Cost.Measure(inner), costY = h - PadY - costH;
+        m.Rule.Bounds = new Rectangle(Pad, costY - S(10) - 1, inner, 1);
+        Put(m.Cost, Pad, costY, inner);
+    }
+
+    private int ComboWidth() =>
+        _days.Items.Cast<object>().Select(i => SetupDraw.Line(i.ToString() ?? "", _days.Font).Width).DefaultIfEmpty(0).Max() + S(34);
+
+    protected override int Place(int width, int room)
+    {
+        int y = Heading(_title, _lead, S(28), room);
+        int gap = S(14), cardW = (room - gap) / 2;
+        int h = _modes.Max(m => CardHeight(m, cardW));
+        for (int i = 0; i < _modes.Count; i++) PlaceCard(_modes[i], Inset + i * (cardW + gap), y, cardW, h);
+        y += h + S(16);
+
+        // "Clean up reports and records after [7 days]", and "You can change both later in Settings." at the line's right
+        // end when it fits there, else under it.
+        int comboW = ComboWidth(), comboH = _days.PreferredHeight, keepW = _keep.OneLine;
+        int rowH = Math.Max(comboH, Fonts.Body.Height), rowEnd;
+        if (keepW + S(8) + comboW <= room)
+        {
+            PutLine(_keep, Inset, y + (rowH - _keep.Measure(keepW)) / 2, keepW);
+            _days.Bounds = new Rectangle(_keep.Right + S(8), y + (rowH - comboH) / 2, comboW, comboH);
+            rowEnd = y + rowH;
+        }
+        else
+        {
+            int keepBottom = Put(_keep, Inset, y, room);
+            _days.Bounds = new Rectangle(Inset, keepBottom + S(4), Math.Min(comboW, room), comboH);
+            rowEnd = _days.Bottom;
+        }
+        int laterW = _later.OneLine;
+        if (_days.Bottom <= y + rowH && _days.Right + S(16) + laterW <= Inset + room)
+            PutLine(_later, Inset + room - laterW, y + (rowH - _later.Measure(laterW)) / 2, laterW);
+        else rowEnd = Put(_later, Inset, rowEnd + S(6), room);
+        y = rowEnd;
+        if (Shown(_error)) y = Put(_error, Inset, y + S(6), room);
+        y += S(14);
+
+        int padX = S(14), padY = S(11), icon = S(18), textX = padX + icon + S(12), textW = room - textX - padX;
+        int textH = _local.Measure(textW), boxH = Math.Max(icon, textH);
+        _lock.Bounds = new Rectangle(padX, padY + (boxH - icon) / 2, icon, icon);
+        Put(_local, textX, padY + (boxH - textH) / 2, textW);
+        _localBox.Bounds = new Rectangle(Inset, y, room, boxH + 2 * padY);
+        return _localBox.Bottom + S(8);
+    }
+}
+
+/// <summary>Step 8: what setup set, the update notices' box, and where PoolWatch lives (next to the clock).</summary>
 internal sealed class ReadyPage : StepPage
 {
     private readonly RoundedBox _badge;

@@ -10,7 +10,16 @@ The first public release. PoolWatch keeps a Windows 11 PC fast and stable throug
 watches the kernel pool, empties the standby cache before the pool slows you down, fixes known issues and, if you
 want, trims background work. Every change it makes is listed, with a way to put it back.
 
-- **Setup that fits itself to your PC.** At first start, Set up PoolWatch opens on its own, in seven short steps
+- **What PoolWatch keeps on disk is your choice.** PoolWatch watches the kernel pool live and tells you when it grows
+  either way. **Reports only**, the default, writes a report each time the pool grows and keeps no record of the day
+  (beside the reports, only its log, its settings, a summary of each boot and the Since boot report);
+  **Detailed recording** also keeps a record of the whole day (the pool and its tags, programs and their handles,
+  services, every program started) and report folders for its spawn storms, up to about 60 MB a day on a PC doing heavy
+  agentic coding. Choose in setup's new Records step, or under **Records** in Settings, where a change applies at once;
+  both also set when reports, records and exports are cleaned up (7 days by default). People upgrading from
+  1.0.0-beta.2, which always recorded, get Reports only and are asked once to choose: the Records step opens alone at
+  the first start, and again at each start until they press Done. What beta.2 recorded is cleaned up by the usual rule.
+- **Setup that fits itself to your PC.** At first start, Set up PoolWatch opens on its own, in eight short steps
   (about 3 minutes), before the main window. It reads the PC and lists each known cause of a growing kernel pool with
   how much it affects this PC, the highest first (high, medium, low, not known where it could not check, then none), and
   which step fixes it. You choose when PoolWatch empties the standby cache (on a schedule, at a pool size, whichever
@@ -18,7 +27,8 @@ want, trims background work. Every change it makes is listed, with a way to put 
   off, and stays off unless you switch it on), the token-leak guard if this Windows build has the leak, a Codex shortcut
   without its shader cache when the Codex app is installed, and where to find Defender's performance mode for a Dev
   Drive. The token-leak check says plainly what it found. On the steps that change things, Next pauses for a second,
-  so you can read what it will do. Setup changes no services. **How PoolWatch works**, from every step, explains the
+  so you can read what it will do. Setup changes no services. Last, you choose what PoolWatch keeps on disk.
+  **How PoolWatch works**, from every step, explains the
   kernel pool and why emptying the cache is safe. The first time, closing setup asks first, with No (keep it open) the
   default; if you close it, PoolWatch keeps running in the tray, what you set with Next stays, and setup opens again
   when you open PoolWatch and at its next start. Open setup again from the tray menu: **Run setup again...**.
@@ -122,7 +132,8 @@ want, trims background work. Every change it makes is listed, with a way to put 
   shell's command line, only processes a ranking can name are kept for an incident's window, a process that ended over
   90 minutes ago keeps only its name and details (the latest 10,000 such), the one-minute history keeps each process's
   I/O for 2 hours and then each hour's 10 busiest by name (what the Since boot report names), an incident keeps the
-  first 1,000 events of its window (its `events.csv` says to when; the day's `events.csv` has every one), and at most
+  first 1,000 events of its window (its `events.csv` says to when; with Detailed recording the day's `events.csv` has
+  every one), and at most
   20 closed incidents stay in memory (the rest are listed from their folders; a tag growing again an hour after its
   incident left memory gets a new one). Replaying a day of that load through PoolWatch's per-sample analysis (not its
   process query, event trace, window or files) takes 0.12% of one core where it took 2.6% before this change, and holds
@@ -130,8 +141,8 @@ want, trims background work. Every change it makes is listed, with a way to put 
   as a whole is still over its own budget on such a PC (About and every report say how much). An incident open longer
   than 70 minutes keeps where its growth began, so its growth no longer shrinks in its report, and PoolWatch's own
   cache clears still count in it after they leave the 70 minutes.
-- **The day's data files, light on the disk.** On a PC doing heavy agentic coding the day's CSV files wrote about
-  4.7 MB an hour, nearly the whole 5 MB budget; in a test of that load they now write about 2.1 MB. Each day's files
+- **The day's data files, light on the disk.** With Detailed recording, on a PC doing heavy agentic coding the day's
+  CSV files wrote about 4.7 MB an hour, nearly the whole 5 MB budget; in a test of that load they now write about 2.1 MB. Each day's files
   start with the whole picture and
   then hold what changed: a pool tag when it moved 1 MB (and every 10 minutes), a process once it has run a minute and
   while it is busy, a service when its host changes, handle counts when they change (and once more as a count leaves
@@ -141,7 +152,7 @@ want, trims background work. Every change it makes is listed, with a way to put 
   spawn trace of the storm folder in use most recently.
 - **A week of data, whatever the clock says.** PoolWatch keeps its data in `C:\ProgramData\PoolWatch`, which only
   administrators can change. A day's folder, an incident or an export is deleted once nothing in it was written for 7
-  days (by default), counted on the PC's own timer while the PC is on and awake, so a change of the PC's clock never
+  days (by default; 1 to 90 in the Records step and in Settings), counted on the PC's own timer while the PC is on and awake, so a change of the PC's clock never
   deletes anything early. While PoolWatch runs, the growth, the clears and the alerts are timed on the PC's own
   timer too, so a change of its clock then moves none of them. Each check of what to delete is one line in the log.
 - **Settings, each explained.** **Advanced...** in Settings lists the settings in a grid and says what the one you

@@ -11,8 +11,9 @@ namespace PoolWatch.Analysis;
 
 /// <summary>
 /// Diagnostics beyond pool-tag incidents (spawn storms, git roots, stray .git, ...). Each produces
-/// <see cref="Finding"/>s: they are appended to findings.jsonl and events.csv, shown on the incident timelines and in
-/// the Findings tab, and alert-level ones get a report folder under incidents\. Runs on the sampler thread.
+/// <see cref="Finding"/>s: they are shown on the incident timelines and in Pool causes, alert-level ones get a report
+/// folder under incidents\ (a spawn storm's only with Detailed recording), and with Detailed recording they are appended
+/// to the day's findings.jsonl and events.csv too. Runs on the sampler thread.
 /// </summary>
 internal sealed class Diagnostics
 {
@@ -25,7 +26,8 @@ internal sealed class Diagnostics
         _engine = engine;
         _analysis = analysis;
         Git = new GitRootResolver(_probe);
-        Spawns = new SpawnTracker(engine.Settings, engine.Registry, Git, GitContext(), CwdOf);
+        // A storm gets a report folder only with Detailed recording; in Reports only it is found, shown and told from memory.
+        Spawns = new SpawnTracker(engine.Settings, engine.Registry, Git, GitContext(), CwdOf) { FoldersWanted = () => engine.Recording };
         StrayGit = new StrayGitCheck(_probe, Git);
         Tokens = new Core.Tokens.TokenCorrelator(engine.Settings, engine.Registry);
         Lag = new Core.Lag.LagMonitor(engine.Settings);
@@ -157,8 +159,9 @@ internal sealed class Diagnostics
     }
 
     /// <summary>
-    /// Findings raised on the UI thread (tray / hotkey marks, a cancel). Recording one writes findings.jsonl and events.csv,
-    /// which only the sampler thread may touch: they are queued here and recorded at the start of the next tick.
+    /// Findings raised on the UI thread (tray / hotkey marks, a cancel). Recording one writes the incident timelines and,
+    /// with Detailed recording, findings.jsonl and events.csv, which only the sampler thread may touch: they are queued here
+    /// and recorded at the start of the next tick.
     /// </summary>
     private readonly System.Collections.Concurrent.ConcurrentQueue<Finding> _fromOtherThreads = new();
 
@@ -740,10 +743,13 @@ internal sealed class Diagnostics
     /// <summary>
     /// Writes a spawn-storm report folder (<see cref="StormReports.WriteWithin"/>). Its first write and its last (it leaves memory,
     /// or PoolWatch stops) are always made; an update in between waits while the report folders' write budget has no room
-    /// (<see cref="Core.Incidents.WriteBudget"/>, shared with the incidents), and is made at a later sample.
+    /// (<see cref="Core.Incidents.WriteBudget"/>, shared with the incidents), and is made at a later sample. Only with Detailed
+    /// recording: in Reports only no storm gets a folder (<see cref="SpawnTracker.FoldersWanted"/>), and one that got its folder
+    /// before recording was turned off is not written again (its storms' findings keep the folder written then).
     /// </summary>
     private void WriteStorm(StormFolder folder, long nowMs)
     {
+        if (!_engine.Recording) return;
         try
         {
             StormReports.WriteWithin(_analysis.Incidents.Budget, Spawns, folder, _engine.Paths.IncidentsDir, _engine.Meter.OwnCostLine(), _engine.Paths.CheckRealNoWait, nowMs);
@@ -766,19 +772,25 @@ internal sealed class Diagnostics
             foreach (var folder in Spawns.FoldersToFinish()) WriteStorm(folder, Environment.TickCount64);
     }
 
-    /// <summary>Every finding: log, findings.jsonl, events.csv and the incident timelines.</summary>
+    /// <summary>
+    /// Every finding: the log, the incident timelines, and with Detailed recording findings.jsonl and events.csv (the day's
+    /// records; in Reports only neither is written, and the findings are held in memory as before).
+    /// </summary>
     private void OnFinding(Finding f)
     {
         _engine.Log.Info($"finding {f.Kind}: {f.Title}");
-        try
+        if (_engine.Recording)
         {
-            // Today's folder, also for a finding dated earlier (a replayed event-log record): never re-create an old day.
-            string dir = _engine.Paths.EnsureDir(_engine.Paths.CsvDir(DateTime.UtcNow));
-            string line = FindingLog.ToJsonLine(f) + "\n";
-            PoolWatch.Engine.NoWaitOpen.AppendAllText(_engine.Paths.Guard.CheckReal(Path.Combine(dir, "findings.jsonl")), line);
-            Core.Util.Profiler.Wrote("findings.jsonl", line.Length);
+            try
+            {
+                // Today's folder, also for a finding dated earlier (a replayed event-log record): never re-create an old day.
+                string dir = _engine.Paths.EnsureDir(_engine.Paths.CsvDir(DateTime.UtcNow));
+                string line = FindingLog.ToJsonLine(f) + "\n";
+                PoolWatch.Engine.NoWaitOpen.AppendAllText(_engine.Paths.Guard.CheckReal(Path.Combine(dir, "findings.jsonl")), line);
+                Core.Util.Profiler.Wrote("findings.jsonl", line.Length);
+            }
+            catch (Exception ex) { _engine.Log.Info("findings.jsonl write failed: " + ex.Message); }
         }
-        catch (Exception ex) { _engine.Log.Info("findings.jsonl write failed: " + ex.Message); }
         var ev = new LifecycleEvent
         {
             TimeUtc = f.TimeUtc, Kind = LifecycleKind.Finding, Pid = f.Pid, Image = f.Kind.ToString(), Detail = f.Title,

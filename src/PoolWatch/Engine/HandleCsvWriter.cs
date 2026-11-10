@@ -18,6 +18,10 @@ namespace PoolWatch.Engine;
 /// handed over while one already waits takes its place, and the one it replaces is not written, counted
 /// (<see cref="Replaced"/>, profile.json) and logged. The next scan it writes writes each count that changed since that
 /// count's last row, so the file's last row of each count stays true; the replaced scan's totals row is what is missing.
+///
+/// Its thread lets go of the two files itself, as it ends (<see cref="Ended"/>), so a stop never has to touch a sink that
+/// may still be in use: the end of a run waits for that, within <see cref="StopWait"/> (<see cref="Dispose"/>); Detailed
+/// recording turned off does not wait at all (<see cref="LetGo"/>), as the sampler's tick never waits for a write.
 /// </summary>
 internal sealed class HandleCsvWriter : IDisposable
 {
@@ -37,6 +41,7 @@ internal sealed class HandleCsvWriter : IDisposable
     private bool _stopping;
     private Thread? _thread;
     private long _replaced;
+    private volatile bool _ended;
 
     /// <param name="sink">The sink the scans are written through (its two handle files only); this writer's thread alone uses it, and disposes it.</param>
     public HandleCsvWriter(CsvSink sink, Action<string> log)
@@ -47,6 +52,9 @@ internal sealed class HandleCsvWriter : IDisposable
 
     /// <summary>Scans not written: each replaced by a later one while it waited.</summary>
     public long Replaced => Interlocked.Read(ref _replaced);
+
+    /// <summary>Stopped, and its files let go of: its thread has ended (or never started), its last write with it.</summary>
+    public bool Ended => _ended;
 
     /// <summary>Hands <paramref name="scan"/> to the writer's thread (started at the first) and returns at once. Not after <see cref="Dispose"/>.</summary>
     public void Post(Scan scan)
@@ -73,20 +81,54 @@ internal sealed class HandleCsvWriter : IDisposable
 
     private void Run()
     {
-        while (true)
+        try
         {
-            Scan scan;
-            lock (_gate)
+            while (true)
             {
-                while (_waiting is null && !_stopping) Monitor.Wait(_gate);
-                if (_waiting is not { } next) return; // stopping, and nothing waits
-                scan = next;
-                _waiting = null;
+                Scan scan;
+                lock (_gate)
+                {
+                    while (_waiting is null && !_stopping) Monitor.Wait(_gate);
+                    if (_waiting is not { } next) return; // stopping, and nothing waits
+                    scan = next;
+                    _waiting = null;
+                }
+                try { Write(scan); }
+                catch (Exception e) { _log($"handles.csv: the handle scan of {scan.Utc.ToString("HH:mm:ss", CultureInfo.InvariantCulture)} UTC could not be written: {e.Message}"); }
             }
-            try { Write(scan); }
-            catch (Exception e) { _log($"handles.csv: the handle scan of {scan.Utc.ToString("HH:mm:ss", CultureInfo.InvariantCulture)} UTC could not be written: {e.Message}"); }
         }
+        finally { Release(); } // its thread alone uses the sink: it lets go of the files once its last write has ended
     }
+
+    /// <summary>Lets go of the two files (<see cref="CsvSink.Dispose"/>), once: by the thread as it ends, or by the stop when there was none.</summary>
+    private void Release()
+    {
+        try { _sink.Dispose(); }
+        catch (Exception e) { _log("handles.csv: its files could not be let go of: " + e.Message); }
+        _ended = true;
+    }
+
+    /// <summary>Stops taking scans (once): the thread to wait for, or null when there is none (its files are let go of here).</summary>
+    private Thread? Stop(bool dropWaiting)
+    {
+        Thread? thread;
+        lock (_gate)
+        {
+            if (_stopping) return _thread; // stopped already: the same thread, if any, still ends (its files are its own)
+            _stopping = true;
+            if (dropWaiting) _waiting = null;
+            thread = _thread;
+            Monitor.PulseAll(_gate);
+        }
+        if (thread is null) Release(); // never started: nothing else uses the sink
+        return thread;
+    }
+
+    /// <summary>
+    /// Detailed recording was turned off: stops at once, without waiting. The scan waiting is not written; a write going on
+    /// ends on its own thread, which then lets go of the two files (<see cref="Ended"/>). Sampler thread.
+    /// </summary>
+    public void LetGo() => Stop(dropWaiting: true);
 
     private void Write(Scan s)
     {
@@ -108,25 +150,15 @@ internal sealed class HandleCsvWriter : IDisposable
     }
 
     /// <summary>
-    /// Writes the scan waiting, if one does, after the one in progress, then lets go of the files (<see cref="CsvSink.Dispose"/>),
-    /// waiting at most <see cref="StopWait"/>. A write still going on then is left to end on its own and its sink is not
-    /// touched (it may still be in use): what it had not written is not written, and the log says so.
+    /// The end of a run: writes the scan waiting, if one does, after the one in progress, then lets go of the files
+    /// (<see cref="CsvSink.Dispose"/>, by its thread as it ends), waiting at most <see cref="StopWait"/>; after
+    /// <see cref="LetGo"/>, waits for the write it left going on the same way. A write still going on then is left to end on
+    /// its own and the stop does not touch its sink (it may still be in use; its thread lets go of it as it ends): the stop
+    /// neither writes nor counts what it had not written yet, and the log says so.
     /// </summary>
     public void Dispose()
     {
-        Thread? thread;
-        lock (_gate)
-        {
-            if (_stopping) return;
-            _stopping = true;
-            thread = _thread;
-            Monitor.PulseAll(_gate);
-        }
-        if (thread is not null && !thread.Join(StopWait))
-        {
-            _log($"handles.csv: the handle scan's write did not end within {StopWait.TotalSeconds:0} s of the stop: the rows it had not written are not written or counted");
-            return;
-        }
-        _sink.Dispose();
+        if (Stop(dropWaiting: false) is { } thread && !thread.Join(StopWait))
+            _log($"handles.csv: the handle scan's write did not end within {StopWait.TotalSeconds:0} s of the stop: the stop neither writes nor counts the rows it had not written yet");
     }
 }

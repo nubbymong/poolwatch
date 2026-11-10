@@ -292,6 +292,26 @@ internal sealed class CheckedAccessibleObject(Control owner, Func<bool> isChecke
     public override AccessibleStates State => isChecked() ? base.State | AccessibleStates.Checked : base.State & ~AccessibleStates.Checked;
 }
 
+/// <summary>A thin line inside a card, the width of the control (the Records step's line above each card's cost).</summary>
+internal sealed class RuleLine : Control
+{
+    public RuleLine()
+    {
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.ResizeRedraw | ControlStyles.UserPaint |
+                 ControlStyles.SupportsTransparentBackColor, true);
+        SetStyle(ControlStyles.Selectable, false);
+        BackColor = Color.Transparent;
+        TabStop = false;
+        AccessibleRole = AccessibleRole.Separator;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        using var pen = new Pen(SetupTheme.Line);
+        e.Graphics.DrawLine(pen, 0, 0, Width, 0);
+    }
+}
+
 /// <summary>One of setup's outline icons.</summary>
 internal sealed class IconBox : Control
 {
@@ -418,8 +438,9 @@ internal sealed class Dot : Control
 }
 
 /// <summary>
-/// The left rail: the app's mark and name, then the seven steps, each a dot (a tick once done, filled for the one shown)
-/// joined by a line, as the design draws them. It paints itself from the flow, so moving to a step only repaints it.
+/// The left rail: the app's mark and name, then the steps the flow shows (the eight, or the Records step alone after an
+/// upgrade), each a dot numbered by its place (a tick once done, filled for the one shown) joined by a line, as the design
+/// draws them. It paints itself from the flow, so moving to a step only repaints it.
 /// </summary>
 internal sealed class StepRail : Control
 {
@@ -446,14 +467,15 @@ internal sealed class StepRail : Control
     public int RailWidth => _s.S(200);
 
     /// <summary>The height the brand and every step need.</summary>
-    public int Needed => _s.S(82 + 38 * SetupFlow.Steps.Count + 24);
+    public int Needed => _s.S(82 + 38 * _flow.Shown.Count + 24);
 
     /// <summary>The widest step name fits beside its dot.</summary>
     internal int TextRoom => RailWidth - _s.S(50 + 18);
 
-    internal int WidestStepName => SetupFlow.Steps.Max(st => SetupDraw.Line(SetupText.Rail(st), _fonts.RailNow).Width);
+    internal int WidestStepName => _flow.Shown.Max(st => SetupDraw.Line(SetupText.Rail(st), _fonts.RailNow).Width);
 
-    public void ShowStep() { AccessibleDescription = $"Step {(int)_flow.Step} of {SetupFlow.Steps.Count}: {SetupText.Rail(_flow.Step)}"; Invalidate(); }
+    /// <summary>"Step 7 of 8: Records" (a screen reader's description of the rail).</summary>
+    public void ShowStep() { AccessibleDescription = $"Step {_flow.Number(_flow.Step)} of {_flow.Shown.Count}: {SetupText.Rail(_flow.Step)}"; Invalidate(); }
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -473,12 +495,13 @@ internal sealed class StepRail : Control
             TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
 
         float dot = _s.K * 20, row = _s.K * 38, y0 = _s.K * 82;
-        for (int i = 0; i < SetupFlow.Steps.Count; i++)
+        var steps = _flow.Shown;
+        for (int i = 0; i < steps.Count; i++)
         {
-            var step = SetupFlow.Steps[i];
+            var step = steps[i];
             var state = _flow.Mark(step);
             float y = y0 + i * row, cx = left + dot / 2, cy = y + row / 2;
-            if (i < SetupFlow.Steps.Count - 1)
+            if (i < steps.Count - 1)
             {
                 using var join = new Pen(state == RailMark.Done ? SetupTheme.AccentLine : SetupTheme.RailLine, _s.K * 2);
                 g.DrawLine(join, cx, cy + dot / 2, cx, cy + row - dot / 2);
@@ -494,7 +517,7 @@ internal sealed class StepRail : Control
             using (var p = new Pen(ring, _s.K * 1.5f)) g.DrawEllipse(p, circle);
             var box = Rectangle.Round(new RectangleF(cx - dot / 2, cy - dot / 2, dot, dot));
             if (state == RailMark.Done) SetupIcons.Draw(g, SetupIcon.Check, RectangleF.Inflate(box, -_s.K * 4.5f, -_s.K * 4.5f), ink);
-            else TextRenderer.DrawText(g, ((int)step).ToString(System.Globalization.CultureInfo.InvariantCulture), _fonts.Dot, box, ink,
+            else TextRenderer.DrawText(g, (i + 1).ToString(System.Globalization.CultureInfo.InvariantCulture), _fonts.Dot, box, ink,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             var text = new Rectangle(left + (int)dot + _s.S(12), (int)y, Width - left - (int)dot - _s.S(12), (int)row);
             TextRenderer.DrawText(g, SetupText.Rail(step), state == RailMark.Now ? _fonts.RailNow : _fonts.Rail, text,

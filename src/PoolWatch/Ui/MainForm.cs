@@ -147,7 +147,7 @@ internal sealed class MainForm : Form
         var clear = HeaderButton("Clear now", () => _actions.Guarded(this, "Clear cache", () => _actions.ClearCacheNow(this)));
         clear.MouseEnter += (_, _) => _tips.SetToolTip(clear, _actions.ClearCacheTip());
         var settings = HeaderButton("Settings", () => _actions.Guarded(this, "Settings", OpenSettings), advancedOnly: true);
-        _tips.SetToolTip(settings, "Detection thresholds, the automatic cache clear, redaction, and Start at logon.");
+        _tips.SetToolTip(settings, "Detection thresholds, the automatic cache clear, what PoolWatch keeps on disk (records), redaction, and Start at logon.");
         _header.Controls.Add(_headerView);  // fill first, then the docked edge
         _header.Controls.Add(_buttons);
         _header.BackColor = SystemColors.Window;
@@ -1671,8 +1671,9 @@ internal sealed class MainForm : Form
             // The form sizes itself to its content: it must still fit the screen it opens on.
             if (Screen.FromControl(settings).WorkingArea is var area && (settings.Height > area.Height || settings.Width > area.Width))
                 settingsLayout.Add($"the Settings form ({settings.Size}) is larger than the screen's working area ({area.Size})");
-            // Every text on the form, its grey hints too (CI checks the token-leak guard's line is there).
-            void Texts(Control parent) { foreach (Control c in parent.Controls) { if (c is CheckBox or Button or Label) settingsForm.Add(c.Text); Texts(c); } }
+            // Every text on the form, its grey hints too (CI checks the token-leak guard's line is there), its choices and the
+            // value its select shows (the cleanup's days).
+            void Texts(Control parent) { foreach (Control c in parent.Controls) { if (c is ButtonBase or Label or ComboBox) settingsForm.Add(c.Text); Texts(c); } }
             Texts(settings);
             settings.Hide();
             var advanced = settings.Advanced;
@@ -1690,6 +1691,9 @@ internal sealed class MainForm : Form
         };
         var likelyCauses = _causeRows.Take(20).Select(r => r.Cause).ToList();
         int unrankedTagRows = _causeRows.Count(r => r.Kind == CauseKind.Tag && r.Active && r.Cause.Length == 0);
+        // The spawn storms Pool causes lists, each with the report folder its details open, if any: none with Reports only,
+        // the CI UI test's choice, where a storm is found, listed and told from memory (ci/m4-ui.ps1).
+        var stormRows = _causeRows.Where(r => r.Finding?.Kind == FindingKind.SpawnStorm).Select(r => new { title = r.What, folder = r.Folder }).ToList();
         SetView(false); // as the window opens again
         bool timerWhileVisible = _timer.Enabled;
         Hide();
@@ -1713,7 +1717,7 @@ internal sealed class MainForm : Form
             tabs = _tabs.TabPages.Cast<TabPage>().Select(p => p.Text).ToList(),
             buttons = advancedButtons,
             rows, causeKinds = kinds, detailsTitle, details = details.Length > 600 ? details[..600] : details,
-            likelyCauses, unrankedTagRows,
+            likelyCauses, unrankedTagRows, stormRows,
             identityKept, selectionKept, copyMatches, copiedSample = copied,
             layoutProblems = layout, layoutProblemsAtMinimumSize = layoutAtMinimum, settingsLayoutProblems = settingsLayout, settingsForm,
             size = new { width = size.Width, height = size.Height, dpi = DeviceDpi },

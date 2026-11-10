@@ -21,7 +21,7 @@ public sealed class CsvFormulaTests : IDisposable
         var paths = new AppPaths(Path.Combine(_root, "data"), null, secure: false);
         var now = new DateTime(2026, 10, 30, 10, 0, 0, DateTimeKind.Utc);
         const string image = "=HYPERLINK(CHAR(104),CHAR(88)).exe", command = "@SUM(1)|x", label = "=SUM(1,2)|x";
-        using (var sink = new CsvSink(paths, new Settings(), verbose: true))
+        using (var sink = new CsvSink(paths, new Settings { RecordMode = RecordMode.Detailed }, verbose: true))
         {
             sink.WriteEvents([new LifecycleEvent { TimeUtc = now, Kind = LifecycleKind.Start, Pid = 42, ParentPid = 4, Image = image, CommandLine = command, Detail = "-x" }], now);
             sink.WriteVolumes([new VolumeInfo(@"E:\", "NTFS", label, false, "Fixed")], now);

@@ -239,7 +239,7 @@ public sealed class DailyCsvBudgetTests(ITestOutputHelper output) : IDisposable
         var registry = new ProcessRegistry();
         long cpu = 0, alloc = 0;
         int minuteRollups = 0;
-        using (var sink = new CsvSink(paths, new Settings(), verbose: false, null, Open))
+        using (var sink = new CsvSink(paths, new Settings { RecordMode = RecordMode.Detailed }, verbose: false, null, Open))
         {
             sink.MergeRollupsFrom(new EventSummarizer()); // as the engine's sink takes them
             sink.WriteVolumes([new VolumeInfo("C:\\", "NTFS", "Windows", false, "Fixed"), new VolumeInfo("F:\\", "ReFS", "Dev", true, "Fixed")], world.Utc);

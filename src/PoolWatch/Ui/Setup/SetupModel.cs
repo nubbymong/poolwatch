@@ -6,8 +6,8 @@ using PoolWatch.Core.TokenGuard;
 
 namespace PoolWatch.Ui.Setup;
 
-/// <summary>The seven steps of the first-run setup, numbered as the rail shows them.</summary>
-internal enum SetupStep { Welcome = 1, YourPc, Safety, StandbyCache, Fixes, Services, Ready }
+/// <summary>The eight steps of the first-run setup, numbered as the rail shows them.</summary>
+internal enum SetupStep { Welcome = 1, YourPc, Safety, StandbyCache, Fixes, Services, Records, Ready }
 
 /// <summary>When PoolWatch empties the standby cache: the four choices of the Standby cache step.</summary>
 internal enum CacheChoice { Schedule, PoolSize, Either, Later }
@@ -35,7 +35,9 @@ internal enum LeakState
 
 /// <summary>
 /// The words of the first-run setup, from the approved design (first run, version 6), with the changes agreed after it:
-/// no restore point, no tour button, and the token-leak guard's own words wherever it is offered.
+/// no restore point, no tour button, and the token-leak guard's own words wherever it is offered; and the Records step's,
+/// from its approved design (records step, version 2), with one agreed change: "Nothing is recorded until the pool grows."
+/// (the log and settings are still written).
 /// </summary>
 internal static class SetupText
 {
@@ -43,8 +45,12 @@ internal static class SetupText
     public const string Brand = "PoolWatch";
     public const string HowItWorks = "How PoolWatch works";
     public const string Next = "Next", Back = "Back", Working = "Working...";
+    /// <summary>The Records step's button when it opens alone, after an upgrade (<see cref="SetupFlow.RecordsOnly"/>).</summary>
+    public const string Done = "Done";
     /// <summary>Under a change that did not work, when Next stays on the step.</summary>
     public const string NextAgain = "Press Next again to go on without it.";
+    /// <summary>The same, on the Records step alone, whose button is Done.</summary>
+    public const string DoneAgain = "Press Done again to go on without it.";
     /// <summary>The question when the owner closes setup on its first run (Yes closes it).</summary>
     public const string CloseFirstRun =
         "Close setup?\n\nPoolWatch keeps running in the tray and keeps watching the kernel pool. Changes you already made with Next stay. " +
@@ -60,7 +66,7 @@ internal static class SetupText
         (SetupIcon.Wrench, "Fixes known issues", "The token leak, Codex's shader cache, Defender on Dev Drives."),
         (SetupIcon.Layers, "Trims background work", "If you want: services, scheduled tasks and startup apps you don't need."),
     ];
-    // The level picks only the view the app opens in (SetupSession.Advanced): setup's seven steps and their choices are the
+    // The level picks only the view the app opens in (SetupSession.Advanced): setup's eight steps and their choices are the
     // same either way, so the words claim nothing for setup ("Setup picks safe settings for you" and "Setup shows every
     // choice" were not true).
     public const string LevelQuestion = "Choose how the app opens";
@@ -122,7 +128,22 @@ internal static class SetupText
     public const string PutBack = "Anything you turn off can be put back, one at a time or all at once.";
     public const string FindIt = "Find it in PoolWatch under Services.";
 
-    // 7 Ready
+    // 7 Records
+    public const string RecordsTitle = "What should PoolWatch keep on disk?";
+    public const string RecordsLead = "PoolWatch watches the kernel pool live and tells you when it grows, whichever you choose. This decides what it writes down.";
+    public const string ReportsOnly = "Reports only", Detailed = "Detailed recording";
+    public const string ReportsWhat = "A report each time the pool grows: what grew, the programs behind it, and a draft bug report for whoever makes the cause.";
+    public const string ReportsWhy = "Enough to find a leak and report it. Most people need nothing more.";
+    /// <summary>The agreed truth fix of the approved "Nothing is written until the pool grows.": the log and settings are still written.</summary>
+    public const string ReportsCost = "Nothing is recorded until the pool grows.";
+    public const string DetailedWhat = "The reports, plus a record of everything PoolWatch watches, all day: the pool and its memory tags, programs and their handles, services, and every program started.";
+    public const string DetailedWhy = "Useful when a leak builds up slowly over days, to compare a good day with a bad one, or when a developer asks for more than a report.";
+    public const string DetailedCost = "Up to about 60 MB a day on a PC doing heavy agentic coding.";
+    public const string CleanUpAfter = "Clean up reports and records after";
+    public const string ChangeLater = "You can change both later in Settings.";
+    public const string StayLocal = "Both stay on this PC and are never sent. They hold full command lines, which can contain passwords, so look before you share one.";
+
+    // 8 Ready
     public const string ReadyTitle = "PoolWatch is watching";
     public const string ReadyLead = "You can change any of this later.";
     public const string TrayNote = "PoolWatch lives here, next to the clock.";
@@ -137,8 +158,12 @@ internal static class SetupText
         SetupStep.StandbyCache => "Standby cache",
         SetupStep.Fixes => "Fixes",
         SetupStep.Services => "Services",
+        SetupStep.Records => "Records",
         _ => "Ready",
     };
+
+    /// <summary>"1 day", "7 days".</summary>
+    public static string Days(int days) => days == 1 ? "1 day" : $"{days.ToString(CultureInfo.CurrentCulture)} days";
 
     /// <summary>"Fix in step 4": where setup fixes a cause, never "Fixed" (nothing is fixed until that step).</summary>
     public static string FixIn(SetupStep step) => $"Fix in step {(int)step}";
@@ -167,23 +192,42 @@ internal static class SetupText
 /// Which step setup is on and whether its window may close without asking. The first run cannot be skipped: it completes
 /// only on the Ready step's button; a close the owner asks for asks first (PoolWatch exiting, or Windows shutting down,
 /// closes it without asking), and the next way into the window, or the next start, opens setup again. Opened again later
-/// from the tray, it can be cancelled.
+/// from the tray, it can be cancelled. <paramref name="recordsOnly"/>: the Records step alone, as it opens by itself after
+/// an upgrade from a version without it (<see cref="RecordsOnly"/>).
 /// </summary>
-internal sealed class SetupFlow(bool firstRun)
+internal sealed class SetupFlow(bool firstRun, bool recordsOnly = false)
 {
+    /// <summary>Every step of setup, in order.</summary>
     public static readonly IReadOnlyList<SetupStep> Steps = Enum.GetValues<SetupStep>();
 
-    public bool FirstRun { get; } = firstRun;
-    public SetupStep Step { get; private set; } = SetupStep.Welcome;
-    /// <summary>The Ready step's button was pressed: setup is complete.</summary>
+    public bool FirstRun { get; } = firstRun && !recordsOnly;
+    /// <summary>
+    /// The Records step alone (after an upgrade from 1.0.0-beta.2, which had none): the rail lists only it, it has no Back,
+    /// its button is Done (which finishes), and closing it without Done cancels it at once (it opens again at the next start).
+    /// </summary>
+    public bool RecordsOnly { get; } = recordsOnly;
+    /// <summary>The steps this setup shows, in order: every step, or the Records step alone.</summary>
+    public IReadOnlyList<SetupStep> Shown { get; } = recordsOnly ? [SetupStep.Records] : Steps;
+    public SetupStep Step { get; private set; } = recordsOnly ? SetupStep.Records : SetupStep.Welcome;
+    /// <summary>The last step's button was pressed (Ready's, or the Records step's alone): setup is complete.</summary>
     public bool Finished { get; private set; }
 
-    public bool CanGoBack => Step != SetupStep.Welcome && !Finished;
+    /// <summary>The last step this setup shows: Ready, or the Records step alone.</summary>
+    public SetupStep Last => Shown[^1];
+
+    /// <summary>Where <paramref name="step"/> is in this setup, from 1 (the rail's number, and "Step 7 of 8").</summary>
+    public int Number(SetupStep step)
+    {
+        for (int i = 0; i < Shown.Count; i++) if (Shown[i] == step) return i + 1;
+        return 0;
+    }
+
+    public bool CanGoBack => Step != Shown[0] && !Finished;
 
     /// <summary>The next step; false on the last one.</summary>
     public bool Forward()
     {
-        if (Step == SetupStep.Ready || Finished) return false;
+        if (Step == Last || Finished) return false;
         Step++;
         return true;
     }
@@ -195,8 +239,11 @@ internal sealed class SetupFlow(bool firstRun)
         return true;
     }
 
-    /// <summary>Straight to a step, without applying anything on the way (the CI UI test's screenshots).</summary>
-    public void GoTo(SetupStep step) => Step = step;
+    /// <summary>Straight to a step this setup shows, without applying anything on the way (the CI UI test's screenshots).</summary>
+    public void GoTo(SetupStep step)
+    {
+        if (Number(step) > 0) Step = step;
+    }
 
     public void Finish() => Finished = true;
 
@@ -209,6 +256,33 @@ internal sealed class SetupFlow(bool firstRun)
 
     /// <summary>How the rail marks <paramref name="step"/>: done, the one shown, or still to come.</summary>
     public RailMark Mark(SetupStep step) => step < Step || Finished ? RailMark.Done : step == Step ? RailMark.Now : RailMark.Ahead;
+}
+
+/// <summary>
+/// The Records step's two choices and the cleanup's days: what PoolWatch keeps on disk (<see cref="Settings.RecordMode"/>)
+/// and after how many days of the PC's awake time reports, records and exports are cleaned up
+/// (<see cref="Settings.RetentionDays"/>, one setting for them all). Pure.
+/// </summary>
+internal static class RecordChoices
+{
+    /// <summary>The days the select offers (with the current value too when it is none of them, <see cref="DayOptions"/>).</summary>
+    public static readonly IReadOnlyList<int> Days = [1, 3, 7, 14, 30, 60, 90];
+
+    /// <summary>The recommended choice, marked so on the step and chosen on a first run: Reports only.</summary>
+    public const RecordMode Recommended = RecordMode.ReportsOnly;
+
+    /// <summary>The days the select offers: <see cref="Days"/>, with <paramref name="current"/> in order among them when it is a value of its own (set in Settings).</summary>
+    public static IReadOnlyList<int> DayOptions(int current) =>
+        current > 0 && !Days.Contains(current) ? Days.Append(current).Order().ToList() : Days;
+
+    /// <summary>A mode in the step's words: "Reports only", "Detailed recording".</summary>
+    public static string Words(RecordMode mode) => mode == RecordMode.Detailed ? SetupText.Detailed : SetupText.ReportsOnly;
+
+    /// <summary>The Ready step's line: "Reports only, cleaned up after 7 days", "Detailed recording, cleaned up after 1 day".</summary>
+    public static string Summary(Settings s) => $"{Words(s.RecordMode)}, cleaned up after {SetupText.Days(s.RetentionDays)}";
+
+    /// <summary>The settings already hold the choice.</summary>
+    public static bool InEffect(Settings s, RecordMode mode, int days) => s.RecordMode == mode && s.RetentionDays == days;
 }
 
 internal enum RailMark { Done, Now, Ahead }

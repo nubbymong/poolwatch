@@ -84,5 +84,34 @@ public sealed class WriteBudgetVisibilityTests
         // The CI's agentic-load check holds what could wait to the allowance profile.json gives, not to a bound of its own.
         string soak = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "ci", "agentic-soak.ps1"));
         Assert.Contains("$canWaitAllowed = [double]$profile.writeBudget.canWaitAllowanceMB", soak);
+        // ... and only once profile.json has the figure: a missing one reads as 0 in PowerShell and would pass unread.
+        Assert.Contains("$null -ne $profile.writeBudget.canWaitMB -and [double]$profile.writeBudget.canWaitMB -le $canWaitAllowed + 0.001", soak);
+    }
+
+    /// <summary>
+    /// profile.json's <c>held</c> counts what the memory bounds hold, each from what holds it (read from CostReport's code,
+    /// which needs the whole app to run): the full and the named records (<c>ProcessRegistry.NamedCount</c>), the minute
+    /// history's process entries, the detailed minutes' and the summed hours' alike (<c>History.MinuteProcessEntries</c>), and
+    /// the summed hours it holds (<c>History.SummedHourCount</c>), both read under the history's lock. The CI soak holds the two
+    /// record counts to their ceilings, each only once profile.json has it: a missing count reads as 0 in PowerShell
+    /// (<c>[int]$null</c>) and would pass unread.
+    /// </summary>
+    [Fact]
+    public void ProfileJsonCountsWhatTheBoundsHoldAndTheSoakJudgesOnlyCountsItHas()
+    {
+        string cost = UninstallerTests.OneLine(ScriptCode.CSharp(File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "CostReport.cs"))));
+        foreach (string line in new[]
+                 {
+                     "lock (analysis.History.SyncRoot) { behind = analysis.Incidents.BehindNow(analysis.History);",
+                     "minuteEntries = analysis.History.MinuteProcessEntries; summedHours = analysis.History.SummedHourCount;",
+                     "registryRecords = engine.Registry.Count, namedRecords = engine.Registry.NamedCount, compactRecords = engine.Registry.CompactCount,",
+                     "historyMinuteEntries = minuteEntries, historySummedHours = summedHours,",
+                 })
+            Assert.Contains(line, cost);
+        string soak = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "ci", "soak.ps1"));
+        // The registry's cap (ProcessRegistry's maxRecords, 20,000 by default) and the named records' ceiling.
+        foreach (var (field, most) in new[] { ("registryRecords", 20000), ("namedRecords", Core.ProcessRegistry.MaxNamed) })
+            Assert.Contains($"Assert-True ($null -ne $profile.held.{field} -and [int]$profile.held.{field} -le {most})", soak);
+        Assert.Equal(10_000, Core.ProcessRegistry.MaxNamed);
     }
 }

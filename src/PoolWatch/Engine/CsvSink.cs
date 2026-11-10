@@ -20,6 +20,13 @@ namespace PoolWatch.Engine;
 /// row already gave that day; and the event summary's minute rollups merged over <see cref="RollupMerge"/>. AGENTS.md
 /// says, file by file, what a reader may carry forward from a row and what it may not. The handle scan's two files are
 /// written on a thread of their own (<see cref="PostHandles"/>, <see cref="HandleCsvWriter"/>).
+///
+/// The day's files are written only with Detailed recording (<see cref="Settings.RecordMode"/>, read at each write, so a
+/// change in Settings or setup applies without a restart). In Reports only, the default, nothing is written and no day
+/// folder is made: each write returns at once, holding nothing. Turned off, the sink writes what it made while it was on
+/// (the rows kept, the rollups being merged), lets go of every file and of the handle scan's writer, and forgets what the
+/// files held; turned on again, the next write starts the day's files with the whole picture, as a start of PoolWatch does
+/// (<see cref="TurnedOn"/> tells the engine, which writes the services and volumes it holds and asks for a handle scan).
 /// </summary>
 internal sealed class CsvSink : IDisposable
 {
@@ -157,6 +164,119 @@ internal sealed class CsvSink : IDisposable
         _open = open ?? NoWaitOpen.OpenUnbuffered;
         _maxKeptChars = maxKeptChars;
         _files = [_totals, _tags, _processes, _events, _handles, _services, _volumes, _systemHandles, _lag, _load];
+        _on = Recording; // the mode it starts in is no change: a start of PoolWatch begins the day's files as before
+        _records = new(_on, DateTime.UtcNow);
+    }
+
+    /// <summary>Detailed recording is chosen now (<see cref="Settings.RecordMode"/>): the day's files are written.</summary>
+    public bool Recording => _settings.RecordMode == RecordMode.Detailed;
+
+    /// <summary>What the day's files record, as the sink follows the choice, and since when without a change.</summary>
+    /// <param name="Detailed">Detailed recording: the day's files are written.</param>
+    /// <param name="SinceUtc">When the sink started, or followed the last change of the choice (<see cref="On"/>).</param>
+    internal sealed record RecordState(bool Detailed, DateTime SinceUtc);
+
+    private volatile RecordState _records;
+
+    /// <summary>
+    /// What the day's files record and since when (any thread): an incident's report says the day's events.csv holds the
+    /// events it left out only for a time Detailed recording was on throughout (<see cref="Core.Incidents.IIncidentHost.DayRecords"/>).
+    /// </summary>
+    public RecordState Records => _records;
+
+    /// <summary>The mode the last write saw (<see cref="On"/>).</summary>
+    private bool _on;
+    /// <summary>Recording turned on since the engine last asked (<see cref="TurnedOn"/>).</summary>
+    private bool _turnedOn;
+
+    /// <summary>
+    /// Whether this write is made: Detailed recording is chosen now. When the mode changed since the last write, the sink
+    /// follows it first: turned off, it closes cleanly (<see cref="StopWriting"/>); turned on, its next rows start the day's
+    /// files with the whole picture (<see cref="StartAgain"/>).
+    /// </summary>
+    private bool On()
+    {
+        bool on = Recording;
+        if (on == _on) return on;
+        _on = on;
+        _records = new(on, DateTime.UtcNow);
+        if (on)
+        {
+            StartAgain();
+            _turnedOn = true;
+            _log("Detailed recording turned on: the day's CSV files and findings.jsonl are written again, starting with the whole picture");
+        }
+        else
+        {
+            StopWriting();
+            _log("Detailed recording turned off (Reports only): the day's CSV files were closed, and nothing more is written to them");
+        }
+        return on;
+    }
+
+    /// <summary>
+    /// Sampler thread, at the start of each tick: whether Detailed recording was turned on since the last call. The engine
+    /// then writes the services and the volumes it holds and asks for a handle scan, so that the day's files start again
+    /// with the whole picture in this tick, as at PoolWatch's start.
+    /// </summary>
+    public bool TurnedOn()
+    {
+        On();
+        bool turned = _turnedOn;
+        _turnedOn = false;
+        return turned;
+    }
+
+    /// <summary>
+    /// Detailed recording was turned off: the rows it made while it was on (kept, or the rollups being merged) are written,
+    /// then each file and the handle scan's writer are let go of, as at the end of a run, and what the files held is
+    /// forgotten, along with the processes' last rows, so nothing of them is held while nothing is written. The handle
+    /// scan's writer is not waited for (the tick never waits for its write, which took 41.9 s in 1.0.0-beta.2): the scan it
+    /// holds is not written, and a write going on ends on its own thread, which then closes its two files
+    /// (<see cref="HandleCsvWriter.LetGo"/>); no other writer starts on them until it has (<see cref="PostHandles"/>).
+    /// </summary>
+    private void StopWriting()
+    {
+        if (_handleWriter is { } writer)
+        {
+            _handleWriter = null; // first, so that HandleScansNotWritten never counts its scans twice
+            Interlocked.Add(ref _handleScansNotWrittenBefore, writer.Replaced); // final: nothing is handed to it any more
+            writer.LetGo();
+            _stoppedHandleWriter = writer;
+        }
+        WriteMerged();
+        foreach (var f in _files) Commit(f);
+        foreach (var f in _files)
+        {
+            if (f.Rows.Count > 0 || f.Dropped > 0)
+                _log($"{f.Name}: the rows kept for it could not be written before recording was turned off ({f.Rows.Count} kept" +
+                     (f.Dropped > 0 ? $", {f.Dropped} dropped before" : "") + "): those rows are not in the CSV files");
+            Close(f);
+            f.Rows.Clear();
+            f.Chars = 0;
+            f.Dropped = 0;
+            f.From = 1;
+            f.Failing = null;
+        }
+        _keptChars = 0;
+        _merged.Clear();
+        _mergeFromMs = null;
+        _dir = null;
+        _dirMade = false;
+        _lastTagWriteMs = _lastProcWriteMs = null;
+        _lastProcRow.Clear();
+        Forget(null);
+    }
+
+    /// <summary>Detailed recording was turned on: the next rows are the day's whole picture, from the next sample.</summary>
+    private void StartAgain()
+    {
+        _dir = null; // the next write opens today's folder
+        _dirMade = false;
+        _lastTagWriteMs = _lastProcWriteMs = null;
+        _lastProcRow.Clear();
+        _mergeFromMs = null;
+        Forget(null);
     }
 
     /// <summary>
@@ -316,6 +436,7 @@ internal sealed class CsvSink : IDisposable
 
     public void WriteSample(Sample s, ProcessRegistry registry)
     {
+        if (!On()) return;
         EnsureFiles(s.TimeUtc);
         Row(_totals, s.TimeUtc, s.Totals.CommittedPaged, s.Totals.CommittedNonPaged, s.Totals.TagSumPaged, s.Totals.TagSumNonPaged, s.Tags.Count, s.Processes.Count,
             s.System.CommitBytes, s.System.CommitLimitBytes, s.System.AvailableBytes, s.System.CompressionWsBytes, s.System.Handles);
@@ -418,6 +539,7 @@ internal sealed class CsvSink : IDisposable
     /// </summary>
     public void WriteEvents(IEnumerable<LifecycleEvent> events, DateTime utcNow)
     {
+        if (!On()) return;
         EnsureFiles(utcNow);
         foreach (var e in events)
         {
@@ -451,9 +573,13 @@ internal sealed class CsvSink : IDisposable
         _mergeRollups = true;
     }
 
-    /// <summary>A rollup closed (<see cref="MergeRollupsFrom"/>): merged with the others of its key until <see cref="RollupMerge"/> has passed.</summary>
+    /// <summary>
+    /// A rollup closed (<see cref="MergeRollupsFrom"/>): merged with the others of its key until <see cref="RollupMerge"/> has
+    /// passed. In Reports only it is neither merged nor kept.
+    /// </summary>
     internal void AddRollup(RollupParts parts)
     {
+        if (!On()) return;
         var key = (parts.OwnerKey, parts.Parent, parts.Image);
         if (!_merged.TryGetValue(key, out var m))
         {
@@ -496,6 +622,7 @@ internal sealed class CsvSink : IDisposable
     /// </summary>
     public (TimeSpan Rows, TimeSpan Commit) WriteHandles(HandleCounts counts, IReadOnlyDictionary<int, string> typeNames, IReadOnlyList<ProcessSample> processes, DateTime utcNow)
     {
+        if (!On()) return (TimeSpan.Zero, TimeSpan.Zero); // turned off since the scan was handed over: not written
         long began = System.Diagnostics.Stopwatch.GetTimestamp();
         var rows = Profiler.Stage("csv.handles.rows");
         EnsureFiles(utcNow);
@@ -572,18 +699,45 @@ internal sealed class CsvSink : IDisposable
 
     /// <summary>The handle scan's writer (<see cref="PostHandles"/>), made at the first scan.</summary>
     private HandleCsvWriter? _handleWriter;
+    /// <summary>The writer let go of when Detailed recording was last turned off, until its last write has ended (<see cref="StopWriting"/>).</summary>
+    private HandleCsvWriter? _stoppedHandleWriter;
 
     /// <summary>
     /// Hands a handle scan to its own thread (<see cref="HandleCsvWriter"/>), which writes it to handles.csv and
     /// system-handles.csv through a sink of its own (<see cref="WriteHandles"/>), and returns at once: the sampler's tick
-    /// never waits for that write. The census, type names and process list are not changed after the scan. Sampler thread.
+    /// never waits for that write. The census, type names and process list are not changed after the scan. One writer at a
+    /// time: while the one let go of at a switch-off still ends its last write (the two files are its own until it has), a
+    /// scan is not written, counted and logged, as one replaced while it waited is. Sampler thread.
     /// </summary>
-    public void PostHandles(HandleCounts counts, IReadOnlyDictionary<int, string> typeNames, IReadOnlyList<ProcessSample> processes, DateTime utcNow) =>
+    public void PostHandles(HandleCounts counts, IReadOnlyDictionary<int, string> typeNames, IReadOnlyList<ProcessSample> processes, DateTime utcNow)
+    {
+        if (!On()) return;
+        if (_stoppedHandleWriter is { } stopped)
+        {
+            if (!stopped.Ended)
+            {
+                long n = Interlocked.Increment(ref _handleScansNotWrittenBefore);
+                _log($"handles.csv: the handle scan of {utcNow.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)} UTC was not written: " +
+                     $"the write going on when recording was turned off has not ended yet ({n:N0} not written so far)");
+                return;
+            }
+            _stoppedHandleWriter = null;
+        }
         (_handleWriter ??= new HandleCsvWriter(new CsvSink(_paths, _settings, _verbose, _log, _open, HandleKeptChars), _log))
             .Post(new HandleCsvWriter.Scan(counts, typeNames, processes, utcNow));
+    }
 
-    /// <summary>Handle scans whose rows were not written: each was handed over while an earlier one still waited (<see cref="HandleCsvWriter"/>).</summary>
-    public long HandleScansNotWritten => _handleWriter?.Replaced ?? 0;
+    /// <summary>
+    /// The scans not written by the handle scan's writers let go of when recording was turned off (<see cref="StopWriting"/>),
+    /// and those handed over while such a writer still ended its last write (<see cref="PostHandles"/>).
+    /// </summary>
+    private long _handleScansNotWrittenBefore;
+
+    /// <summary>
+    /// Handle scans whose rows were not written: each was handed over while an earlier one still waited
+    /// (<see cref="HandleCsvWriter"/>), or while the write going on when recording was turned off had not ended.
+    /// </summary>
+    public long HandleScansNotWritten => Interlocked.Read(ref _handleScansNotWrittenBefore) + (_handleWriter?.Replaced ?? 0);
 
     /// <summary>
     /// The services and the process that hosts each: at the day's first call the whole list (those running), then a row for
@@ -592,6 +746,7 @@ internal sealed class CsvSink : IDisposable
     /// </summary>
     public void WriteServices(IReadOnlyList<ServiceEntry> services, DateTime utcNow)
     {
+        if (!On()) return;
         EnsureFiles(utcNow);
         var now = new Dictionary<string, (int Pid, string Display)>(StringComparer.OrdinalIgnoreCase);
         foreach (var s in services) now[s.Name] = (s.ProcessId, s.DisplayName);
@@ -616,6 +771,7 @@ internal sealed class CsvSink : IDisposable
 
     public void WriteLag(Core.Lag.LagProbe p)
     {
+        if (!On()) return;
         // Probes are drained after the sample: one taken just before midnight goes to the day already open, rather than
         // switching every file back to yesterday's folder.
         if (_dir is null || p.TimeUtc > _lastSwitchUtc) EnsureFiles(p.TimeUtc);
@@ -625,6 +781,7 @@ internal sealed class CsvSink : IDisposable
 
     public void WriteLoad(Core.Services.LoadPoint p, long pageFaultsPerSec)
     {
+        if (!On()) return;
         if (_dir is null || p.TimeUtc > _lastSwitchUtc) EnsureFiles(p.TimeUtc);
         Row(_load, p.TimeUtc, Math.Round(p.CpuFraction, 3), p.RunQueue is { } q ? Math.Round(q, 1) : null, p.Cores, pageFaultsPerSec,
             p.Faults is { } f ? Math.Round(f.DemandZeroPerSec) : null, p.Faults is { } t ? Math.Round(t.TransitionPerSec) : null,
@@ -634,6 +791,7 @@ internal sealed class CsvSink : IDisposable
     /// <summary>The volumes (at start and every hour). Only volumes.csv is written here.</summary>
     public void WriteVolumes(IReadOnlyList<VolumeInfo> volumes, DateTime utcNow)
     {
+        if (!On()) return;
         EnsureFiles(utcNow);
         foreach (var v in volumes)
             Row(_volumes, utcNow, v.Root, v.FileSystem, v.Label, v.IsDevDrive?.ToString() ?? "unknown", v.DriveType);
@@ -643,6 +801,7 @@ internal sealed class CsvSink : IDisposable
     /// <summary>Writes the rows kept for each file (<see cref="Commit"/>); a file that cannot be written is not thrown for.</summary>
     public void Flush()
     {
+        if (!On()) return;
         foreach (var f in _files) Commit(f);
     }
 
@@ -668,9 +827,15 @@ internal sealed class CsvSink : IDisposable
     /// <summary>Writes what is kept (the rollups being merged too), as a flush does, then lets go of each file. The rows of a
     /// file that no file could take even then, and those dropped since its last write, are logged: they are not in the CSV
     /// files. The handle scan's writer is let go of first: it writes the scan it was handed, within its time
-    /// (<see cref="HandleCsvWriter.Dispose"/>).</summary>
+    /// (<see cref="HandleCsvWriter.Dispose"/>), and so is one let go of when recording was turned off, whose last write may
+    /// still be going on. In Reports only every file is let go of already (as recording was turned off, which this looks at
+    /// first), and nothing is written.</summary>
     public void Dispose()
     {
+        bool on = On();
+        _stoppedHandleWriter?.Dispose(); // waits for the write it left going on, within its time
+        _stoppedHandleWriter = null;
+        if (!on) return;
         _handleWriter?.Dispose();
         WriteMerged();
         Flush();

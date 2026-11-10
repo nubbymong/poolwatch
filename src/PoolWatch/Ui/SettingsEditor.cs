@@ -8,7 +8,8 @@ namespace PoolWatch.Ui;
 /// <summary>
 /// The settings being edited, shared by the plain Settings form and the Advanced grid, and the one Save both use. Save
 /// writes settings.json (<see cref="LiveSettings.SaveForNextStart"/>: never with --config, and with the service profiles
-/// as they are then) and puts the automatic clear, the token-leak guard, update notices and the kernel pool notices into effect at once
+/// as they are then) and puts the automatic clear, the token-leak guard, update notices, the kernel pool notices and the
+/// records (what PoolWatch keeps on disk, and when it is cleaned up) into effect at once
 /// (<see cref="LiveSettings"/>, so the next-clear line and Active changes are right straight away); every other setting
 /// applies at PoolWatch's next start. Turning the automatic clear on first deals with any clear task of your own;
 /// turning the guard on starts its sign-in check. A change made elsewhere while Settings is open (a suggestion, the setup
@@ -122,12 +123,15 @@ internal sealed record AutoClearSettings(bool Enabled, double EveryHours, double
 
 /// <summary>
 /// The settings Save puts into effect at once, in the parts the owner changes together: the automatic clear (all its
-/// values), the token-leak guard, update notices and the kernel pool notices (which the tray reads at each notice).
+/// values), the token-leak guard, update notices, the kernel pool notices (which the tray reads at each notice), what
+/// PoolWatch keeps on disk (which the engine reads at each write: turned on, the day's files start with the next sample;
+/// turned off, they are closed at once) and when reports and records are cleaned up (read at each retention check).
 /// Every other setting applies at the next start.
 /// </summary>
-internal sealed record AtOnceSettings(AutoClearSettings AutoClear, bool TokenGuard, bool CheckForUpdates, PoolNoticeLevel PoolNotices)
+internal sealed record AtOnceSettings(AutoClearSettings AutoClear, bool TokenGuard, bool CheckForUpdates, PoolNoticeLevel PoolNotices,
+    RecordMode Records, int RetentionDays)
 {
-    public static AtOnceSettings Of(Settings s) => new(AutoClearSettings.Of(s), s.TokenGuardEnabled, s.CheckForUpdates, s.PoolNotices);
+    public static AtOnceSettings Of(Settings s) => new(AutoClearSettings.Of(s), s.TokenGuardEnabled, s.CheckForUpdates, s.PoolNotices, s.RecordMode, s.RetentionDays);
 
     public void ApplyTo(Settings s)
     {
@@ -135,6 +139,8 @@ internal sealed record AtOnceSettings(AutoClearSettings AutoClear, bool TokenGua
         s.TokenGuardEnabled = TokenGuard;
         s.CheckForUpdates = CheckForUpdates;
         s.PoolNotices = PoolNotices;
+        s.RecordMode = Records;
+        s.RetentionDays = RetentionDays;
     }
 
     /// <summary>The automatic clear goes from off to on: a clear task of your own is dealt with first.</summary>
@@ -155,5 +161,7 @@ internal sealed record AtOnceSettings(AutoClearSettings AutoClear, bool TokenGua
         edited.AutoClear != shown.AutoClear ? edited.AutoClear : running.AutoClear,
         edited.TokenGuard != shown.TokenGuard ? edited.TokenGuard : running.TokenGuard,
         edited.CheckForUpdates != shown.CheckForUpdates ? edited.CheckForUpdates : running.CheckForUpdates,
-        edited.PoolNotices != shown.PoolNotices ? edited.PoolNotices : running.PoolNotices);
+        edited.PoolNotices != shown.PoolNotices ? edited.PoolNotices : running.PoolNotices,
+        edited.Records != shown.Records ? edited.Records : running.Records,
+        edited.RetentionDays != shown.RetentionDays ? edited.RetentionDays : running.RetentionDays);
 }

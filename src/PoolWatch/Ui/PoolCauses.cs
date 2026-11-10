@@ -101,7 +101,10 @@ internal static class PoolCauses
     public static readonly TimeSpan FindingWindow = TimeSpan.FromHours(24);
     public static readonly TimeSpan IncidentWindow = TimeSpan.FromDays(7);
 
-    /// <summary>Finding kinds that explain pool growth or its release; the rest (lag, marks, versions, ...) stay in findings.jsonl and the bundle.</summary>
+    /// <summary>
+    /// Finding kinds that explain pool growth or its release; the rest (lag, marks, versions, ...) stay in the vendor bundle,
+    /// and with Detailed recording in findings.jsonl.
+    /// </summary>
     private static readonly HashSet<FindingKind> PoolKinds =
         [FindingKind.SpawnStorm, FindingKind.GitRoot, FindingKind.StrayGit, FindingKind.ChildAccumulation, FindingKind.TokenSpawn, FindingKind.FilterEvent];
 

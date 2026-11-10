@@ -37,7 +37,11 @@ folder names and incident ids are local time, so match an id to CSV rows through
 unless a name says otherwise. A pool tag is four characters and **case-sensitive**: `Reff` and `RefF` are different
 tags. Tag owners and meanings are in each incident report, or in Microsoft's `pooltag.txt`.
 
-In the data folder:
+What the data folder holds depends on what the person chose PoolWatch keeps on disk (setup's Records step, or
+**Records** in Settings; `recordMode` in `settings.json`): with **Reports only**, the default, a report folder each time
+the pool grows and no day's records (no `data\<yyyyMMdd>\` folder, no `findings.jsonl`, no `SpawnStorm` folder); with
+**Detailed recording**, those as well. Either way the rest below is kept (the log, the settings, `boots\`, `cache\`,
+the other report folders). A folder written before a change of mode stays until it is cleaned up. In the data folder:
 
 | Path | What it holds |
 |---|---|
@@ -45,9 +49,9 @@ In the data folder:
 | `settings.json` | PoolWatch's settings, and the service profiles: the services each keeps off, and the one applied when PoolWatch starts |
 | `poolwatch.log` | what PoolWatch did, one line each (moved to `poolwatch.log.1` at 2 MB by the tray app, a headless run or the uninstall cleanup); a run during which another program kept refusing its appends goes on in `poolwatch-<date>-<time>-<process id>-<n>.log`, whose first line says why; it cannot be opened while that run writes it, except in the moment it rolls over at 2 MB, or tries to (its own `.1`, made then, can), and the newest five are kept, and any of another PoolWatch still running |
 | `since-boot.md`, `since-boot.json`, `boots.md` | written when PoolWatch exits: what grew since boot, and the last boots side by side |
-| `data\<yyyyMMdd>\` | one folder per day: the CSV files below and `findings.jsonl`. Deleted once nothing in it was written for 7 days (by default) of time the PC was awake, so a PC that sleeps keeps more calendar days |
+| `data\<yyyyMMdd>\` | with Detailed recording only: one folder per day, the CSV files below and `findings.jsonl`. Deleted once nothing in it was written for 7 days (by default; the same cleanup as the incidents and exports) of time the PC was awake, so a PC that sleeps keeps more calendar days |
 | `incidents\<id>\` | one folder per incident (section 3). `<id>` is `<yyyyMMdd-HHmmss>-<tag>-<tag in hex>` |
-| `incidents\<yyyyMMdd-HHmmss>-<kind>-<subject>\` | a report on one alert finding (such as `Experiment`, `Crash`, `SpawnStorm`): its `report.json` is that finding (time, kind, title, details, data), not an incident. A `SpawnStorm` folder holds every storm of one program (its image, role and owner, such as a Claude Code session's bash) that came within an hour of the one before: `data.episodes` lists them, `data` is otherwise the latest storm's, and `spawns.csv` has the folder's first 1,000 starts. Fork copies (a child with its parent's own image and command line, as Git Bash runs a pipeline) are not counted as starts. At most 10 such folders are made an hour; a storm past that is only in `findings.jsonl` |
+| `incidents\<yyyyMMdd-HHmmss>-<kind>-<subject>\` | a report on one alert finding (such as `Experiment`, `Crash`, `SpawnStorm`): its `report.json` is that finding (time, kind, title, details, data), not an incident. A `SpawnStorm` folder holds every storm of one program (its image, role and owner, such as a Claude Code session's bash) that came within an hour of the one before: `data.episodes` lists them, `data` is otherwise the latest storm's, and `spawns.csv` has the folder's first 1,000 starts. Fork copies (a child with its parent's own image and command line, as Git Bash runs a pipeline) are not counted as starts. At most 10 such folders are made an hour; a storm past that is only in `findings.jsonl`. `SpawnStorm` folders are made with Detailed recording only: with Reports only a storm is in the window and the log, not on disk |
 | `cache\clears.json` | the last 100 finished cache clears: when, how and why, the pool (and its paged part) and the standby list before and after, and any error; for a measured clear, the tags it freed (up to 12, each at least 1 MB, with the bytes before and after). Every tag that dropped is in the `CacheClear` findings |
 | `cache\token-guard.json` | the last token-leak test: the Windows build, the result and when it ran |
 | `cache\token-guard-setting.json` | the Windows setting the token-leak guard replaced (the live foreground lock timeout from before it set 0), one value per sign-in with the sign-in it belongs to, so turning the guard off or uninstalling in that sign-in puts it back when Windows allows it (one the guard found already changed is not recorded, and stays until you sign out) |
@@ -58,7 +62,7 @@ In the data folder:
 | `service-changes.json` | every background service PoolWatch changed, with its original start type (Put back needs it, on the Services tab and in Active changes) |
 | `applied-changes.json` | the other changes PoolWatch made that can be put back (Active changes needs it) |
 | `removed-tasks\<name>.xml` | only when a clear task of the owner's that PoolWatch removed could not be put back by itself: its definition, to import in Task Scheduler |
-| `setup.json` | when setup was completed, the suggestions the owner hid (each shows again after 30 days), and the feature cards of the Simple view the owner hid (for good) |
+| `setup.json` | when setup was completed, when the owner chose what PoolWatch keeps on disk (`recordsChosenUtc`; absent after an upgrade from 1.0.0-beta.2 until that choice is made), the suggestions the owner hid (each shows again after 30 days), and the feature cards of the Simple view the owner hid (for good) |
 | `ui-state.json` | which view the main window opens in: Simple or Advanced |
 | `uninstall-summary.txt` | written by the uninstaller: each change it put back (or put back only in part, and what was not done), and any it could not put back (and why) or kept |
 | `uninstall-list.json` | only while the uninstaller runs: the list of changes it asked PoolWatch for, deleted again once read |
@@ -72,7 +76,9 @@ the Services tab: `poolwatch-services.md`, the prompt PoolWatch made for their A
 and startup apps on the PC, with its own instructions), and `poolwatch-services-answer.json`, the agent's answer,
 which PoolWatch reads only when the person imports it, and then shows every change before making any.
 
-The daily CSV files have a header row. `totals.csv` has a row every 10 seconds; the others as noted. A day's rows of
+The daily CSV files (Detailed recording) have a header row. `totals.csv` has a row every 10 seconds; the others as
+noted. When Detailed recording is turned on while PoolWatch runs, the day's files start again at the next sample with
+the whole picture, as at a start; when it is turned off they stop at once. A day's rows of
 one file can go on in a numbered file next to it (`totals-2.csv`, then `totals-3.csv`, and so on): when an update
 changed its columns, or when another program refused its open or write. Read them together and order the rows by
 their time: when PoolWatch starts again the same day, it can write to the first file again.
@@ -119,7 +125,7 @@ table says. When you read one of them as a series, carry a value forward only as
 | `lag.csv` | time, timer_ms, message_ms, file_ms, dwm_missed, committed_paged_bytes, committed_nonpaged_bytes: how late small probes ran (how slow the PC felt) |
 | `load.csv` | time, cpu_fraction, run_queue, cores, page_faults_per_sec, demand_zero_per_sec, transition_per_sec, pages_input_per_sec, probe_tripping |
 
-`findings.jsonl` holds one JSON object per line: time, kind, severity (Info, Warning or Alert), title, details, pid,
+`findings.jsonl` (Detailed recording) holds one JSON object per line: time, kind, severity (Info, Warning or Alert), title, details, pid,
 image, data and reportDir. The kinds that matter most: `CacheClear` (a clear and what it freed, by tag), `TokenSpawn`
 and `TokenGuard` (the token leak), `SpawnStorm` and `ChildAccumulation` (a process starting hundreds of others),
 `Saturation` (every core busy), `ServiceChange`, `Crash`, `VersionChange`, `Lag`, `GitRoot` and `StrayGit` (a `.git`
@@ -144,7 +150,9 @@ the events of its window from 2 minutes before the onset, every one from its fir
 PoolWatch added them (sorted by time within each addition): the window's first 1,000 at most, and on a busy PC fewer
 while the incident is open, as PoolWatch writes within a disk budget. When it holds fewer than the window had for good,
 its last row (`kind` `Note`) says so, and its time is when its events stop. An `Alert` row marks when each growth rule
-first fired (the report has its latest numbers). The day's `data\<yyyyMMdd>\events.csv` has every event. On a busy
+first fired (the report has its latest numbers). With Detailed recording the day's `data\<yyyyMMdd>\events.csv` has
+every event; with Reports only that `Note` row says the later ones are not recorded; and when the choice was changed
+during the incident, it says the day's file has them only for the time Detailed recording was on. On a busy
 PC an open incident's `report.json` can be up to about an hour behind (PoolWatch's window shows it live); an export
 of an open incident (Export report) writes its folder whole first, so the zip is current. The fields of `report.json`
 that matter:

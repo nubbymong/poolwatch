@@ -8,10 +8,12 @@ namespace PoolWatch.Ui;
 /// <summary>
 /// Settings, opened from the main window's Settings button: a short form in plain words with what most people change, in
 /// three columns (Start at logon, update notices, and the Codex shortcut when it can be made again; automatic cache
-/// clearing with its three rules by name, and the kernel pool notices' three choices under Notifications; deeper capture
-/// and the token-leak guard) and an Advanced button for every setting (the old grid). Start at logon is a scheduled task and changes
-/// at once. Save writes the rest to settings.json and puts automatic clearing, the token-leak guard, the notifications
-/// and update notices into effect at once; the other settings apply at
+/// clearing with its three rules by name, and the kernel pool notices' three choices under Notifications; Records, what
+/// PoolWatch keeps on disk, Reports only or Detailed recording with a line each, and when reports and records are cleaned
+/// up; deeper capture and the token-leak guard) and an Advanced button for every setting (the old grid, which shows the
+/// same two settings too). Start at logon is a scheduled task and changes at once. Save writes the rest to settings.json
+/// and puts automatic clearing, the token-leak guard, the notifications, update notices, records and their cleanup into effect at once;
+/// the other settings apply at
 /// PoolWatch's next start. A change made elsewhere while the form is open shows here at once. The form sizes itself to its
 /// content, so nothing is cut off at any scaling, and fits a 1024 x 600 screen; on a shorter one it scrolls. Created for
 /// each opening and disposed when it closes, so it always starts from what is saved, with the settings in effect now.
@@ -184,7 +186,10 @@ internal sealed class SettingsDialog : Form
         _tips.SetToolTip(_fields.NeedsAttention, SimpleSettings.NeedsAttentionTip);
         _tips.SetToolTip(_fields.NoticesOff, SimpleSettings.NoticesOffTip);
 
-        // The third column: what PoolWatch records, and the token-leak guard.
+        // The third column: what PoolWatch's traces record, the token-leak guard, and Records: what PoolWatch keeps on disk,
+        // no advanced option. The three columns are full on a 1024 x 600 screen, so Records is compact: its two choices on
+        // one line, the chosen one's line under them (each choice's line is its tooltip too), and when reports and records
+        // are cleaned up.
         var third = Column();
         third.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
         Row(third, Heading("Deeper capture"));
@@ -194,6 +199,27 @@ internal sealed class SettingsDialog : Form
         Row(third, _fields.TokenGuard, indent);
         Row(third, Hint(SimpleSettings.TokenGuardHint), indent, bottom: 10);
         _tips.SetToolTip(_fields.TokenGuard, SimpleSettings.TokenGuardTip);
+        Row(third, Heading(SimpleSettings.RecordsHeading));
+        var modes = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
+        foreach (var mode in new[] { _fields.ReportsOnly, _fields.Detailed })
+        {
+            mode.Margin = new Padding(0, 0, S(14), 0);
+            modes.Controls.Add(mode);
+        }
+        Row(third, modes, indent, bottom: 0);
+        _fields.RecordsHint.ForeColor = SystemColors.GrayText;
+        Row(third, _fields.RecordsHint, indent, bottom: 2);
+        _fields.CleanUpDays.Width = S(76);
+        var cleanUp = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, MaximumSize = new Size(width - indent, 0) };
+        foreach (var c in new Control[] { new Label { Text = SimpleSettings.CleanUpLabel, AutoSize = true }, _fields.CleanUpDays })
+        {
+            c.Margin = c is Label ? new Padding(0, S(5), S(6), 0) : new Padding(0, S(2), 0, 0);
+            cleanUp.Controls.Add(c);
+        }
+        Row(third, cleanUp, indent, bottom: 0);
+        _tips.SetToolTip(_fields.ReportsOnly, SimpleSettings.ReportsOnlyTip);
+        _tips.SetToolTip(_fields.Detailed, SimpleSettings.DetailedTip);
+        _tips.SetToolTip(_fields.CleanUpDays, SimpleSettings.CleanUpTip);
 
         var columns = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
         for (int i = 0; i < 3; i++) columns.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -463,21 +489,36 @@ internal sealed class SimpleSettingsFields
     public RadioButton EveryGrowth { get; } = new() { Text = SimpleSettings.EveryGrowthChoice, AutoSize = true, Checked = true };
     public RadioButton NeedsAttention { get; } = new() { Text = SimpleSettings.NeedsAttentionChoice, AutoSize = true };
     public RadioButton NoticesOff { get; } = new() { Text = SimpleSettings.NoticesOffChoice, AutoSize = true };
+    /// <summary>What PoolWatch keeps on disk, under Records (one is always picked), and when reports and records are cleaned up.</summary>
+    public RadioButton ReportsOnly { get; } = new() { Text = SimpleSettings.ReportsOnlyChoice, AutoSize = true, Checked = true };
+    public RadioButton Detailed { get; } = new() { Text = SimpleSettings.DetailedChoice, AutoSize = true };
+    /// <summary>The chosen record mode's line, under the two choices (<see cref="SimpleSettings.RecordsLine"/>).</summary>
+    public Label RecordsHint { get; } = new() { Text = SimpleSettings.ReportsOnlyHint, AutoSize = true };
+    public ComboBox CleanUpDays { get; } = new() { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = SimpleSettings.CleanUpLabel };
 
     /// <summary>The notices' choices, in the form's order.</summary>
     public RadioButton[] NoticeChoices => [EveryGrowth, NeedsAttention, NoticesOff];
+
+    /// <summary>The cleanup's choices: a number of days and its words ("7 days").</summary>
+    private sealed record DayItem(int Value, string Text)
+    {
+        public override string ToString() => Text;
+    }
 
     public SimpleSettingsFields()
     {
         // One choice at a time in each group, whatever holds the choices (radio buttons only clear each other inside one
         // container).
-        foreach (var group in new[] { new[] { Schedule, PoolSize, Either }, NoticeChoices })
+        foreach (var group in new[] { new[] { Schedule, PoolSize, Either }, NoticeChoices, new[] { ReportsOnly, Detailed } })
             foreach (var choice in group)
                 choice.CheckedChanged += (_, _) =>
                 {
                     if (!choice.Checked) return;
                     foreach (var other in group) if (other != choice) other.Checked = false;
                 };
+        ShowDays(new Settings().RetentionDays); // the default, until the form is filled
+        // The line under the record modes says what the one chosen keeps.
+        foreach (var mode in new[] { ReportsOnly, Detailed }) mode.CheckedChanged += (_, _) => RecordsHint.Text = SimpleSettings.RecordsLine(Records);
     }
 
     /// <summary>The rule picked now.</summary>
@@ -485,6 +526,26 @@ internal sealed class SimpleSettingsFields
 
     /// <summary>The kernel pool notices picked now.</summary>
     public PoolNoticeLevel Notices => NeedsAttention.Checked ? PoolNoticeLevel.NeedsAttention : NoticesOff.Checked ? PoolNoticeLevel.Off : PoolNoticeLevel.EveryGrowth;
+
+    /// <summary>What PoolWatch keeps on disk, as picked now.</summary>
+    public RecordMode Records => Detailed.Checked ? RecordMode.Detailed : RecordMode.ReportsOnly;
+
+    /// <summary>The cleanup's days picked now (the default, 7, before the list was filled).</summary>
+    public int Days => (CleanUpDays.SelectedItem as DayItem)?.Value ?? new Settings().RetentionDays;
+
+    /// <summary>The cleanup's list: setup's days, with <paramref name="days"/> among them when it is a value of its own, and it chosen.</summary>
+    private void ShowDays(int days)
+    {
+        var options = Setup.RecordChoices.DayOptions(days);
+        if (!CleanUpDays.Items.Cast<DayItem>().Select(i => i.Value).SequenceEqual(options))
+        {
+            CleanUpDays.BeginUpdate();
+            CleanUpDays.Items.Clear();
+            foreach (int d in options) CleanUpDays.Items.Add(new DayItem(d, Setup.SetupText.Days(d)));
+            CleanUpDays.EndUpdate();
+        }
+        CleanUpDays.SelectedIndex = options.ToList().IndexOf(days);
+    }
 
     /// <summary>The schedule and the size the fields show when the rule in effect does not use one (the defaults).</summary>
     private const decimal ShownHours = 1, ShownPoolGb = 8;
@@ -505,13 +566,17 @@ internal sealed class SimpleSettingsFields
         EveryGrowth.Checked = v.PoolNotices == PoolNoticeLevel.EveryGrowth;
         NeedsAttention.Checked = v.PoolNotices == PoolNoticeLevel.NeedsAttention;
         NoticesOff.Checked = v.PoolNotices == PoolNoticeLevel.Off;
+        ReportsOnly.Checked = v.Records == RecordMode.ReportsOnly;
+        Detailed.Checked = v.Records == RecordMode.Detailed;
+        RecordsHint.Text = SimpleSettings.RecordsLine(v.Records);
+        ShowDays(v.RetentionDays);
     }
 
     /// <summary>What the form holds: the rule keeps the numbers it uses, and turns the other rule off (0).</summary>
     public SimpleSettings Values()
     {
         var (hours, gb) = SimpleSettings.ForRule(Rule, Hours.Value, PoolGb.Value);
-        return new(AutoClear.Checked, hours, gb, Deeper.Checked, TokenGuard.Checked, Updates.Checked, Notices);
+        return new(AutoClear.Checked, hours, gb, Deeper.Checked, TokenGuard.Checked, Updates.Checked, Notices, Records, Days);
     }
 }
 

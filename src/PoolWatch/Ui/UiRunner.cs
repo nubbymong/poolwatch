@@ -152,9 +152,9 @@ internal static class UiRunner
         files.AddRange(app.Form.Screenshots(dir));
         var form = app.Form.SmokeStats(); // hides the main window last
 
-        // Setup as on a first run (its close button asks first), each of its seven steps once it has read the PC, then
-        // "How PoolWatch works". Nothing is applied: the test goes straight to each step, and every change refuses in the
-        // test anyway.
+        // Setup as on a first run (its close button asks first), each of its eight steps once it has read the PC, then
+        // "How PoolWatch works", then its Records step alone, as it opens by itself after an upgrade from 1.0.0-beta.2.
+        // Nothing is applied: the test goes straight to each step, and every change refuses in the test anyway.
         var guide = new SetupWizardForm(app.Setup, firstRun: true, advanced: false);
         guide.Show();
         bool guideReady = await Task.WhenAny(guide.Ready, Task.Delay(SmokeWait)) == guide.Ready;
@@ -171,6 +171,12 @@ internal static class UiRunner
         how.Close();
         var guideStats = new { ready = guideReady, window = guide.WindowStats(), steps, howItWorks = howStats };
         guide.CloseForTest();
+
+        var records = new SetupWizardForm(app.Setup, firstRun: false, advanced: false, recordsOnly: true);
+        records.Show();
+        bool recordsReady = await Task.WhenAny(records.Ready, Task.Delay(SmokeWait)) == records.Ready;
+        var recordsStats = new { ready = recordsReady, window = records.WindowStats(), stats = records.SmokeStats(), shot = Shot(records, SetupWizardForm.RecordsAloneShot) };
+        records.CloseForTest();
 
         var active = new ActiveChangesForm(app.Setup.Ledger, app.Setup.Actions);
         active.Show();
@@ -202,6 +208,7 @@ internal static class UiRunner
             screenshots = files.Select(Path.GetFileName),
             form,
             guide = guideStats,
+            recordsAlone = recordsStats,
             activeChanges = activeStats,
             report = reportStats,
             about = aboutStats,
