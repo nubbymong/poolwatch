@@ -7,6 +7,12 @@
 # that step runs on that leg alone; on its other leg, a later step fails the job when the output lacks that line.
 # CheckMarkerTests holds the scripts, this list and the workflows to each other, and fails on a step other than these
 # (the run, its check, and the soak's check of its other leg) that names one of these scripts by its file name.
+agentic-soak.ps1 agentic-load-ran
+agentic-soak.ps1 agentic-cpu
+agentic-soak.ps1 agentic-working-set
+agentic-soak.ps1 agentic-writes
+agentic-soak.ps1 agentic-storm-folders
+agentic-soak.ps1 agentic-incident-folders
 installer-e2e.ps1 installer-welcome-page-fits
 installer-e2e.ps1 installer-ready-page-fits
 installer-e2e.ps1 installer-every-icon-shown

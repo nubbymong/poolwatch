@@ -22,8 +22,10 @@ internal static class CostReport
         int historyProcs; long historyPoints; int minutes; long minuteEntries; int events;
         int growthMinutes, growthTags; long growthTagEntries, growthBytes;
         (int incidents, int owners, int ownerMembers, int events) held;
+        Core.Incidents.FoldersBehind behind;
         lock (analysis.History.SyncRoot)
         {
+            behind = analysis.Incidents.BehindNow(analysis.History);
             historyProcs = analysis.History.ProcessTrackCount;
             historyPoints = analysis.History.ProcessPointCount;
             minutes = analysis.History.Minutes.Count;
@@ -36,8 +38,16 @@ internal static class CostReport
             growthBytes = analysis.Growth.ApproxBytes();
         }
         int stormTraceRows;
-        // The starts the spawn-storm report folders hold for their spawns.csv, not written yet.
-        lock (analysis.Diagnostics.Spawns) stormTraceRows = analysis.Diagnostics.Spawns.Folders.Sum(f => f.PendingRows.Count);
+        object spawns;
+        // The starts the spawn-storm report folders hold for their spawns.csv, not written yet; and what the spawn tracker
+        // counted: the starts, the fork copies it did not count as launches, the report folders it holds and those it did
+        // not make (past 10 an hour). The agentic-load check (ci/agentic-soak.ps1) reads these.
+        lock (analysis.Diagnostics.Spawns)
+        {
+            var t = analysis.Diagnostics.Spawns;
+            stormTraceRows = t.Folders.Sum(f => f.PendingRows.Count);
+            spawns = new { starts = t.StartsSeen, forkCopies = t.ForkCopiesSeen, stormFoldersHeld = t.Folders.Count, stormFoldersWithheld = t.FoldersWithheld };
+        }
         return new
         {
             elapsedSeconds = Math.Round(elapsed, 1),
@@ -104,11 +114,43 @@ internal static class CostReport
                 lastHandleScanMs = engine.LatestHandles?.Elapsed.TotalMilliseconds,
                 lastHandleTotal = engine.LatestHandles?.Counts.TotalHandles,
             },
+            // The report folders' write budget (DESIGN.md section 3): what it let them write (that could wait, against what it
+            // allows them, and what a reader needed at once, always written), how often it held a write back for a later
+            // sample, and the open incidents whose report or chart is behind now, the oldest last written how long ago. So the
+            // owner can see what was deferred.
+            writeBudget = WriteBudgetOf(analysis.Incidents.Budget, behind, elapsed),
+            spawns,
+            // The handle scans whose rows the handle CSV's own thread did not write (each replaced by a later one while it
+            // waited behind a write still going on: HandleCsvWriter).
+            handleScansNotWritten = engine.HandleScansNotWritten,
             stages = Profiler.StageReport(elapsed),
             writesByFile = Profiler.WrittenByFile.OrderByDescending(kv => kv.Value)
                 .Select(kv => new { file = kv.Key, MB = Math.Round(kv.Value / 1048576.0, 3), MBPerHour = elapsed > 0 ? Math.Round(kv.Value / 1048576.0 / elapsed * 3600, 2) : 0 }),
         };
     }
+
+    /// <summary>
+    /// profile.json's <c>writeBudget</c>: the report folders' budget, what it spent (what could wait beside what it allows
+    /// them, <see cref="Core.Incidents.WriteBudget.CanWaitAllowance"/>), how many times it held a write back (deferrals, not
+    /// distinct writes: <c>heldBack</c>), and the open incidents behind now: their reports (<c>incidentsBehindNow</c>, of
+    /// which <c>writesFailedNow</c> because their last write failed) and their charts and CSVs (<c>chartsBehindNow</c>).
+    /// </summary>
+    internal static object WriteBudgetOf(Core.Incidents.WriteBudget b, Core.Incidents.FoldersBehind behind, double elapsedSeconds) => new
+    {
+        bytesPerHour = b.BytesPerHour,
+        burstBytes = b.Burst,
+        spentMB = Math.Round(b.Spent / 1048576.0, 3),
+        spentMBPerHour = elapsedSeconds > 0 ? Math.Round(b.Spent / 1048576.0 / elapsedSeconds * 3600, 3) : 0,
+        canWaitMB = Math.Round(b.SpentCanWait / 1048576.0, 3),
+        canWaitAllowanceMB = Math.Round(b.CanWaitAllowance / 1048576.0, 3),
+        mustMB = Math.Round(b.SpentMust / 1048576.0, 3),
+        heldBack = b.Held,
+        incidentsBehindNow = behind.Reports,
+        oldestBehindMinutes = behind.OldestReport is { } o ? Math.Round(o.TotalMinutes, 1) : (double?)null,
+        writesFailedNow = behind.Failed,
+        chartsBehindNow = behind.Charts,
+        oldestChartMinutes = behind.OldestChart is { } c ? Math.Round(c.TotalMinutes, 1) : (double?)null,
+    };
 
     public static string Json(MonitorEngine engine, AnalysisPipeline analysis, (int rankings, int owners, int ownerMembers, int events)? window = null) =>
         JsonSerializer.Serialize(Build(engine, analysis, window), new JsonSerializerOptions { WriteIndented = true });

@@ -709,6 +709,7 @@ internal sealed class MainForm : Form
         _rankTags = [];
         _knownIssues = null;
         _reportText.Clear();
+        _liveText.Clear();
         _detailText.Clear();
         _textItems.Clear();
         if (_syncs.TryGetValue(_causes, out var sync)) sync.Clear();
@@ -1026,15 +1027,35 @@ internal sealed class MainForm : Form
     }
 
     private readonly Dictionary<string, (DateTime written, string text)> _reportText = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (string Json, string Text)> _liveText = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// What the details of an open incident say about its folder: the details are live, the folder is written within the
+    /// disk budget (so it can be behind them), when it was last written, and that Export report writes it whole first.
+    /// </summary>
+    internal static string LiveFolderNote(DateTime? writtenUtc) =>
+        "These details are live, from PoolWatch's memory. While the incident is open PoolWatch writes its report folder within its disk " +
+        "budget, so on a busy PC the folder can be behind them" + (writtenUtc is { } w ? $" (its report was last written at {Fmt.Stamp(w)})" : " (its report is being written)") +
+        ": report.md and report.json at each refresh the budget has room for, the timeline chart and the CSV files when it has room to spare, " +
+        "and all of it when the incident closes. Export report writes the folder whole first.";
 
     /// <summary>
     /// The incident's report summary as the details show it (<see cref="UiActions.IncidentDetails"/>: no Markdown marks, the
-    /// kind and confidence in words, local times), from report.json, re-read when the report is rewritten. Copy summary
-    /// copies it as report.json has it, but for the confidence (<see cref="UiActions.IncidentSummary"/>).
+    /// kind and confidence in words, local times). An open incident's comes from memory (<see cref="UiData.Live"/>), so it is
+    /// never behind its folder, with when the folder was last written; any other's from report.json, re-read when the report
+    /// is rewritten. Copy summary copies it as report.json has it, but for the confidence (<see cref="UiActions.IncidentSummaryNow"/>).
     /// </summary>
     private string IncidentDetails(CauseRow row)
     {
         if (row.Folder is not { } dir) return "";
+        if (UiData.Live(_analysis, dir) is { } live)
+        {
+            if (_liveText.TryGetValue(dir, out var shown) && ReferenceEquals(shown.Json, live.Json)) return shown.Text;
+            string text = CopyText.IncidentDetails(live.Json).TrimEnd() + "\r\n\r\n" + LiveFolderNote(live.WrittenUtc);
+            _liveText[dir] = (live.Json, text);
+            return text;
+        }
+        _liveText.Remove(dir);
         string json = Path.Combine(dir, "report.json");
         try
         {
@@ -1139,7 +1160,7 @@ internal sealed class MainForm : Form
         switch (row.Kind)
         {
             case CauseKind.Incident when row.Folder is { } dir:
-                return new CopyInfo(null, null, dir, null, () => UiActions.IncidentSummary(dir));
+                return new CopyInfo(null, null, dir, null, () => _actions.IncidentSummaryNow(dir));
             case CauseKind.Tag when row.Tag is { } tag && _rankings.Get(tag) is { } ranked: // none after the window hid: nothing to copy
                 return new CopyInfo(null, null, null, null, () => TagSummary(ranked));
             case CauseKind.Process when row.Process is { } pk && _engine.Registry.Get(pk) is { } r:

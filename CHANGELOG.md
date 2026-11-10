@@ -106,9 +106,13 @@ want, trims background work. Every change it makes is listed, with a way to put 
   start is), and one program is one storm however PoolWatch first saw it. One program's storms within an hour share one
   report folder, and at most 10 new ones are made an hour. PoolWatch writes its incident and storm reports within a
   disk budget: a report is written when an incident opens and closes, and brought up to date in between as the budget
-  allows (with many incidents open at once, up to about an hour behind; the list's figures are live). An incident's
-  `events.csv` has every event from its first row to its last. The incident list always shows your incidents, however
-  many storm reports came after them.
+  allows (with many incidents open at once, up to about an hour behind). The window is never behind: the list's
+  figures, an open incident's details, its Copy summary and Report an issue's summary of it come from what PoolWatch
+  knows now, and Export report writes an open incident's folder whole first. About and `cache\profile.json` say what the
+  budget wrote, how much of it could wait against what the budget allows, how often it held a write back, and which
+  open incidents' reports or charts are behind. An
+  incident's `events.csv` has every event from its first row to its last, and an export never takes half a row of it.
+  The incident list always shows your incidents, however many storm reports came after them.
 - **Lighter on the CPU and memory under agentic load.** On a PC starting hundreds of processes a minute with ten
   incidents open, 1.0.0-beta.2 spent 2.4% of one core and its memory rose for hours (170 MB of managed memory after
   7 hours). An open incident's growth is still measured every 30 seconds, but its suspects are ranked again only before
@@ -126,6 +130,15 @@ want, trims background work. Every change it makes is listed, with a way to put 
   as a whole is still over its own budget on such a PC (About and every report say how much). An incident open longer
   than 70 minutes keeps where its growth began, so its growth no longer shrinks in its report, and PoolWatch's own
   cache clears still count in it after they leave the 70 minutes.
+- **The day's data files, light on the disk.** On a PC doing heavy agentic coding the day's CSV files wrote about
+  4.7 MB an hour, nearly the whole 5 MB budget; in a test of that load they now write about 2.1 MB. Each day's files
+  start with the whole picture and
+  then hold what changed: a pool tag when it moved 1 MB (and every 10 minutes), a process once it has run a minute and
+  while it is busy, a service when its host changes, handle counts when they change (and once more as a count leaves
+  the ones recorded), an exit without the command line its start already gave, and the short commands summed over 5
+  minutes. The guide for AI assistants in the data folder says, file by file, how to read them. A handle scan writes
+  only its own files, on a thread of its own, so PoolWatch's sampling never waits for it. The vendor bundle takes the
+  spawn trace of the storm folder in use most recently.
 - **A week of data, whatever the clock says.** PoolWatch keeps its data in `C:\ProgramData\PoolWatch`, which only
   administrators can change. A day's folder, an incident or an export is deleted once nothing in it was written for 7
   days (by default), counted on the PC's own timer while the PC is on and awake, so a change of the PC's clock never

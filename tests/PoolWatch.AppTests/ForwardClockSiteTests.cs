@@ -262,11 +262,10 @@ public sealed class ForwardClockSiteTests : IDisposable
     {
         // A sample every 10 s; the system clock is set back an hour at the 3rd and forward a day at the 9th. The tag and
         // process rows are written every 60 forward seconds: at the 1st, 7th and 13th samples, neither stopped by the hour
-        // back nor written at once by the day forward.
+        // back nor written at once by the day forward. (The tag grows and the process reads at every sample: the day's files
+        // hold a tag or a process again only when it changed, CsvSink.)
         var c = new TwoClocks();
         var paths = new AppPaths(Path.Combine(_dir, "data"), null, secure: false);
-        var tag = new PoolTagEntry(PoolTag.Parse("Leak"), 0, 0, 0, 1, 0, 64UL << 20);
-        var proc = new ProcessSample { Pid = 77, ParentPid = 4, CreateTime = 1, ImageName = "x.exe" };
         var registry = new ProcessRegistry();
         using (var sink = new CsvSink(paths, new Settings(), verbose: false))
         {
@@ -275,6 +274,8 @@ public sealed class ForwardClockSiteTests : IDisposable
                 if (i == 2) c.SetSystemClock(-TimeSpan.FromHours(1));
                 if (i == 8) c.SetSystemClock(TimeSpan.FromDays(1));
                 var at = c.Now();
+                var tag = new PoolTagEntry(PoolTag.Parse("Leak"), 0, 0, 0, 1, 0, (64UL + 2UL * (ulong)i) << 20);
+                var proc = new ProcessSample { Pid = 77, ParentPid = 4, CreateTime = 1, ImageName = "x.exe", ReadOperationCount = 10L * i };
                 sink.WriteSample(new Sample(at.Utc, default, [tag], [proc]) { TickMs = at.Ms }, registry);
                 c.Pass(TimeSpan.FromSeconds(10));
             }

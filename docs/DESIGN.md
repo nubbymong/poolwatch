@@ -80,8 +80,10 @@ on), and every lasting one is listed under Active changes, where it can be put b
   wrote 140 to 225 MB an hour in 1.0.0-beta.2: every open incident's whole folder (events.csv alone 1.2 to 1.3 MB) every
   5 minutes, and a folder for every spawn storm (about 3,000 a day, most of them Git Bash fork copies). They now share
   one write budget (`Core.Incidents.WriteBudget`, section 10), the report folders' share of the 5 MB an hour beside the
-  day's CSV files' 2 to 3 MB: what can wait is written while the budget has room, 1 MB an hour with a burst of 256 KB,
-  first an open incident's `report.json` and `report.md` (what the window's details and Copy summary read), the one
+  day's CSV files' 2.5 MB (the next item): what can wait is written while the budget has room, 1 MB an hour with a burst
+  of 256 KB, first an open incident's `report.json` and `report.md` (what an export and an AI assistant read; the
+  window's details and Copy summary of an open incident are built from the incident in memory, so they are never behind
+  it, and Export report writes its folder whole first), the one
   written longest ago first, then its events' rows while no report is due, and a storm folder's update, an open
   incident's chart and CSVs only while the budget has room to spare; what a reader needs at once (an incident opening,
   re-opening or closing, a trace attached, a storm's first and last folder write, the end of a run) is always written
@@ -93,10 +95,18 @@ on), and every lasting one is listed under Active changes, where it can be put b
   owner's event rate and command-line lengths, write 1.7 MB in that hour (1.0 MB of it the openings and the storm
   folders' first writes, which must be made), under its 2 MB share; each open incident's report there is at most an
   hour behind (an incident's report is about 90 KB, ten of them refreshed every 5 minutes would be 10 MB an hour).
-  It also measures the CPU of that work on its thread, and asserts under 18 s in the hour, the 0.5% budget. The rest
-  of the overhead on the owner's PC (2.9% of one core and 254 MB in 1.0.0-beta.2, `cache\profile.json`: the ranking,
-  the handle scans' CSV flush, the day's CSV files at about 4.7 MB an hour, the allocations) is outside the report
-  folders; the next point is the ranking's and the memory's.
+  It also measures the CPU of that work on its thread, and asserts under 18 s in the hour, the 0.5% budget. The rest of
+  the overhead on the owner's PC (2.9% of one core and 254 MB in 1.0.0-beta.2, `cache\profile.json`: the ranking, the
+  allocations, and the day's CSV files at about 4.7 MB an hour with the handle scans' write of every one of them) is
+  outside the report folders: the ranking and the memory are the next item, the day's files and the handle scan the
+  items after it. What the budget spent and held back is in About (beside
+  PoolWatch's own overhead: what the report folders wrote; what of it a reader needed at once, written whatever the
+  budget; what could wait, within or over what the budget allows it so far (`WriteBudget.CanWaitAllowance`: the refill,
+  the burst it starts with and one burst more, as such a write is made with any room left and debited whole); how many
+  times a write was held for a later sample; the open incidents whose report is behind now, the oldest since when, and
+  of them those whose last write failed; and those whose chart and CSV files are 30 minutes old or more) and in
+  `cache\profile.json`'s `writeBudget`, so a deferral is never silent and nothing is said to be within the budget that
+  is not.
 - **CPU and memory under agentic load.** On the owner's PC (`cache\profile.json`, 1.0.0-beta.2 after 7 hours of
   agentic load, about 236,000 process starts an hour) PoolWatch spent 2.4% of one core (`tick (all)` 1.46%, of it
   `analysis.incidents` 0.43% and `diagnostics` 0.36%), allocated 15.5 MB a sample and 2.3 MB more in its ETW callbacks
@@ -166,17 +176,50 @@ on), and every lasting one is listed under Active changes, where it can be put b
   | `tick.registry`, `analysis.history` | 0.047 | 0.047 | unchanged in the world |
   | `diagnostics` (core parts in the world 0.008) | 0.36 | up to 0.36 | app-side parts not measured; now `diagnostics.*` by part |
   | `tick.processes` (the kernel's process query) | 0.21 | 0.21 | not changed |
-  | handle scan, `incident.write`, CSV files (the other lane) | 0.23 | 0.23 | as measured |
+  | handle scan, `incident.write`, CSV files | 0.23 | about 0.06 | the scan's query 0.04 as measured; its write 16 ms of CPU a scan and the day's files under 0.01% (`HandleCsvWriterTests`, `DailyCsvBudgetTests`, below); `incident.write` within the write budget |
   | ETW callbacks (`etw.start`, `etw.stop`, `enrich`) | 0.15 | 0.15 | not changed |
   | the window (`ui.*`) | 0.08 | 0.08 | not changed |
   | the other stages (labels, trims, services, pool tags) | 0.02 | 0.02 | not changed |
   | outside the stages (the GC, timers, the thread pool) | 0.73 | about 0.35 | allocations about 18 → about 8 MB a sample, ETW callbacks included |
-  | **all** | **2.42** | **about 1.5** | |
+  | **all** | **2.42** | **about 1.3 to 1.5** | |
 
   So the CPU still over budget on that PC is the diagnostics' app-side parts (load and PDH reads, services, the cache
   clear, storm folders, lag, marks, findings; `diagnostics.*` in the next `profile.json` say which), the process
-  query, the ETW callbacks (3.4 KB allocated a start), the handle scan and the GC's share; under the CI soak's lighter
-  load PoolWatch keeps to it (0.46% with the window open).
+  query, the ETW callbacks (3.4 KB allocated a start), the handle scan's query and the GC's share; under the CI soak's
+  lighter load PoolWatch keeps to it (0.46% with the window open).
+- **The day's CSV files inside their share.** On the owner's PC in 1.0.0-beta.2 the day's folder took 112 MB a day:
+  `events.csv` 2.2 MB an hour, `tags.csv` 0.95, `processes.csv` 0.75, `services.csv` 0.31, `handles.csv` 0.19. Their
+  share is now 2.5 MB an hour, which with the report folders' 1 MB leaves 1.5 MB for `findings.jsonl` (0.3 to 0.6 MB an
+  hour there), the log and the caches. Outside verbose mode (`CsvSink`, AGENTS.md's file guide says the same) each day's
+  files begin with the whole picture (every process, every tag over 1 MB, the whole services list, every handle row) and
+  then hold what changed: a tag's row when its paged or non-paged use moved 1 MB, at least every 10 minutes, and once as
+  it falls under 1 MB; a process once it has run a minute (a shorter one is in `events.csv`), then while it is among the
+  50 busiest by I/O (any at all), its handles moved by 100, or it is PoolWatch; a service when its host changed (PID 0:
+  stopped); a process's handles of a type when their count changed, and once more, with its count then, as it leaves
+  that selection while it runs (the per-type totals and the System process's every scan); an `Exit` or `Orphaned` row
+  without the command line its `Start` row gave that day (a `Start` row without one is not matched); and the event
+  summary's minute rollups merged over 5 minutes (`EventSummarizer.RollupClosed`; the incidents still get the minute
+  ones). AGENTS.md says file by file what a reader may carry forward from a row. A file whose kept rows were dropped
+  (past the bound on rows no file could take) gives the whole picture again at its next write.
+- **The handle scan's write off the tick.** In the owner's beta.2 one handle scan's CSV stage took 41.9 s of wall time,
+  24 s of it the sampler thread's CPU, while every file of the day, written at each sample, never took more than 0.2 s
+  (`tick.csv`): what took the time was not found, as that build had no finer stages. So a scan's two files are written on
+  a thread of their own (`HandleCsvWriter`, through a sink of its own): the tick hands the scan over and goes on; at most
+  one scan waits while one is written, and one handed over meanwhile replaces it, counted (`profile.json`'s
+  `handleScansNotWritten`) and logged. The write is profiled in parts (`csv.handles.rows`, `csv.handles.commit`), and one
+  of 5 s or more is logged with its thread's kernel and user CPU, the GCs and their pause during it and PoolWatch's page
+  faults, so the next slow one says where its time went. It records at most 2,000 of the processes' counts, the
+  largest, and a scan with more says how many it left out (a pid -2 row).
+  `HandleCsvWriterTests` measures an owner-sized census (the System process with 1.4 million handles and 600 processes,
+  2 million in all, 820 rows): 16 ms of CPU for the day's first scan and 2 ms for the next, asserted under 250 ms, and
+  the tick's hand-over under 1 ms.
+- **The day's CSV files, measured.** `DailyCsvBudgetTests` measures the day's files at the sink's opener under the owner's shape for 4 hours
+  (samples of about 330 processes with 25 short commands caught in each, 1,100 tags of which 180 over 1 MB and 10
+  growing, the owner's hour of events.csv rows at their lengths with 66 minute rollups a minute, the services changing
+  25 times an hour, handle scans with a third of their counts moving): 4.6 to 5.1 MB an hour before, 2.10 to 2.16 MB an
+  hour now (`events.csv` 1.20, `processes.csv` 0.43, `tags.csv` 0.21, `handles.csv` 0.19, the rest 0.10), asserted under
+  2.5 MB in each hour; the sink's own CPU there is under 1 s in the 4 hours (under 0.01% of one core), its allocations
+  70 MB an hour (142 before). The CI's agentic-load check (section 12) holds the whole app to the 5 MB.
 - **Where it writes**: only under its admin-only data folder `%ProgramData%\PoolWatch` (or an explicit headless
   `--out` folder), apart from the few writes SECURITY.md lists, never in its install folder, never through a link, and never
   on a ReFS volume (every Dev Drive is ReFS: its per-file metadata is the pool being measured). 7-day retention by
@@ -637,8 +680,17 @@ budget has room to spare, and the rows of `events.csv` only while no open incide
 new timeline entry, and every 30 minutes for alerts counted after it closed. All but the opening, re-opening, closing,
 trace and end-of-run writes wait while the report folders' write budget has no room (section 3), and are written at a
 later re-rank, the incident written longest ago first, so on a busy PC with many incidents open the report may be up
-to about an hour behind the window (the list, the tray and the notices are live: the growth is measured every 30 s,
-the cause comes from a ranking at most 10 minutes old). `report.md`, `report.json`,
+to about an hour behind the window. The window is not behind it: the list, the tray and the notices are live (the
+growth is measured every 30 s, the cause comes from a ranking at most 10 minutes old), and an
+open incident's details and Copy summary (the window's and the tray's), and Report an issue's summary of it, are built
+from the incident in memory as its `report.json` would say them now (`IncidentManager.SummaryJson`, each field made by
+the writer's own code, which `LiveDetailsTests` holds field by field to a `report.json` written at the same moment),
+with when its folder was last written and why it can be behind; a closed incident's come from its `report.json`. The
+summary is built again only when what it says can have changed (`LiveSummaries`: a ranking, at most every 30 s while
+the incident changes, an alert, a re-open, a trace, its end or a write; its growth alone moves at nearly every sample
+and is brought up to date by the next ranking), so it is never behind what its folder says. Export report writes
+an open incident's folder whole first, every event it kept included (`IncidentManager.WriteNow`, a write a reader needs
+at once), and does not export it when that write fails. `report.md`, `report.json`,
 `timeline.csv`, `processes.csv` and `timeline.png` are each replaced in one step (temp file and move), and only when
 what they say changed since this run last wrote them (the chart is drawn again only when what it shows changed), so a
 closed incident's CSVs and chart are written once. `events.csv` is appended to, in whole rows sorted by time within
@@ -655,9 +707,11 @@ onset (a rule that keeps firing keeps its bigger alert under the first one's ons
 the time the file first saw it, and one row per release. While open it can hold rows from after the growth ended, up
 to the close. It is written whole again only when it is not as this run last wrote it, or when a closed incident's
 onset moved later than rows it holds: those rows are left out and the rest stay as written (they are all among what it
-kept). Its rows are written in single appends and read by others as they are: a copy taken in the moment of an
-append can fail with a sharing violation (an export then fails and can be tried again), and a crash in that moment can leave its last row cut short, which a
-later write in the same run repairs (a file not as written is written whole again) and a later run leaves as it is.
+kept). Its rows are written in single appends and read by others as they are: a crash in the moment of an append can
+leave its last row cut short, which a later write in the same run repairs (a file not as written is written whole
+again) and a later run leaves as it is. An export and a vendor bundle read it, and a storm folder's `spawns.csv`, beside
+their writer (sharing writes) and up to their last whole row (`Csv.ReadCompleteRows`: the last line break outside a
+quoted value), so a row being appended in that moment is never in the zip as half a row (it is in the folder).
 At the end of a run everything left is written.
 
 **Spawn storms** (`Core.Spawn.SpawnTracker`, `StormReports`). A parent that starts more than 30 short-lived children
@@ -682,7 +736,10 @@ lists every storm in it (opened, closed, parent, starts, peak, fork copies, chil
 `report.json`'s `data` is the latest storm's with `identity`, `storms`, `folderTotalStarts` and `episodes`;
 `spawns.csv` gets the folder's first 1,000 starts, each appended once its process exited, and those still running at
 its last write as they are then (no lifetime). tools/Leaker's agent-load session (a burst every 2.5 minutes) makes one
-folder in an hour, where it made one a burst.
+folder in an hour, where it made one a burst. A vendor bundle's `spawns.csv` is the most recently active storm folder's
+(`BundleBuilder.LatestStormSpawns`: of the folders held, the one whose storms were active last; after a restart, of the
+newest 500 storm folders, the one whose `spawns.csv` was written last), not the newest by name: a folder made in the
+morning can be the one still in use in the evening.
 
 These files are written as recorded, for you, and each report says so at the top ("NOT REDACTED"). **Export report**
 builds a zip for sharing, redacted by default: the user name, home and TEMP paths (long and 8.3 forms), machine name,
@@ -1177,6 +1234,19 @@ The code builds anywhere the .NET 10 SDK runs (`EnableWindowsTargeting`); it run
   `steadyStateSeconds` keeps its older name: it counts from the warm-up (the sample interval three times, at least
   30 s), as do the CPU and disk-write figures beside it, not from steady state; the `judged...` figures, which About
   holds against the budget, count from steady state (`judgedFromSeconds`).
+- The agentic-load check (`ci/agentic-soak.ps1`, its own job beside the soak: on demand and on a release tag, where the
+  release needs it) holds the whole app to the hard budget on a PC doing agentic coding, the load that broke it in
+  1.0.0-beta.2: PoolWatch headless for 45 minutes (the soak's shortened windows, `ci/soak-agentic-config.json`) while
+  tools/Leaker agent-load runs a dozen sessions of short Git Bash commands in rotating bursts (about 3,000 starts a
+  minute asked; their pipeline stages are fork copies), about 600 idle processes and a Claude Code session's
+  transcripts, and every 7 minutes a load that grows a pool tag (60,000 File handles held, then 30,000 files touched), so
+  growth incidents open beside it (a 10-minute rule of 6 MB there). Judged from 15 minutes as the soak judges, from
+  outside and from PoolWatch's own files, each check with its marker: the load ran (Git Bash there, at least 500 starts
+  a minute seen, fork copies seen and not counted), CPU under 0.5% of one core, working set under 100 MB, disk writes
+  under 5 MB an hour with the report folders' writes that could wait kept to what their 1 MB an hour allows
+  (`profile.json`'s `writeBudget`: `canWaitMB` within `canWaitAllowanceMB`, the bound the budget itself states and its
+  tests hold), at most 10 spawn-storm folders an hour, and at least one growth incident with its `report.json` and
+  `report.md` in every incident folder. It writes `agentic-soak.md` with the stages and the writes by file.
 - Text pins and check markers. Some app-layer tests hold a CI script, the setup script's [Code] or a source file to its
   text (`ScriptCode`), read without comments (a source file also without the code under an `#if`; a whole [Code]
   routine as written, with its comments): a definition only where it is the
@@ -1234,7 +1304,8 @@ The code builds anywhere the .NET 10 SDK runs (`EnableWindowsTargeting`); it run
   looks for that line alone. `CheckMarkerTests` holds the scripts, the list and the workflows to each other: a step
   with a line other than a comment line that names a listed script (its file name, in any case) is one of those checks
   of its output, or names it only in lines that run it so (such a line outside the steps and jobs it reads fails it);
-  each such job to no condition (but the soak's: it runs on demand and on a release tag), no job it needs to one,
+  each such job to no condition (but the soak's and the agentic-load check's: they run on demand and on a release
+  tag, and the release needs both), no job it needs to one,
   nothing in it to going on after a failure, and the soak's ui leg to its matrix; and Assert-True and
   Complete-Assertions, which every check goes through, to their text, with no other statement of the CI scripts naming
   their list of failures, `ErrorActionPreference` or the words of the line Complete-Assertions prints once no check

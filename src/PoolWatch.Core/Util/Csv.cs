@@ -70,6 +70,36 @@ public static class Csv
         return sb.ToString();
     }
 
+    /// <summary>
+    /// <paramref name="text"/> up to the end of its last whole row: up to and including its last line break outside a
+    /// quoted value. A file PoolWatch appends rows to (events.csv, spawns.csv) can be read in the moment of an append, or
+    /// after a crash in it, with its last row cut short; this leaves that row out, and a value with a line break in it,
+    /// cut inside its quotes, is not taken for a row's end. Text with no line break outside quotes gives "".
+    /// </summary>
+    public static string CompleteRows(string text)
+    {
+        bool quoted = false;
+        int end = -1;
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (c == '"') quoted = !quoted; // a doubled quote inside a value toggles twice
+            else if (c == '\n' && !quoted) end = i;
+        }
+        return end == text.Length - 1 ? text : text[..(end + 1)];
+    }
+
+    /// <summary>
+    /// A CSV file PoolWatch appends to, read beside its writer (sharing reading, writing and deleting) up to the end of its
+    /// last whole row (<see cref="CompleteRows"/>).
+    /// </summary>
+    public static string ReadCompleteRows(string path)
+    {
+        using var s = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var r = new StreamReader(s, Encoding.UTF8);
+        return CompleteRows(r.ReadToEnd());
+    }
+
     /// <summary>Splits one CSV line (no embedded newlines).</summary>
     public static List<string> Split(string line)
     {

@@ -122,13 +122,13 @@ internal static class BundleBuilder
         files["git-and-spawns.md"] = git.ToString();
         try
         {
-            // The newest spawn-storm trace (explicit folder pattern under PoolWatch's own incidents\, capped at 5 MB).
-            if (Directory.Exists(engine.Paths.IncidentsDir) &&
-                Directory.EnumerateDirectories(engine.Paths.IncidentsDir, "*-SpawnStorm*").Order(StringComparer.Ordinal).LastOrDefault() is { } storm &&
-                Path.Combine(storm, "spawns.csv") is var sp && File.Exists(sp) && new FileInfo(sp).Length <= 5 << 20)
-                files["spawns.csv"] = File.ReadAllText(sp);
+            // The most recently active spawn-storm folder's trace (capped at 5 MB), its whole rows only.
+            List<(string? Dir, long LastActiveMs)> held;
+            lock (d.Spawns) held = d.Spawns.Folders.Select(f => (f.Dir, f.LastActiveMs)).ToList();
+            if (LatestStormSpawns(held, engine.Paths.IncidentsDir) is { } sp && new FileInfo(sp).Length <= 5 << 20)
+                files["spawns.csv"] = Core.Util.Csv.ReadCompleteRows(sp);
         }
-        catch (IOException) { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
 
         var crashes = new StringBuilder("# Crashes (event logs, since PoolWatch last ran)\n\n");
         foreach (var c in d.SystemCrashes)
@@ -145,6 +145,25 @@ internal static class BundleBuilder
 
         return VendorBundle.Write(engine.Paths.ExportsDir, now, files, redaction, engine.Paths.Guard.CheckReal,
             new Dictionary<string, string> { [AgentsGuide.FileName] = AgentsGuide.Text });
+    }
+
+    /// <summary>The most storm folders on disk whose spawns.csv is looked at (the newest by name), when none is held in memory.</summary>
+    internal const int MaxStormFoldersLookedAt = 500;
+
+    /// <summary>
+    /// The spawns.csv of the most recently active spawn-storm folder, or null. Not the newest by name: a folder takes every
+    /// storm of its program that comes within an hour of the one before (SpawnTracker), so an older folder can be the one
+    /// still in use. Of the folders PoolWatch holds (<paramref name="held"/>: its storms', the last active the latest), the
+    /// latest with a spawns.csv; else, after a restart, of the newest <see cref="MaxStormFoldersLookedAt"/> storm folders in
+    /// <paramref name="incidentsDir"/>, the one whose spawns.csv was written last.
+    /// </summary>
+    internal static string? LatestStormSpawns(IEnumerable<(string? Dir, long LastActiveMs)> held, string incidentsDir)
+    {
+        foreach (var (dir, _) in held.Where(h => h.Dir is not null).OrderByDescending(h => h.LastActiveMs))
+            if (Path.Combine(dir!, "spawns.csv") is var sp && File.Exists(sp)) return sp;
+        if (!Directory.Exists(incidentsDir)) return null;
+        return Directory.EnumerateDirectories(incidentsDir, "*-SpawnStorm*").Order(StringComparer.Ordinal).TakeLast(MaxStormFoldersLookedAt)
+            .Select(d => new FileInfo(Path.Combine(d, "spawns.csv"))).Where(f => f.Exists).MaxBy(f => f.LastWriteTimeUtc)?.FullName;
     }
 
     private static string Iso(DateTime utc) => utc.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);

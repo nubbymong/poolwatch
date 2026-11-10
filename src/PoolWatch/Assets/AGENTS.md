@@ -53,7 +53,7 @@ In the data folder:
 | `cache\token-guard-setting.json` | the Windows setting the token-leak guard replaced (the live foreground lock timeout from before it set 0), one value per sign-in with the sign-in it belongs to, so turning the guard off or uninstalling in that sign-in puts it back when Windows allows it (one the guard found already changed is not recorded, and stays until you sign out) |
 | `cache\tagscan.json` | which driver each pool tag belongs to, from PoolWatch's scan of the drivers |
 | `cache\environment.json` | the last look at the PC: Windows version and build, memory, drives and their file systems, the AI tools found and what is set up, and which of the drives, installed apps and running services it could not read. No user names, and no paths except drive roots |
-| `cache\profile.json` | PoolWatch's own cost, written every hour: its processor time, memory and heap, what it holds in memory, and what it wrote to each file |
+| `cache\profile.json` | PoolWatch's own cost, written every hour: its processor time, memory and heap, what it holds in memory, what it wrote to each file, and `writeBudget`: what the report folders' disk budget let them write (`canWaitMB` beside `canWaitAllowanceMB`, what it allows), how many times it held a write back for a later sample (`heldBack`, deferrals rather than distinct writes), and the open incidents whose report (`incidentsBehindNow`, `writesFailedNow`) or chart and CSV files (`chartsBehindNow`) are behind now |
 | `cache\update-check.json` | the last check for a new version: when it ran, its result, and the newest release seen |
 | `service-changes.json` | every background service PoolWatch changed, with its original start type (Put back needs it, on the Services tab and in Active changes) |
 | `applied-changes.json` | the other changes PoolWatch made that can be put back (Active changes needs it) |
@@ -84,15 +84,37 @@ break, inside a value whose quotes are not at the start of a cell as it splits t
 after a semicolon or a line break that starts the same way, or with a quote, gets an apostrophe too (`a;'=b`), and that
 one stays in the value. Numbers never have it (a pid of -1 is written `-1`).
 
+To stay inside PoolWatch's disk budget on a busy PC, several files hold what changed rather than a full copy each
+time: each day's files (and each start of PoolWatch) begin with the whole picture, and after that rows come as the
+table says. When you read one of them as a series, carry a value forward only as its file allows:
+
+- `tags.csv`: a tag's last row holds, to within 1 MB, until its next row, which comes at least every 10 minutes while
+  it is over 1 MB. A last row under 1 MB means it fell under 1 MB then and stayed under it.
+- `services.csv`: a service's last row holds until a newer one; pid 0 means it stopped or left the list.
+- `handles.csv`: a process's last row of a type holds until a newer one, which comes when the count changes, or once
+  as the count leaves the selection (the 20 processes with the most handles, or 500 of the type) with its count then
+  (0: it holds none of that type). A scan records at most 2,000 process counts, the largest first: a scan with more
+  has a pid -2 row whose count says how many were left out; those are not recorded (each had its last row as it fell
+  out) until a scan without a pid -2 row records them again. A count ends at the process's exit (in `events.csv`). The
+  pid -1 totals come every scan: do not carry them.
+- `processes.csv`: carry only what does not change: pid, create_time, image and parent_pid. The counters are as they
+  were at the row's time: a process with no newer row was not among the 50 busiest by I/O and its handles moved by
+  less than 100 in each minute, but they and its memory may have moved since. Never carry `d_read_ops`, `d_write_ops`
+  or `d_other_ops` forward: each is the change over the minute before its row. A last row does not mean the process
+  still runs: its exit, and when it became an orphan, are in `events.csv`.
+- `totals.csv`, `system-handles.csv`, `lag.csv` and `load.csv` are a reading at each row: nothing to carry.
+- `events.csv` holds events, not states: an `Exit` or `Orphaned` row's empty `command_line` is the one its `Start`
+  row gave (below).
+
 | File | Columns |
 |---|---|
 | `totals.csv` | time, committed_paged_bytes, committed_nonpaged_bytes (the pool as Task Manager shows it), tagsum_paged_bytes, tagsum_nonpaged_bytes (the sum over the tags, which runs lower: compare like with like), tag_count, process_count, commit_bytes, commit_limit_bytes, available_bytes, compression_ws_bytes, system_handles |
-| `tags.csv` | time, tag, tag_hex, paged_used, nonpaged_used, paged_allocs, paged_frees, nonpaged_allocs, nonpaged_frees. Once a minute, tags over 1 MB |
-| `processes.csv` | time, pid, create_time, image, parent_pid, handles, threads, quota_paged, quota_nonpaged, private_bytes, read_ops, write_ops, other_ops, read_bytes, write_bytes, d_read_ops, d_write_ops, d_other_ops (the change since the previous row), orphan (1: its parent is gone). Once a minute, the 50 busiest processes and any whose handles moved by 100 |
-| `handles.csv` | time, pid, image, type, count: handles by object type every 5 minutes. Pid -1 is the total of each type |
-| `system-handles.csv` | time, type, count: the System process's handles by type |
-| `events.csv` | time, kind, pid, create_time, parent_pid, image, exit_code, user, command_line, detail: process starts and exits, and every finding |
-| `services.csv` | time, pid, service, display_name: which process hosts which service, written when that changes |
+| `tags.csv` | time, tag, tag_hex, paged_used, nonpaged_used, paged_allocs, paged_frees, nonpaged_allocs, nonpaged_frees. Checked once a minute, tags over 1 MB: a tag has a row when its paged or non-paged use moved 1 MB since its last row, at least every 10 minutes, and once more as it falls under 1 MB |
+| `processes.csv` | time, pid, create_time, image, parent_pid, handles, threads, quota_paged, quota_nonpaged, private_bytes, read_ops, write_ops, other_ops, read_bytes, write_bytes, d_read_ops, d_write_ops, d_other_ops (the change over the minute before the row), orphan (1: its parent is gone). Checked once a minute: every process at the first check of the day, then each process once when it has run a minute (a shorter one is in `events.csv`), and again whenever it is among the 50 busiest by I/O (any at all) or its handles moved by 100 |
+| `handles.csv` | time, pid, image, type, count: handles by object type every 5 minutes. Pid -1 is the total of each type, every scan; a process's count of a type (the 20 with the most handles, those of a type it holds 500 of) when it changed since its last row, and once more, with its count then, as it leaves that selection while it runs; pid -2: how many counts a scan left out past its 2,000 |
+| `system-handles.csv` | time, type, count: the System process's handles by type, every scan |
+| `events.csv` | time, kind, pid, create_time, parent_pid, image, exit_code, user, command_line, detail: process starts and exits (of processes that ran 30 seconds or more), every finding, and the short-lived ones as `Rollup` rows, one per program, parent and kind of child per 5 minutes (written up to about 6 minutes after their first start; the time range and counts are in `detail`). An `Exit` or `Orphaned` row leaves `command_line` empty when the process's `Start` row earlier in the same day's file has the same one: match them by pid and create_time (it has no `user`: that is on the `Start` row) |
+| `services.csv` | time, pid, service, display_name: which process hosts which service. The whole list (those running) at the first check of the day, then a row for each service whose host changed; pid 0 means it stopped |
 | `volumes.csv` | time, root, file_system, label, dev_drive, drive_type: at start and every hour |
 | `lag.csv` | time, timer_ms, message_ms, file_ms, dwm_missed, committed_paged_bytes, committed_nonpaged_bytes: how late small probes ran (how slow the PC felt) |
 | `load.csv` | time, cpu_fraction, run_queue, cores, page_faults_per_sec, demand_zero_per_sec, transition_per_sec, pages_input_per_sec, probe_tripping |
@@ -123,7 +145,9 @@ PoolWatch added them (sorted by time within each addition): the window's first 1
 while the incident is open, as PoolWatch writes within a disk budget. When it holds fewer than the window had for good,
 its last row (`kind` `Note`) says so, and its time is when its events stop. An `Alert` row marks when each growth rule
 first fired (the report has its latest numbers). The day's `data\<yyyyMMdd>\events.csv` has every event. On a busy
-PC an open incident's `report.json` can be up to about an hour behind. The fields of `report.json` that matter:
+PC an open incident's `report.json` can be up to about an hour behind (PoolWatch's window shows it live); an export
+of an open incident (Export report) writes its folder whole first, so the zip is current. The fields of `report.json`
+that matter:
 
 - `id`, `kind` (`Growth`, `NonPagedTotal` for the whole non-paged pool over its limit, `Release` for a sharp drop,
   `Capture` for a trace the person started), `tag` and `tagHex`, `owner` and `description` (the driver and what the

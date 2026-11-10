@@ -42,6 +42,7 @@ internal sealed class MonitorEngine : IDisposable
         _log = log;
         _retention = paths.OpenRetentionClock(Native.WorkingTime.Ms, log.Info);
         _sink = new CsvSink(paths, settings, verboseCsv, log.Info);
+        _sink.MergeRollupsFrom(_summarizer); // the day's events.csv merges the minute rollups over 5 minutes
         Registry = new ProcessRegistry { Enricher = ProcessDetails.Enrich, KeepShortLived = TimeSpan.FromMinutes(settings.ShortLivedKeepMinutes) };
         _etw = new ProcessEtwCollector(Registry, log.Info);
         Meter = new SelfMeter(TimeSpan.FromSeconds(Math.Max(30, settings.SampleIntervalSeconds * 3)));
@@ -56,6 +57,8 @@ internal sealed class MonitorEngine : IDisposable
     public Log Log => _log;
     public bool EtwRunning => _etw.Running;
     public long EtwEvents => _etw.EventsSeen;
+    /// <summary>Handle scans whose CSV rows were not written (<see cref="CsvSink.HandleScansNotWritten"/>).</summary>
+    public long HandleScansNotWritten => _sink.HandleScansNotWritten;
     public int EtwEventsLost => _etw.EventsLost;
     public string EtwMode => _etw.Mode;
 
@@ -404,7 +407,8 @@ internal sealed class MonitorEngine : IDisposable
             var keys = procs.GroupBy(p => p.Pid).ToDictionary(g => g.Key, g => g.First().Key);
             var snap = new HandleSnapshot(now, counts, types, elapsed, keys) { Ms = nowMs };
             LatestHandles = snap;
-            using (Profiler.Stage("tick.handleScan.csv")) _sink.WriteHandles(counts, types, procs, now);
+            // Handed to the handle CSV's own thread, which writes it (csv.handles): the tick does not wait for that write.
+            using (Profiler.Stage("tick.handleScan.csv")) _sink.PostHandles(counts, types, procs, now);
             using (Profiler.Stage("tick.handleScan.handlers")) HandlesScanned?.Invoke(snap);
         }
         catch (Exception ex) { _log.Info("handle scan failed: " + ex.Message); }

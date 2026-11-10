@@ -140,9 +140,12 @@ Switch on **Advanced view** for the details. The header stays, and the window ad
     them at their top, then their words and each button, and the arrow keys scroll them; switching away and back keeps
     your place. What PoolWatch's own cache clear frees is
     that clear's result, not a release: it shows in the clear's own row. Incidents from before PoolWatch last started
-    come from their report folders, however many spawn-storm reports came after them. An open incident's evidence comes
-    from its report, which PoolWatch brings up to date as its write budget allows (on a busy PC with many incidents
-    open, about once an hour; the row's figures are live). A **spawn storm** row is a program starting more than 30
+    come from their report folders, however many spawn-storm reports came after them. An open incident's evidence and
+    its Copy summary are live, from what PoolWatch knows of it now; its report folder is brought up to date as its write
+    budget allows (on a busy PC with many incidents open, about once an hour), and the details say when it was last
+    written. **Export report** on an open incident writes its folder whole first, so the export is up to date, and
+    **Report an issue** offers the same live summary. About says what the write budget held back. A **spawn storm** row
+    is a program starting more than 30
     short commands in 30 seconds; the copies Git Bash makes of itself to run a pipeline are not counted, what they
     start is. One program's storms within an hour share one report folder, and PoolWatch makes at most 10 new ones an hour
     (a storm past that has its row and no folder).
@@ -696,6 +699,12 @@ Installed from a zip: use **Put all back** in Active changes, exit PoolWatch (tr
 ## About PoolWatch
 
 The About window (tray menu, **About PoolWatch**) lists the credits, with links; the README's
-[Credits](../README.md#credits) has the same list.
+[Credits](../README.md#credits) has the same list. Under **Monitoring** it says what PoolWatch itself costs against its
+budget (CPU, memory, disk writes) and what its report folders wrote: how much of it had to be written at once (an
+incident opening or closing, say, written whatever the budget), how much could wait and whether that is within what
+its budget of 1 MB an hour allows so far, how many times a write that could wait was held back for later, how many open
+incidents' reports are behind now (the oldest written how long ago, and any whose last write failed), and how many
+open incidents' charts and CSV files are half an hour old or more. The same figures are in `cache\profile.json`
+(`writeBudget`), written every hour.
 
 ![About PoolWatch, with the credits and licences](screenshots/9-about.png)

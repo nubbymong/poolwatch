@@ -168,20 +168,20 @@ public sealed class EventSummarizer
         var output = new List<LifecycleEvent>();
         foreach (var ((ownerKey, parent, image), r) in _rollups.OrderBy(kv => kv.Value.First))
         {
-            var patterns = r.Patterns.OrderByDescending(kv => kv.Value).Take(3).Select(kv => $"{kv.Value}× {kv.Key}");
-            int n = r.ParentPids.Count;
-            string who = n <= 1 ? $"{parent} ({r.FirstParentPid})" : $"{parent} ×{n:N0}{(n >= MaxParents ? "+" : "")}";
-            output.Add(new LifecycleEvent
-            {
-                TimeUtc = r.First, Kind = LifecycleKind.Rollup, ParentPid = r.FirstParentPid, Image = image, Owner = r.OwnerName, OwnerKey = ownerKey, Count = r.Starts,
-                Detail = string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                    $"{who} started {r.Starts:N0}, {r.Exits:N0} exited, short-lived, {Detection.Fmt.Clock(r.First)}-{Detection.Fmt.Clock(r.Last)}: ") + string.Join("; ", patterns),
-            });
+            var parts = new RollupParts(ownerKey, r.OwnerName, parent, image, r.Starts, r.Exits, r.FirstParentPid, r.ParentPids, r.First, r.Last, r.Patterns);
+            output.Add(parts.Event());
+            RollupClosed?.Invoke(parts);
         }
         _rollups.Clear();
         _ownerByParent.Clear();
         return output;
     }
+
+    /// <summary>
+    /// Each rollup as its window closes, in its parts (the day's events.csv merges them over a longer window: the CSV sink).
+    /// The parts' collections are the rollup's own, valid during the call only.
+    /// </summary>
+    public event Action<RollupParts>? RollupClosed;
 
     private void Count(LifecycleEvent e, Func<int, string?> parentName, bool start)
     {
@@ -200,10 +200,43 @@ public sealed class EventSummarizer
         {
             r.Starts++;
             string p = CommandLineTokens.Pattern(e.Image, e.CommandLine, 4);
-            if (r.Patterns.ContainsKey(p) || r.Patterns.Count < 20) r.Patterns[p] = r.Patterns.GetValueOrDefault(p) + 1;
+            if (r.Patterns.ContainsKey(p) || r.Patterns.Count < MaxRollupPatterns) r.Patterns[p] = r.Patterns.GetValueOrDefault(p) + 1;
         }
         else r.Exits++;
         if (e.TimeUtc < r.First) r.First = e.TimeUtc;
         if (e.TimeUtc > r.Last) r.Last = e.TimeUtc;
+    }
+
+    /// <summary>At most this many parent PIDs of one rollup are counted ("bash.exe ×1,000+").</summary>
+    public const int MaxRollupParents = MaxParents;
+
+    /// <summary>At most this many command patterns of one rollup are counted (the first ones seen).</summary>
+    public const int MaxRollupPatterns = 20;
+}
+
+/// <summary>
+/// One rollup of short-lived processes, in its parts: who it was for (<paramref name="OwnerKey"/>, <paramref name="OwnerName"/>),
+/// the parent's and the children's image, the starts and exits counted, the parent PIDs (counted up to
+/// <see cref="EventSummarizer.MaxRollupParents"/>) and the first one, the first and last event's time, and the starts by
+/// command pattern (up to <see cref="EventSummarizer.MaxRollupPatterns"/> patterns).
+/// </summary>
+public sealed record RollupParts(string? OwnerKey, string? OwnerName, string Parent, string Image, int Starts, int Exits, int FirstParentPid,
+    IReadOnlyCollection<int> ParentPids, DateTime First, DateTime Last, IReadOnlyDictionary<string, int> Patterns)
+{
+    /// <summary>
+    /// The rollup's row: "bash.exe ×90 started 412, 410 exited, short-lived, 10:00:01-10:00:59: 300× git status; ..."
+    /// (the parent with its PID when it was one, the three commonest patterns).
+    /// </summary>
+    public LifecycleEvent Event()
+    {
+        var patterns = Patterns.OrderByDescending(kv => kv.Value).Take(3).Select(kv => $"{kv.Value}× {kv.Key}");
+        int n = ParentPids.Count;
+        string who = n <= 1 ? $"{Parent} ({FirstParentPid})" : $"{Parent} ×{n:N0}{(n >= EventSummarizer.MaxRollupParents ? "+" : "")}";
+        return new LifecycleEvent
+        {
+            TimeUtc = First, Kind = LifecycleKind.Rollup, ParentPid = FirstParentPid, Image = Image, Owner = OwnerName, OwnerKey = OwnerKey, Count = Starts,
+            Detail = string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"{who} started {Starts:N0}, {Exits:N0} exited, short-lived, {Detection.Fmt.Clock(First)}-{Detection.Fmt.Clock(Last)}: ") + string.Join("; ", patterns),
+        };
     }
 }

@@ -120,22 +120,29 @@ files' times, which a clock set back can make look old). `poolwatch.log` has one
 and removed, with the first few names:
 
 - `data\<yyyyMMdd>\`: the CSV files (totals, tags, processes, handles, events, services, volumes, lag, load) and
-  `findings.jsonl`, about 2-3 MB an hour (about 350-500 MB over the 7 days kept). A CSV file whose columns changed in
+  `findings.jsonl`: on a PC doing heavy agentic coding about 2.5 MB an hour (about 400 MB over the 7 days kept), much
+  less on a quieter one, as the CSV files hold what changed after each day's first rows (the data folder's `AGENTS.md`
+  says how to read them; 1.0.0-beta.2 wrote 4.7 MB an hour there). A CSV file whose columns changed in
   an update, or whose open or write another program refuses, is passed over: its rows go on in its next numbered file
   (`totals-2.csv`, say). Rows that no file can take yet are kept (up to about 4 million characters in all the files,
-  the oldest of the file that keeps the most dropped beyond that) and written once one can; rows still kept, or
-  dropped, when PoolWatch stops are counted in `poolwatch.log` (when its sampler does not stop within 30 s, the log
-  says instead that the stop neither writes nor counts the rows not written yet);
+  the oldest of the file that keeps the most dropped beyond that; the handle scan's two files, written on a thread of
+  their own so the samples never wait for them, keep half a million characters of their own) and written once one can;
+  rows still kept, or dropped, when PoolWatch stops are counted in `poolwatch.log` (when its sampler does not stop
+  within 30 s, the log says instead that the stop neither writes nor counts the rows not written yet, and so it does
+  for the handle scan's write when that does not end within 10 s);
 - `incidents\<id>\`: `report.md`, `report.json`, `timeline.csv`, `processes.csv`, `events.csv`, `timeline.png`, and
   `capture.etl` when a trace was taken (a trace can add far more than the CSV files). `events.csv` holds the incident's
   events from 2 minutes before its onset, every one from its first row to its last, added as PoolWatch writes the
   folder, at most 1,000; when it holds fewer than the window had, its last row says to when (the day's `events.csv` has
-  every one). Its rows are appended in single writes: copying the folder at that moment can fail (try again), and a
-  crash then can cut its last row short. What can wait in the report folders is held to 1 MB an hour (a 256 KB burst):
+  every one). Its rows are appended in single writes: copying the folder at that moment can fail (try again; Export
+  report reads it beside the write, its whole rows only), and a crash then can cut its last row short. What can wait in
+  the report folders is held to 1 MB an hour (a 256 KB burst):
   an open incident's `report.json` and `report.md` first, then the rest. An incident's opening, re-opening and closing,
   a trace attached and a storm folder's first and last writes are always made; under the owner's load (10 incidents
   opening together beside a storm-heavy hour) the folders wrote about 1.7 MB in that hour, and an open incident's
-  report was up to about an hour behind (the row's figures are live). It is written again when the incident closes;
+  report was up to about an hour behind (the row's figures, its details and Copy summary are live, built from memory;
+  Export report writes the folder whole first; About and `cache\profile.json` say what the budget held back). It is
+  written again when the incident closes;
 - `incidents\<yyyyMMdd-HHmmss>-SpawnStorm-<program>\`: a program's spawn storms (by default, more than 30 short commands
   in 30 s from one parent); its storms within an hour of each other share the folder, Git Bash's fork copies are not
   counted, and at most 10 such folders are made an hour (the rest are in `findings.jsonl`);

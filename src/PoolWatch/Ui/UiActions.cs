@@ -144,6 +144,14 @@ internal sealed class UiActions
             "Redaction is best-effort: read the export before you post it.)",
             "Export report", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
         if (answer == DialogResult.Cancel) return;
+        // An open incident's folder is written whole first (every event it kept included), so the export holds its state
+        // now: the write budget can have held its refreshes back.
+        if (UiData.WriteOpenIncident(_analysis, dir) is false)
+        {
+            MessageBox.Show(owner, "The open incident's folder could not be written just now (poolwatch.log says why), so it was not exported: " +
+                "its files would be behind what PoolWatch knows. Try again in a moment.", "Export report");
+            return;
+        }
         var zip = Exporter.Export(dir, _engine.Paths.ExportsDir, answer == DialogResult.Yes ? MainForm.CurrentRedaction() : null, _engine.Paths.Guard.CheckReal,
             new Dictionary<string, string> { [AgentsGuide.FileName] = AgentsGuide.Text });
         OpenFolder(Path.GetDirectoryName(zip)!);
@@ -195,10 +203,16 @@ internal sealed class UiActions
     /// </summary>
     public static string IncidentDetails(string dir) => CopyText.IncidentDetails(File.ReadAllText(Path.Combine(dir, "report.json")));
 
-    /// <summary>Tray "Copy latest incident summary": the newest incident's summary as plain text.</summary>
+    /// <summary>
+    /// What Copy summary copies for an incident now (<see cref="IncidentSummary"/>'s text): an open incident's built from
+    /// memory (<see cref="UiData.Live"/>), so never behind its folder; any other's from its report.json.
+    /// </summary>
+    public string IncidentSummaryNow(string dir) => UiData.Live(_analysis, dir) is { } live ? CopyText.IncidentSummary(live.Json) : IncidentSummary(dir);
+
+    /// <summary>Tray "Copy latest incident summary": the newest incident's summary as plain text (an open one's from memory).</summary>
     public void CopyLatestIncidentSummary(IWin32Window? owner)
     {
-        if (LatestIncidentDir() is { } dir && File.Exists(Path.Combine(dir, "report.json"))) { Copy(IncidentSummary(dir)); return; }
+        if (LatestIncidentDir() is { } dir && (UiData.Live(_analysis, dir) is not null || File.Exists(Path.Combine(dir, "report.json")))) { Copy(IncidentSummaryNow(dir)); return; }
         MessageBox.Show(owner, "There is no incident yet.", "PoolWatch");
     }
 

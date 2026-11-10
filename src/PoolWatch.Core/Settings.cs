@@ -148,13 +148,13 @@ public sealed class Settings
     public double HandleScanBudgetMs { get; set; } = 250;
 
     // CSV output.
-    [Description("How often the pool tags are written to tags.csv in the data folder, in seconds (default 60; never more often than SampleIntervalSeconds).")]
+    [Description("How often the pool tags are checked for tags.csv, in seconds (default 60; never more often than SampleIntervalSeconds). After the day's first rows, a tag gets one when it moved 1 MB, at least every 10 minutes.")]
     public double TagCsvIntervalSeconds { get; set; } = 60;
-    [Description("How often the busiest processes are written to processes.csv in the data folder, in seconds (default 60; never more often than SampleIntervalSeconds).")]
+    [Description("How often the processes are checked for processes.csv, in seconds (default 60; never more often than SampleIntervalSeconds). After the day's first rows, a process gets one once seen at two checks, then while busy.")]
     public double ProcessCsvIntervalSeconds { get; set; } = 60;
-    [Description("tags.csv leaves out pool tags smaller than this many bytes, apart from the tags PoolWatch always tracks (default 1,048,576, which is 1 MB).")]
+    [Description("tags.csv leaves out pool tags smaller than this many bytes, apart from the tags PoolWatch always tracks (default 1,048,576, which is 1 MB). A tag that falls under it gets one last row, then none until it is over it again.")]
     public long TagCsvMinBytes { get; set; } = 1 * MB;
-    [Description("How many processes each row of processes.csv lists: those with the most disk reads, writes and other I/O since the last row (default 50).")]
+    [Description("How many of the busiest processes processes.csv lists at each check: those with the most disk reads, writes and other I/O since the last check, of those that did any I/O (default 50).")]
     public int ProcessCsvTopN { get; set; } = 50;
 
     // Retention.

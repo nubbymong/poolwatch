@@ -696,7 +696,7 @@ public sealed class LauncherTests
         Assert.Contains("Compress-Archive -Path \"publish/$($pair[0])/*\"", ci);
         // Every PoolWatch the CI checks start is PoolWatch itself, below the launcher.
         Assert.DoesNotMatch(@"publish/(fd|sc)/PoolWatch(-selfcontained)?\.exe""", ci);
-        Assert.Equal(6, Regex.Matches(ci, Regex.Escape("-Exe \"$PWD/publish/fd/app/PoolWatch.exe\"")).Count);
+        Assert.Equal(7, Regex.Matches(ci, Regex.Escape("-Exe \"$PWD/publish/fd/app/PoolWatch.exe\"")).Count); // the agentic-load check (ci/agentic-soak.ps1) is the 7th
         Assert.Contains("\"POOLWATCH=$app\\app\\PoolWatch.exe\" >> $env:GITHUB_ENV", ci);
         // The sign job: the tag's version, at least four signed programs (the launcher and PoolWatch itself in each build),
         // and each verified, in the builds and in the installer's stage.

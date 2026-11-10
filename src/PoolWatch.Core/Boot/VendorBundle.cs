@@ -28,7 +28,7 @@ public static class VendorBundle
         ("experiment/", "the guided A/B experiment's report and per-tag phase changes, when one ran"),
         ("filters.json", "minifilter instances per volume, watched services (bindflt, wcifs, vmcompute, CoworkVMService) and filter / package events"),
         ("git-and-spawns.md", "git root findings (stray .git at a profile / OneDrive / volume root) and spawn storms"),
-        ("spawns.csv", "the most recent spawn-storm trace (process starts with command lines), when there was one"),
+        ("spawns.csv", "the most recently active spawn-storm folder's trace (process starts with command lines), when there was one"),
         ("crashes.md", "bugchecks, unexpected restarts and watched-app crashes from the event logs"),
         ("findings.jsonl", "every diagnostic finding of this run"),
     ];

@@ -42,12 +42,12 @@ internal sealed class ReportIssueDialog : Form
     // box or a button.
     private string _title = DefaultTitle, _whatText = "", _details = "", _fullText = "", _version = "", _windows = "";
 
-    /// <param name="incidentDir">An incident folder whose summary is offered (its report.json), or null.</param>
+    /// <param name="incidentDir">An incident folder whose summary is offered (an open one's from memory, else its report.json), or null.</param>
     public ReportIssueDialog(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions, string? incidentDir)
     {
         _engine = engine;
         _actions = actions;
-        _incident = Digest(incidentDir);
+        _incident = Digest(analysis, incidentDir);
         _facts = Facts(engine, analysis);
         Text = "Report an issue";
         Icon = TrayIcons.App;
@@ -264,10 +264,14 @@ internal sealed class ReportIssueDialog : Form
 
     private static string Clock(DateTime utc) => utc.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture);
 
-    /// <summary>The incident's summary from its report.json, or null (no incident, a file too large, unreadable or not a report).</summary>
-    private static string? Digest(string? incidentDir)
+    /// <summary>
+    /// The incident's summary: an open incident's from memory (<see cref="UiData.Live"/>, what its details show now, never
+    /// behind its folder), any other's from its report.json; or null (no incident, a file too large, unreadable or not a report).
+    /// </summary>
+    internal static string? Digest(AnalysisPipeline analysis, string? incidentDir)
     {
         if (incidentDir is null) return null;
+        if (UiData.Live(analysis, incidentDir) is { } live) return IssueReport.IncidentDigest(live.Json);
         try
         {
             var report = new FileInfo(Path.Combine(incidentDir, "report.json"));

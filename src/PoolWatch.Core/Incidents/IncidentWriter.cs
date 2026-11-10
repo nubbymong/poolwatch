@@ -202,6 +202,39 @@ internal sealed class IncidentWriter
         return bytes;
     }
 
+    /// <summary>
+    /// The incident's summary as its report.json would say it if written now, from memory: the fields the window's details
+    /// and Copy summary read (<see cref="CopyText.IncidentSummary"/>: id, kind, tag, headline, window, plain answer, the top
+    /// five suspects with their evidence and command lines) and Report an issue's digest (<see cref="Report.IssueReport.IncidentDigest"/>:
+    /// the suspects' images too), each made by the same code as report.json's (<see cref="Headline"/>, <see cref="PlainOwners"/>,
+    /// the incident's and suspects' own fields), so an open incident's details are never behind what PoolWatch knows (its
+    /// report.json can be, on a busy PC, as the write budget holds refreshes back). <c>LiveDetailsTests</c> holds each of its
+    /// fields to report.json's, written at the same moment, with a Claude Code session and a trace. Writes nothing. The
+    /// caller holds the history lock, as for a write.
+    /// </summary>
+    public string SummaryJson(History.History h, Incident inc)
+    {
+        _history = h;
+        _plainFor = null;
+        var info = _knowledge.Lookup(inc.Tag);
+        // The headline names the top suspect's Claude Code session, as a write gives it (read on demand, its search cached).
+        _sessions = inc.Suspects.Take(1).ToDictionary(s => s.Key, s => _host.DescribeSession(s));
+        var summary = new
+        {
+            id = inc.Id,
+            kind = inc.Kind,
+            tag = inc.Tag.ToString(),
+            headline = Headline(inc, info),
+            plainAnswer = PlainOwners(inc)?.Line,
+            window = inc.Window,
+            suspects = inc.Suspects.Take(5).Select(s => new
+            {
+                rank = s.Rank, pid = s.Key.Pid, image = s.Image, displayName = s.DisplayName, commandLine = s.CommandLine, confidence = s.Confidence, evidence = s.Evidence,
+            }),
+        };
+        return JsonSerializer.Serialize(summary, Json);
+    }
+
     /// <summary>Appends up to <paramref name="maxRows"/> of the kept events not written yet to events.csv alone (rows a write left for later); returns the bytes written.</summary>
     public long AppendEvents(Incident inc, IncidentEventSet ev, int maxRows)
     {

@@ -1,0 +1,16 @@
+{
+  // The agentic-load overhead check (ci/agentic-soak.ps1): as in the 45-minute soak (soak-config.json), the in-memory
+  // windows are shortened (defaults 70 / 15 / 90 min) so each one is full before the steady state the check judges
+  // starts at 15 min. Everything else is at its default, but the growth rules below and the on-alert CPU trace.
+  "rawHistoryMinutes": 8,
+  "shortLivedKeepMinutes": 5,
+  "incidentEventKeepMinutes": 8,
+  // A rule the check's growth loads reach (File handles held, files touched: tens of MB in a minute or two) beside the
+  // default hour rule, so growth incidents open and are written beside the agentic load's spawn storms, as on the
+  // owner's PC; at the default 200 MB in 10 minutes a runner never opens one.
+  "growthRules": [ { "windowMinutes": 10, "bytes": 6291456 }, { "windowMinutes": 60, "bytes": 1073741824 } ],
+  // As in the soak: the on-alert CPU trace is an alert-time cost, not steady-state overhead.
+  "cpuTraceEnabled": false,
+  // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
+  "checkForUpdates": false
+}

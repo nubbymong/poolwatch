@@ -181,6 +181,12 @@ public static class Exporter
     /// <summary>JSON, CSV and XML are "structured" for the secret scrub: a raw double quote ends a string, field or attribute there.</summary>
     public static bool IsStructured(string fileName) => StructuredExtensions.Contains(Path.GetExtension(fileName));
 
+    /// <summary>
+    /// The files of a report folder PoolWatch appends rows to while it runs (an incident's events.csv, a storm folder's
+    /// spawns.csv), which an export reads up to their last whole row (<see cref="Util.Csv.ReadCompleteRows"/>).
+    /// </summary>
+    public static bool IsAppended(string relativePath) => relativePath is "events.csv" or "spawns.csv";
+
     /// <param name="checkWrite">The write policy (returns the path or throws).</param>
     /// <param name="extraFiles">Text files added at the root of the zip as they are, never redacted (the guide for AI
     /// assistants, which holds nothing about this PC), by file name. A file of the same name in the folder is left out.</param>
@@ -207,7 +213,15 @@ public static class Exporter
                 if (extraFiles?.ContainsKey(rel) == true) continue;
                 string ext = Path.GetExtension(file);
                 if (ext.Equals(".tmp", StringComparison.OrdinalIgnoreCase) || ext.Equals(".etlx", StringComparison.OrdinalIgnoreCase)) continue;
-                if (redaction is not null && TextExtensions.Contains(ext))
+                if (IsAppended(rel))
+                {
+                    // Appended to while PoolWatch runs: read beside its writer, its whole rows only (never a row cut short in
+                    // the moment of an append; that row is in the folder once the append ends).
+                    string text = Util.Csv.ReadCompleteRows(file);
+                    using var s = zip.CreateEntry(rel, CompressionLevel.Optimal).Open();
+                    s.Write(new UTF8Encoding(false).GetBytes(redaction is null ? text : RedactText(text, redaction, structured: true)));
+                }
+                else if (redaction is not null && TextExtensions.Contains(ext))
                 {
                     var entry = zip.CreateEntry(rel, CompressionLevel.Optimal);
                     using var s = entry.Open();

@@ -58,6 +58,12 @@ internal static unsafe class NativeMethods
     /// <summary>Kernel + user CPU time of the calling thread, in 100 ns ticks (for the profiler).</summary>
     public static long CurrentThreadCpuTicks() => GetThreadTimes(GetCurrentThread(), out _, out _, out long k, out long u) ? k + u : 0;
 
+    /// <summary>The calling thread's kernel and user CPU time apart, in 100 ns ticks (0, 0 when they cannot be read).</summary>
+    public static (long Kernel, long User) CurrentThreadTimes() => GetThreadTimes(GetCurrentThread(), out _, out _, out long k, out long u) ? (k, u) : (0, 0);
+
+    /// <summary>The page faults this process has taken (soft and hard, cumulative; 0 when it cannot be read).</summary>
+    public static long OwnPageFaults() => GetProcessMemoryInfo(GetCurrentProcess(), out var c, Marshal.SizeOf<PROCESS_MEMORY_COUNTERS_EX>()) ? (uint)c.PageFaultCount : 0;
+
     [DllImport("ntdll.dll")]
     public static extern int NtQuerySystemInformation(int infoClass, void* buffer, int length, out int returnLength);
 

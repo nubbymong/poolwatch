@@ -1074,32 +1074,91 @@ public sealed class IncidentManager
     /// incident's opening, re-opening and refreshes) report.json and report.md, and the rows follow as the budget allows
     /// (<see cref="AppendEvents"/>), after every refresh due.
     /// </summary>
-    private void Write(History.History h, Incident inc, bool mustWrite = true, bool? full = null)
+    /// <param name="rows">How many rows of events.csv the write may add (null: as above).</param>
+    /// <returns>Whether the folder was written (false: it waits for the budget, or the write failed and was logged).</returns>
+    private bool Write(History.History h, Incident inc, bool mustWrite = true, bool? full = null, int? rows = null)
     {
         long nowMs = NewestMs(h);
         if (!mustWrite && !_finishing && !Budget.HasRoom(nowMs))
         {
             Budget.Hold();
-            return;
+            return false;
         }
         bool all = _finishing || (full ?? (!inc.IsOpen || ((_writer.FullWrittenMs(inc) is not { } fw || nowMs - fw >= Ms(OpenChartInterval)) && Budget.HasRoomToSpare(nowMs))));
-        int rows = _finishing ? IncidentWriter.MaxEventRows : all ? EventRowsPerWrite : 0;
+        rows ??= _finishing ? IncidentWriter.MaxEventRows : all ? EventRowsPerWrite : 0;
         using var stage = Util.Profiler.Stage("incident.write");
         try
         {
-            Budget.Spend(_writer.Write(h, inc, IncidentEvents(inc, nowMs), rows, all, nowMs), nowMs, mustWrite || _finishing);
+            Budget.Spend(_writer.Write(h, inc, IncidentEvents(inc, nowMs), rows.Value, all, nowMs), nowMs, mustWrite || _finishing);
             inc.LastWriteUtc = h.Times.Count > 0 ? h.Times[^1] : DateTime.UtcNow;
             inc.LastWriteMs = nowMs;
             inc.WrittenTop = inc.Suspects.FirstOrDefault()?.Key;
             inc.WrittenGrowth = inc.Growth;
             inc.Dirty = false;
             inc.CountPending = false;
+            inc.WriteFailed = false;
+            return true;
         }
         catch (Exception ex)
         {
             inc.Dirty = inc.CountPending = false; // do not retry every sample; the next change rewrites it
+            inc.WriteFailed = true; // its folder is behind until then (BehindNow)
             _host.Log($"incident {inc.Id}: write failed: {ex.Message}");
+            return false;
         }
+    }
+
+    /// <summary>
+    /// An open incident's summary as its report.json would say it now, built from memory (<see cref="IncidentWriter.SummaryJson"/>):
+    /// what the window's details and Copy summary show for it, so they are never behind its folder, which the write budget can
+    /// hold back. Writes nothing. The caller holds the history lock.
+    /// </summary>
+    public string SummaryJson(History.History h, Incident inc) => _writer.SummaryJson(h, inc);
+
+    /// <summary>The open incidents' summaries from memory, each built again only when it can have changed (<see cref="LiveSummaries"/>). Under the history lock.</summary>
+    public LiveSummaries Live => _live ??= new LiveSummaries(this);
+    private LiveSummaries? _live;
+
+    /// <summary>
+    /// Writes the incident's whole folder now, every event it kept included, whatever the write budget (it spends it as a
+    /// write a reader needs at once): an export of an open incident holds its state now, not a refresh the budget held
+    /// back. False when the write failed (logged). The caller holds the history lock.
+    /// </summary>
+    public bool WriteNow(History.History h, Incident inc) => Write(h, inc, mustWrite: true, full: true, rows: IncidentWriter.MaxEventRows);
+
+    /// <summary>
+    /// What of the open incidents' folders is behind what PoolWatch knows of them now, on the forward clock. Their reports
+    /// (<see cref="FoldersBehind.Reports"/>): one whose report changed and was last written <see cref="MaxRewriteInterval"/>
+    /// ago or more (its refresh waits for the write budget), whose events.csv rows wait, or whose last write failed
+    /// (<see cref="FoldersBehind.Failed"/>, not retried until its next change); with how long ago the oldest of them was
+    /// written. Their charts, timeline.csv and processes.csv (<see cref="FoldersBehind.Charts"/>), written only while the
+    /// budget has room to spare: those never written, or last written <see cref="OpenChartInterval"/> ago or more, the
+    /// oldest since when (its opening, for one never written). What About and profile.json say the budget holds back. The
+    /// caller holds the history lock.
+    /// </summary>
+    public FoldersBehind BehindNow(History.History h)
+    {
+        long nowMs = NewestMs(h);
+        int reports = 0, charts = 0, failed = 0;
+        long? oldestReport = null, oldestChart = null;
+        foreach (var inc in _open.Values)
+        {
+            bool stale = inc.Dirty && nowMs - inc.LastWriteMs >= Ms(MaxRewriteInterval);
+            if (inc.WriteFailed) failed++;
+            if (stale || inc.WriteFailed || _writer.EventsPending(inc))
+            {
+                reports++;
+                if (oldestReport is not { } o || inc.LastWriteMs < o) oldestReport = inc.LastWriteMs;
+            }
+            long chartMs = _writer.FullWrittenMs(inc) ?? inc.OpenedMs;
+            if (_writer.FullWrittenMs(inc) is null || nowMs - chartMs >= Ms(OpenChartInterval))
+            {
+                charts++;
+                if (oldestChart is not { } c || chartMs < c) oldestChart = chartMs;
+            }
+        }
+        TimeSpan? Ago(long? ms) => ms is { } m ? TimeSpan.FromMilliseconds(Math.Max(0, nowMs - m)) : null;
+        return new FoldersBehind(reports, Ago(oldestReport), charts, Ago(oldestChart), failed);
     }
 
     /// <summary>The rows of events.csv a write left for later, while the write budget has room; false when it had none.</summary>
@@ -1120,4 +1179,15 @@ public sealed class IncidentManager
     /// <summary>The newest sample's time on the clock that only goes forward (the sample being processed's, before any).</summary>
     private long NewestMs(History.History h) => h.Count > 0 ? h.Ms[^1] : _nowMs;
     private static DateTime Max(DateTime a, DateTime b) => a > b ? a : b;
+}
+
+/// <summary>
+/// What of the open incidents' folders is behind (<see cref="IncidentManager.BehindNow"/>): how many reports (report.json,
+/// report.md, events.csv's rows), the oldest last written how long ago, and of them how many because their last write
+/// failed; how many charts with their timeline.csv and processes.csv, the oldest written (or, never written, opened) how
+/// long ago.
+/// </summary>
+public readonly record struct FoldersBehind(int Reports, TimeSpan? OldestReport, int Charts, TimeSpan? OldestChart, int Failed)
+{
+    public static readonly FoldersBehind None = new(0, null, 0, null, 0);
 }

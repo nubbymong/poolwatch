@@ -173,7 +173,54 @@ internal sealed class AboutDialog : Form
     private static AboutFacts FactsOf(MonitorEngine engine, AnalysisPipeline analysis) => new(UiActions.AppVersion,
         $"{engine.SampleCount:N0} samples; process events (ETW) {(engine.EtwRunning ? engine.EtwMode : "not running")}; " +
         $"pooltag.txt {(analysis.Knowledge.PoolTagTxtLoaded ? "loaded" : "not found (built-in tag table and driver scan)")}.",
-        Overhead(engine), engine.Paths.DataRoot);
+        Overhead(engine) + "\n" + ReportFolders(analysis), engine.Paths.DataRoot);
+
+    /// <summary>What the report folders' write budget spent and holds back now (<see cref="WriteBudgetText"/>), read as About opens.</summary>
+    private static string ReportFolders(AnalysisPipeline analysis)
+    {
+        var b = analysis.Incidents.Budget;
+        Core.Incidents.FoldersBehind behind;
+        lock (analysis.History.SyncRoot) behind = analysis.Incidents.BehindNow(analysis.History);
+        return WriteBudgetText(new(b.Spent, b.SpentMust, b.SpentCanWait, b.CanWaitAllowance, b.Held, b.BytesPerHour, b.Burst), behind, analysis.Incidents.OpenChartInterval);
+    }
+
+    /// <summary>The report folders' write budget as About reads it (<see cref="Core.Incidents.WriteBudget"/>).</summary>
+    internal readonly record struct BudgetFigures(long Spent, long SpentMust, long SpentCanWait, long CanWaitAllowance, long Held, long BytesPerHour, long Burst);
+
+    /// <summary>
+    /// What About says about the report folders' write budget (DESIGN.md section 3): what they wrote since PoolWatch started;
+    /// how much of it was what a reader needed at once (written whatever the budget) and how much could wait, beside what the
+    /// budget allows that so far (<see cref="Core.Incidents.WriteBudget.CanWaitAllowance"/>: within it, or over it); how many
+    /// times a write that could wait was held back for a later sample (deferrals: one refresh held at several samples counts
+    /// at each); and which open incidents' reports are behind now (the oldest last written how long ago, and those whose last
+    /// write failed) and whose charts and CSV files are <paramref name="chartAge"/> old or more (they are written only while
+    /// the budget has room to spare). So a deferral is never silent, and nothing is claimed that the figures do not hold.
+    /// </summary>
+    internal static string WriteBudgetText(BudgetFigures b, Core.Incidents.FoldersBehind behind, TimeSpan chartAge)
+    {
+        var text = new System.Text.StringBuilder();
+        text.Append($"Report folders (incidents and spawn storms): {Fmt.Bytes(b.Spent)} written since PoolWatch started. {Fmt.Bytes(b.SpentMust)} of it was what " +
+                    "a reader needed at once (an incident opening, re-opening or closing, a trace, a new storm folder), written whatever the budget; " +
+                    $"{Fmt.Bytes(b.SpentCanWait)} was writes that could wait, against their budget of {Fmt.Bytes(b.BytesPerHour)} an hour ({Fmt.Bytes(b.Burst)} burst): " +
+                    $"{(b.SpentCanWait > b.CanWaitAllowance ? "over" : "within")} the {Fmt.Bytes(b.CanWaitAllowance)} it allows them so far. ");
+        text.Append(b.Held switch
+        {
+            0 => "No write that could wait was held back.",
+            1 => "A write that could wait was held back once, for a later sample.",
+            _ => $"Writes that could wait were held back {b.Held:N0} times, each for a later sample (each time one was due).",
+        });
+        text.Append(behind.Reports == 0
+            ? " No open incident's report is behind now"
+            : $" {behind.Reports} open incident{(behind.Reports == 1 ? "'s report is" : "s' reports are")} behind now, the oldest last written " +
+              $"{Fmt.Duration(behind.OldestReport ?? TimeSpan.Zero)} ago" +
+              (behind.Failed > 0 ? $" ({behind.Failed} of them because {(behind.Failed == 1 ? "its" : "their")} last write failed: poolwatch.log says why)" : ""));
+        text.Append(behind.Charts == 0
+            ? $"; no open incident's chart and CSV files are {Fmt.Duration(chartAge)} old or more"
+            : $"; {behind.Charts} open incident{(behind.Charts == 1 ? "'s chart and CSV files are" : "s' charts and CSV files are")} {Fmt.Duration(chartAge)} old " +
+              $"or more (written while the budget has room to spare), the oldest {Fmt.Duration(behind.OldestChart ?? TimeSpan.Zero)} old");
+        text.Append(behind.Reports + behind.Charts > 0 ? " (the window's details of an open incident are live)." : ".");
+        return text.ToString();
+    }
 
     /// <summary>
     /// The overhead in steady state against its budget, then the last 10 minutes, with the working set now. Read as About

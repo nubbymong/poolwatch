@@ -137,6 +137,8 @@ public sealed class Incident
     public ProcessKey? WrittenTop { get; set; }
     public long WrittenGrowth { get; set; }
     public bool Dirty { get; set; } = true;
+    /// <summary>Its folder's last write failed (logged; it is not retried until the next change), cleared by one that is made.</summary>
+    public bool WriteFailed { get; set; }
     /// <summary>
     /// An alert was counted on an existing timeline entry of a CLOSED incident. Not a material change
     /// (a closed incident is not rewritten on every sample for it), but its folder is rewritten within

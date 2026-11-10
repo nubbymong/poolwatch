@@ -222,6 +222,31 @@ internal static class UiData
         return live.OrderByDescending(r => r.OpenedUtc).ToList();
     }
 
+    /// <summary>
+    /// An open incident's summary as its report.json would say it now, built from memory (<see cref="IncidentManager.SummaryJson"/>),
+    /// with when its folder was last written: what the details and Copy summary show for an open incident, so they are never
+    /// behind its folder, which the write budget can hold back. Null when <paramref name="dir"/> is no open incident in
+    /// memory (a closed one, or one read from disk, shows its report.json). The same instance until what it says can have
+    /// changed (<see cref="LiveSummaries"/>: its ranking, alerts, trace, end or a write; tests hold it to that). UI thread.
+    /// </summary>
+    public static LiveSummary? Live(AnalysisPipeline a, string dir)
+    {
+        lock (a.History.SyncRoot) return a.Incidents.Live.Get(a.History, dir);
+    }
+
+    /// <summary>
+    /// Writes an open incident's whole folder now (<see cref="IncidentManager.WriteNow"/>), so an export holds its state now;
+    /// null when <paramref name="dir"/> is no open incident in memory (its folder is as it was last written, closed or read
+    /// from disk), false when the write failed (logged).
+    /// </summary>
+    public static bool? WriteOpenIncident(AnalysisPipeline a, string dir)
+    {
+        lock (a.History.SyncRoot)
+            foreach (var i in a.Incidents.Open)
+                if (string.Equals(i.Dir, dir, StringComparison.OrdinalIgnoreCase)) return a.Incidents.WriteNow(a.History, i);
+        return null;
+    }
+
     /// <summary>The most incident folders read from disk for the list (the newest by name, which starts with the time).</summary>
     internal const int MaxDiskRows = 500;
 

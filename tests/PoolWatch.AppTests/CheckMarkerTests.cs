@@ -45,6 +45,8 @@ public class CheckMarkerTests
     private static readonly Dictionary<string, string> JobConditions = new(StringComparer.Ordinal)
     {
         ["soak.ps1"] = "github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')",
+        // The agentic-load overhead check runs beside it, on the same runs, and the release needs it too.
+        ["agentic-soak.ps1"] = "github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')",
     };
 
     /// <summary>
@@ -163,7 +165,7 @@ public class CheckMarkerTests
     {
         Assert.Null(WhyTheMarkersAndTheListDiffer(Scripts(), List()));
         var (entries, _) = Entries(List());
-        Assert.Equal(["installer-e2e.ps1", "m4-ui.ps1", "soak.ps1"], entries.Select(e => e.Script).Distinct().Order(StringComparer.Ordinal));
+        Assert.Equal(["agentic-soak.ps1", "installer-e2e.ps1", "m4-ui.ps1", "soak.ps1"], entries.Select(e => e.Script).Distinct().Order(StringComparer.Ordinal));
     }
 
     /// <summary>
@@ -557,7 +559,7 @@ public class CheckMarkerTests
     [Fact]
     public void EveryStepThatNamesAListedScriptRunsItSavedAndVerifiedOrChecksItsOutput()
     {
-        Assert.Equal(["installer-e2e.ps1", "m4-ui.ps1", "soak.ps1"], Listed());
+        Assert.Equal(["agentic-soak.ps1", "installer-e2e.ps1", "m4-ui.ps1", "soak.ps1"], Listed());
         Assert.Contains("ci.yml", Workflows().Keys);
         Assert.Null(WhyAStepIsNotVerified(Workflows(), Listed()));
     }
@@ -635,6 +637,8 @@ public class CheckMarkerTests
         // The soak's job runs on demand and on a release tag only, and the release needs it.
         Assert.Equal(JobConditions["soak.ps1"], JobKey(Jobs(Workflows()["ci.yml"])["soak"], "if"));
         Assert.Contains("soak", Needs(Jobs(Workflows()["ci.yml"])["sign"]));
+        Assert.Equal(JobConditions["agentic-soak.ps1"], JobKey(Jobs(Workflows()["ci.yml"])["agentic-soak"], "if"));
+        Assert.Contains("agentic-soak", Needs(Jobs(Workflows()["ci.yml"])["sign"]));
     }
 
     /// <summary>

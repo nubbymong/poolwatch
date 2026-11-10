@@ -7,10 +7,35 @@ namespace PoolWatch.Engine;
 
 /// <summary>
 /// Writes the continuous CSV record: totals every sample; tags / processes at their (coarser) CSV interval and
-/// filtered to significant rows, which keeps steady-state disk writes well under the 5 MB/hour budget.
+/// filtered to significant rows. Under a PC doing agentic coding the day's files wrote about 4.7 MB an hour (the owner's
+/// 1.0.0-beta.2), nearly the whole 5 MB budget; their share is now 2.5 MB an hour beside the report folders' 1 MB
+/// (DESIGN.md section 3), and <c>DailyCsvBudgetTests</c> measures them under that load. So outside verbose mode each day's
+/// files start with the whole picture (every process, every tag over the minimum, the whole services list, every handle
+/// row) and then hold what changed: a tag's row when its paged or non-paged use moved <see cref="TagMoveBytes"/> since its
+/// last row (and every <see cref="TagRefresh"/> while it stays over the minimum, once more as it falls under it); a
+/// process once it was running at two process writes (a shorter one is in events.csv), then while it is among the busiest
+/// by I/O (any at all), its handles moved by 100, or it is PoolWatch; a service when the process that hosts it changed
+/// (0: stopped); a process's handles of a type when their count changed, and once more as it leaves the selection (the
+/// per-type totals and the System process's every scan); an Exit or Orphaned event without the command line its Start
+/// row already gave that day; and the event summary's minute rollups merged over <see cref="RollupMerge"/>. AGENTS.md
+/// says, file by file, what a reader may carry forward from a row and what it may not. The handle scan's two files are
+/// written on a thread of their own (<see cref="PostHandles"/>, <see cref="HandleCsvWriter"/>).
 /// </summary>
 internal sealed class CsvSink : IDisposable
 {
+    /// <summary>A tag's row is written when its paged or non-paged use moved at least this much since its last row ...</summary>
+    internal const long TagMoveBytes = 1L << 20;
+    /// <summary>... and at least this often while it stays over the minimum, on the forward clock.</summary>
+    internal static readonly TimeSpan TagRefresh = TimeSpan.FromMinutes(10);
+    /// <summary>The event summary's minute rollups are merged over this long in the day's events.csv.</summary>
+    internal static readonly TimeSpan RollupMerge = TimeSpan.FromMinutes(5);
+    /// <summary>At most this many rollups are merged at once (the rest written as they come).</summary>
+    internal const int MaxRollupsMerged = 2000;
+    /// <summary>At most this many processes' Start rows are remembered for their Exit and Orphaned rows (past it, forgotten).</summary>
+    internal const int MaxStartsRemembered = 10_000;
+    /// <summary>At most this many per-process rows of one handle scan, the largest counts first.</summary>
+    internal const int MaxHandleRowsPerScan = 2000;
+
     private readonly AppPaths _paths;
     private readonly Settings _settings;
     private readonly bool _verbose;
@@ -51,26 +76,86 @@ internal sealed class CsvSink : IDisposable
     /// <summary>When the tag and process rows were last written, on the clock that only goes forward (the samples' TickMs); null: not yet.</summary>
     private long? _lastTagWriteMs, _lastProcWriteMs;
     private readonly Dictionary<ProcessKey, ProcessSample> _lastProcRow = new();
-    private string _lastServiceSignature = "";
+
+    // What the day's files hold so far (the last row of each), so that only what changed is written: forgotten at the day's
+    // switch, and for a file whose kept rows were dropped (Forget), whose next write then gives the whole picture again.
+    /// <summary>Each tag's last row: its paged and non-paged use, and when (forward clock).</summary>
+    private readonly Dictionary<PoolTag, (ulong Paged, ulong NonPaged, long Ms)> _tagRows = new();
+    /// <summary>The processes with a row in the day's processes.csv (live ones), and whether the next write lists every process.</summary>
+    private readonly HashSet<ProcessKey> _procRows = new();
+    private bool _procAll = true;
+    /// <summary>Each service's host and display name as the day's services.csv has them; null: the whole list is due.</summary>
+    private Dictionary<string, (int Pid, string Display)>? _serviceRows;
+    /// <summary>Each process instance's last handle count by type in the day's handles.csv.</summary>
+    private readonly Dictionary<(ProcessKey Key, int Type), int> _handleRows = new();
+    /// <summary>
+    /// The processes whose Start row the day's events.csv has with a command line, still running, and that command line's
+    /// mark (its length and hash): an Exit or Orphaned row leaves out only the same command line.
+    /// </summary>
+    private readonly Dictionary<ProcessKey, (int Length, int Hash)> _startRows = new();
+    /// <summary>Whether the event summary's rollups come merged (<see cref="MergeRollupsFrom"/>), and those being merged.</summary>
+    private bool _mergeRollups;
+    private readonly Dictionary<(string? OwnerKey, string Parent, string Image), MergedRollup> _merged = new();
+    private long? _mergeFromMs;
+
+    /// <summary>
+    /// Rollups of one key being merged (<see cref="RollupMerge"/>), as the event summary counts them. Of the first one only
+    /// its names and first parent are kept (<see cref="Head"/>): its collections are the summary's own, valid during its
+    /// call only, and the merge counts its own.
+    /// </summary>
+    private sealed class MergedRollup(RollupParts head)
+    {
+        private static readonly IReadOnlyDictionary<string, int> NoPatterns = new Dictionary<string, int>();
+        public readonly RollupParts Head = head with { ParentPids = [], Patterns = NoPatterns };
+        public int Starts, Exits;
+        public readonly HashSet<int> ParentPids = [];
+        public readonly Dictionary<string, int> Patterns = new(StringComparer.Ordinal);
+        public DateTime From = DateTime.MaxValue, To = DateTime.MinValue;
+
+        public void Add(RollupParts p)
+        {
+            Starts += p.Starts;
+            Exits += p.Exits;
+            foreach (int pid in p.ParentPids) if (ParentPids.Count < Core.Model.EventSummarizer.MaxRollupParents) ParentPids.Add(pid);
+            foreach (var (pattern, n) in p.Patterns)
+                if (Patterns.ContainsKey(pattern) || Patterns.Count < Core.Model.EventSummarizer.MaxRollupPatterns) Patterns[pattern] = Patterns.GetValueOrDefault(pattern) + n;
+            if (p.First < From) From = p.First;
+            if (p.Last > To) To = p.Last;
+        }
+
+        public RollupParts Parts() => Head with { Starts = Starts, Exits = Exits, ParentPids = ParentPids, First = From, Last = To, Patterns = Patterns };
+    }
 
     /// <summary>The most that the rows no file could take yet may hold in all the files, in characters, before the oldest
     /// rows of the file that keeps the most are dropped.</summary>
     internal const int MaxKeptChars = 4 * 1024 * 1024;
 
+    /// <summary>
+    /// The handle scan's own sink (<see cref="HandleCsvWriter"/>, its two files only) keeps this much of its own: rows of
+    /// about six scans that no file could take yet (a scan writes at most <see cref="MaxHandleRowsPerScan"/> rows of
+    /// about 40 characters, and its totals).
+    /// </summary>
+    internal const int HandleKeptChars = 512 * 1024;
+
     /// <summary>How many of a file's names one flush tries, each after the one before refused its rows.</summary>
     private const int NamesPerFlush = 3;
+
+    private readonly int _maxKeptChars;
 
     /// <param name="log">Where a file that cannot be written is logged (once, and again once it ends). Null: nowhere.</param>
     /// <param name="open">How each CSV file is opened (null: <see cref="NoWaitOpen.OpenUnbuffered"/>). Tests stand in
     /// their own.</param>
+    /// <param name="maxKeptChars">The bound on the rows kept (<see cref="MaxKeptChars"/>; the handle scan's sink
+    /// <see cref="HandleKeptChars"/>).</param>
     public CsvSink(AppPaths paths, Settings settings, bool verbose, Action<string>? log = null,
-        Func<string, FileMode, FileAccess, FileShare, Stream>? open = null)
+        Func<string, FileMode, FileAccess, FileShare, Stream>? open = null, int maxKeptChars = MaxKeptChars)
     {
         _paths = paths;
         _settings = settings;
         _verbose = verbose;
         _log = log ?? (_ => { });
         _open = open ?? NoWaitOpen.OpenUnbuffered;
+        _maxKeptChars = maxKeptChars;
         _files = [_totals, _tags, _processes, _events, _handles, _services, _volumes, _systemHandles, _lag, _load];
     }
 
@@ -94,18 +179,36 @@ internal sealed class CsvSink : IDisposable
 
     private DateTime _lastSwitchUtc = DateTime.MinValue;
 
-    // Switches to the day's folder when the day changes. What is kept for the day before is written there first; what no
-    // file of it could take is kept for the new day's files, so no row is lost at the switch.
+    // Switches to the day's folder when the day changes. What is kept for the day before is written there first (the
+    // rollups being merged too); what no file of it could take is kept for the new day's files, so no row is lost at the
+    // switch. Each new day's files start with the whole picture again (Forget).
     private void EnsureFiles(DateTime utcNow)
     {
         var dir = _paths.CsvDir(utcNow);
         if (dir == _dir) return;
-        if (_dir is not null) Flush();
+        if (_dir is not null)
+        {
+            WriteMerged();
+            Flush();
+        }
         _lastSwitchUtc = utcNow;
         CloseFiles();
         _dir = dir;
         _dirMade = false;
-        _lastServiceSignature = "";
+        Forget(null);
+    }
+
+    /// <summary>
+    /// Forgets what the day's <paramref name="file"/> (null: every file) holds, so its next write gives the whole picture:
+    /// at the day's switch, and when rows kept for it were dropped (it may not hold what it was thought to).
+    /// </summary>
+    private void Forget(DayFile? file)
+    {
+        if (file is null || file == _tags) _tagRows.Clear();
+        if (file is null || file == _processes) { _procRows.Clear(); _procAll = true; }
+        if (file is null || file == _services) _serviceRows = null;
+        if (file is null || file == _handles) _handleRows.Clear();
+        if (file is null || file == _events) _startRows.Clear();
     }
 
     /// <summary>Keeps a row for <paramref name="file"/>, written at the next flush.</summary>
@@ -116,13 +219,13 @@ internal sealed class CsvSink : IDisposable
         file.Chars += line.Length;
         _keptChars += line.Length;
         Profiler.WroteName(file.Name, line.Length + 2);
-        if (_keptChars <= MaxKeptChars) return;
+        if (_keptChars <= _maxKeptChars) return;
         // No file has taken these rows for a long time: the oldest of the file that keeps the most go, so what is kept
         // stays bounded in all the files.
         var most = _files.MaxBy(f => f.Chars)!;
         int drop = 0;
         long chars = most.Chars;
-        while (_keptChars > MaxKeptChars && drop < most.Rows.Count - 1)
+        while (_keptChars > _maxKeptChars && drop < most.Rows.Count - 1)
         {
             int n = most.Rows[drop++].Length;
             chars -= n;
@@ -131,9 +234,9 @@ internal sealed class CsvSink : IDisposable
         most.Rows.RemoveRange(0, drop);
         most.Chars = chars;
         if (most.Dropped == 0 && drop > 0)
-            _log($"{most.Name}: the rows that could not be written are kept up to {MaxKeptChars / (1024 * 1024)} M characters in all the files, and the oldest beyond that are dropped, until it can be written");
+            _log($"{most.Name}: the rows that could not be written are kept up to {(_maxKeptChars >= 1 << 20 ? $"{_maxKeptChars >> 20} M" : $"{_maxKeptChars >> 10} K")} characters in all the files, and the oldest beyond that are dropped, until it can be written");
         most.Dropped += drop;
-        if (most == _services && drop > 0) _lastServiceSignature = ""; // the list is written again at the next call
+        if (drop > 0) Forget(most); // its next write gives the whole picture again (the services list, every tag, ...)
     }
 
     /// <summary>
@@ -220,11 +323,7 @@ internal sealed class CsvSink : IDisposable
         if (_verbose || Due(_lastTagWriteMs, s.TickMs, _settings.TagCsvIntervalSeconds))
         {
             _lastTagWriteMs = s.TickMs;
-            foreach (var t in s.Tags)
-            {
-                if (!_verbose && t.TotalUsed < (ulong)_settings.TagCsvMinBytes && !BuiltinTags.AlwaysTracked.Contains(t.Tag)) continue;
-                Row(_tags, s.TimeUtc, t.Tag.ToString(), t.Tag.Raw.ToString("x8"), t.PagedUsed, t.NonPagedUsed, t.PagedAllocs, t.PagedFrees, t.NonPagedAllocs, t.NonPagedFrees);
-            }
+            WriteTags(s);
         }
 
         if (_verbose || Due(_lastProcWriteMs, s.TickMs, _settings.ProcessCsvIntervalSeconds))
@@ -232,86 +331,287 @@ internal sealed class CsvSink : IDisposable
             _lastProcWriteMs = s.TickMs;
             WriteProcesses(s, registry);
         }
+        // The rollups merged over RollupMerge are written once it has passed, on the forward clock.
+        _mergeFromMs ??= s.TickMs;
+        if (s.TickMs - _mergeFromMs >= (long)RollupMerge.TotalMilliseconds)
+        {
+            WriteMerged();
+            _mergeFromMs = s.TickMs;
+        }
         Flush();
     }
+
+    /// <summary>
+    /// The tags over the minimum (and those always tracked): in verbose mode each one at every write; otherwise each one
+    /// whose paged or non-paged use moved <see cref="TagMoveBytes"/> since its last row, or whose last row is
+    /// <see cref="TagRefresh"/> old, and once more as it falls under the minimum (its row says so: under it).
+    /// </summary>
+    private void WriteTags(Sample s)
+    {
+        long refreshMs = (long)TagRefresh.TotalMilliseconds;
+        foreach (var t in s.Tags)
+        {
+            bool over = t.TotalUsed >= (ulong)_settings.TagCsvMinBytes || BuiltinTags.AlwaysTracked.Contains(t.Tag);
+            if (!_verbose)
+            {
+                if (_tagRows.TryGetValue(t.Tag, out var last))
+                {
+                    if (!over) _tagRows.Remove(t.Tag); // its last row, under the minimum: no more until it is over it again
+                    else if (Moved(t.PagedUsed, last.Paged) < TagMoveBytes && Moved(t.NonPagedUsed, last.NonPaged) < TagMoveBytes && s.TickMs - last.Ms < refreshMs) continue;
+                }
+                else if (!over) continue;
+                if (over) _tagRows[t.Tag] = (t.PagedUsed, t.NonPagedUsed, s.TickMs);
+            }
+            Row(_tags, s.TimeUtc, t.Tag.ToString(), t.Tag.Raw.ToString("x8"), t.PagedUsed, t.NonPagedUsed, t.PagedAllocs, t.PagedFrees, t.NonPagedAllocs, t.NonPagedFrees);
+        }
+    }
+
+    private static ulong Moved(ulong now, ulong was) => now > was ? now - was : was - now;
 
     /// <summary>Rows written every <paramref name="seconds"/> (half a second early is on time) are due again, on the forward clock.</summary>
     private static bool Due(long? lastMs, long nowMs, double seconds) => lastMs is not { } last || nowMs - last >= (long)((seconds - 0.5) * 1000);
 
+    /// <summary>
+    /// The processes: in verbose mode, and at the day's first write, every one; otherwise the <see cref="Settings.ProcessCsvTopN"/>
+    /// busiest by I/O since the last write (that did any), any whose handles moved by 100, PoolWatch itself, and, once, each
+    /// that was running at the last write too (one that lived less than that is in events.csv, start and exit or rolled up).
+    /// </summary>
     private void WriteProcesses(Sample s, ProcessRegistry registry)
     {
         int self = Environment.ProcessId;
-        var rows = new List<(ProcessSample p, long dR, long dW, long dO, int dH)>();
+        bool all = _verbose || _procAll;
+        var rows = new List<(ProcessSample p, long dR, long dW, long dO, int dH, bool before)>(s.Processes.Count);
         foreach (var p in s.Processes)
         {
-            _lastProcRow.TryGetValue(p.Key, out var prev);
+            bool before = _lastProcRow.TryGetValue(p.Key, out var prev);
             long dR = prev is null ? 0 : p.ReadOperationCount - prev.ReadOperationCount;
             long dW = prev is null ? 0 : p.WriteOperationCount - prev.WriteOperationCount;
             long dO = prev is null ? 0 : p.OtherOperationCount - prev.OtherOperationCount;
             int dH = prev is null ? 0 : p.HandleCount - prev.HandleCount;
-            rows.Add((p, dR, dW, dO, dH));
+            rows.Add((p, dR, dW, dO, dH, before));
         }
-        var chosen = new HashSet<ProcessKey>(rows.OrderByDescending(r => r.dR + r.dW + r.dO).Take(_settings.ProcessCsvTopN).Select(r => r.p.Key));
+        var chosen = new HashSet<ProcessKey>(rows.Where(r => r.dR + r.dW + r.dO > 0 || _verbose).OrderByDescending(r => r.dR + r.dW + r.dO)
+            .Take(_settings.ProcessCsvTopN).Select(r => r.p.Key));
         foreach (var r in rows)
         {
-            bool include = _verbose || chosen.Contains(r.p.Key) || Math.Abs(r.dH) >= 100 || r.p.Pid == self || !_lastProcRow.ContainsKey(r.p.Key);
-            if (!include) continue;
             var p = r.p;
+            bool include = all || chosen.Contains(p.Key) || Math.Abs(r.dH) >= 100 || p.Pid == self || (r.before && !_procRows.Contains(p.Key));
+            if (!include) continue;
+            _procRows.Add(p.Key);
             bool orphan = registry.Get(p.Key)?.IsOrphan ?? false;
             Row(_processes, s.TimeUtc, p.Pid, p.CreateTime, p.ImageName, p.ParentPid, p.HandleCount, p.ThreadCount, p.QuotaPagedPoolUsage,
                 p.QuotaNonPagedPoolUsage, p.PrivateBytes, p.ReadOperationCount, p.WriteOperationCount, p.OtherOperationCount,
                 p.ReadTransferCount, p.WriteTransferCount, r.dR, r.dW, r.dO, orphan ? 1 : 0);
         }
+        _procAll = false;
         _lastProcRow.Clear();
         foreach (var p in s.Processes) _lastProcRow[p.Key] = p;
+        _procRows.RemoveWhere(k => !_lastProcRow.ContainsKey(k)); // the live ones only
     }
 
+    /// <summary>
+    /// The day's events.csv rows. An Exit or Orphaned row of a process whose Start row the day's file has with the same
+    /// command line (this run, the latest <see cref="MaxStartsRemembered"/> running ones) leaves that command line out: a
+    /// Start row without one (the process was not read yet) is not remembered, so a command line read later is written
+    /// with its exit. (Exit and Orphaned events carry no user.) The event summary's rollups, when they come merged
+    /// (<see cref="MergeRollupsFrom"/>), are written by <see cref="AddRollup"/> instead.
+    /// </summary>
     public void WriteEvents(IEnumerable<LifecycleEvent> events, DateTime utcNow)
     {
         EnsureFiles(utcNow);
         foreach (var e in events)
+        {
+            if (_mergeRollups && e.Kind == LifecycleKind.Rollup) continue;
+            bool started = !_verbose && e.Kind is LifecycleKind.Exit or LifecycleKind.Orphaned && e.CreateTime != 0 && e.CommandLine is { } given
+                && _startRows.TryGetValue(e.Key, out var mark) && mark == Mark(given);
             Row(_events, e.TimeUtc, e.Kind.ToString(), e.Pid, e.CreateTime, e.ParentPid, e.Image, e.ExitCode,
-                e.User is null ? null : Collectors.ProcessDetails.DisplayUser(e.User), e.CommandLine, e.Detail);
+                e.User is null ? null : Collectors.ProcessDetails.DisplayUser(e.User), started ? null : e.CommandLine, e.Detail);
+            if (e.Kind == LifecycleKind.Start && e.CreateTime != 0 && !_verbose && e.CommandLine is { } command)
+            {
+                if (_startRows.Count >= MaxStartsRemembered) _startRows.Clear(); // their exits are written whole
+                _startRows[e.Key] = Mark(command);
+            }
+            else if (e.Kind == LifecycleKind.Exit) _startRows.Remove(e.Key);
+        }
     }
 
-    public void WriteHandles(HandleCounts counts, IReadOnlyDictionary<int, string> typeNames, IReadOnlyList<ProcessSample> processes, DateTime utcNow)
+    /// <summary>A command line's mark: its length and hash (this run's), so the sink holds no copy of it.</summary>
+    private static (int Length, int Hash) Mark(string commandLine) => (commandLine.Length, commandLine.GetHashCode(StringComparison.Ordinal));
+
+    /// <summary>
+    /// The day's events.csv takes the event summary's rollups from <paramref name="summarizer"/> as each closes, and merges
+    /// those of one owner, parent and child image over <see cref="RollupMerge"/> (a row each, as the summary words it:
+    /// their starts and exits added, their parents and commands counted together); the rollups it hands on with its notable
+    /// events are then not written again. Not in verbose mode, which writes every rollup.
+    /// </summary>
+    public void MergeRollupsFrom(Core.Model.EventSummarizer summarizer)
     {
+        if (_verbose) return;
+        summarizer.RollupClosed += AddRollup;
+        _mergeRollups = true;
+    }
+
+    /// <summary>A rollup closed (<see cref="MergeRollupsFrom"/>): merged with the others of its key until <see cref="RollupMerge"/> has passed.</summary>
+    internal void AddRollup(RollupParts parts)
+    {
+        var key = (parts.OwnerKey, parts.Parent, parts.Image);
+        if (!_merged.TryGetValue(key, out var m))
+        {
+            if (_merged.Count >= MaxRollupsMerged)
+            {
+                Rollup(parts); // too many at once: this one as it is
+                return;
+            }
+            _merged[key] = m = new MergedRollup(parts);
+        }
+        m.Add(parts);
+    }
+
+    /// <summary>Writes the merged rollups, the earliest first, and starts merging anew.</summary>
+    private void WriteMerged()
+    {
+        if (_merged.Count == 0) return;
+        if (_dir is null) return; // nothing written yet: kept for the first day's file
+        foreach (var m in _merged.Values.OrderBy(m => m.From)) Rollup(m.Parts());
+        _merged.Clear();
+    }
+
+    private void Rollup(RollupParts parts)
+    {
+        var e = parts.Event();
+        Row(_events, e.TimeUtc, e.Kind.ToString(), e.Pid, e.CreateTime, e.ParentPid, e.Image, e.ExitCode, null, null, e.Detail);
+    }
+
+    /// <summary>
+    /// A handle scan: the per-type totals (pid -1) and the System process's handles by type (system-handles.csv) every scan;
+    /// then the 20 processes with the most handles (and PoolWatch) by each type they hold 20 of, and any process by each type
+    /// it holds 500 of, at most <see cref="MaxHandleRowsPerScan"/> rows (the largest first; a pid -2 row counts those left
+    /// out): in verbose mode, and at the day's
+    /// first scan, each; otherwise each whose count changed since that process's last row of the type, and once more each
+    /// (process, type) with a row that this scan did not pick while the process still runs, with its count now (0: it holds
+    /// none of that type): so the last row of each is what it holds until a newer row says otherwise, or the process exits
+    /// (its exit is in events.csv). Only its own two files are written here (the others at the sample's flush). Called on
+    /// the handle scan's own thread (<see cref="PostHandles"/>), and by tests. Returns how long its rows took to make and
+    /// its two files to write (profiled too: csv.handles.rows, csv.handles.commit).
+    /// </summary>
+    public (TimeSpan Rows, TimeSpan Commit) WriteHandles(HandleCounts counts, IReadOnlyDictionary<int, string> typeNames, IReadOnlyList<ProcessSample> processes, DateTime utcNow)
+    {
+        long began = System.Diagnostics.Stopwatch.GetTimestamp();
+        var rows = Profiler.Stage("csv.handles.rows");
         EnsureFiles(utcNow);
-        // Per-type totals (pid -1), then the top processes by handle count with their significant types.
+        string Type(int type) => typeNames.TryGetValue(type, out var name) ? name : "#" + type.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var totals = new Dictionary<int, long>();
-        foreach (var pid in counts.Pids)
-            foreach (var (type, n) in counts.ForProcess(pid)) totals[type] = totals.GetValueOrDefault(type) + n;
-        foreach (var (type, n) in totals.OrderByDescending(kv => kv.Value))
-            Row(_handles, utcNow, -1, "*", typeNames.GetValueOrDefault(type, $"#{type}"), n);
-        // The System process (PID 4) by type, every census (the reports saw it hold 1.75 M handles).
-        foreach (var (type, n) in counts.ForProcess(4).OrderByDescending(kv => kv.Value))
-            Row(_systemHandles, utcNow, typeNames.GetValueOrDefault(type, $"#{type}"), n);
-        var names = processes.GroupBy(p => p.Pid).ToDictionary(g => g.Key, g => g.First().ImageName);
-        var top = counts.Pids.Select(pid => (pid, total: counts.ForProcess(pid).Values.Sum())).OrderByDescending(x => x.total).Take(20).Select(x => x.pid).ToHashSet();
-        int self = Environment.ProcessId;
+        var byPid = new List<(int Pid, long Total)>();
         foreach (var pid in counts.Pids)
         {
-            var types = counts.ForProcess(pid);
-            bool isTop = top.Contains(pid) || pid == self;
-            foreach (var (type, n) in types)
+            long total = 0;
+            foreach (var (type, n) in counts.ForProcess(pid))
             {
-                if (n >= 500 || (isTop && n >= 20))
-                    Row(_handles, utcNow, pid, names.GetValueOrDefault(pid, ""), typeNames.GetValueOrDefault(type, $"#{type}"), n);
+                totals[type] = totals.GetValueOrDefault(type) + n;
+                total += n;
+            }
+            byPid.Add((pid, total));
+        }
+        foreach (var (type, n) in totals.OrderByDescending(kv => kv.Value)) Row(_handles, utcNow, -1, "*", Type(type), n);
+        // The System process (PID 4) by type, every census (the reports saw it hold 1.75 M handles).
+        foreach (var (type, n) in counts.ForProcess(4).OrderByDescending(kv => kv.Value)) Row(_systemHandles, utcNow, Type(type), n);
+        var keys = new Dictionary<int, ProcessSample>();
+        foreach (var p in processes) keys.TryAdd(p.Pid, p);
+        ProcessKey KeyOf(int pid) => keys.TryGetValue(pid, out var p) ? p.Key : new ProcessKey(pid, 0);
+        byPid.Sort((a, b) => b.Total.CompareTo(a.Total));
+        int self = Environment.ProcessId;
+        var top = new HashSet<int>(byPid.Take(20).Select(x => x.Pid)) { self };
+        var picked = new List<(int Pid, int Type, int N)>();
+        foreach (var (pid, _) in byPid)
+            foreach (var (type, n) in counts.ForProcess(pid))
+                if (n >= 500 || (top.Contains(pid) && n >= 20)) picked.Add((pid, type, n));
+        if (picked.Count > MaxHandleRowsPerScan)
+        {
+            // The scan's file says so: pid -2 counts the process counts left out (the smallest), which are not recorded
+            // until a scan without one (AGENTS.md).
+            Row(_handles, utcNow, -2, "*", "(left out)", picked.Count - MaxHandleRowsPerScan);
+            picked = picked.OrderByDescending(x => x.N).Take(MaxHandleRowsPerScan).ToList();
+        }
+        var written = new HashSet<(ProcessKey Key, int Type)>();
+        foreach (var (pid, type, n) in picked)
+        {
+            var key = (KeyOf(pid), type);
+            if (!_verbose)
+            {
+                written.Add(key);
+                if (_handleRows.TryGetValue(key, out int was) && was == n) continue;
+                _handleRows[key] = n;
+            }
+            Row(_handles, utcNow, pid, keys.GetValueOrDefault(pid)?.ImageName ?? "", Type(type), n);
+        }
+        if (_handleRows.Count > written.Count)
+        {
+            // A count with a row that this scan did not pick (it fell under the selection, the process left the 20 with the
+            // most handles, or the scan's rows were capped): one more row with its count now, then none until it is picked
+            // again, so the last row a reader carries forward is the count when it stopped being recorded, not an older one
+            // (AGENTS.md says a last row may be that). A process that exited (or whose PID now belongs to another) has its
+            // exit in events.csv: no row.
+            var running = new HashSet<ProcessKey>();
+            foreach (var pid in counts.Pids) running.Add(KeyOf(pid));
+            foreach (var k in _handleRows.Keys.Where(k => !written.Contains(k)).ToList())
+            {
+                _handleRows.Remove(k);
+                if (running.Contains(k.Key))
+                    Row(_handles, utcNow, k.Key.Pid, keys.GetValueOrDefault(k.Key.Pid)?.ImageName ?? "", Type(k.Type), counts.Count(k.Key.Pid, k.Type));
             }
         }
-        Flush();
+        rows.Dispose();
+        long made = System.Diagnostics.Stopwatch.GetTimestamp();
+        using (Profiler.Stage("csv.handles.commit"))
+        {
+            Commit(_handles);
+            Commit(_systemHandles);
+        }
+        return (System.Diagnostics.Stopwatch.GetElapsedTime(began, made), System.Diagnostics.Stopwatch.GetElapsedTime(made));
     }
 
+    /// <summary>The handle scan's writer (<see cref="PostHandles"/>), made at the first scan.</summary>
+    private HandleCsvWriter? _handleWriter;
+
+    /// <summary>
+    /// Hands a handle scan to its own thread (<see cref="HandleCsvWriter"/>), which writes it to handles.csv and
+    /// system-handles.csv through a sink of its own (<see cref="WriteHandles"/>), and returns at once: the sampler's tick
+    /// never waits for that write. The census, type names and process list are not changed after the scan. Sampler thread.
+    /// </summary>
+    public void PostHandles(HandleCounts counts, IReadOnlyDictionary<int, string> typeNames, IReadOnlyList<ProcessSample> processes, DateTime utcNow) =>
+        (_handleWriter ??= new HandleCsvWriter(new CsvSink(_paths, _settings, _verbose, _log, _open, HandleKeptChars), _log))
+            .Post(new HandleCsvWriter.Scan(counts, typeNames, processes, utcNow));
+
+    /// <summary>Handle scans whose rows were not written: each was handed over while an earlier one still waited (<see cref="HandleCsvWriter"/>).</summary>
+    public long HandleScansNotWritten => _handleWriter?.Replaced ?? 0;
+
+    /// <summary>
+    /// The services and the process that hosts each: at the day's first call the whole list (those running), then a row for
+    /// each service whose host changed, with PID 0 for one that stopped or left the list. A change no file could take yet is
+    /// kept, so an unchanged list writes nothing. Only services.csv is written here.
+    /// </summary>
     public void WriteServices(IReadOnlyList<ServiceEntry> services, DateTime utcNow)
     {
         EnsureFiles(utcNow);
-        var sig = string.Join("|", services.OrderBy(s => s.Name).Select(s => s.Name + ":" + s.ProcessId));
-        if (sig == _lastServiceSignature) return;
-        // Its rows are kept until a file takes them, so an unchanged list is not written again.
-        _lastServiceSignature = sig;
-        foreach (var s in services.Where(s => s.ProcessId != 0).OrderBy(s => s.ProcessId))
-            Row(_services, utcNow, s.ProcessId, s.Name, s.DisplayName);
-        Flush();
+        var now = new Dictionary<string, (int Pid, string Display)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in services) now[s.Name] = (s.ProcessId, s.DisplayName);
+        var was = _serviceRows;
+        _serviceRows = now;
+        if (was is null)
+        {
+            foreach (var s in services.Where(s => s.ProcessId != 0).OrderBy(s => s.ProcessId)) Row(_services, utcNow, s.ProcessId, s.Name, s.DisplayName);
+        }
+        else
+        {
+            var changed = new List<(int Pid, string Name, string Display)>();
+            foreach (var (name, (pid, display)) in now)
+                if ((was.TryGetValue(name, out var before) ? before.Pid : 0) != pid) changed.Add((pid, name, display));
+            foreach (var (name, (pid, display)) in was)
+                if (pid != 0 && !now.ContainsKey(name)) changed.Add((0, name, display));
+            if (changed.Count == 0) return;
+            foreach (var (pid, name, display) in changed.OrderBy(c => c.Pid).ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase)) Row(_services, utcNow, pid, name, display);
+        }
+        Commit(_services);
     }
 
     public void WriteLag(Core.Lag.LagProbe p)
@@ -331,12 +631,13 @@ internal sealed class CsvSink : IDisposable
             p.Faults is { } i ? Math.Round(i.PagesInputPerSec) : null, p.ProbeTripping ? 1 : 0);
     }
 
+    /// <summary>The volumes (at start and every hour). Only volumes.csv is written here.</summary>
     public void WriteVolumes(IReadOnlyList<VolumeInfo> volumes, DateTime utcNow)
     {
         EnsureFiles(utcNow);
         foreach (var v in volumes)
             Row(_volumes, utcNow, v.Root, v.FileSystem, v.Label, v.IsDevDrive?.ToString() ?? "unknown", v.DriveType);
-        Flush();
+        Commit(_volumes);
     }
 
     /// <summary>Writes the rows kept for each file (<see cref="Commit"/>); a file that cannot be written is not thrown for.</summary>
@@ -364,10 +665,14 @@ internal sealed class CsvSink : IDisposable
         }
     }
 
-    /// <summary>Writes what is kept, as a flush does, then lets go of each file. The rows of a file that no file could take
-    /// even then, and those dropped since its last write, are logged: they are not in the CSV files.</summary>
+    /// <summary>Writes what is kept (the rollups being merged too), as a flush does, then lets go of each file. The rows of a
+    /// file that no file could take even then, and those dropped since its last write, are logged: they are not in the CSV
+    /// files. The handle scan's writer is let go of first: it writes the scan it was handed, within its time
+    /// (<see cref="HandleCsvWriter.Dispose"/>).</summary>
     public void Dispose()
     {
+        _handleWriter?.Dispose();
+        WriteMerged();
         Flush();
         foreach (var f in _files)
         {

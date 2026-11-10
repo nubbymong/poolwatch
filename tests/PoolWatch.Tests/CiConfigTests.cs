@@ -69,4 +69,20 @@ public sealed class CiConfigTests
         Assert.True(CaptureGovernor.ScopeFor(CaptureSource.LagTrip, s).Cpu);
         Assert.True(CaptureGovernor.ScopeFor(CaptureSource.Manual, s).Cpu);
     }
+
+    [Fact]
+    public void TheAgenticLoadCheckRunsAsTheSoakDoesWithAGrowthRuleItsLoadsReach()
+    {
+        // ci/agentic-soak.ps1: the soak's shortened windows (each full before the judged window at 15 min) and its CPU trace
+        // off; a 10-minute rule of 6 MB (its File-handle and file loads grow tens of MB) beside the default hour rule, so
+        // growth incidents open; nothing else changed from the soak's settings.
+        var s = Config("soak-agentic-config.json");
+        var soak = Config("soak-config.json");
+        Assert.Equal((soak.RawHistoryMinutes, soak.ShortLivedKeepMinutes, soak.IncidentEventKeepMinutes), (s.RawHistoryMinutes, s.ShortLivedKeepMinutes, s.IncidentEventKeepMinutes));
+        Assert.False(s.CpuTraceEnabled);
+        Assert.False(s.CaptureOnAlert);
+        Assert.Equal([new GrowthRule(10, 6 * Settings.MB), new GrowthRule(60, 1024 * Settings.MB)], s.GrowthRules);
+        soak.GrowthRules = s.GrowthRules;
+        Assert.Equal(soak.ToJson(), s.ToJson());
+    }
 }
