@@ -46,6 +46,11 @@ public sealed class Suspect
     public string? ImagePath { get; init; }
     public string? User { get; init; }
     public DateTime StartUtc { get; init; }
+    /// <summary>
+    /// PoolWatch held no record of the process when it was ranked (the registry had let it go: it is named by when the
+    /// history saw it): its exit is not known, so an empty <see cref="ExitUtc"/> does not mean it still ran.
+    /// </summary>
+    public bool Unresolved { get; init; }
     public DateTime? ExitUtc { get; init; }
     /// <summary><see cref="ExitUtc"/> on the clock that only goes forward (<see cref="ProcessRecord.ExitMs"/>): whether it exited before a trace began is timed on it.</summary>
     public long? ExitMs { get; init; }
@@ -223,6 +228,7 @@ public static class Correlator
                 ImagePath = rec?.ImagePath,
                 User = rec?.User,
                 StartUtc = key.CreateTimeUtc,
+                Unresolved = rec is null,
                 ExitUtc = rec?.ExitUtc,
                 ExitMs = rec?.ExitMs,
                 ExitCode = rec?.ExitCode,

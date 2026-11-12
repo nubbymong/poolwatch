@@ -204,14 +204,19 @@ public static class OwnerRanking
             string type = handleMembers[0].Direct.HandleType!;
             double share = handleMembers.Sum(m => m.Direct.HandleShare);
             long est = growth > 0 ? (long)(growth * share) : 0;
-            p.Add($"holds {delta:N0} more {type} handles ({share:P0} of the {type}-handle growth{(est > 0 ? $", about {Fmt.Bytes(est)} of the rise" : "")})");
+            // Said of the window, not of now: the line stays in a closed incident's report however much later that is
+            // written, and in the live view a process whose handles rose can have exited since ("holds 24,000 more File
+            // handles" was said of a process that had exited hours before the report was written again).
+            p.Add($"its {type} handles rose by {delta:N0} ({share:P0} of the {type}-handle growth{(est > 0 ? $", about {Fmt.Bytes(est)} of the rise" : "")})");
         }
         long quota = g.Members.Sum(m => m.Direct.QuotaDelta);
         if (Math.Abs(quota) >= 16 * 1024) p.Add($"pool memory charged to it: {Fmt.SignedBytes(quota)}");
         long trace = g.Members.Sum(m => Math.Max(0, m.TraceNetBytes));
         if (trace > 0) p.Add($"the confirmation trace saw it allocate {Fmt.Bytes(trace)} of {tag.ToDisplay()}");
         if (g.Ops > 0) p.Add($"file and other I/O: {Count(g.Ops)} operations ({g.IoShare:P0} of all)");
-        if (!double.IsNaN(g.Correlation)) p.Add($"rises and falls with the tag: {Moves(g.Correlation)}");
+        // Said of the window too, as the handles are above: the ranking is of a window that has passed, and a closed
+        // incident's lines are read hours after it ("rises and falls with the tag" was said of a process that had exited).
+        if (!double.IsNaN(g.Correlation)) p.Add($"rose and fell with the tag: {Moves(g.Correlation)}");
         foreach (var m in g.Members.Where(m => m.Lifecycle.StartedBeforeOnset).Take(1)) p.Add($"{m.Image} started just before the growth began ({Fmt.Clock(m.StartUtc)})");
         foreach (var m in g.Members.Where(m => m.Lifecycle.ExitedAtEnd).Take(1)) p.Add($"{m.Image} exited when the growth stopped");
         foreach (var m in g.Members.Where(m => m.Lifecycle.OrphanActive).Take(1)) p.Add($"{m.Image} kept running and working after its parent exited");
@@ -223,23 +228,45 @@ public static class OwnerRanking
         : n >= 10_000 ? (n / 1e3).ToString("0", CultureInfo.InvariantCulture) + " k" : n.ToString("N0", CultureInfo.InvariantCulture);
 
     /// <summary>
-    /// "File objects (non-paged) grew 1.2 GB in the last hour. Most likely cause: Codex (strong evidence). Next: Stream Deck
-    /// (some evidence)." or "No clear cause yet: the suspects below account for 0.6 MB of a 300 MB rise." A confidence is
-    /// in the words of Pool causes' Confidence column (<see cref="PlainWords.Confidence"/>).
+    /// How an answer names a tag: by what it holds, with the tag and its pool, "File objects (File, non-paged)"; a tag
+    /// with no short description by its name and owner, "Abcd (example.sys, paged)". The pool is the one that holds
+    /// more of it.
     /// </summary>
-    public static TagAnswer Answer(TagInfo info, PoolTag tag, long pagedBytes, long nonPagedBytes, long growth, string window, IReadOnlyList<OwnerSuspect> owners)
+    public static string Named(TagInfo info, PoolTag tag, long pagedBytes, long nonPagedBytes)
     {
         string kind = nonPagedBytes > pagedBytes ? "non-paged" : "paged";
-        string what = info.Description.Length > 0 && info.Description.Length <= 60 ? $"{info.Description} ({tag.ToDisplay()}, {kind})" : $"{tag.ToDisplay()} ({info.Owner}, {kind})";
+        return info.Description.Length > 0 && info.Description.Length <= 60 ? $"{info.Description} ({tag.ToDisplay()}, {kind})" : $"{tag.ToDisplay()} ({info.Owner}, {kind})";
+    }
+
+    /// <summary>
+    /// "File objects (non-paged) grew 1.2 GB in the last hour. Most likely cause: Codex (strong evidence). Next: Stream Deck
+    /// (some evidence)." or "No clear cause yet: the suspects below account for 0.6 MB of a 300 MB rise." of a window
+    /// that runs to now (the live view, an open incident), and "No clear cause was found: ..." of a
+    /// <paramref name="closed"/> incident's, whose suspects are as they were last ranked. A confidence is
+    /// in the words of Pool causes' Confidence column (<see cref="PlainWords.Confidence"/>). A tag that fell: "... fell
+    /// 140 MB in 1 min." ("fell 200 MB on its own in 3 min." with <paramref name="onItsOwn"/>: PoolWatch's own cache
+    /// clears freed more of it meanwhile, which is their result). One that did neither: "... is flat over the last
+    /// hour." of a window that runs to now, and "... was flat over 1 min." of a closed incident's, whose report is
+    /// written again hours after that minute.
+    /// </summary>
+    /// <param name="growth">What the tag did over the window: above 0 it grew, below 0 it fell by that much.</param>
+    public static TagAnswer Answer(TagInfo info, PoolTag tag, long pagedBytes, long nonPagedBytes, long growth, string window, IReadOnlyList<OwnerSuspect> owners,
+        bool closed = false, bool onItsOwn = false)
+    {
+        string what = Named(info, tag, pagedBytes, nonPagedBytes);
         long explained = owners.Where(o => o.Meaningful).Sum(o => o.ExplainedBytes);
-        string head = growth > 0 ? $"{what} grew {Fmt.Bytes(growth)} in {window}." : growth < 0 ? $"{what} fell {Fmt.Bytes(-growth)} in {window}." : $"{what} is flat over {window}.";
+        string head = growth > 0 ? $"{what} grew {Fmt.Bytes(growth)} in {window}."
+            : growth < 0 ? $"{what} fell {Fmt.Bytes(-growth)}{(onItsOwn ? " on its own" : "")} in {window}."
+            : $"{what} {(closed ? "was" : "is")} flat over {window}.";
         var top = owners.Where(o => o.Meaningful).ToList();
         if (growth <= 0) return new TagAnswer(head, owners, growth, explained);
         // A cause is named only when the top owner itself has at least some evidence, or its own evidence covers a tenth of the rise.
         bool named = top.Count > 0 && (top[0].Confidence >= Confidence.Correlated || top[0].ExplainedBytes >= growth / 10);
         bool explains = explained >= growth / 10 || (top.Count > 0 && top[0].Confidence >= Confidence.StronglyCorrelated);
+        // "yet" only of a window that runs to now: a closed incident's suspects are as they were last ranked, and its
+        // report is written again hours later ("No clear cause yet" was then said hours after PoolWatch last looked for one).
         if (!named)
-            return new TagAnswer($"{head} No clear cause yet: the suspects below account for {Fmt.Bytes(explained)} of a {Fmt.Bytes(growth)} rise.", owners, growth, explained);
+            return new TagAnswer($"{head} No clear cause {(closed ? "was found" : "yet")}: the suspects below account for {Fmt.Bytes(explained)} of a {Fmt.Bytes(growth)} rise.", owners, growth, explained);
         string line = $"{head} Most likely cause: {top[0].Name} ({PlainWords.Confidence(top[0].Confidence)}).";
         if (top.Count > 1 && top[1].Confidence >= Confidence.Correlated) line += $" Next: {top[1].Name} ({PlainWords.Confidence(top[1].Confidence)}).";
         if (!explains) line += $" The evidence accounts for {Fmt.Bytes(explained)} of the {Fmt.Bytes(growth)} rise.";

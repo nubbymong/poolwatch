@@ -119,6 +119,78 @@ public class ReffIncidentTests
         Assert.StartsWith(string.Format(System.Globalization.CultureInfo.InvariantCulture, starts, Fmt.Clock(clearUtc)), line);
     }
 
+    /// <summary>
+    /// The trace's answer for the incident with a level of <paramref name="currentMb"/> after a peak of
+    /// <paramref name="peakMb"/>, of which PoolWatch's own clears freed <paramref name="clearedMb"/> (one clear, at
+    /// 06:46, or several); open, or <paramref name="closed"/> at 07:04; its level read from the sample of
+    /// <paramref name="readUtc"/> (null: never read from one).
+    /// </summary>
+    private static string Answer(long peakMb, long currentMb, long clearedMb, bool oneClear, DateTime? readUtc, bool closed)
+    {
+        var (reg, cap) = Session(shortCommands: 0);
+        var inc = Inc();
+        inc.PeakBytes = peakMb * MB;
+        inc.CurrentBytes = currentMb * MB;
+        inc.ClearedBytes = clearedMb * MB;
+        inc.ClearedAtUtc = oneClear ? T0.AddMinutes(12) : null;
+        (inc.EndUtc, inc.EndMs) = (null, null);
+        if (closed) (inc.ClosedUtc, inc.ClosedMs) = (T0.AddMinutes(30), At(T0.AddMinutes(30)).Ms);
+        inc.CurrentAtUtc = readUtc;
+        inc.Capture = cap;
+        inc.Traced = TraceAttribution.Resolve(cap, Reff, reg);
+        inc.TraceOwners = TraceAttribution.Owners(inc.Traced);
+        return TraceAttribution.Answer(inc, new TagInfo("refs.sys", "FCB_DATA", "test"), inc.TraceOwners, cap)!;
+    }
+
+    [Theory]
+    // No clear: held, or part of it freed by the time the level was read.
+    [InlineData(675, 675, 0, false, "Reff (FCB_DATA) grew 580 MB in 26 min and was still held at {1}. The trace")]
+    [InlineData(675, 600, 0, false, "Reff (FCB_DATA) grew 580 MB in 26 min; 75 MB had been freed by {1}. The trace")]
+    // PoolWatch's own clears freed part of it: the rest held, or more freed on its own.
+    [InlineData(875, 675, 200, true, "Reff (FCB_DATA) grew 780 MB in 26 min; PoolWatch's own cache clear at {0} freed 200 MB of it, and the rest was still held at {1}. The trace")]
+    [InlineData(875, 575, 200, true, "Reff (FCB_DATA) grew 780 MB in 26 min; PoolWatch's own cache clear at {0} freed 200 MB of it, and 100 MB more had been freed by {1}. The trace")]
+    [InlineData(395, 180, 200, true, "Reff (FCB_DATA) grew 300 MB in 26 min; PoolWatch's own cache clear at {0} freed 200 MB of it, and 15 MB more had been freed by {1}. The trace")]
+    [InlineData(395, 185, 200, true, "Reff (FCB_DATA) grew 300 MB in 26 min; PoolWatch's own cache clear at {0} freed 200 MB of it, and the rest was still held at {1}. The trace")]
+    // The clears freed as much as it grew, or more: its level, against where it grew from.
+    [InlineData(675, 0, 675, false, "Reff (FCB_DATA) grew 580 MB in 26 min; PoolWatch's own cache clears freed 675 MB of the tag, more than it grew: it was empty at {1}. The trace")]
+    [InlineData(595, 45, 550, true, "Reff (FCB_DATA) grew 500 MB in 26 min; PoolWatch's own cache clear at {0} freed 550 MB of the tag, more than it grew: it was at 45 MB at {1}, under the 95 MB it grew from. The trace")]
+    [InlineData(675, 95, 580, true, "Reff (FCB_DATA) grew 580 MB in 26 min; PoolWatch's own cache clear at {0} freed 580 MB of the tag, as much as it grew: it was back at the 95 MB it grew from, at {1}. The trace")]
+    [InlineData(675, 120, 600, true, "Reff (FCB_DATA) grew 580 MB in 26 min; PoolWatch's own cache clear at {0} freed 600 MB of the tag, more than it grew: it was at 120 MB at {1}, over the 95 MB it grew from. The trace")]
+    public void TheTraceAnswerOfAClosedIncidentSaysTheTimeItsLevelIsOf(long peakMb, long currentMb, long clearedMb, bool oneClear, string starts)
+    {
+        // A closed incident's level is as it was last read (at its close, or when it was found still held after it),
+        // and its trace's answer is written again with its folder hours later, and shown in the window for an hour:
+        // what it says of the level is in the past tense, with the time of the sample the level is of. (Before, it said
+        // "and is still held", "has been freed since" and "it is now empty" of a level hours old, beside a Growth line
+        // that gave the same level with its time.)
+        var read = T0.AddMinutes(29).AddSeconds(50); // the last sample before its close at 07:04
+        string line = Answer(peakMb, currentMb, clearedMb, oneClear, read, closed: true);
+        Assert.StartsWith(string.Format(System.Globalization.CultureInfo.InvariantCulture, starts, Fmt.Clock(T0.AddMinutes(12)), Fmt.Clock(read)), line);
+        Assert.DoesNotContain(" is still held", line);
+        Assert.DoesNotContain("freed since", line);
+        Assert.DoesNotContain("it is now", line);
+    }
+
+    [Fact]
+    public void TheTraceAnswerSaysNowOnlyOfAnOpenIncidentAndNoLevelOfAClosedOneThatWasNeverRead()
+    {
+        // While the incident is open the level is the newest sample's: the present tense, whatever time it carries.
+        var read = T0.AddMinutes(29).AddSeconds(50);
+        Assert.StartsWith("Reff (FCB_DATA) grew 580 MB in 26 min and is still held. The trace", Answer(675, 675, 0, false, read, closed: false));
+        Assert.StartsWith("Reff (FCB_DATA) grew 580 MB in 26 min; 75 MB has been freed since. The trace", Answer(675, 600, 0, false, read, closed: false));
+        Assert.StartsWith("Reff (FCB_DATA) grew 580 MB in 26 min; PoolWatch's own cache clears freed 675 MB of the tag, more than it grew: it is now empty. The trace",
+            Answer(675, 0, 675, false, null, closed: false));
+        // A closed incident whose level was never read from a sample has no time to give it with: its answer says what
+        // grew and what the clears freed, and nothing of what was held (its Growth line says no level either).
+        string clear = Fmt.Clock(T0.AddMinutes(12));
+        Assert.StartsWith("Reff (FCB_DATA) grew 580 MB in 26 min. The trace", Answer(675, 675, 0, false, null, closed: true));
+        Assert.StartsWith("Reff (FCB_DATA) grew 580 MB in 26 min. The trace", Answer(675, 600, 0, false, null, closed: true));
+        Assert.StartsWith($"Reff (FCB_DATA) grew 780 MB in 26 min; PoolWatch's own cache clear at {clear} freed 200 MB of it. The trace", Answer(875, 675, 200, true, null, closed: true));
+        Assert.StartsWith($"Reff (FCB_DATA) grew 780 MB in 26 min; PoolWatch's own cache clear at {clear} freed 200 MB of it. The trace", Answer(875, 575, 200, true, null, closed: true));
+        Assert.StartsWith("Reff (FCB_DATA) grew 580 MB in 26 min; PoolWatch's own cache clears freed 675 MB of the tag, more than it grew. The trace", Answer(675, 0, 675, false, null, closed: true));
+        Assert.StartsWith($"Reff (FCB_DATA) grew 580 MB in 26 min; PoolWatch's own cache clear at {clear} freed 580 MB of the tag, as much as it grew. The trace", Answer(675, 95, 580, true, null, closed: true));
+    }
+
     [Fact]
     public void TracedPidIsMatchedByCreateTimeNotJustPid()
     {

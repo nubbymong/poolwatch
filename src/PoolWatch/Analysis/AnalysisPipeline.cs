@@ -258,7 +258,7 @@ internal sealed class AnalysisPipeline
     private Incident? StartLagCapture(CaptureDecision d)
     {
         var now = History.Count > 0 ? History.Times[^1] : DateTime.UtcNow;
-        var inc = Incidents.CreateCapture(History, [], now);
+        var inc = Incidents.CreateCapture(History, [], now, CaptureSource.LagTrip);
         Incidents.Note(inc, d.Request.TimeUtc, d.Request.Why);
         Incidents.Note(inc, now, $"capture started: {d.Summary}");
         if (StartCapture(d, [inc], [])) return inc;

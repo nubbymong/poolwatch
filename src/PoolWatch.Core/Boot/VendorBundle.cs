@@ -24,7 +24,7 @@ public static class VendorBundle
         ("samples.csv", "one row per minute: commit, commit limit, paged / non-paged, system handles, process count"),
         ("tags/", "tag snapshots: after-reboot (boot baseline), history-start, now, during-growth at incident peaks, before-launch-<app> / after-exit-<app> " +
                   "for each watched app (the last snapshot before it started, the first after it exited), and before-launch / app-running / after-exit when an experiment ran"),
-        ("incidents.md", "each pool-growth incident with its top tag, growth and suspects (during growth)"),
+        ("incidents.md", "the last 50 incidents (growths, drops, the non-paged pool over its limit, your traces): each one's tag, what the tag did, when it began and closed, and its top three suspects"),
         ("experiment/", "the guided A/B experiment's report and per-tag phase changes, when one ran"),
         ("filters.json", "minifilter instances per volume, watched services (bindflt, wcifs, vmcompute, CoworkVMService) and filter / package events"),
         ("git-and-spawns.md", "git root findings (stray .git at a profile / OneDrive / volume root) and spawn storms"),

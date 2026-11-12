@@ -62,12 +62,18 @@ public class RecommendationInputsBuilderTests
         cleared.ClearedBytes = 512L << 20;
         cleared.ClearedAtUtc = clearUtc;
         cleared.CurrentBytes = (3L << 30) - (512L << 20);
+        cleared.CurrentAtUtc = cleared.ClosedUtc; // its level as its close measured it
         string at = clearUtc.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
         string onset = cleared.OnsetUtc.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
         Assert.Equal($"Kernel pool grew 2.0 GB at {onset} (PoolWatch's own cache clear at {at} freed 512 MB of it); the likely cause is X, with strong evidence.",
             RecommendationInputsBuilder.Reportable([cleared], new Dictionary<string, Moment>(), AppClocks.At(Now))!.Value.Headline);
-        Assert.EndsWith($", closed {Fmt.Stamp(cleared.ClosedUtc!.Value)}; now 2.5 GB, after PoolWatch's own cache clear at {Fmt.Clock(clearUtc)} freed 512 MB of it",
+        // A closed incident's level is as it was last measured, and a bundle is made hours or days later: the line gives
+        // it with the time of the sample it is of (before, "; now 2.5 GB" of a level two hours old); an open incident's is "now".
+        Assert.EndsWith($", closed {Fmt.Stamp(cleared.ClosedUtc!.Value)}; 2.5 GB at {Fmt.Stamp(cleared.ClosedUtc.Value)}, after PoolWatch's own cache clear at {Fmt.Clock(clearUtc)} freed 512 MB of it",
             PoolWatch.Analysis.BundleBuilder.IncidentLine(cleared));
+        var open = Growth("20261028-0610-Reff", null, Owner("app:x", "X", Confidence.StronglyCorrelated));
+        (open.ClearedBytes, open.ClearedAtUtc, open.CurrentBytes, open.CurrentAtUtc) = (512L << 20, clearUtc, (3L << 30) - (512L << 20), Now);
+        Assert.EndsWith($", open; now 2.5 GB, after PoolWatch's own cache clear at {Fmt.Clock(clearUtc)} freed 512 MB of it", PoolWatch.Analysis.BundleBuilder.IncidentLine(open));
 
         // A clear that freed more of the tag than the growth (it emptied a cache that was there before) freed it of the tag.
         var more = Growth("20261028-0630-Reff", Now.AddHours(-1.5), Owner("app:x", "X", Confidence.StronglyCorrelated));
@@ -82,6 +88,53 @@ public class RecommendationInputsBuilderTests
         Assert.Equal($"Kernel pool grew 2.0 GB at {onset}; the likely cause is X, with strong evidence.",
             RecommendationInputsBuilder.Reportable([plain], new Dictionary<string, Moment>(), AppClocks.At(Now))!.Value.Headline);
         Assert.EndsWith($", closed {Fmt.Stamp(plain.ClosedUtc!.Value)}", PoolWatch.Analysis.BundleBuilder.IncidentLine(plain));
+    }
+
+    [Fact]
+    public void ATracesIncidentWithNoSpanIsListedInTheBundleByWhatItsReportSays()
+    {
+        // An incident made for a trace of its own ("Capture now") is made closed, its start and its end the moment it
+        // is made, and gets its span from its trace. A vendor bundle made while the trace still records, 40 s on,
+        // lists it in incidents.md by what its report says until then: that its trace had not finished by the time
+        // of the newest sample as the bundle is made (the moment the incident was made, when PoolWatch holds no
+        // sample), with the level its tag held as it was last measured, when it was. One whose trace recorded
+        // nothing PoolWatch could use never gets a span, and its line says that. Neither reads as a growth. Once a
+        // trace with a span is attached, the line gives the growth over it, as before.
+        // (Before, both were listed as "100 MB -> 100 MB (+0 B)": a growth of nothing, which reads as what a trace
+        // found.)
+        var made = Now.AddMinutes(-10);
+        var newest = made.AddSeconds(40);
+        Incident Trace() => new()
+        {
+            Id = "20261028-0850-File", Dir = @"C:\ProgramData\PoolWatch\incidents\20261028-0850-File", Tag = PoolTag.Parse("File"), Kind = IncidentKind.Capture,
+            TraceFor = CaptureSource.Manual, OpenedUtc = made, OpenedMs = AppClocks.Ms(made), OnsetUtc = made, OnsetMs = AppClocks.Ms(made),
+            ClosedUtc = made, ClosedMs = AppClocks.Ms(made), StartBytes = 100L << 20, PeakBytes = 100L << 20, CurrentBytes = 100L << 20, CurrentAtUtc = made,
+        };
+        string when = $", onset {Fmt.Stamp(made)}, closed {Fmt.Stamp(made)}", held = $" (the tag held 100 MB at {Fmt.Stamp(made)})";
+        var recording = Trace();
+        Assert.Equal($"- Capture on `File`: its trace had not finished by {Fmt.Stamp(newest)}{held}{when}", PoolWatch.Analysis.BundleBuilder.IncidentLine(recording, newest));
+        Assert.Equal($"- Capture on `File`: its trace had not finished by {Fmt.Stamp(made)}{held}{when}", PoolWatch.Analysis.BundleBuilder.IncidentLine(recording));
+        var unread = Trace();
+        unread.CurrentAtUtc = null; // its level was never read from a sample
+        Assert.Equal($"- Capture on `File`: its trace had not finished by {Fmt.Stamp(newest)}{when}", PoolWatch.Analysis.BundleBuilder.IncidentLine(unread, newest));
+
+        var nothing = Trace();
+        nothing.Capture = new CaptureResult { Error = "wpr.exe could not start" }.Recorded(AppClocks.At(made), AppClocks.At(made));
+        Assert.Equal($"- Capture on `File`: its trace recorded nothing PoolWatch could use{held}{when}", PoolWatch.Analysis.BundleBuilder.IncidentLine(nothing, newest));
+
+        // A trace of a minute, attached: the incident starts and closes with it, and its line gives the growth over it.
+        var (start, end) = (made.AddSeconds(3.7), made.AddSeconds(63.7));
+        var recorded = Trace();
+        recorded.Capture = new CaptureResult { PoolEventsParsed = true }.Recorded(AppClocks.At(start), AppClocks.At(end));
+        (recorded.OnsetUtc, recorded.ClosedUtc, recorded.PeakBytes, recorded.CurrentBytes, recorded.CurrentAtUtc) = (start, end, 118L << 20, 118L << 20, end);
+        string grew = $"- Capture on `File`: 100 MB -> 118 MB (+18 MB), onset {Fmt.Stamp(start)}, closed {Fmt.Stamp(end)}";
+        Assert.Equal(grew, PoolWatch.Analysis.BundleBuilder.IncidentLine(recorded, newest));
+
+        // incidents.md, with the newest sample's time it is handed: no line of a trace without a span gives a growth.
+        var lines = PoolWatch.Analysis.BundleBuilder.IncidentsMarkdown([recording, nothing, recorded], newest).Split(Environment.NewLine).Where(l => l.StartsWith("- Capture on ", StringComparison.Ordinal)).ToList();
+        Assert.Equal([$"- Capture on `File`: its trace had not finished by {Fmt.Stamp(newest)}{held}{when}", $"- Capture on `File`: its trace recorded nothing PoolWatch could use{held}{when}", grew], lines);
+        Assert.All(lines.Take(2), l => Assert.DoesNotContain(" -> ", l, StringComparison.Ordinal));
+        Assert.All(lines.Take(2), l => Assert.DoesNotContain("(+", l, StringComparison.Ordinal));
     }
 
     [Fact]

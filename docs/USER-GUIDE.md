@@ -79,8 +79,8 @@ safe.
    good day with a bad one, or when a developer asks for more than a report: up to about 60 MB a day on a PC doing
    heavy agentic coding. Under them, **Clean up reports and records after** (7 days to begin with; 1 to 90): the same
    cleanup for reports, records and exports, counted in the time the PC is awake. You can change both later under
-   **Records** in Settings. Both stay on this PC and are never sent; they hold full command lines, which can contain
-   passwords, so look before you share one.
+   **Records** in Settings (**Settings...** in the tray menu, in either view). Both stay on this PC and are never
+   sent; they hold full command lines, which can contain passwords, so look before you share one.
 8. **PoolWatch is watching.** What setup set (the standby cache, the Codex shortcut, the token leak, the records,
    Active changes), **Tell me when a new version is out** (ticked to begin with; see [Privacy](../README.md#privacy))
    and where PoolWatch lives: next to the clock. **Open PoolWatch** finishes setup.
@@ -88,8 +88,9 @@ safe.
 **After an upgrade from 1.0.0-beta.2**, whose setup had no Records step and which always recorded, PoolWatch uses
 Reports only and opens that step alone at its first start (the same page, its rail listing only Records, with **Done**
 and no Back). Done keeps your choice and it does not open again; closed without Done, Reports only stays and the step
-opens again at each start until you press Done. What beta.2 recorded is cleaned up by the usual rule, 7 days of the
-PC's awake time without a write.
+opens again at each start until you press Done, or save a change of the record mode or the cleanup in Settings, which
+is a choice too (saved while the step is open, the step then shows it, so its Done keeps it). What beta.2 recorded is
+cleaned up by the usual rule, 7 days of the PC's awake time without a write.
 
 Steps 4 and 5 wait until PoolWatch has read the PC ("Looking at your PC... Next is ready in a moment."), at most a
 minute; after that, setup goes on with what it knows. Nothing changes until you press **Next** on step 4 (the cache
@@ -144,7 +145,8 @@ Switch on **Advanced view** for the details. The header stays, and the window ad
   PoolWatch remembers what you chose.
 - **Growth and clears**, a panel beside the graph, for the window picked: the rate, Grew, Cleared, Fell on its own,
   Net change and how long PoolWatch measured.
-- **Settings**, in the header on the Pool causes tab.
+- **Settings**, in the header on the Pool causes tab (in either view, **Settings...** in the tray menu opens the same
+  window).
 - Three tabs:
   - **Pool causes**: one list of what grew or was released, what is happening now first. Each row says what grew (the
     pool tag in words, with its driver), how much it grew, what PoolWatch's own cache clears freed of it, its net
@@ -182,7 +184,9 @@ growth per hour of its own (a smaller tag's rise over the last 10 minutes, an in
 to a process) shows its impact at once. A smaller tag that is held, not growing, shows None. A row with no growth per
 hour, such as a release, a cache clear, a warning or an alert, leaves the cell empty.
 
-**Settings** is a short form in plain words: starting at sign-in; update notices; automatic cache clearing, by name
+**Settings** (the Advanced view's header button, or **Settings...** in the tray menu in either view: one window, which
+comes to the front when it is open already) is a short form in plain words: starting at sign-in; update notices;
+automatic cache clearing, by name
 (**On a schedule**, **At a pool size** or **Whichever comes first**, recommended) with how often and at what pool size;
 **Notifications**, which kernel pool notices you get (**Every growth**, the default; **Only when it needs attention**,
 only when the tray icon turns red; or **Off**; the token-leak guard's notices, which need your click, always appear);
@@ -483,8 +487,9 @@ its appends, the `poolwatch-<date>-<time>-<process id>-<n>.log` file next to it,
 with Detailed recording, `findings.jsonl` in that day's folder under it (`data\<yyyyMMdd>\`), say what the guard did.
 
 Point at the icon for the paged and non-paged pool; double-click it to open the window. Right-click it for the
-token-leak guard's line while it is not protected (above), **Open PoolWatch**, **Run setup again...**, **Active
-changes...**, a line when a newer version is out, and the tools for
+token-leak guard's line while it is not protected (above), **Open PoolWatch**, **Settings...** (in either view; the
+Simple view's header has no Settings button), **Run setup again...**, **Active changes...**, a line when a newer
+version is out, and the tools for
 technical users: **Capture now** (a short trace that shows which program allocates the memory), **Since boot
 report**, **Open incident folder**, **Export vendor bundle...**, **Copy latest incident summary**, **Mark...** and the
 experiments; then **Report an issue...** and **About PoolWatch**. **Exit**, at the bottom, stops PoolWatch until you

@@ -42,7 +42,7 @@ public sealed partial class SetupWizardTests
                     "Reports only", "Recommended",
                     "A report each time the pool grows: what grew, the programs behind it, and a draft bug report for whoever makes the cause.",
                     "Enough to find a leak and report it. Most people need nothing more.",
-                    "Nothing is recorded until the pool grows.", // the agreed truth fix of the approved "Nothing is written until the pool grows."
+                    "No all-day record is kept.", // the owner's truth fix of the approved "Nothing is written until the pool grows."
                     "Detailed recording",
                     "The reports, plus a record of everything PoolWatch watches, all day: the pool and its memory tags, programs and their handles, services, and every program started.",
                     "Useful when a leak builds up slowly over days, to compare a good day with a bad one, or when a developer asks for more than a report.",
@@ -50,6 +50,10 @@ public sealed partial class SetupWizardTests
                     "Clean up reports and records after", "You can change both later in Settings.",
                     "Both stay on this PC and are never sent. They hold full command lines, which can contain passwords, so look before you share one.",
                 ], page.Texts());
+            // Settings' Reports only choice says the same in its tooltip, its last line the card's: no line that says nothing
+            // is written before the pool grows (the boot report and the crash and restart reports are written without one).
+            Assert.EndsWith("\nNo all-day record is kept.", SimpleSettings.ReportsOnlyTip);
+            Assert.DoesNotContain("until the pool grows", SimpleSettings.ReportsOnlyTip);
             session.ChooseRecords(RecordMode.Detailed);
             page.DaysField.SelectedIndex = page.DaysField.Items.Cast<object>().Select(i => i.ToString()).ToList().IndexOf("30 days");
             Assert.Equal((RecordMode.Detailed, 30), (session.Records, session.Days));
@@ -195,6 +199,144 @@ public sealed partial class SetupWizardTests
         Assert.False(form.Finished);
         Assert.DoesNotContain("asked to close", host.Calls);
         Assert.Equal((0, 0), (host.RecordsChosen, host.Completed));
+    }
+
+    /// <summary>
+    /// The Records step alone is open (it opens at each start after an upgrade until Done) and Settings, opened from the tray,
+    /// saves Detailed recording and 10 days: the step shows them, so its Done applies them, not the Reports only and 7 days
+    /// it opened with. A change of anything else in Settings leaves the step's own pick as it is.
+    /// </summary>
+    [Fact]
+    public async Task ASettingsSaveWhileTheRecordsStepIsOpenAloneIsWhatItsDoneKeeps()
+    {
+        var host = new FakeHost(Busy());
+        long now = 0;
+        var session = new SetupSession(host, firstRun: false, advanced: false, clock: () => now, recordsOnly: true);
+        await session.LoadAsync(CancellationToken.None);
+        Assert.Equal((RecordMode.ReportsOnly, 7), (session.Records, session.Days));
+        var (view, fonts) = View(session, 100, new Size(880, 586));
+        using (view)
+        using (fonts)
+        {
+            var page = (RecordsPage)view.Pages[SetupStep.Records];
+            host.ApplyElsewhere(s => { s.RecordMode = RecordMode.Detailed; s.RetentionDays = 10; }); // Settings' Save
+            session.FollowRecords();
+            Assert.Equal((RecordMode.Detailed, 10), (session.Records, session.Days));
+            Assert.True(page.Cards[RecordMode.Detailed].Selected && !page.Cards[RecordMode.ReportsOnly].Selected);
+            Assert.Equal("10 days", page.DaysShown);
+            Assert.Equal([1, 3, 7, 10, 14, 30, 60, 90], session.DayOptions);
+            // Then 20 days, which the step does not offer either: the select offers it in 10's place (as many days as before).
+            host.ApplyElsewhere(s => s.RetentionDays = 20);
+            session.FollowRecords();
+            Assert.Equal([1, 3, 7, 14, 20, 30, 60, 90], session.DayOptions);
+            Assert.Equal("20 days", page.DaysShown);
+            Assert.Equal(session.DayOptions.Select(SetupText.Days), page.DaysField.Items.Cast<object>().Select(i => i.ToString()));
+            // A change of anything else: the step's own pick stays.
+            session.ChooseRecords(RecordMode.ReportsOnly);
+            host.ApplyElsewhere(s => s.TokenGuardEnabled = !s.TokenGuardEnabled);
+            session.FollowRecords();
+            Assert.Equal((RecordMode.ReportsOnly, 20), (session.Records, session.Days));
+            session.ChooseRecords(RecordMode.Detailed);
+            now += NextWaitTicks;
+            Assert.True(await session.NextAsync(null!)); // Done
+        }
+        Assert.Equal("records Detailed 20", host.Calls.Last(c => c.StartsWith("records ", StringComparison.Ordinal)));
+        Assert.Equal((RecordMode.Detailed, 20), (host.Running.RecordMode, host.Running.RetentionDays));
+    }
+
+    /// <summary>
+    /// The setup window has its session follow a setting put into effect elsewhere (posted to its own thread), from when it is
+    /// made until it is disposed.
+    /// </summary>
+    [Fact]
+    public void TheSetupWindowFollowsASettingPutIntoEffectElsewhereUntilItIsDisposed()
+    {
+        var host = new FakeHost(Busy());
+        var form = new SetupWizardForm(host, firstRun: false, advanced: false, recordsOnly: true);
+        _ = form.Handle;
+        Assert.True(host.Followed);
+        host.ApplyElsewhere(s => s.RecordMode = RecordMode.Detailed);
+        Application.DoEvents();
+        Assert.Equal(RecordMode.Detailed, form.Session.Records);
+        form.Dispose();
+        Assert.False(host.Followed);
+        host.ApplyElsewhere(s => s.RecordMode = RecordMode.ReportsOnly); // nothing follows it now
+        Application.DoEvents();
+    }
+
+    /// <summary>
+    /// A record mode or cleanup put into effect before the setup window has a handle (the window is made, then shown:
+    /// Settings can save in between, and the window cannot be told on its own thread before it has one) is what the Records
+    /// step shows once it has one: the window reads what is in effect as its handle is created.
+    /// </summary>
+    [Fact]
+    public void TheSetupWindowShowsARecordChoicePutIntoEffectBeforeItHadAHandle()
+    {
+        var host = new FakeHost(Busy());
+        using var form = new SetupWizardForm(host, firstRun: false, advanced: false, recordsOnly: true);
+        Assert.False(form.IsHandleCreated);
+        host.ApplyElsewhere(s => { s.RecordMode = RecordMode.Detailed; s.RetentionDays = 30; });
+        Application.DoEvents();
+        Assert.False(form.IsHandleCreated);
+        Assert.Equal((RecordMode.ReportsOnly, 7), (form.Session.Records, form.Session.Days)); // not told yet: no handle to be told on
+        _ = form.Handle;
+        Assert.Equal((RecordMode.Detailed, 30), (form.Session.Records, form.Session.Days));
+    }
+
+    /// <summary>
+    /// The same through the app's own wiring, end to end: the Records step alone as the tray app opens it (the setup window
+    /// over the app's <see cref="SetupContext"/>, its host the real <see cref="SetupHost"/>), and Settings' Save as Settings
+    /// makes it (<see cref="SettingsEditor.Commit"/>, through <see cref="PoolWatch.Engine.LiveSettings"/>). The Save reaches
+    /// the open step (<see cref="SetupHost.Applied"/> passes on what LiveSettings tells), which shows it, and its Done keeps
+    /// it: Detailed recording and 30 days stay in effect and saved, where a step that had not followed would have put the
+    /// Reports only and 7 days it opened with back. The window lets go of LiveSettings when it is disposed.
+    /// </summary>
+    [Fact]
+    public async Task ASettingsSaveReachesTheRecordsStepTheTrayAppOpensAndItsDoneKeepsIt()
+    {
+        using var f = new ChangeFixture();
+        var live = f.Live(new Settings(), persist: true);
+        // The app's context over an engine that is never started (no sampler, no trace, no scan): the Records step alone
+        // reads the settings in effect and setup.json, and nothing of the PC.
+        using var engine = new PoolWatch.Engine.MonitorEngine(new Settings(), f.Paths, f.Log, verboseCsv: false);
+        var context = new SetupContext(engine, analysis: null!, actions: null!, live, new PoolWatch.Engine.Changes.ChangeLedger([], f.Records, f.Log), shell: null!, smoke: false);
+        // Who LiveSettings tells of a change put into effect (its Applied event's handlers).
+        int Told() => (typeof(PoolWatch.Engine.LiveSettings).GetField("Applied", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(live) as Delegate)?.GetInvocationList().Length ?? 0;
+        int before = Told();
+        var form = new SetupWizardForm(context, firstRun: false, advanced: false, recordsOnly: true);
+        try
+        {
+            _ = form.Handle;
+            Assert.True(form.RecordsOnly);
+            Assert.Equal(before + 1, Told()); // the window follows LiveSettings through its host
+            Assert.Equal((RecordMode.ReportsOnly, 7), (form.Session.Records, form.Session.Days));
+
+            // Settings, opened from the tray while the step is open, saves Detailed recording and 30 days.
+            var editor = new SettingsEditor(analysis: null!, actions: null!, live, shell: null!, context.Store);
+            editor.Edit.RecordMode = RecordMode.Detailed;
+            editor.Edit.RetentionDays = 30;
+            Assert.True(editor.Commit(editor.ToApply()));
+            Application.DoEvents(); // the step follows on the window's thread
+            Assert.Equal((RecordMode.Detailed, 30), (form.Session.Records, form.Session.Days));
+
+            // Done (it waits a moment from when the step opened): what the step shows is in effect already, and stays.
+            bool done = false;
+            for (var waited = System.Diagnostics.Stopwatch.StartNew(); !done && waited.Elapsed < TimeSpan.FromSeconds(10);)
+            {
+                var next = form.Session.NextAsync(form);
+                Assert.True(next.IsCompleted); // nothing to put into effect, so nothing to wait for (and no window's thread to wait on)
+                done = await next;
+                if (!done) Thread.Sleep(50);
+            }
+            Assert.True(done);
+            Assert.True(form.Finished);
+            Assert.Equal((RecordMode.Detailed, 30), (live.Running.RecordMode, live.Running.RetentionDays));
+            Assert.Equal((RecordMode.Detailed, 30), (f.Saved().RecordMode, f.Saved().RetentionDays));
+            Assert.True(new PoolWatch.Engine.Setup.RecommendationStore(f.Paths, f.Log).RecordsChosen);
+        }
+        finally { form.Dispose(); }
+        Assert.Equal(before, Told());
     }
 
     /// <summary>

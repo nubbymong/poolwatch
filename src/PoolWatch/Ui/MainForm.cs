@@ -65,6 +65,8 @@ internal sealed class MainForm : Form
     private readonly ViewSwitch _switch;
     /// <summary>The Advanced view shows (false: the Simple view), as the switch has it.</summary>
     private bool IsAdvanced => _switch.Advanced;
+    /// <summary>CI's UI run: the view the window is in (<see cref="IsAdvanced"/>), hidden or not.</summary>
+    internal bool AdvancedView => IsAdvanced;
     /// <summary>When the Simple view's line and suggestions are next read: at most every <see cref="SimpleEvery"/>, on the clock that only goes forward.</summary>
     private Core.Model.Every _simpleRead = new(SimpleEvery);
     private static readonly TimeSpan SimpleEvery = TimeSpan.FromMinutes(1);
@@ -146,7 +148,7 @@ internal sealed class MainForm : Form
         // Header.
         var clear = HeaderButton("Clear now", () => _actions.Guarded(this, "Clear cache", () => _actions.ClearCacheNow(this)));
         clear.MouseEnter += (_, _) => _tips.SetToolTip(clear, _actions.ClearCacheTip());
-        var settings = HeaderButton("Settings", () => _actions.Guarded(this, "Settings", OpenSettings), advancedOnly: true);
+        var settings = HeaderButton("Settings", () => _actions.Guarded(this, "Settings", _context.Shell.ShowSettings), advancedOnly: true);
         _tips.SetToolTip(settings, "Detection thresholds, the automatic cache clear, what PoolWatch keeps on disk (records), redaction, and Start at logon.");
         _header.Controls.Add(_headerView);  // fill first, then the docked edge
         _header.Controls.Add(_buttons);
@@ -415,7 +417,7 @@ internal sealed class MainForm : Form
     public void ShowTokenGuardOffer()
     {
         if (IsDisposed || !Visible || OwnedForms.Any(f => f.Visible)) return;
-        if (TokenGuardOfferIn(IsAdvanced) == TokenGuardOffer.Settings) _actions.Guarded(this, "Settings", OpenSettings);
+        if (TokenGuardOfferIn(IsAdvanced) == TokenGuardOffer.Settings) _actions.Guarded(this, "Settings", _context.Shell.ShowSettings);
         else ReadSimpleNow();
     }
 
@@ -577,26 +579,6 @@ internal sealed class MainForm : Form
             _ => saturatedBusiest is not null ? HeaderTone.Watch : HeaderTone.Calm,
         };
         return (parts.Count == 0 ? null : string.Join(" ", parts), tone);
-    }
-
-    /// <summary>Settings, created for this opening and disposed when it closes, so it always starts from what is saved, with the settings in effect now.</summary>
-    private void OpenSettings()
-    {
-        using var settings = NewSettings();
-        settings.ShowDialog(this);
-    }
-
-    /// <summary>
-    /// Settings for one opening (the caller disposes it), with the offer to make the Codex shortcut again when the ChatGPT
-    /// desktop app is installed, the launcher is there and the shortcut is not on the desktop.
-    /// </summary>
-    private SettingsDialog NewSettings()
-    {
-        bool onDesktop = ShortcutOffer.OnDesktop(() => Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), File.Exists);
-        var offer = ShortcutOffer.Offered(_context.Probe.Last?.ChatGptInstalled == true, ChatGptShortcut.Launcher() is not null, onDesktop)
-            ? new ShortcutOffer(() => _context.Recommendations.CreateCodexShortcut("Settings"))
-            : null;
-        return new(_engine, _analysis, _actions, _context.Live, _context.Shell, offer);
     }
 
     // ---------------------------------------------------------------- Simple view
@@ -1032,16 +1014,24 @@ internal sealed class MainForm : Form
     /// <summary>
     /// What the details of an open incident say about its folder: the details are live, the folder is written within the
     /// disk budget (so it can be behind them), when it was last written, what its events.csv holds while it is open (a
-    /// re-opened one's too), and that Export report writes it whole first, with both ends of events.csv from memory.
+    /// re-opened one's too: the first events from where its window started when the file was begun, which follow the
+    /// window's start as the growth's start is measured again, the file starting again from them until its last row says to when it holds them;
+    /// the first PoolWatch still held, where it had already let go of events from there), and that Export report writes
+    /// it whole first, with both ends of events.csv from memory.
     /// </summary>
     internal static string LiveFolderNote(DateTime? writtenUtc) =>
         "These details are live, from PoolWatch's memory. While the incident is open PoolWatch writes its report folder within its disk " +
         "budget, so on a busy PC the folder can be behind them" + (writtenUtc is { } w ? $" (its report was last written at {Fmt.Stamp(w)})" : " (its report is being written)") +
         ": report.md and report.json at each refresh the budget has room for, the timeline chart and the CSV files when it has room to spare, " +
-        "and all of it when the incident closes. Until then events.csv holds up to the first 1,000 events of the window (fewer while the budget " +
-        "holds rows back; a re-opened incident's holds both ends as its last close wrote them); when the incident closes PoolWatch replaces it " +
-        "with the first 1,000, a row saying how many events between the two were left out, if any were, and the latest 1,000. Export report " +
-        "writes the folder whole first. Its zip has both ends of events.csv, from memory, with a report.md that counts them.";
+        "and all of it when the incident closes. Until then events.csv holds up to the first 500 events from where the incident's window started " +
+        "when the file was begun (fewer while the budget holds rows back; the first PoolWatch still held, when it had already let go of events from " +
+        "there, which the file then says; a re-opened incident's holds both ends as its last close wrote them). PoolWatch " +
+        "measures the growth's start again as it goes on, and the first events follow the window's start, at most every 10 minutes: a file that " +
+        "is still being filled starts again from the new start, one whose last row says to when it holds its events stays as written until the incident closes, and report.md " +
+        "says where the file's rows are from and where the window starts now whenever the two differ. When the incident closes with more events " +
+        "than those first 500, PoolWatch replaces the file with both ends of the window as it is measured then: the first events and the latest up to the " +
+        "window's end, up to 500 of each, and a row between them saying how many events were left " +
+        "out, if any were. Export report writes the folder whole first. Its zip has both ends of events.csv, from memory, with a report.md that counts them.";
 
     /// <summary>
     /// The incident's report summary as the details show it (<see cref="UiActions.IncidentDetails"/>: no Markdown marks, the
@@ -1667,7 +1657,7 @@ internal sealed class MainForm : Form
         // The Settings form and its Advanced grid, each shown as it opens.
         var settingsLayout = new List<string>();
         var settingsForm = new List<string>();
-        using (var settings = NewSettings())
+        using (var settings = _context.NewSettings())
         {
             settings.Show(this);
             Application.DoEvents();
@@ -1829,7 +1819,7 @@ internal sealed class MainForm : Form
         _tasksTab.SelectFirst(); // the detail panel shows the top row
         Shot(this, "3b-tasks-and-startup-apps.png");
         _tabs.SelectedIndex = 0;
-        using (var settings = NewSettings())
+        using (var settings = _context.NewSettings())
         {
             settings.StartPosition = FormStartPosition.CenterParent;
             settings.Show(this);

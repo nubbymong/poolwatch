@@ -140,32 +140,48 @@ public static class TraceAttribution
     /// "Reff (refs.sys FCB_DATA) grew 580 MB in 26 min and is still held. The trace shows shell commands (grep, cut, git,
     /// bash) allocating it: +147 MB from two commands in 1 min, and about 700 KB per short command, none freed. Started by:
     /// Claude Code session sample-app (PID 4412)." Null when the trace holds no net growth of the tag.
+    /// <para>What it says of the tag's level ("is still held", "has been freed since", "it is now empty") is of the
+    /// newest sample only while the incident is open. A closed incident's level is as last measured (at its close, or
+    /// when it was found retained after it: <see cref="Incident.CurrentAtUtc"/>), and its answer is said again long
+    /// after: in report.md's plain words and report.json's <c>traceAnswer</c> at every later write of its folder,
+    /// hours on, and in the window's view of its tag for an hour after the close. So it gives the time the level is
+    /// of, in the past tense: "and was still held at 07:05:53", "12 MB had been freed by 07:05:53", "it was empty at
+    /// 07:05:53", as its Growth line does (<see cref="Incident.LevelSaid"/>). A closed incident whose level was never
+    /// read from a sample says nothing of what is held.</para>
     /// </summary>
     public static string? Answer(Incident inc, TagInfo info, IReadOnlyList<TraceOwner> owners, CaptureResult cap)
     {
         long total = owners.Sum(o => o.Net);
         if (total <= 0 || owners.Count == 0) return null;
         string what = info.Description.Length > 0 && info.Description.Length <= 60 ? $"{inc.Tag.ToDisplay()} ({info.Description})" : inc.Tag.ToDisplay();
-        string span = Fmt.Duration(TimeSpan.FromMilliseconds((inc.EndMs ?? inc.LastRiseMs) - inc.OnsetMs)); // on the forward clock
+        string span = Fmt.Duration(TimeSpan.FromMilliseconds(inc.SpanEndMs - inc.OnsetMs)); // on the forward clock
         // On the tag's own scale: the peak counts back what PoolWatch's own clears freed (their drop is not the growth ending),
         // so the level it reached and fell from on its own is the peak less that; the clears' part is said as their result.
         long peak = inc.PeakBytes - inc.ClearedBytes;
         string? own = inc.OwnClearsFreed;
+        // The level is the newest sample's while the incident is open ("is", "now"); a closed incident's is of the sample
+        // it was last read at, said with that sample's time ("was ... at 07:05:53"), or not at all when it was never read.
+        bool open = inc.IsOpen;
+        string? at = open || inc.CurrentAtUtc is not { } read ? null : Fmt.Clock(read);
+        bool said = open || at is not null;
         string held;
         if (own is null)
-            held = peak > 0 && inc.CurrentBytes >= peak * 9 / 10 ? " and is still held"
-                : peak > inc.CurrentBytes ? $"; {Fmt.Bytes(peak - inc.CurrentBytes)} has been freed since" : "";
+            held = !said ? ""
+                : peak > 0 && inc.CurrentBytes >= peak * 9 / 10 ? (open ? " and is still held" : $" and was still held at {at}")
+                : peak > inc.CurrentBytes ? $"; {Fmt.Bytes(peak - inc.CurrentBytes)} {(open ? "has been freed since" : $"had been freed by {at}")}" : "";
         // The clears often empty more of the tag than it grew (a cache that was there before the growth). That says where the
         // tag's level is, not whose bytes they freed: a leak a purge cannot free can still be held whole. So the level is
         // said, against where the growth began. Otherwise what is held is decided on the rise: of the growth the clears left,
         // the part that has not fallen on its own since.
         else if (inc.ClearedBytes >= inc.Growth)
-            held = $"; {own} of the tag, {(inc.ClearedBytes > inc.Growth ? "more than" : "as much as")} it grew: it is now " +
-                   (inc.CurrentBytes <= 0 ? "empty"
-                       : inc.CurrentBytes == inc.StartBytes ? $"back at the {Fmt.Bytes(inc.StartBytes)} it grew from"
-                       : $"at {Fmt.Bytes(inc.CurrentBytes)}, {(inc.CurrentBytes < inc.StartBytes ? "under" : "over")} the {Fmt.Bytes(inc.StartBytes)} it grew from");
-        else if (peak - inc.CurrentBytes <= (inc.Growth - inc.ClearedBytes) / 10) held = $"; {own} of it, and the rest is still held";
-        else held = $"; {own} of it, and {Fmt.Bytes(peak - inc.CurrentBytes)} more has been freed since";
+            held = $"; {own} of the tag, {(inc.ClearedBytes > inc.Growth ? "more than" : "as much as")} it grew" +
+                   (!said ? ""
+                       : inc.CurrentBytes <= 0 ? (open ? ": it is now empty" : $": it was empty at {at}")
+                       : inc.CurrentBytes == inc.StartBytes ? (open ? $": it is now back at the {Fmt.Bytes(inc.StartBytes)} it grew from" : $": it was back at the {Fmt.Bytes(inc.StartBytes)} it grew from, at {at}")
+                       : $": it {(open ? "is now" : "was")} at {Fmt.Bytes(inc.CurrentBytes)}{(open ? "" : $" at {at}")}, {(inc.CurrentBytes < inc.StartBytes ? "under" : "over")} the {Fmt.Bytes(inc.StartBytes)} it grew from");
+        else if (!said) held = $"; {own} of it";
+        else if (peak - inc.CurrentBytes <= (inc.Growth - inc.ClearedBytes) / 10) held = $"; {own} of it, and the rest {(open ? "is still held" : $"was still held at {at}")}";
+        else held = $"; {own} of it, and {Fmt.Bytes(peak - inc.CurrentBytes)} more {(open ? "has been freed since" : $"had been freed by {at}")}";
         var top = owners[0];
         string trace = Fmt.Duration(cap.Duration);
         var images = top.Processes.OrderByDescending(p => p.Usage.NetBytes).Select(p => Path.GetFileNameWithoutExtension(p.Identity.Image)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();

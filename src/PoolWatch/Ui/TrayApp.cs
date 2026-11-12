@@ -18,7 +18,8 @@ namespace PoolWatch.Ui;
 /// after Explorer restarts (<see cref="TaskbarWatch"/>). Until the first setup is done,
 /// setup is the way in: it opens by itself at every start, and anything that would show the main window brings setup
 /// instead (<see cref="FirstRunGate"/>); once it is done, while what PoolWatch keeps on disk was never chosen (after an
-/// upgrade from 1.0.0-beta.2), setup's Records step opens alone at each start. Its menu runs setup again and opens Active changes, says when a newer release is
+/// upgrade from 1.0.0-beta.2), setup's Records step opens alone at each start. Its menu opens Settings (in either view: the
+/// Simple view's header has no Settings button), runs setup again and opens Active changes, says when a newer release is
 /// out (update notices, information only), and holds the tools that are not on the main window (DESIGN.md section 11):
 /// Capture now, Since boot report, Open incident folder, Export vendor bundle, Copy latest incident summary, the
 /// clear-task removals (shown only while there is something to remove), Report an issue and About. It is the shell setup
@@ -60,6 +61,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
     /// <summary>Where each way into the app leads: setup until it was completed once (never in the CI UI test).</summary>
     private readonly FirstRunGate _gate;
     private ActiveChangesForm? _activeChanges;
+    /// <summary>Settings, one at a time, from the tray menu and the Advanced view's Settings button (<see cref="ShowSettings"/>).</summary>
+    private readonly SettingsWindow _settings;
     /// <summary>What a click on the latest notice opens: the main window, or Active changes or the token-leak guard where that notice offers it.</summary>
     private readonly BalloonClick _balloonClick;
     /// <summary>Which kernel pool notices show, once each episode of an incident: as it opens, or once it turns red (<see cref="IncidentNotices"/>).</summary>
@@ -94,6 +97,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _balloonClick = new BalloonClick(ShowWindow, engine.Log.Info);
         _notices = new IncidentNotices(analysis.Knowledge.Lookup, () => engine.Services, engine.Log.Info);
         Setup =new SetupContext(engine, analysis, _actions, live, ledger, this, smoke, new UpdateSwitch(live));
+        _settings = new SettingsWindow(Setup.NewSettings, ShowSettingsDialog, Bring);
         if (!smoke)
         {
             // The check reads the setting at each wake, so turning notices off or on needs no call here.
@@ -109,6 +113,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
         menu.Items.Add(guardLine);
         menu.Items.Add(guardRule);
         menu.Items.Add("Open PoolWatch", null, (_, _) => ShowWindow());
+        // Settings in either view (the Simple view's header has no Settings button): the one the Advanced view's button opens.
+        menu.Items.Add(SettingsMenuItem, null, (_, _) => _actions.Guarded(null, "Settings", ShowSettings));
         menu.Items.Add(FirstRunGate.MenuItem, null, (_, _) => OpenGuide());
         menu.Items.Add("Active changes...", null, (_, _) => OpenActiveChanges());
         // "PoolWatch 1.2.0 is available": shown only while a newer release is out; it opens that release's page.
@@ -206,7 +212,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
         // Until setup was completed once, it opens on its own at every start (started at sign-in too), and the main window
         // waits for it. The update check starts once setup has been completed, so the owner has seen its switch first.
         // Once setup was completed (1.0.0-beta.2's included) but what PoolWatch keeps on disk was never chosen, the Records
-        // step opens alone at each start until its Done; meanwhile Reports only, the default, is in force.
+        // step opens alone at each start until its Done, or a Settings save that changes the record mode or the cleanup
+        // days; meanwhile Reports only, the default, is in force.
         _gate = new FirstRunGate(completed: () => Setup.Store.GuideCompleted, smoke: smoke, openSetup: OpenGuide, showMain: ShowMain,
             switchToAdvanced: tab => Form.ShowAdvanced(tab), switchToSimple: () => Form.ShowView(advanced: false),
             rememberView: advanced => _view?.Remember(advanced), startUpdates: () => _updates?.Start(),
@@ -316,6 +323,38 @@ internal sealed class TrayApp : ApplicationContext, IShell
     /// <summary>Every item of the tray menu, by text (CI: what the main window gave up must still be reachable).</summary>
     public List<string> MenuItemTexts() => _menu.Items.OfType<ToolStripMenuItem>().Select(i => i.Text ?? "").ToList();
 
+    /// <summary>
+    /// CI's UI run only (it throws anywhere else): the tray menu's Settings... clicked as a user would, the main window as it
+    /// is then (hidden, in the Simple view, whose header has no Settings button). What the window it opened was, read once it
+    /// shows (<see cref="TraySettingsCheck"/>): its title, whether it has a taskbar button and sits centred on its screen (its
+    /// real place, as one opened from the tray with the main window hidden must, so it cannot get lost), and whether the main
+    /// window showed meanwhile; then it is closed, and the click returns. When none shows within 10 s, every window the click
+    /// opened is closed, and a failure the click's action raised is told here in place of its box (which would wait for a
+    /// click nobody makes): either way the click returns, and the result says opened false and why (error), so the run fails
+    /// its check instead of waiting until the job is stopped.
+    /// </summary>
+    internal object SettingsFromTrayForTest()
+    {
+        if (!Setup.Smoke) throw new InvalidOperationException("The tray's Settings check is for the CI UI run (--ui-smoke) only.");
+        var before = Application.OpenForms.Cast<Form>().ToList();
+        var check = new TraySettingsCheck(() => _settings.Open, form => form.Visible, () => Application.OpenForms.Cast<Form>().Except(before).ToList(), () => MainWindowIfShown is not null);
+        using var timer = new System.Windows.Forms.Timer { Interval = TraySettingsCheck.TickMs };
+        timer.Tick += (_, _) => { if (check.Tick()) timer.Stop(); };
+        _actions.FailureTold = check.Failed;
+        timer.Start();
+        try
+        {
+            if (_menu.Items.OfType<ToolStripMenuItem>().FirstOrDefault(i => i.Text == SettingsMenuItem) is { } item) item.PerformClick(); // returns once Settings closes
+            else check.Failed($"the tray menu has no {SettingsMenuItem} item");
+        }
+        finally
+        {
+            timer.Stop();
+            _actions.FailureTold = null;
+        }
+        return check.Result(simpleView: !Form.AdvancedView);
+    }
+
     /// <summary>The main window, or setup while it was never completed (<see cref="FirstRunGate"/>).</summary>
     public void ShowWindow() => _gate.ShowWindow();
 
@@ -413,6 +452,30 @@ internal sealed class TrayApp : ApplicationContext, IShell
     }
 
     public void ShowReport(string? incidentDir) => _actions.ReportIssue(MainWindowIfShown, incidentDir);
+
+    /// <summary>The tray menu's item that opens Settings, in both views (in the menu's style: "..." for a window to fill in).</summary>
+    internal const string SettingsMenuItem = "Settings...";
+
+    /// <summary>
+    /// Settings, one at a time (<see cref="SettingsWindow"/>): the tray menu's Settings..., the Advanced view's Settings
+    /// button and the token-leak notice in the Advanced view open the same window, and one asked for while it is open brings
+    /// the one open to the front. It needs no finished setup: it opens no main window.
+    /// </summary>
+    public void ShowSettings() => _settings.Show();
+
+    /// <summary>
+    /// Settings as a dialog over the main window when that shows (as the Advanced view's button always had it); from the tray
+    /// with the main window hidden or minimized (a dialog it owned would be hidden with it), on its own: centred on the
+    /// screen, with a taskbar button, so it cannot get lost behind other windows (the tray's other windows have one then
+    /// too). Returns once it closes.
+    /// </summary>
+    private void ShowSettingsDialog(Form settings)
+    {
+        var owner = MainWindowIfShown is { WindowState: not FormWindowState.Minimized } main ? main : null;
+        settings.ShowInTaskbar = owner is null;
+        if (owner is null) settings.StartPosition = FormStartPosition.CenterScreen;
+        settings.ShowDialog(owner);
+    }
 
     /// <summary>
     /// The token-leak guard's sign-in check now, with its notices (one set for the app; shown only when the guard needs the
@@ -565,7 +628,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
 /// keeps running in the tray, and a first run opens again at the next way in and the next start. Never in the CI UI
 /// test, which opens the main window at once.
 /// Once setup was completed but what PoolWatch keeps on disk was never chosen (an upgrade from 1.0.0-beta.2, whose setup
-/// had no Records step), the Records step opens alone at each start, until its Done (<paramref name="recordsChosen"/>);
+/// had no Records step), the Records step opens alone at each start, until its Done, or a Settings save that changes the
+/// record mode or the cleanup days (<paramref name="recordsChosen"/>);
 /// the main window, when the start asked for it, shows once that step closes, Done or not. Every other way in is as usual.
 /// Without a window: the tray app passes what each of those does, and the tests pass fakes.
 /// </summary>
@@ -797,4 +861,95 @@ internal sealed class OtherWindows(Func<int> shown, Action release)
 
     /// <summary>Whether <paramref name="form"/> counts: it shows, and it is not the main window.</summary>
     internal static bool Counts(Form? form, Form? main) => form is { Visible: true } && form != main;
+}
+
+/// <summary>
+/// Settings, one at a time, from wherever it is asked for: the tray menu's Settings... (in either view; the Simple view's
+/// header has no Settings button), the Advanced view's Settings button, and the token-leak notice in the Advanced view.
+/// Asked for while it is open (the tray menu still opens while it shows), the one open is brought to the front
+/// (<paramref name="bring"/>) and no second one is made. Each opening makes a new one (<paramref name="make"/>, so it
+/// starts from what is saved, with the settings in effect now) and shows it as a dialog (<paramref name="show"/>, which
+/// returns once it closes); it is disposed then, also when showing it threw.
+/// </summary>
+internal sealed class SettingsWindow(Func<Form> make, Action<Form> show, Action<Form> bring)
+{
+    private Form? _open;
+
+    /// <summary>The Settings window open now; null when none is.</summary>
+    public Form? Open => _open is { IsDisposed: false } f ? f : null;
+
+    /// <summary>Opens Settings and returns once it closes; brings the one open to the front instead when there is one.</summary>
+    public void Show()
+    {
+        if (Open is { } open)
+        {
+            bring(open);
+            return;
+        }
+        var form = make();
+        _open = form;
+        try { show(form); }
+        finally
+        {
+            _open = null;
+            form.Dispose();
+        }
+    }
+}
+
+/// <summary>
+/// CI's UI run, after it clicked the tray menu's Settings... (<see cref="TrayApp.SettingsFromTrayForTest"/>): what each tick
+/// of its wait does, and what it found. Once the Settings window shows (<paramref name="settings"/>,
+/// <paramref name="shows"/>), it is read and closed: its title, whether it has a taskbar button, whether it sits centred on
+/// its screen (<see cref="Centred"/>, from where it really is) and whether the main window shows
+/// (<paramref name="mainShown"/>). When none shows within <see cref="MaxTicks"/> ticks, every window the click opened
+/// (<paramref name="openedSince"/>) is closed, so the click returns, and the result says why nothing opened; so does a
+/// failure of the click's action (<see cref="Failed"/>, told in place of its box). Without a window of its own: the tray
+/// app passes what each of those reads, and the tests pass forms they never show.
+/// </summary>
+internal sealed class TraySettingsCheck(Func<Form?> settings, Func<Form, bool> shows, Func<IReadOnlyList<Form>> openedSince, Func<bool> mainShown)
+{
+    /// <summary>A tick of the wait, in milliseconds.</summary>
+    public const int TickMs = 100;
+    /// <summary>The wait gives up after this many ticks without a Settings window that shows: 10 s.</summary>
+    public const int MaxTicks = 100;
+
+    private int _ticks;
+    private string? _title, _error;
+    private bool _taskbar, _centred, _mainShown;
+
+    /// <summary>
+    /// Whether a window with these bounds is where a window centred on a screen with this working area is: in its middle,
+    /// or at its left or top edge along a side the window is longer than the area on (where WinForms puts one it centres),
+    /// within 2 pixels. A window left where Windows puts a new one by default (near the top left), or at the middle of
+    /// another screen, is not.
+    /// </summary>
+    public static bool Centred(Rectangle window, Rectangle area) =>
+        Math.Abs(window.X - Math.Max(area.X, area.X + (area.Width - window.Width) / 2)) <= 2 &&
+        Math.Abs(window.Y - Math.Max(area.Y, area.Y + (area.Height - window.Height) / 2)) <= 2;
+
+    /// <summary>One tick of the wait; true once it is over: the window was read and closed, or none showed in time and what the click opened was closed.</summary>
+    public bool Tick()
+    {
+        if (settings() is { } form && shows(form))
+        {
+            (_title, _taskbar, _centred, _mainShown) = (form.Text, form.ShowInTaskbar, Centred(form.Bounds, Screen.FromControl(form).WorkingArea), mainShown());
+            form.Close();
+            return true;
+        }
+        if (++_ticks < MaxTicks) return false;
+        _error ??= $"no Settings window showed within {MaxTicks * TickMs / 1000} s";
+        foreach (var opened in openedSince()) opened.Close();
+        return true;
+    }
+
+    /// <summary>The click's action failed: its message, in place of the box it would have shown (the first one is kept).</summary>
+    public void Failed(string message) => _error ??= message;
+
+    /// <summary>What the run writes to smoke.json: opened only when a Settings window showed and nothing failed; else why not (error).</summary>
+    public object Result(bool simpleView) => new
+    {
+        opened = _title is not null && _error is null, title = _title, showInTaskbar = _taskbar, centredOnScreen = _centred, mainWindowShown = _mainShown, simpleView,
+        error = _error ?? (_title is null ? "the click returned before a Settings window showed" : null),
+    };
 }

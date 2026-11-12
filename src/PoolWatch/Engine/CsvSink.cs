@@ -703,6 +703,16 @@ internal sealed class CsvSink : IDisposable
     private HandleCsvWriter? _stoppedHandleWriter;
 
     /// <summary>
+    /// Whether no writer let go of at a switch-off still ends its last write, so the next scan handed over is written by a
+    /// new one (<see cref="PostHandles"/>). A writer closes its two files and then says it has ended
+    /// (<see cref="HandleCsvWriter.Ended"/>; never the other way round, or a second writer could open files still held),
+    /// so for a moment the files are closed while a scan is still not taken: a scan handed over then is one of those "not
+    /// written" while the old write ends, counted and logged like them. A test that hands the next scan over waits for
+    /// this, not for the files alone. Sampler thread.
+    /// </summary>
+    internal bool HandleWriterFree => _stoppedHandleWriter is not { Ended: false };
+
+    /// <summary>
     /// Hands a handle scan to its own thread (<see cref="HandleCsvWriter"/>), which writes it to handles.csv and
     /// system-handles.csv through a sink of its own (<see cref="WriteHandles"/>), and returns at once: the sampler's tick
     /// never waits for that write. The census, type names and process list are not changed after the scan. One writer at a

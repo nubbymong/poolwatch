@@ -116,7 +116,7 @@ public sealed class RecordModeSettingsTests : IDisposable
     [Fact]
     public void AReportWrittenWithReportsOnlyNamesNoDayFile()
     {
-        // The window's 1,500 events are a second apart from its start; the incident keeps the first 1,000, to 16 min 39 s in.
+        // The window's 1,500 events are a second apart from its start; the incident keeps the first 500, to 8 min 19 s in.
         var cases = new (string Name, bool Detailed, DateTime Since, string? Report)[]
         {
             ("1", false, DateTime.MinValue, null),
@@ -134,13 +134,15 @@ public sealed class RecordModeSettingsTests : IDisposable
             writer.Write(new History(), inc, events, maxRows: 300); // the window's first 300; the rest left for later
             string report = File.ReadAllText(Path.Combine(inc.Dir, "report.md"));
             Assert.True(File.Exists(Path.Combine(inc.Dir, "report.json")));
-            Assert.Contains("events.csv gets the rest of the window's first 1,000 events as PoolWatch's write budget allows", report);
-            if (c.Report is { } said) Assert.Contains(said, report);
-            else Assert.DoesNotContain(@"data\<yyyyMMdd>\events.csv", report);
-            writer.AppendEvents(inc, events, maxRows: 10_000); // up to the 1,000 it keeps, then the row that says so
+            // The line under the window's events, whole: what the file gets and when, then what the day's file has, if anything.
+            Assert.Contains("(1500 other events in the window; events.csv gets more of the window's first events, up to 500 in all, as PoolWatch's write budget allows, " +
+                            "and when the incident closes with more events than that, PoolWatch replaces the file with both ends of its window as it is measured then, its first events and its latest, " +
+                            "up to 500 of each, with a Gap row between them when it leaves any out" + (c.Report is { } said ? ", " + said : "") + ")", report);
+            if (c.Report is null) Assert.DoesNotContain(@"data\<yyyyMMdd>\events.csv", report);
+            writer.AppendEvents(inc, events, maxRows: 10_000); // up to the 500 it keeps, then the row that says so
             string last = File.ReadAllLines(Path.Combine(inc.Dir, "events.csv"))[^1];
             Assert.Contains(",Note,", last);
-            Assert.Contains("events.csv holds the incident window's first 1,000 events, to this row's time; the window's later events are not in this file", last);
+            Assert.Contains("events.csv holds the incident window's first 500 events, to this row's time, as PoolWatch had them when it wrote this row; later events are not in this file", last);
             Assert.DoesNotContain(@"data\", last);
         }
     }

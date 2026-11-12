@@ -194,6 +194,10 @@ internal static class UiRunner
         var updateStats = new { text = app.Form.UpdateNotice, layoutProblems = updateProblems, shot = updateShot };
         app.Form.Hide();
 
+        // The tray menu's Settings... clicked as a user would, the main window hidden in the Simple view (whose header has no
+        // Settings button): Settings opens on its own, centred on the screen, with a taskbar button; it is closed again.
+        var traySettings = app.SettingsFromTrayForTest();
+
         // The tray icon's colour and what decides it (UiData.State), under one lock so no sample comes between them (the
         // lock is re-entrant, and UiData.State takes it too).
         int openIncidents, retainedTags;
@@ -216,6 +220,7 @@ internal static class UiRunner
             updateNotice = updateStats,
             openForms = Application.OpenForms.Cast<Form>().Select(f => f.Text).ToList(),
             trayMenu = app.MenuItemTexts(),
+            traySettings,
             trayIcon = app.IconState.ToString(),
             openIncidents,
             retainedTags,

@@ -97,7 +97,9 @@ public class ConfidenceWordsAppTests
 
     /// <summary>
     /// The window's details and Copy summary of a tag row, and the bundle's incidents.md, are built by the functions above:
-    /// read from the source, as the window and the bundle need the whole app to run.
+    /// read from the source, as the window and the bundle need the whole app to run. The bundle hands incidents.md the
+    /// newest sample's time, for the line of a trace's incident whose trace has not finished
+    /// (<c>RecommendationInputsBuilderTests.ATracesIncidentWithNoSpanIsListedInTheBundleByWhatItsReportSays</c>).
     /// </summary>
     [Fact]
     public void TheWindowAndTheBundleBuildTheseTextsWithThem()
@@ -109,7 +111,7 @@ public class ConfidenceWordsAppTests
         Assert.DoesNotContain("Confidence", details);
         Assert.Contains("() => TagSummary(ranked)", MainWindowLayoutTests.Block(main, "private CopyInfo? CauseCopy(object? key)"));
         string export = MainWindowLayoutTests.Block(bundle, "public static string Export(MonitorEngine engine, AnalysisPipeline analysis, RedactionInfo? redaction)");
-        Assert.Contains("files[\"incidents.md\"] = IncidentsMarkdown(analysis.Incidents.All);", export);
+        Assert.Contains("files[\"incidents.md\"] = IncidentsMarkdown(analysis.Incidents.All, h.Count > 0 ? h.Times[^1] : null);", export);
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(export, "incidents\\.md"));
         Assert.DoesNotContain("Confidence", export);
     }

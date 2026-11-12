@@ -974,7 +974,8 @@ internal sealed class RecordsPage : StepPage
         try
         {
             var days = Session.DayOptions;
-            if (_days.Items.Count != days.Count) Fill(days);
+            // Filled again when the days offered changed (one picked, or Settings put others into effect), not only their count.
+            if (!_days.Items.Cast<Item>().Select(item => item.Value).SequenceEqual(days)) Fill(days);
             int i = days.ToList().IndexOf(Session.Days);
             if (_days.SelectedIndex != i) _days.SelectedIndex = i;
         }

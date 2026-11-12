@@ -21,6 +21,11 @@ internal interface IShell
     /// <summary>Opens Report an issue, with that incident's summary offered when a folder is given.</summary>
     void ShowReport(string? incidentDir);
     /// <summary>
+    /// Opens Settings, one at a time (the tray menu's Settings... in either view, and the Advanced view's Settings button):
+    /// asked for while it is open, the one open comes to the front.
+    /// </summary>
+    void ShowSettings();
+    /// <summary>
     /// Runs the token-leak guard's sign-in check now, with its notices (shown only when the guard needs the user's click):
     /// true when this sign-in is protected or needs no protection, false when it could not be protected yet (its notice
     /// says what to do).
@@ -74,6 +79,20 @@ internal sealed class SetupContext
 
     /// <summary>The installer put the ChatGPT shortcut's launcher next to PoolWatch (read once).</summary>
     public bool LauncherInstalled => _launcherInstalled.Value;
+
+    /// <summary>
+    /// Settings for one opening (the caller disposes it), with the offer to make the Codex shortcut again when the ChatGPT
+    /// desktop app is installed, the launcher is there and the shortcut is not on the desktop. Its Save records a changed
+    /// record mode or cleanup as the owner's choice of what PoolWatch keeps on disk (setup.json, <see cref="Store"/>).
+    /// </summary>
+    public SettingsDialog NewSettings()
+    {
+        bool onDesktop = ShortcutOffer.OnDesktop(() => Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), File.Exists);
+        var offer = ShortcutOffer.Offered(Probe.Last?.ChatGptInstalled == true, ChatGptShortcut.Launcher() is not null, onDesktop)
+            ? new ShortcutOffer(() => Recommendations.CreateCodexShortcut("Settings"))
+            : null;
+        return new(Engine, Analysis, Actions, Live, Shell, offer, Store);
+    }
 
     /// <summary>The rules' inputs, from memory and the cached facts (nothing is scanned): cheap enough for a once-a-minute refresh.</summary>
     public RecommendationInputs Inputs() => RecommendationInputsBuilder.Build(Engine, Analysis, Probe.Last, Store, Ledger.Records.Has(RecordKind.Shortcut),

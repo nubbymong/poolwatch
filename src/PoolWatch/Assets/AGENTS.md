@@ -33,7 +33,11 @@ Rules for you, the assistant:
 ## 2. File map
 
 Times inside CSV and JSON files are UTC (`2026-10-28T09:12:00.000Z`); `poolwatch.log` and the dates and times in
-folder names and incident ids are local time, so match an id to CSV rows through the time zone. Sizes are in bytes
+folder names and incident ids are local time, so match an id to CSV rows through the time zone. The clock times
+`report.md` gives are the PC's local time too, and so are those inside these texts of `report.json`: `headline`,
+`plainAnswer`, `traceAnswer`, `retention`'s `note`, the `timeline` texts and the suspects' `evidence` lines. They are
+in the time zone `report.md`'s stamps show ("opened 2026-10-28 10:12:00 +01:00"), so on that PC a `timeUtc` of
+`2026-10-28T09:12:00Z` stands beside a `note` that says "at 10:12:00". Sizes are in bytes
 unless a name says otherwise. A pool tag is four characters and **case-sensitive**: `Reff` and `RefF` are different
 tags. Tag owners and meanings are in each incident report, or in Microsoft's `pooltag.txt`.
 
@@ -143,23 +147,86 @@ after a watched app ran), `incidents.md`, `experiment\` (when one ran), `filters
 
 ## 3. Reading `report.json`
 
-Each incident folder has `report.md` (for people), `report.json` (the same, for you), `timeline.csv`,
-`processes.csv`, `events.csv`, `timeline.png` and, when a trace was taken, `capture.etl`. (A folder whose name has a
+Each incident folder has `report.md` (for people), `report.json` (the same, for you) and `events.csv`; from the
+first write of its chart files on (an incident opens before that), `timeline.csv`, `processes.csv` and
+`timeline.png` (no chart is drawn of fewer than two samples); and, when a trace was taken, `capture.etl`. The draft
+bug report at the end of `report.md` lists which of them the folder held when it was written. (A folder whose name has a
 finding's kind instead of a tag is a finding's report, described in the file map.) An incident's `events.csv` holds
-both ends of its window. While the incident is open it holds the window's first 1,000 events from 2 minutes before the
-onset, every one from its first row to its last, in the order PoolWatch added them (sorted by time within each
-addition), and on a busy PC fewer, as PoolWatch writes within a disk budget; once it has all 1,000, its last row
-(`kind` `Note`) says so, and its time is when they stop. Once the incident has closed it holds the window's first 1,000
-events by time, then its latest 1,000, all sorted by time, each event once; when events between the two were left
-out, a row of `kind` `Gap` sits between the two parts, at the time of the first one left out, and its `detail` says
-how many and the time of the first and the last of them (a window of under 2,000 events has every one and no such
-row). A last `Gap` row also says how many of a short incident's events PoolWatch's disk budget never had room for.
-When `reopened` in `report.json` is above 0, the rows start at the first episode's onset less 2 minutes (`onsetUtc`
-is the latest episode's), and while the incident is open again the file holds both ends as its last close wrote them:
-the new episode's events come at its next close. `Alert`, `Release`, `Note` and `Gap` rows are not events: count the
+both ends of the window its report gives, 500 events each (on a busy PC about 3 minutes of events at each end). Its
+first part is the first 500 events by time from the window's start: 2 minutes before `onsetUtc`. PoolWatch measures
+the onset again as the growth goes on (later as a long, steady growth's rise grows, sometimes earlier), and the first
+part follows the window's start: it is taken again from where the window starts then, a closed incident's at once
+and an open one's at most every 10 minutes, so the file shows the window the report gives. (Left where the incident
+opened, the first part would be mostly from before the growth: after an hour on a busy PC, 416 of its 500 rows on
+average.) For a `Capture` incident the start is not measured:
+its trace is its window. Its start is the moment the incident was made until its trace finishes, and from then on
+exactly the trace's own start, a little later (a trace that could not record leaves it where it was). PoolWatch never
+moves it otherwise, so that start is `onsetUtc`, the window `report.md` lists starts exactly there, with no 2 minutes
+before it, and `startBytes` is the tag's level at the first sample from it on (the last one before it, when the trace
+ended before the next sample). Its window ends exactly where its trace
+ended (`closedUtc`, the trace's own `endUtc` under `capture`; the moment the incident was made until the trace
+finishes, and for a trace that could not record), with no minute added and whatever its tag did: its `events.csv`
+and the events `report.md` lists are the trace's own, from its start to its end, however long the trace was.
+On a very busy PC PoolWatch may no longer hold every event from the window's start (by default it holds the events
+of the last 90 minutes, and never more than 20,000): the first
+part is then the first events it still holds from there, up to 500. After a start measured later those can be the
+first events the incident had kept itself from the new start on: they are the window's first, often fewer than 500, and
+the file says how many. Where PoolWatch had let go of events from the start on, the `Note` row, the `Gap` row and
+`report.md` say so, with
+the time of the latest event it had let go by then ("the first 500 events PoolWatch still held from ... (by then it
+had already let go of events up to ...)"): the events it had let go are not
+in the file, and are not counted anywhere. While the incident is open the file holds that first
+part, every event from its first row to its last, in the order PoolWatch added them (sorted by time within each
+addition), and on a busy PC fewer, as PoolWatch writes within a disk budget; once it has all of it, its last row
+(`kind` `Note`) says how many events it holds and from when, and its time is when they stop: no event row of the
+file is later. When the first part
+follows the window's start, a file without its `Note` row starts again from the new start, and one with it stays as
+written until the incident closes; `report.md` then says where the file's rows are from and where the window starts
+now. (A file without its `Note` row is also written again when a late event takes a place among rows it holds: it
+never holds more than its first part's 500.) Once the incident has
+closed it holds the window's first part as it is measured at the close, then its latest 500 events up to the window's
+end, all sorted by time, each event
+once; when events between the two were left out, a row of `kind` `Gap` sits between the two parts, at the time of the
+first one left out, and its `detail` says how many (every event between the two parts), the time of the first and the
+last of them, and what the file keeps: how many events from when ("the first 500 events from ..., where the
+incident's window started when this file was written"), and how many up to the window's end. A file with no event
+row before its `Gap` row holds only its latest events, and the row says so. An incident with under 1,000 events
+from its first row to its window's end has every one and no
+such row; with no more than 500 it has no latest part, and its close leaves its file with every
+event of the window, in time order. An event of a closed incident's window that comes after its file was last written
+(a short command's
+`Rollup` is handed over up to a minute and a half after its first start, so those of a trace's last seconds can) is
+listed in `report.md` at the next sample or soon after; a file that holds the first part only gets its row then too,
+at its end, after rows of later times.
+Two minutes after the window's end, when every late event of the window can have come, PoolWatch writes the folder
+once more if `events.csv` does not hold the window's events as `report.md` lists them, each once and in time order
+(a file that holds both ends
+is replaced whole then, its `report.md` with it; one that holds the first part only is written in time order), and
+again only when still more of them come later; until then that
+`report.md` counts the file's rows as they are. The `Gap` row counts each event by its own time, so no event from
+after the window's end is counted as left out: when the window's end is measured again after events were counted,
+PoolWatch takes the latest part and the count again from the events it holds (those it no longer holds stay counted
+as they were). Only on a PC so busy that it no
+longer holds the events from after the new end (over 20,000 events since it) does such a count hold events from
+after the end; the
+row and `report.md` then say so, with where the window ends ("the count runs past the window's end, ... when this
+file was written: PoolWatch no longer held those events, to count each by its own time against that end").
+`report.md` says the same in words in the line under its list of the window's events, which are those of the
+window as last measured; for an open incident whose file has its `Note` row, the line also says how many more events
+have come since: every one PoolWatch took in from the file's start on that is not one of its rows, those after the
+window's end as last measured among them. A last `Gap` row, after the file's other rows, also says how
+many late events of a short incident's window PoolWatch's disk budget never had room for before the incident left
+PoolWatch's memory.
+When `reopened` in `report.json` is above 0 and the incident is open again, the file holds both ends as its last
+close wrote them: the new episode's events come at its next close, which writes both ends of the whole window as it
+is measured then. `Alert`, `Release`, `Note` and `Gap` rows are not events: count the
 others. An `Alert` row marks when each growth rule first fired (the report has its latest numbers).
-With Detailed recording the day's `data\<yyyyMMdd>\events.csv` has every event; with Reports only there is no such
-file. A folder an older PoolWatch wrote can differ: 1.0.0-beta.2
+With Detailed recording the day's `data\<yyyyMMdd>\events.csv` has every event of the time it was on; with Reports
+only there is no such file, and after a switch from one to the other during the day it holds only the time Detailed
+recording was on. While an incident's rows wait for the disk budget, its `report.md` names that file only with Detailed
+recording: it "has every one" when Detailed recording was on for the whole window, "has those of the time Detailed
+recording was on" after a switch in the window, and no day file is named with Reports only. A folder an older
+PoolWatch wrote can differ: 1.0.0-beta.2
 and earlier kept up to the window's newest 5,000 events with no `Note` or `Gap` row, so such an `events.csv` may not
 have every event of the window. On a busy
 PC an open incident's `report.json` can be up to about an hour behind (PoolWatch's window shows it live); an export
@@ -168,18 +235,54 @@ zip has both ends of the window, from memory, with a `report.md` that counts the
 matter:
 
 - `id`, `kind` (`Growth`, `NonPagedTotal` for the whole non-paged pool over its limit, `Release` for a sharp drop,
-  `Capture` for a trace the person started), `tag` and `tagHex`, `owner` and `description` (the driver and what the
-  tag holds);
-- `openedUtc`, `onsetUtc` (when the growth began), `endUtc` (when it stopped; empty while still climbing),
+  `Capture` for a trace taken on its own: one the person started with Capture now, or, where the person turned that
+  on, a CPU trace of a moment the PC lagged; `traceFor` says which, `Manual` or `LagTrip`: it is empty for the other
+  kinds, and a folder an older PoolWatch wrote has none), `tag` and `tagHex`, `owner` and `description` (the driver
+  and what the tag holds);
+- `openedUtc`, `onsetUtc` (when the growth began; a `Capture` incident's start, as above), `endUtc` (when it stopped;
+  empty while still climbing, and when there was no growth to end),
   `growthBytes`, `startBytes`, `peakBytes`, `currentBytes`, and `clearedBytes` (what PoolWatch's own cache clears freed
   of the tag since the onset: the growth and the peak count it back, as a clear's drop is not the growth ending;
   `currentBytes` is the tag's real level) with `clearedAtUtc` (when, if one clear freed it; empty for none or
-  several);
+  several), and `currentAtUtc`, the sample `currentBytes` is of: the newest one while the incident is open; for a
+  closed incident the one of its close (or of a later check that found the growth still held), however much later
+  the report was written, so it is not the tag's level now (`report.md` gives it as "244 MB at 07:05:53", and says
+  "now" only of an open incident; a folder an older PoolWatch wrote has no `currentAtUtc`, and its `report.md` says
+  "now" of a closed incident's level too, which is the level as it was last measured, at its close or when the
+  growth was found still held);
 - `headline` (one line) and `plainAnswer` (the answer in plain words, with the suspects grouped by who they work for:
-  an app, a service, a Claude Code session);
+  an app, a service, a Claude Code session). Of a closed incident they say "was flat over 1 min", "No clear cause
+  was found" and "Non-paged pool rose over 5.0 GB", where an open one's say "is flat over ...", "No clear cause yet"
+  and "Non-paged pool over 5.0 GB and rising", and a drop's `plainAnswer` says the drop ("fell 140 MB in 1 min").
+  The figure in a `NonPagedTotal` headline is the limit the pool was over when the alert fired: not the pool's size
+  (the alert's `rule` under `alerts` gives it) and not that alert's `bytes`, which is how much the fastest-growing
+  tag rose in 10 minutes. A `Capture` incident written before its trace has finished has no span yet: its
+  `headline` says so, with the time of the newest sample when it was written ("its trace had not finished by
+  07:05:20"), as `report.md`'s title and Growth line do, and its `plainAnswer` is empty or says the same; its
+  `growthBytes` of 0 is then no finding of a trace. One whose trace recorded nothing PoolWatch could use never
+  gets a span: its `headline` says that instead ("its trace recorded nothing PoolWatch could use"), and `capture`
+  has the trace's `error` or `notes`.
+  A folder an older PoolWatch wrote gives a growth in both cases ("grew ... in ..."), which is of no trace, says
+  "is flat", "No clear cause yet" and "and
+  rising" of a closed incident too, gives the alert's `bytes` as the figure in a `NonPagedTotal` headline, and in a
+  drop's `plainAnswer` says "is flat" or "grew", which is of the time just
+  before the drop, not of the drop;
 - `suspects[]`: each process with `rank`, `pid`, `image`, `displayName`, `commandLine`, `ancestry` (its parent
-  chain), `services`, `confidence` and `evidence` (each line one reason it ranks there);
-- `traceOwners` and `traceAnswer`: what a confirmation trace attributed, when one ran (`capture` holds its details);
+  chain), `services`, `confidence` and `evidence` (each line one reason it ranks there). They are as PoolWatch last
+  ranked them: for a closed incident at its close (or as its trace was attached, after it), however much later the
+  report was written. So `report.md` says "still running" only of an open incident's suspect; of a closed
+  incident's suspect that PoolWatch knew to be running it says "still running when it closed", which is not whether
+  it runs now (a folder an older PoolWatch wrote says "still running" of a closed incident's too);
+- `traceOwners` and `traceAnswer`: what a confirmation trace attributed, when one ran (`capture` holds its details).
+  `traceAnswer` also says where the tag's level was against its growth: of an open incident at the newest sample
+  ("and is still held", "has been freed since", "it is now empty"), of a closed one at the sample `currentAtUtc`
+  gives, with its time ("and was still held at 07:05:53", "had been freed by 07:05:53", "it was empty at 07:05:53";
+  a folder an older PoolWatch wrote says "is still held" of a closed incident too, which is of its close or of when
+  the growth was found still held);
+- `retention` (when a closed incident's growth was found still held after its likeliest cause went quiet or exited:
+  `timeUtc`, `activityStoppedUtc`, `retainedBytes`, and `note`, which says it with that time, "still held 12 MB of
+  its 12 MB rise at 07:20:53", as `report.md`'s "Retained" line does; a folder an older PoolWatch wrote says "still
+  holds", which is of `timeUtc` too, not of now);
 - `release` (for a drop: how much and when; `fromBytes` and `toBytes` are the tag's real levels, `dropped` is what fell
   on its own, and `clearedBytes` what PoolWatch's own cache clears freed of it meanwhile, with `clearedAtUtc` when one
   clear did), `window` (the time span the suspects were judged over), `timeline`, and `notice` (the file is not

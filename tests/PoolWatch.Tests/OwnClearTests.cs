@@ -660,19 +660,21 @@ public class OwnClearTests
         Assert.Equal(drop, json.RootElement.GetProperty("clearedBytes").GetInt64());
         Assert.Equal(a.Clears[0].TimeUtc, json.RootElement.GetProperty("clearedAtUtc").GetDateTime());
         var growthLine = Assert.Single(File.ReadAllLines(Path.Combine(inc.Dir, "report.md")), l => l.StartsWith("- Growth:", StringComparison.Ordinal));
-        Assert.EndsWith($"; now {Fmt.Bytes(V(at))}, after PoolWatch's own cache clear at {Fmt.Clock(a.Clears[0].TimeUtc)} freed {Fmt.Bytes(drop)} of it", growthLine);
+        // Closed by the end of the run: its level is said with the time of the sample it is of, not as "now".
+        Assert.EndsWith($"; {Fmt.Bytes(V(at))} at {Fmt.Clock(a.History.Times[^1])}, after PoolWatch's own cache clear at {Fmt.Clock(a.Clears[0].TimeUtc)} freed {Fmt.Bytes(drop)} of it", growthLine);
     }
 
     [Fact]
     public void AnIncidentWithNoClearInItSaysNothingOfClears()
     {
-        // A leak with no clear: its report's Growth line ends at its level now, and report.json says no clear freed any of it.
+        // A leak with no clear: its report's Growth line ends at its level as last measured (the end of the run closed it: with
+        // that sample's time, not as "now"), and report.json says no clear freed any of it.
         using var a = new ClearWorld(new Settings { IncidentMaxMinutes = 600 });
         for (int i = 0; i < 200; i++) a.Sample(GB, ("Leak", GB + i * 40 * MB / 6));
         var inc = Assert.Single(a.Incidents.All);
         a.Incidents.Finish(a.History, a.Last);
         var line = Assert.Single(File.ReadAllLines(Path.Combine(inc.Dir, "report.md")), l => l.StartsWith("- Growth:", StringComparison.Ordinal));
-        Assert.EndsWith($"; now {Fmt.Bytes(inc.CurrentBytes)}", line);
+        Assert.EndsWith($"; {Fmt.Bytes(inc.CurrentBytes)} at {Fmt.Clock(a.History.Times[^1])}", line);
         using var json = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(inc.Dir, "report.json")));
         Assert.Equal(0, json.RootElement.GetProperty("clearedBytes").GetInt64());
         Assert.Equal(System.Text.Json.JsonValueKind.Null, json.RootElement.GetProperty("clearedAtUtc").ValueKind);

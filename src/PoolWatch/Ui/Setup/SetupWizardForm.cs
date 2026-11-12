@@ -1,3 +1,5 @@
+using PoolWatch.Core;
+
 namespace PoolWatch.Ui.Setup;
 
 /// <summary>
@@ -61,6 +63,26 @@ internal sealed class SetupWizardForm : Form
             _mayClose = true;
             Close();
         };
+        // Settings, which the tray opens while setup is open (the Records step alone opens at each start until Done), may
+        // put another record mode or cleanup into effect: the step shows it, on this window's thread (the change is told on
+        // its caller's, a worker's for Undo), so its Next or Done never puts an older choice back over it. Before the window
+        // has a handle there is nothing to show: it reads what is in effect as it gets one (OnHandleCreated).
+        _onApplied = change =>
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+            try { BeginInvoke(new Action(() => { if (!IsDisposed) Session.FollowRecords(); })); }
+            catch (InvalidOperationException) { } // its handle went meanwhile: it is closing
+        };
+        host.Applied += _onApplied;
+    }
+
+    /// <summary>Follows a setting put into effect elsewhere (<see cref="ISetupHost.Applied"/>); let go of when the window is disposed.</summary>
+    private readonly Action<Action<Settings>> _onApplied;
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        Session.FollowRecords(); // a change put into effect before the window had a handle
     }
 
     internal SetupSession Session { get; }
@@ -324,6 +346,7 @@ internal sealed class SetupWizardForm : Form
         base.Dispose(disposing);
         if (disposing)
         {
+            _host.Applied -= _onApplied;
             _stop.Dispose();
             _fonts?.Dispose();
         }

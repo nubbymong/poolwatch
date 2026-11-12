@@ -137,6 +137,37 @@ public sealed class ExitSignalTests
         Assert.True(thread.Join(TimeSpan.FromSeconds(10)));
     }
 
+    /// <summary>
+    /// Once a listener is disposed its event is gone, so a request just after finds none, as when no PoolWatch runs (the
+    /// pool's wait thread let go of the event only when it next looked: 1 of 2,000 such events outlived their listener on
+    /// the maintainer's PC, and a show signal's did so in a gate run); and one disposed after it fired (its wait ran once)
+    /// stops at once.
+    /// </summary>
+    [Fact]
+    public void AStoppedListenerLeavesNoEventBehindAndStopsAtOnceAfterItFired()
+    {
+        int outlived = 0;
+        for (int i = 0; i < 2000; i++)
+        {
+            string name = _event + "-" + i;
+            var listener = ExitSignal.Listen(name, AdminOnlyAndMe, () => { }, _ => { });
+            Assert.NotNull(listener);
+            listener!.Dispose();
+            if (EventWaitHandle.TryOpenExisting(name, out var left)) { left.Dispose(); outlived++; }
+        }
+        Assert.Equal(0, outlived);
+
+        using var fired = new ManualResetEventSlim();
+        var once = ExitSignal.Listen(_event, AdminOnlyAndMe, fired.Set, _ => { });
+        Assert.NotNull(once);
+        using (var signal = EventWaitHandle.OpenExisting(_event)) signal.Set();
+        Assert.True(fired.Wait(TimeSpan.FromSeconds(10)));
+        var stop = Stopwatch.StartNew();
+        once!.Dispose();
+        Assert.True(stop.Elapsed < TimeSpan.FromSeconds(1), $"stopped in {stop.Elapsed.TotalMilliseconds:0} ms");
+        Assert.False(EventWaitHandle.TryOpenExisting(_event, out _));
+    }
+
     [Fact]
     public void ANameThatAlreadyExistsIsNotUsed()
     {

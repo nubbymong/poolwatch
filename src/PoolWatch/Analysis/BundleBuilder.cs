@@ -15,27 +15,42 @@ internal static class BundleBuilder
 
     /// <summary>
     /// An incident in the bundle's incidents.md: its growth from start to peak, and, when PoolWatch's own cache clears freed
-    /// part of it (the peak counts that back), its level now and what they freed, said as their result.
+    /// part of it (the peak counts that back), its level and what they freed, said as their result. The level is "now"
+    /// only for an open incident: a closed one's is as it was last measured (at its close, or when it was found
+    /// retained), and a bundle is made hours or days later, so it is given with its sample's time
+    /// (<see cref="Incident.LevelSaid"/>, as report.md gives it). An incident made for a trace of its own that has no
+    /// span (its trace is not attached yet, as in a bundle made while the trace records, or recorded nothing
+    /// PoolWatch could use) has no growth to give: its line says which, as its report.md does
+    /// (<see cref="Incident.NoTraceSpan"/>), "its trace had not finished by" the time of the newest sample as the
+    /// bundle is made (<paramref name="newestUtc"/>; null: no sample yet, and the line gives the moment the incident
+    /// was made), or "its trace recorded nothing PoolWatch could use", and in brackets the level its tag held as it
+    /// was last measured, with that sample's time. Its onset and its close are the moment it was made. (Before:
+    /// "100 MB -> 100 MB (+0 B)", which reads as what the trace found.)
     /// </summary>
-    internal static string IncidentLine(Incident i) =>
-        $"- {i.Kind} on `{i.Tag.ToDisplay()}`: {Fmt.Bytes(i.StartBytes)} -> {Fmt.Bytes(i.PeakBytes)} (+{Fmt.Bytes(i.Growth)}), onset {Fmt.Stamp(i.OnsetUtc)}" +
-        (i.ClosedUtc is { } c ? $", closed {Fmt.Stamp(c)}" : ", open") +
-        (i.OwnClearsFreed is { } own ? $"; now {Fmt.Bytes(i.CurrentBytes)}, after {own} of it" : "");
+    internal static string IncidentLine(Incident i, DateTime? newestUtc = null)
+    {
+        string when = $", onset {Fmt.Stamp(i.OnsetUtc)}" + (i.ClosedUtc is { } c ? $", closed {Fmt.Stamp(c)}" : ", open");
+        if (i.NoTraceSpan(newestUtc, Fmt.Stamp) is { } why)
+            return $"- {i.Kind} on `{i.Tag.ToDisplay()}`: {why}" + (i.CurrentAtUtc is { } at ? $" (the tag held {Fmt.Bytes(i.CurrentBytes)} at {Fmt.Stamp(at)})" : "") + when;
+        return $"- {i.Kind} on `{i.Tag.ToDisplay()}`: {Fmt.Bytes(i.StartBytes)} -> {Fmt.Bytes(i.PeakBytes)} (+{Fmt.Bytes(i.Growth)})" + when +
+               (i.OwnClearsFreed is { } own ? $"{i.LevelSaid(Fmt.Stamp)}, after {own} of it" : "");
+    }
 
     /// <summary>A suspect under its incident in incidents.md, its confidence in the words of Pool causes' Confidence column.</summary>
     internal static string SuspectLine(Core.Correlation.OwnerSuspect o) => $"- Suspect: {o.Summary} ({Core.Util.PlainWords.Confidence(o.Confidence)})";
 
     /// <summary>
     /// The bundle's incidents.md: the last 50 incidents, each with its <see cref="IncidentLine"/> and its first three
-    /// meaningful owners (<see cref="SuspectLine"/>).
+    /// meaningful owners (<see cref="SuspectLine"/>). <paramref name="newestUtc"/>: the newest sample's time as the
+    /// bundle is made (null: no sample yet), for the line of a trace's incident whose trace has not finished.
     /// </summary>
-    internal static string IncidentsMarkdown(IEnumerable<Incident> incidents)
+    internal static string IncidentsMarkdown(IEnumerable<Incident> incidents, DateTime? newestUtc = null)
     {
         var inc = new StringBuilder("# Incidents\n\n");
         foreach (var i in incidents.TakeLast(50))
         {
             inc.AppendLine($"## {i.Id}").AppendLine();
-            inc.AppendLine(IncidentLine(i));
+            inc.AppendLine(IncidentLine(i, newestUtc));
             foreach (var o in (i.Owners ?? []).Where(o => o.Meaningful).Take(3)) inc.AppendLine(SuspectLine(o));
             inc.AppendLine();
         }
@@ -79,7 +94,7 @@ internal static class BundleBuilder
             if (engine.Latest is { } latest)
                 files["tags/now.csv"] = $"# {Iso(latest.TimeUtc)}\n" + VendorBundle.TagCsv(latest.Tags.Select(t => new TagSize(t.Tag.ToDisplay(), (long)t.PagedUsed, (long)t.NonPagedUsed)).Where(t => t.Total > 0));
 
-            files["incidents.md"] = IncidentsMarkdown(analysis.Incidents.All);
+            files["incidents.md"] = IncidentsMarkdown(analysis.Incidents.All, h.Count > 0 ? h.Times[^1] : null);
             // During growth: the one-minute tag table at each of the last three incidents' peaks. The entry name is the
             // file-safe tag (readable form + hex of the raw bytes: Reff and RefF never collide) and the peak's date and minute
             // (the same tag at the same minute is the same table: kept once).

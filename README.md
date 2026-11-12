@@ -281,7 +281,8 @@ experiment you run), and beside the reports only its log, its settings, a summar
 made from them. The window and the tray notices work from what it holds in memory. **Detailed recording** adds a record
 of the whole day in the data folder (the pool and its tags, programs and their handles, services, every program
 started, its findings) and report folders for its spawn storms. You choose in setup's Records
-step, and change it at any time under **Records** in Settings, which applies at once. Reports, records and exports are
+step, and change it at any time under **Records** in Settings (**Settings...** in the tray menu, in either view),
+which applies at once. Reports, records and exports are
 cleaned up after 7 days of the PC's awake time without a write (you choose 1 to 90 days there too). Both stay on your
 PC and are never sent.
 
@@ -314,7 +315,7 @@ you open PoolWatch and at its next start, as it does if PoolWatch stops before t
 area by the clock (if you do not see it, click the **^** arrow there): closing the window keeps it running. To stop
 PoolWatch, right-click the icon and choose **Exit**. If it starts when you sign in, it starts again at your next
 sign-in, until you turn off "Start PoolWatch when you sign in" in Active changes. **Run setup again...** in the tray
-menu opens setup later.
+menu opens setup later, and **Settings...**, just above it, opens Settings in either view.
 
 To update, run the new version's setup: it asks the running PoolWatch to exit first, and keeps your settings, reports
 and Active changes. If another program still has one of PoolWatch's files in use, the update finishes the next time

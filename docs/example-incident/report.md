@@ -2,9 +2,9 @@
 
 - Incident `20261026-034624-File-656c6946` (Growth), opened 2026-10-26 03:46:24 +00:00, closed 2026-10-26 03:47:14 +00:00
 - Tag `File` (raw 0x656c6946; tags are case-sensitive): owner **&lt;unknown>**, File objects (source: pooltag.txt)
-- Growth: 6.6 MB -> 18.7 MB (+12.1 MB) from 03:46:04 to 03:46:44; now 18.7 MB
+- Growth: 6.6 MB -> 18.7 MB (+12.1 MB) from 03:46:04 to 03:46:44; 18.7 MB at 03:47:14
 - Alert 03:46:44: grew > 3 MB in 1 min (+12.1 MB, onset 03:45:54)
-- **Retained**: File still holds 12.1 MB of its 12.1 MB rise 30 s after Leaker.exe (PID 7716) went quiet.
+- **Retained**: File still held 12.1 MB of its 12.1 MB rise at 03:47:14, 30 s after Leaker.exe (PID 7716) went quiet.
 - Sizes are the tag's own usage from SystemPoolTagInformation; Task Manager's committed pool figures run higher (fragmentation, lazy release).
 
 ![timeline](timeline.png)
@@ -34,7 +34,7 @@ Ranked by every signal: direct charge (handles of the matching object type, quot
 - Command line: `"D:\a\poolwatch\poolwatch\publish\leaker\Leaker.exe" leak-handles --dir D:\a\_temp\leaker-ui --count 30000 --ramp 30 --hold 40`
 - User: runnervmdaln5\runneradmin
 - Parent chain: wininit.exe › services.exe › svchost.exe (Schedule) › hosted-compute-agent › Runner.Listener.exe › Runner.Worker.exe › pwsh.exe › Leaker.exe
-- Started: 2026-10-26 03:46:08 +00:00; still running
+- Started: 2026-10-26 03:46:08 +00:00; still running when it closed
 
 ### 2. pwsh.exe (PID 7904)
 
@@ -44,7 +44,7 @@ Ranked by every signal: direct charge (handles of the matching object type, quot
 - Command line: `"C:\Program Files\PowerShell\7\pwsh.EXE" -command ". 'D:\a\_temp\fb501258-4e4e-4cda-8855-c7040017bd07.ps1'"`
 - User: runnervmdaln5\runneradmin
 - Parent chain: wininit.exe › services.exe › svchost.exe (Schedule) › hosted-compute-agent › Runner.Listener.exe › Runner.Worker.exe › pwsh.exe
-- Started: 2026-10-26 03:45:53 +00:00; still running
+- Started: 2026-10-26 03:45:53 +00:00; still running when it closed
 
 ### 3. PoolWatch.exe (PID 8136)
 
@@ -54,7 +54,7 @@ Ranked by every signal: direct charge (handles of the matching object type, quot
 - Command line: `"D:\a\poolwatch\poolwatch\publish\fd\PoolWatch.exe" --ui-smoke 80 --config D:\a\poolwatch\poolwatch\ci\m2-config.json --interval 10 --out D:\a\_temp/ui`
 - User: runnervmdaln5\runneradmin
 - Parent chain: wininit.exe › services.exe › svchost.exe (Schedule) › hosted-compute-agent › Runner.Listener.exe › Runner.Worker.exe › pwsh.exe › PoolWatch.exe
-- Started: 2026-10-26 03:45:53 +00:00; still running
+- Started: 2026-10-26 03:45:53 +00:00; still running when it closed
 
 ### 4. csrss.exe (PID 6840)
 
@@ -64,7 +64,7 @@ Ranked by every signal: direct charge (handles of the matching object type, quot
 - Command line: `%SystemRoot%\system32\csrss.exe ObjectDirectory=\Windows SharedSection=1024,20480,768 Windows=On SubSystemType=Windows ServerDll=basesrv,1 ServerDll=winsrv:UserServerDllInitialization,3 ServerDll=sxssrv,4 ProfileControl=Off MaxRequestThreads=16`
 - User: NT AUTHORITY\SYSTEM
 - Parent chain: csrss.exe
-- Started: 2026-10-26 03:41:05 +00:00; still running; orphaned 2026-10-26 03:45:54 +00:00
+- Started: 2026-10-26 03:41:05 +00:00; still running when it closed; orphaned 2026-10-26 03:45:54 +00:00
 
 ### 5. Runner.Worker.exe (PID 2204)
 
@@ -74,7 +74,7 @@ Ranked by every signal: direct charge (handles of the matching object type, quot
 - Command line: `"C:\actions-runner\cached\2.338.0\bin\Runner.Worker.exe" spawnclient 1720 1732`
 - User: runnervmdaln5\runneradmin
 - Parent chain: wininit.exe › services.exe › svchost.exe (Schedule) › hosted-compute-agent › Runner.Listener.exe › Runner.Worker.exe
-- Started: 2026-10-26 03:45:13 +00:00; still running
+- Started: 2026-10-26 03:45:13 +00:00; still running when it closed
 
 ## Events in the window
 

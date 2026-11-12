@@ -97,6 +97,40 @@ public sealed class Incident
     public long PeakBytes { get; set; }
     /// <summary>The tag's level at the last sample ranked.</summary>
     public long CurrentBytes { get; set; }
+    /// <summary>The time of the sample <see cref="CurrentBytes"/> was read at (null while the incident's level was never read from a sample).</summary>
+    public DateTime? CurrentAtUtc { get; set; }
+    /// <summary>
+    /// The tag's level in the words that end a growth's line. While the incident is open, "; now 244 MB": the level at
+    /// the newest sample as it was measured for that write. Once it is closed the level is as last measured (at its
+    /// close, or when it was found retained after it), and its folder is written again hours later (an alert counted
+    /// after it closed, a late event, a note), when "now" would be said of a level that is hours old: it is given with
+    /// its sample's time, "; 244 MB at 07:05:53", written by <paramref name="time"/>. A closed incident whose level
+    /// was never read from a sample (no sample held its tag) says no level.
+    /// </summary>
+    public string LevelSaid(Func<DateTime, string> time) =>
+        IsOpen ? $"; now {Fmt.Bytes(CurrentBytes)}" : CurrentAtUtc is { } at ? $"; {Fmt.Bytes(CurrentBytes)} at {time(at)}" : "";
+    /// <summary>
+    /// What a text says of an incident made for a trace of its own (<see cref="IncidentKind.Capture"/>) that has no
+    /// span, in place of what its tag did over it; null for any other incident. Such an incident is made closed, its
+    /// start and its end one moment (<c>IncidentManager.CreateCapture</c>), and gets its span from its trace
+    /// (<c>IncidentManager.ApplyCapture</c>). Until the trace is attached: "its trace had not finished by 07:05:20",
+    /// the time the newest sample's as the text is written (<paramref name="newestUtc"/>; the moment the incident
+    /// was made, before any sample), written by <paramref name="time"/>. That is true of each moment such a text is
+    /// written at, and whenever it is read: as the incident is made (the trace starts just after), while the trace
+    /// records, and while it is saved and read. Once a trace is attached that has no span of its own (its start and
+    /// its end one moment: wpr could not start, or a CPU recording held nothing PoolWatch could read), the incident
+    /// keeps the moment it was made for good: "its trace recorded nothing PoolWatch could use" (the trace's error or
+    /// note, when it has one, is under Confirmation trace in report.md). Not "its trace did not record": a CPU
+    /// recording that was made and held no CPU events, or could not be read, has no span either
+    /// (<c>CaptureRunner.Run</c>). report.md and report.json say it (<c>IncidentWriter.NoTraceSpan</c>), and so does
+    /// the vendor bundle's incidents.md.
+    /// </summary>
+    public string? NoTraceSpan(DateTime? newestUtc, Func<DateTime, string> time)
+    {
+        if (Kind != IncidentKind.Capture) return null;
+        if (Capture is not { } trace) return $"its trace had not finished by {time(newestUtc ?? OnsetUtc)}";
+        return trace.EndMs > trace.StartMs ? null : "its trace recorded nothing PoolWatch could use";
+    }
     /// <summary>What PoolWatch's own cache clears freed of the tag since the onset (0 when none did).</summary>
     public long ClearedBytes { get; set; }
     /// <summary>When the one own clear that freed part of it since the onset ran; null when none did or several did.</summary>
@@ -137,8 +171,40 @@ public sealed class Incident
     public ProcessKey? WrittenTop { get; set; }
     public long WrittenGrowth { get; set; }
     public bool Dirty { get; set; } = true;
-    /// <summary>Its folder's last write failed (logged; it is not retried until the next change), cleared by one that is made.</summary>
+    /// <summary>
+    /// A write of its folder failed (logged) and its folder has not been written whole since. An open incident's is
+    /// not tried again until its next change, and any write of its folder that is made clears this; one that wrote
+    /// its report and could not write its timeline.csv or its processes.csv (another program holds it) does not set
+    /// it: its report is not behind. A closed incident's folder is written again while PoolWatch holds the incident
+    /// (<see cref="IncidentManager.FailedWriteRetry"/> after each try that fails, and at the end of a run), also
+    /// when all that could not be written was its timeline.csv or its processes.csv, and only a write of its whole
+    /// folder that must be made clears it, or, when those files are all that is still to write
+    /// (<see cref="ChartsAloneFailed"/>), a try for them alone (a try that leaves one of its chart, timeline.csv and
+    /// processes.csv as it is, because the history no longer holds the samples to make it from, clears it too: no
+    /// later try could make that file).
+    /// </summary>
     public bool WriteFailed { get; set; }
+    /// <summary>
+    /// All that is still to write of a closed incident's folder after its failed write (<see cref="WriteFailed"/>)
+    /// is its timeline.csv or its processes.csv: the write that could not write one of them wrote the rest of the
+    /// folder, its reports among it (<see cref="IncidentWriter.ChartFailure"/>), and no earlier write that failed
+    /// left more to write (one that failed at the folder itself, at events.csv or at a report is made good only by
+    /// a write of the whole folder that must be made, and a write that can wait is not one). A try that follows
+    /// then writes the chart and those two files alone, unless a change waits to have the folder written
+    /// (<see cref="Dirty"/>; <c>IncidentManager.Retry</c>). Read only while <see cref="WriteFailed"/> is set.
+    /// </summary>
+    internal bool ChartsAloneFailed { get; set; }
+    /// <summary>When a write of its folder last failed, on the forward clock (<see cref="WriteFailed"/>).</summary>
+    internal long WriteFailedMs { get; set; }
+    /// <summary>
+    /// The log said that a closed incident's folder could not be written and is tried again: said once, however many
+    /// tries fail after it, until its folder is written whole (the log then says that, once: "its folder is written
+    /// again", or, of a try that left one of its chart and its two other CSVs as it is, that the folder is written
+    /// again but for that file). It stays when the incident re-opens before that: the re-opening writes its report
+    /// alone, and the log says the folder is written again once a write with the chart and the CSVs is made (a
+    /// refresh, its close, or a try after that close).
+    /// </summary>
+    internal bool WriteFailSaid { get; set; }
     /// <summary>
     /// An alert was counted on an existing timeline entry of a CLOSED incident. Not a material change
     /// (a closed incident is not rewritten on every sample for it), but its folder is rewritten within
@@ -184,6 +250,20 @@ public sealed class Incident
     /// alert (the "grew 1.2 GB in 40 min" of the headline and the report).
     /// </summary>
     public TimeSpan GrowthSpan => TimeSpan.FromMilliseconds((EndMs ?? ClosedMs ?? LastAlertMs) - OnsetMs);
+    /// <summary>
+    /// Where the growth runs to for what a trace's answer says and counts over it ("grew 40 MB in 1 min", an owner's
+    /// process starts during it), on the forward clock: its end as measured, else its last rise. An incident made for a
+    /// trace of its own (<see cref="IncidentKind.Capture"/>) has no rise: its last rise is the moment it was made, and
+    /// its start, once its trace has finished, is the trace's own, after that. Its span runs to its close (the trace's
+    /// end, once the trace has finished), as <see cref="GrowthSpan"/>'s does.
+    /// </summary>
+    public long SpanEndMs => EndMs ?? (Kind == IncidentKind.Capture && ClosedMs is { } closed ? closed : LastRiseMs);
+    /// <summary>
+    /// What started the trace an incident of kind <see cref="IncidentKind.Capture"/> was made for: the person (Capture now)
+    /// or a lag trip (its CPU trace, where the person turned that on); null for an incident of another kind. report.json has
+    /// it as <c>traceFor</c>, and Pool causes labels the incident by it.
+    /// </summary>
+    public CaptureSource? TraceFor { get; set; }
     /// <summary>How many times the tag grew again within an hour of closing and re-opened this incident.</summary>
     public int Reopened { get; set; }
 }

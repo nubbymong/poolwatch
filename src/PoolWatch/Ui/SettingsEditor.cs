@@ -15,22 +15,28 @@ namespace PoolWatch.Ui;
 /// turning the guard on starts its sign-in check. A change made elsewhere while Settings is open (a suggestion, the setup
 /// guide, Undo) is followed (<see cref="Follow"/>), and Save puts into effect only the parts changed here, so an older
 /// copy never undoes such a change. Lives as long as one opening of Settings, and starts from what is saved
-/// (<see cref="StartFrom"/>), so a change saved for the next start shows again and is never written back over.
+/// (<see cref="StartFrom"/>), so a change saved for the next start shows again and is never written back over. A Save that
+/// changes the record mode or the cleanup's days is the owner's choice of what PoolWatch keeps on disk, as setup's Records
+/// step is: setup.json records it, so after an upgrade from 1.0.0-beta.2 the Records step no longer opens by itself
+/// (<see cref="AtOnceSettings.ChoosesRecords"/>).
 /// </summary>
 internal sealed class SettingsEditor
 {
     private readonly AnalysisPipeline _analysis;
     private readonly LiveSettings _live;
     private readonly IShell _shell;
+    private readonly Engine.Setup.RecommendationStore? _store;
     /// <summary>The settings as this opening of Settings last showed them: <see cref="Edit"/> without the edits made here.</summary>
     private readonly Settings _shown;
 
-    public SettingsEditor(AnalysisPipeline analysis, UiActions actions, LiveSettings live, IShell shell)
+    /// <param name="store">setup.json, where a Save that changes the record mode or the cleanup records the owner's choice; null: not recorded.</param>
+    public SettingsEditor(AnalysisPipeline analysis, UiActions actions, LiveSettings live, IShell shell, Engine.Setup.RecommendationStore? store = null)
     {
         _analysis = analysis;
         Actions = actions;
         _live = live;
         _shell = shell;
+        _store = store;
         Edit = StartingCopy(live);
         _shown = Clone(Edit);
     }
@@ -73,13 +79,10 @@ internal sealed class SettingsEditor
     {
         Edit.Normalize();
         var running = AtOnceSettings.Of(_live.Running);
-        var apply = AtOnceSettings.ToApply(AtOnceSettings.Of(_shown), AtOnceSettings.Of(Edit), running);
+        var apply = ToApply();
         string? clearStaysOff = apply.TurnsClearOn(running) ? ClearTaskStays(owner) : null;
         if (clearStaysOff is not null) apply = apply with { AutoClear = apply.AutoClear with { Enabled = false } };
-        apply.ApplyTo(Edit);
-        bool kept = _live.SaveForNextStart(Edit); // every setting, for the next start (nothing with --config)
-        _live.Apply("Settings", apply.ApplyTo);   // and these at once
-        apply.ApplyTo(_shown);
+        bool kept = Commit(apply);
         // Turned off: the guard also puts back the Windows setting it changed when Windows allows it (Save was clicked here,
         // so PoolWatch is in front), and says what happened.
         string? guardOff = null;
@@ -90,6 +93,27 @@ internal sealed class SettingsEditor
         foreach (string? more in new[] { guardOff, clearStaysOff })
             if (more is not null) said += "\n\n" + more;
         MessageBox.Show(owner, said, "PoolWatch");
+    }
+
+    /// <summary>What Save puts into effect now (<see cref="AtOnceSettings.ToApply"/>): each part changed here, the rest as it is in effect.</summary>
+    internal AtOnceSettings ToApply() => AtOnceSettings.ToApply(AtOnceSettings.Of(_shown), AtOnceSettings.Of(Edit), AtOnceSettings.Of(_live.Running));
+
+    /// <summary>
+    /// Save's writes, once <paramref name="apply"/> is final (the automatic clear kept off when your own clear task stays):
+    /// every setting to settings.json for the next start (nothing with --config), <paramref name="apply"/>'s at once, and,
+    /// when the record mode or the cleanup's days changed here, setup.json's record that the owner chose what PoolWatch
+    /// keeps on disk (also with --config: setup's Records step records its choice the same way). True when settings.json
+    /// was written.
+    /// </summary>
+    internal bool Commit(AtOnceSettings apply)
+    {
+        bool chose = AtOnceSettings.Of(_shown).ChoosesRecords(AtOnceSettings.Of(Edit));
+        apply.ApplyTo(Edit);
+        bool kept = _live.SaveForNextStart(Edit); // every setting, for the next start (nothing with --config)
+        _live.Apply("Settings", apply.ApplyTo);   // and these at once
+        apply.ApplyTo(_shown);
+        if (chose) _store?.MarkRecordsChosen(DateTime.UtcNow);
+        return kept;
     }
 
     /// <summary>
@@ -151,6 +175,13 @@ internal sealed record AtOnceSettings(AutoClearSettings AutoClear, bool TokenGua
 
     /// <summary>The guard goes from on to off: it stops putting Windows' setting back, as Undo does.</summary>
     public bool TurnsGuardOff(AtOnceSettings running) => !TokenGuard && running.TokenGuard;
+
+    /// <summary>
+    /// Settings changed what PoolWatch keeps on disk (<paramref name="edited"/>'s record mode or cleanup days differ from what
+    /// it showed, these): the owner's choice, as setup's Records step records it. A Save that changes neither (another
+    /// setting only) chooses nothing.
+    /// </summary>
+    public bool ChoosesRecords(AtOnceSettings edited) => edited.Records != Records || edited.RetentionDays != RetentionDays;
 
     /// <summary>
     /// What Save puts into effect: each part Settings changed (<paramref name="edited"/> differs from what it showed,

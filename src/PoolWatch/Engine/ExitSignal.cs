@@ -206,7 +206,7 @@ internal static class ExitSignal
             try { onExit(); }
             catch (Exception ex) { log("exit signal: " + ex.Message); }
         }, null, Timeout.Infinite, executeOnlyOnce: true);
-        return new Listener(signal, wait);
+        return new Listener(signal, wait, name);
     }
 
     /// <summary>Asks a running PoolWatch to exit and waits for it. False: still running after <paramref name="wait"/>.</summary>
@@ -242,13 +242,38 @@ internal static class ExitSignal
         catch (UnauthorizedAccessException) { } // the event is in PoolWatch's admin-only namespace, which the caller already opened to get this name; a rare refusal to open or set it here is skipped, and the wait then times out
     }
 
-    private sealed class Listener(EventWaitHandle signal, RegisteredWaitHandle wait) : IDisposable
+    private sealed class Listener(EventWaitHandle signal, RegisteredWaitHandle wait, string name) : IDisposable
     {
-        public void Dispose()
-        {
-            wait.Unregister(null);
-            signal.Dispose();
-        }
+        public void Dispose() => StopListening(wait, signal, name);
     }
 
+    /// <summary>
+    /// Stops listening on <paramref name="signal"/> (named <paramref name="name"/>) and closes it, so the event is gone once
+    /// this returns (the show signal's listener stops so too): a request or a start just after then finds no event, as when
+    /// no PoolWatch runs. The thread pool's wait thread lets go of the event only when it next looks, after its
+    /// unregistration has returned and even after the handle given to it was set, so the event stayed open a moment longer
+    /// and a request could still set it with no PoolWatch listening (3 times in 4,000 in a test, and once in 4,000 when only
+    /// that handle was waited for). So this waits for a callback running then (it only posts to the UI thread), closes the
+    /// event, then waits until its name opens no event: each wait at most 1 s, so nothing stuck holds up the exit.
+    /// </summary>
+    internal static void StopListening(RegisteredWaitHandle wait, EventWaitHandle signal, string name)
+    {
+        using (var gone = new ManualResetEvent(false))
+            if (wait.Unregister(gone)) gone.WaitOne(TimeSpan.FromSeconds(1));
+        signal.Dispose();
+        long until = Environment.TickCount64 + 1000;
+        while (Opens(name) && Environment.TickCount64 < until) Thread.Sleep(1);
+    }
+
+    /// <summary>Whether <paramref name="name"/> still opens an event (one this account may not open counts as none: nothing of PoolWatch's can be told then).</summary>
+    private static bool Opens(string name)
+    {
+        try
+        {
+            if (!EventWaitHandle.TryOpenExisting(name, out var left)) return false;
+            left.Dispose();
+            return true;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or WaitHandleCannotBeOpenedException) { return false; }
+    }
 }

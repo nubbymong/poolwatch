@@ -40,6 +40,12 @@ internal interface ISetupHost
     void MarkCompleted();
     /// <summary>The owner chose what PoolWatch keeps on disk (setup.json): the Records step no longer opens by itself.</summary>
     void MarkRecordsChosen();
+    /// <summary>
+    /// Raised after a setting was put into effect while setup is open (Settings' Save from the tray, Undo, a suggestion), on
+    /// the caller's thread (<see cref="LiveSettings.Applied"/>): the window then has the Records step show what is in effect
+    /// (<see cref="SetupSession.FollowRecords"/>).
+    /// </summary>
+    event Action<Action<Settings>>? Applied;
     void OpenWebPage(IWin32Window owner, string url);
     void Log(string line);
     /// <summary>
@@ -77,6 +83,12 @@ internal sealed class SetupHost : ISetupHost
     public Task<(bool Ok, string Message)> ApplyCache(CacheChoice choice, double hours, double gb, bool replaceOwnTask) => _cache.Apply(choice, hours, gb, replaceOwnTask);
     public Task<(bool Ok, string Message)> ApplyRecords(RecordMode mode, int days) => _records.Apply(mode, days);
     public void MarkRecordsChosen() => _c.Store.MarkRecordsChosen(DateTime.UtcNow);
+
+    public event Action<Action<Settings>>? Applied
+    {
+        add => _c.Live.Applied += value;
+        remove => _c.Live.Applied -= value;
+    }
 
     public async Task<(int All, int CanPutBack)?> ActiveChanges()
     {
@@ -295,6 +307,7 @@ internal sealed class SetupSession
         // The first run starts on the recommended Reports only; opened again (or alone after an upgrade), on what is in effect.
         Records = Flow.FirstRun ? RecordChoices.Recommended : running.RecordMode;
         Days = _daysInEffect = running.RetentionDays;
+        _recordsInEffect = (running.RecordMode, running.RetentionDays);
         Leak = ImpactRows.Leak(null, running.TokenGuardEnabled, host.LeakTestNow, checking: false, notRun: false);
         _toldInputs = FixInputs();
         if (recordsOnly) _heldFrom = _clock();
@@ -352,8 +365,28 @@ internal sealed class SetupSession
     /// <summary>The step's Next waits for the scan: the Standby cache and Fixes steps apply what it found.</summary>
     public bool WaitsForScan => !Scanned && UsesScan;
 
-    /// <summary>The cleanup's days in effect as setup opened: the select keeps offering them, whatever is picked meanwhile.</summary>
-    private readonly int _daysInEffect;
+    /// <summary>The cleanup's days in effect as setup opened (or as Settings put them since): the select keeps offering them, whatever is picked meanwhile.</summary>
+    private int _daysInEffect;
+
+    /// <summary>The record mode and the cleanup's days in effect as the Records step last read them (<see cref="FollowRecords"/>).</summary>
+    private (RecordMode Mode, int Days) _recordsInEffect;
+
+    /// <summary>
+    /// A setting was put into effect elsewhere while setup is open (<see cref="ISetupHost.Applied"/>: Settings' Save, which
+    /// the tray opens while the Records step is open alone, Undo). When the record mode or the cleanup's days in effect
+    /// changed, the Records step's choices become them, so its Next (Done, alone) never puts an older choice back over the
+    /// newer one; Settings' Save of a changed one has recorded the choice already (setup.json). A change of anything else
+    /// leaves the step's choices as they are, the owner's own picks among them. UI thread.
+    /// </summary>
+    public void FollowRecords()
+    {
+        var now = (Running.RecordMode, Running.RetentionDays);
+        if (now == _recordsInEffect) return;
+        _recordsInEffect = now;
+        (Records, Days, _daysInEffect) = (now.RecordMode, now.RetentionDays, now.RetentionDays);
+        Forget(RecordsKey);
+        Tell(SetupPart.Records);
+    }
 
     /// <summary>
     /// The Records step's select: the days it offers, with the number in effect as setup opened when Settings set another

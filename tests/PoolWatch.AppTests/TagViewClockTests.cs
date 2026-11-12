@@ -62,6 +62,24 @@ public sealed class TagViewClockTests
         Assert.Equal(steady, View(i => i >= 90 ? -TimeSpan.FromHours(1) : TimeSpan.Zero));
     }
 
+    [Fact]
+    public void ATagsLiveViewSpeaksInThePresentOfAWindowThatRunsToNow()
+    {
+        // A tag's view (a Pool causes row's details) is of the last hour, or what the history holds of it, up to the
+        // newest sample: a tag that held still over it "is flat", and one that grew with no clear cause has none
+        // "yet". The past ("was flat", "No clear cause was found") is a closed incident's, whose report is written
+        // again hours after its span (OwnerRanking.Answer's closed): the view never passes it.
+        string View(long perSample)
+        {
+            var h = Core.History.History.ForInterval(10, rawMinutes: 130);
+            for (int i = 0; i < 180; i++)
+                h.Add(new Sample(T0.AddSeconds(10 * i), default, [new PoolTagEntry(Reff, 0, 0, 0, (uint)i, 0, (ulong)(64 * MB + i * perSample))], []) { TickMs = 1_000_000 + i * 10_000 });
+            return TagViewBuilder.Build(h, new TagKnowledge(null, null), [], (_, _) => [], new ProcessRegistry(), Reff)!.Answer.Line;
+        }
+        Assert.Equal("FCB_DATA (per-file control block) (Reff, non-paged) is flat over the last 29 min.", View(0));
+        Assert.Equal("FCB_DATA (per-file control block) (Reff, non-paged) grew 179 MB in the last 29 min. No clear cause yet: the suspects below account for 0 B of a 179 MB rise.", View(MB));
+    }
+
     /// <summary>Two events at the forward clock's <paramref name="since"/> + 1 ms ("first") and - 1 ms ("before"), read back by forward milliseconds.</summary>
     private static Func<long, long, List<LifecycleEvent>> EventsAround(long since)
     {

@@ -27,16 +27,27 @@ internal sealed class UiActions
         _ui = ui;
     }
 
-    /// <summary>Runs an action; a failure is logged and shown instead of reaching WinForms' unhandled-exception path.</summary>
+    /// <summary>
+    /// Runs an action; a failure is logged and shown instead of reaching WinForms' unhandled-exception path. While
+    /// <see cref="FailureTold"/> is set, the failure is told there in place of its box.
+    /// </summary>
     public void Guarded(IWin32Window? owner, string what, Action action)
     {
         try { action(); }
         catch (Exception ex)
         {
             _engine.Log.Info($"{what} failed: {ex}");
-            MessageBox.Show(owner, $"{what} failed: {ex.Message}", "PoolWatch");
+            string message = $"{what} failed: {ex.Message}";
+            if (FailureTold is { } told) told(message); else MessageBox.Show(owner, message, "PoolWatch");
         }
     }
+
+    /// <summary>
+    /// CI's UI run, while it clicks the tray menu's Settings... (<see cref="TrayApp.SettingsFromTrayForTest"/>, the only place
+    /// that sets it): a failure <see cref="Guarded"/> caught is told here in place of its box, which would wait for a click
+    /// nobody makes there, so the run fails its check instead of waiting until the job is stopped. Null: the box shows.
+    /// </summary>
+    internal Action<string>? FailureTold { get; set; }
 
     // ---------------------------------------------------------------- Clear cache
 

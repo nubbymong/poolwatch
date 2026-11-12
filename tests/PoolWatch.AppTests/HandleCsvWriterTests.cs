@@ -239,8 +239,11 @@ public sealed class HandleCsvWriterTests(ITestOutputHelper output) : IDisposable
                 Assert.Contains("handles.csv: the handle scan of 10:10:00 UTC was not written: the write going on when recording was turned off has not ended yet (1 not written so far)", log);
         }
         finally { gate.Set(); }
-        Assert.True(SpinWait.SpinUntil(() => LetGoOf(DayFile("handles.csv")) && LetGoOf(DayFile("system-handles.csv")), TimeSpan.FromSeconds(10)),
-            "handles.csv or system-handles.csv stayed open after the write ended");
+        // The old writer closes its two files and then says it has ended: a scan handed over between the two is still one
+        // "not written" while it ends (and was, in one run of the whole suite, when this waited for the files alone). So
+        // the next scan is handed over once the writer has ended, as the files being closed does not say that yet.
+        Assert.True(SpinWait.SpinUntil(() => sink.HandleWriterFree, TimeSpan.FromSeconds(10)), "the write going on when recording was turned off did not end");
+        Assert.True(LetGoOf(DayFile("handles.csv")) && LetGoOf(DayFile("system-handles.csv")), "handles.csv or system-handles.csv stayed open after the write ended");
         sink.PostHandles(WithSystem(70), Names, Procs, Now.AddMinutes(15)); // a new writer, a fresh picture
         sink.Dispose();
         Assert.Equal(["00:-1:50", "00:500:40", "15:-1:80", "15:500:70"], Rows("handles.csv").Select(r => $"{r[0][14..16]}:{r[1]}:{r[4]}"));

@@ -46,16 +46,19 @@ public sealed class AgentLoadTests(ITestOutputHelper output) : IDisposable
 
     /// <summary>
     /// The heap these parts may hold under this load (after a compacting full collection, less what the test held before
-    /// it): measured 38 MB at 4 hours and 40 to 43 MB from 6 hours to the day's end, the raw history (15,000 processes'
+    /// it): measured 35 to 36 MB at 4 hours and 36 to 40 MB from 6 hours to the day's end (Release, both ends of each
+    /// incident's window 500 events; 37 to 43 MB with 1,000 at each end; each with BothEndsTests and WriteBudgetTests in
+    /// the same run: this test alone in its process reads about 2 MB more at every hour, 37 MB at 4 hours and 38 to
+    /// 42 MB after, for the same code), the raw history (15,000 processes'
     /// tracks), the 90 minutes of events, 32 incidents and the registry's records held. PoolWatch's own trim empties its
     /// working set only while the heap is at most half of the 75 MB it empties at (MemoryTrim), and the window and the runtime
     /// hold about 70 MB of working set beside a 15 MB heap in the CI soak: the target is about 37 MB in all, this load's
     /// parts and the app's own; this ceiling is what holds today, with room for the noise of the hours.
     /// </summary>
     private const long HeapCeiling = 48L << 20;
-    /// <summary>The CPU these parts may take: measured 0.14% of one core here; about three times that, so a slower runner passes and the old 30 s re-ranking (1.3%) does not.</summary>
+    /// <summary>The CPU these parts may take: measured 0.11% to 0.18% of one core here (Release, from run to run); about three times that, so a slower runner passes and the old 30 s re-ranking (1.3%) does not.</summary>
     private const double CpuCeiling = 0.0045;
-    /// <summary>The allocations a sample: measured 4.2 MB here (9144b20: 40 MB).</summary>
+    /// <summary>The allocations a sample: measured 3.9 to 4.0 MB here (9144b20: 40 MB).</summary>
     private const long AllocCeiling = 6L << 20;
 
 #if DEBUG

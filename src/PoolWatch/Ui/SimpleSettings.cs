@@ -81,7 +81,7 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
     public const string CleanUpLabel = Setup.SetupText.CleanUpAfter;
     public const string ReportsOnlyTip =
         "A report each time the pool grows: what grew, the programs behind it,\nand a draft bug report for whoever makes the cause. " +
-        "Most people need nothing more.\nNothing is recorded until the pool grows.";
+        "Most people need nothing more.\n" + Setup.SetupText.ReportsCost;
     public const string DetailedTip =
         "The reports, plus a record of everything PoolWatch watches, all day:\nthe pool and its memory tags, programs and their handles, services, " +
         "and every program started.\nUp to about 60 MB a day on a PC doing heavy agentic coding.";

@@ -51,7 +51,8 @@ internal sealed class RecommendationStore
     }
 
     /// <summary>
-    /// The owner chose what PoolWatch keeps on disk (setup's Records step, or the step alone after an upgrade). A setup.json
+    /// The owner chose what PoolWatch keeps on disk (setup's Records step, the step alone after an upgrade, or a Settings
+    /// save that changes the record mode or the cleanup days). A setup.json
     /// without it (1.0.0-beta.2's, which had no such step) says no choice was made, so that step opens by itself once setup
     /// was completed, until one is.
     /// </summary>

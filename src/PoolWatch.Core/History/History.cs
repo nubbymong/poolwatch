@@ -428,6 +428,12 @@ public sealed class History
     public IReadOnlyList<DateTime> Times => _times;
     /// <summary>Each raw sample's time on the clock that only goes forward (<see cref="Model.Sample.TickMs"/>), on which windows are timed.</summary>
     public IReadOnlyList<long> Ms => _ms;
+    /// <summary>
+    /// A raw sample's place in the count of every sample this history took (the first one is 0). It stays the sample's
+    /// own as the oldest samples are let go, where its index moves: two of them tell how many samples lie between,
+    /// also once the history no longer holds them all.
+    /// </summary>
+    public long SeqAt(int index) => _firstSeq + index;
     public IReadOnlyList<PoolTotals> Totals => _totals;
     public IReadOnlyList<SystemCounters> System => _system;
     public IReadOnlyList<PoolTag> KnownTags => _tags;

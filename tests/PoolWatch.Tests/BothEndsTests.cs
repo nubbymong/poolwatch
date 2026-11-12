@@ -14,11 +14,12 @@ using static PoolWatch.Tests.Clocks;
 namespace PoolWatch.Tests;
 
 /// <summary>
-/// An incident's events.csv holds both ends of its window (the owner's decision, 2026-11-10): its first 1,000 events by time
-/// from the onset less 2 minutes, a <c>Gap</c> row saying how many it left out and between which times (when it left any
-/// out), and its latest 1,000, sorted by time, each event once, late events in their places. While the incident is open the
-/// file holds the first part only, appended to as before; when it closes, at the end of a run, and as it leaves memory, the
-/// file is replaced whole with both ends, once per close; a re-opened incident that closes again writes it again; Export
+/// An incident's events.csv holds both ends of the window its report gives (the owner's decisions, 2026-11-10 and 11): the
+/// first 500 events by time from the window's start (the onset less 2 minutes, as the onset is measured when the file is
+/// written: the first part follows it), a <c>Gap</c> row saying how many it left out and between which times (when it left
+/// any out), and its latest 500 up to the window's end, sorted by time, each event once, late events in their places. While
+/// the incident is open the file holds the first part only, appended to as before; when it closes, at the end of a run, and
+/// as it leaves memory, the file is replaced whole with both ends, once per close; a re-opened incident that closes again writes it again; Export
 /// report of an open incident takes both ends from memory, with a report.md that counts them; a closed incident lets go of
 /// its latest part once it can no longer re-open. What the latest parts hold and what the closing writes cost are measured
 /// here. The load is the owner's: 26 events every 10 s sample, 9,400 an hour.
@@ -140,8 +141,25 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
             }
             Mgr.AddEvents(events, At(now));
             Mgr.Process(W.History, _det, _det.Evaluate(W.History), At(now));
+            foreach (var inc in Mgr.Open) Opened.TryAdd(inc, inc.OnsetUtc.AddMinutes(-2));
             Host.Settle();
         }
+
+        /// <summary>Where each incident's window started when it opened (its onset less 2 minutes as measured then), at the sample it opened.</summary>
+        public readonly Dictionary<Incident, DateTime> Opened = new();
+
+        /// <summary>
+        /// The first event from where the incident's window started when it opened: an open incident's file, begun then,
+        /// starts with it until the file starts again or the incident closes.
+        /// </summary>
+        public int FirstOfPart(Incident inc) => Times.Where(kv => kv.Value >= Opened[inc]).Min(kv => kv.Key);
+
+        /// <summary>
+        /// The reason a <c>Gap</c> row gives for a file whose two parts are these events, written whole with the incident's
+        /// window as it is measured now, by this run's own times: what the file keeps and from where, the window's start.
+        /// </summary>
+        public string Why(Incident inc, List<int> first, List<int> latest) => string.Create(CultureInfo.InvariantCulture,
+            $"(events.csv keeps the first {first.Count:N0} events from {Csv.Escape(inc.OnsetUtc.AddMinutes(-2))}, where the incident's window started when this file was written, and the latest {latest.Count:N0} up to the window's end)");
 
         /// <summary>
         /// The last event of the incident's window as it ends now (<see cref="IncidentManager.EventWindowEndMs"/>: a minute after
@@ -151,9 +169,28 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
 
         /// <summary>The time of day the incident's window ends at now (<see cref="IncidentManager.EventWindowEndMs"/>, on the world's forward clock).</summary>
         public DateTime EndOfWindow(Incident inc) => new(IncidentManager.EventWindowEndMs(inc, W.History.Ms[^1]) * TimeSpan.TicksPerMillisecond, DateTimeKind.Utc);
+
+        /// <summary>
+        /// How many events have come after an incident's first part, the 500 from <paramref name="firstKept"/> (PIDs follow
+        /// time here: no late events): every one, or only those up to the window's end as it is measured now
+        /// (<paramref name="toWindowEnd"/>).
+        /// </summary>
+        public int EventsSince(int firstKept, Incident? toWindowEnd = null) =>
+            Times.Count(kv => kv.Key >= firstKept + IncidentWriter.MaxEventRows && (toWindowEnd is null || kv.Value <= EndOfWindow(toWindowEnd)));
+
+        /// <summary>
+        /// The first event of the incident's window as its start is measured now (<see cref="IncidentManager.EventWindowStartMs"/>:
+        /// the onset less 2 minutes, on the world's forward clock): later than <see cref="FirstOfPart"/> once a long growth's
+        /// onset was measured later. A file written whole starts with it.
+        /// </summary>
+        public int FirstOfWindow(Incident inc)
+        {
+            var from = new DateTime(IncidentManager.EventWindowStartMs(inc) * TimeSpan.TicksPerMillisecond, DateTimeKind.Utc);
+            return Times.Where(kv => kv.Value >= from).Min(kv => kv.Key);
+        }
     }
 
-    /// <summary>5 quiet minutes, then 25 minutes of growth: one incident, open, its window far past 2,000 events.</summary>
+    /// <summary>5 quiet minutes, then 25 minutes of growth: one incident, open, its window far past 1,000 events.</summary>
     /// <param name="room">A write budget with room for every write that can wait (the rows of events.csv follow each new event).</param>
     private Run Grown(bool room = false)
     {
@@ -172,13 +209,17 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
         Assert.False(inc.IsOpen);
     }
 
-    /// <summary>The file holds both ends of the window as it is: the first part's last event, a Gap row for every event between, the latest 1,000 to the window's last.</summary>
-    private static (List<int> First, Row Gap, List<int> Latest) AssertBothEnds(Run run, Incident inc, string text, int firstKept)
+    /// <summary>
+    /// The file holds both ends of the window as it is measured now (it was written whole just now): the first part,
+    /// exactly the window's first 500 events (<see cref="Run.FirstOfWindow"/>: the first part followed the window's start),
+    /// a Gap row for every event between the two parts, the window's own, at the first of them, that says what the file
+    /// keeps and from where (<see cref="Run.Why"/>), and the latest 500 to the window's last.
+    /// </summary>
+    private static (List<int> First, Row Gap, List<int> Latest) AssertBothEnds(Run run, Incident inc, string text)
     {
         var (first, gap, latest) = Ends(text);
         Assert.NotNull(gap);
-        Assert.Equal(firstKept + IncidentWriter.MaxEventRows - 1, first[^1]); // the first part: the first 1,000 from the window's start
-        Assert.True(first.Count <= IncidentWriter.MaxEventRows);
+        Assert.Equal(Enumerable.Range(run.FirstOfWindow(inc), IncidentWriter.MaxEventRows), first); // the first part: the window's first 500 from its start as measured now
         Assert.Equal(IncidentWriter.MaxEventRows, latest.Count);
         Assert.Equal(run.LastOfWindow(inc), latest[^1]); // the latest part ends with the window's last event
         var (count, from, to) = Said(gap!);
@@ -186,8 +227,45 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
         Assert.Equal(run.Times[first[^1] + 1], from);
         Assert.Equal(run.Times[latest[0] - 1], to);
         Assert.Equal(from, gap!.Time); // the row sits where the events left out begin
+        Assert.EndsWith(run.Why(inc, first, latest), gap.Detail);
         Assert.DoesNotContain(RowsOf(text), r => r.Kind == "Note");
         return (first, gap, latest);
+    }
+
+    private const string AtClose = "when the incident closes PoolWatch replaces the file with both ends of its window as it is measured then, its first events and its latest, " +
+                                   "up to 500 of each, with a Gap row between them when it leaves any out";
+
+    /// <summary>
+    /// report.md's line under the window's events for an open incident whose events.csv has its Note row (it stays as
+    /// written until the close), its window's start measured later since than where the file was begun (some of the
+    /// file's rows are from before it): how many events the file holds, from when and to when (the first event after its
+    /// first part), how many more have come since (every one, <see cref="Run.EventsSince"/>: the count goes on when the
+    /// incident's first part follows the window's start), what the close does, and where the window starts now.
+    /// </summary>
+    private static string OpenLine(Run run, Incident inc, int firstKept) =>
+        $"(500 other events in events.csv: while the incident is open it holds the first 500 events from {Fmt.Clock(run.Opened[inc])}, " +
+        $"to {Fmt.Clock(run.Times[firstKept + IncidentWriter.MaxEventRows])}, as PoolWatch had them when it wrote them; " +
+        $"{run.EventsSince(firstKept):N0} more have come since, and {AtClose}" +
+        $"; the incident's window now starts at {Fmt.Clock(inc.OnsetUtc.AddMinutes(-2))}: the file's events from before then are not the window's)";
+
+    [Fact]
+    public void AnOpenIncidentsReportCountsEveryEventThatHasComeSinceItsFileWasFullInItsQuietMinutesToo()
+    {
+        // 25 minutes of growth, then 8 quiet minutes: the incident is still open (it closes after 10), the end of its growth,
+        // and its window's end a minute after, stand where the growth stopped, and events keep coming. report.md's "more
+        // have come since" counts every event after the file's rows, those after the window's end as it is measured now
+        // among them. (Before, it counted only up to that end: 3,635 here when 4,908 had come.)
+        var run = Grown(room: true);
+        var inc = run.Mgr.Open.Single();
+        int firstKept = run.FirstOfPart(inc);
+        for (int i = 0; i < 48; i++) run.Step(grow: false);
+        Assert.True(inc.IsOpen);
+        Assert.NotNull(inc.EndUtc); // its growth has an end as measured, minutes back
+        Assert.True(run.Mgr.WriteNow(run.W.History, inc));
+        int since = run.EventsSince(firstKept), toEnd = run.EventsSince(firstKept, toWindowEnd: inc);
+        Assert.Equal(run.Pid - firstKept - IncidentWriter.MaxEventRows, since);
+        Assert.True(since - toEnd > 1000, $"{since} have come since, {toEnd} of them up to the window's end");
+        Assert.Equal(OpenLine(run, inc, firstKept), EventsLine(inc));
     }
 
     [Fact]
@@ -196,38 +274,55 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
         var run = Grown(room: true);
         var inc = run.Mgr.Open.Single();
         // Open, with room for every row: the first part only, all of it, and the Note row saying the rest come at its close,
-        // though the window has over 3,000 events by now.
+        // though the window has over 1,500 events by now.
         var (first, gap, latest) = Ends(EventsCsv(inc), whole: false);
         Assert.Null(gap);
         Assert.Empty(latest);
         int firstKept = first[0];
+        Assert.Equal(run.FirstOfPart(inc), firstKept); // from where its window started when it opened, and the file was begun
         Assert.Equal(IncidentWriter.MaxEventRows, first.Count);
-        Assert.Equal("Note", RowsOf(EventsCsv(inc))[^1].Kind);
+        var open = RowsOf(EventsCsv(inc));
+        var note = open[^1];
+        Assert.Equal("Note", note.Kind);
+        // The Note row: how many events the file holds and from when, to the first event after them (its time), and what the
+        // close does; a fact about the file, true wherever the onset is measured afterwards.
+        Assert.Equal(run.Times[firstKept + IncidentWriter.MaxEventRows], note.Time);
+        Assert.Equal($"events.csv holds the first 500 events from {Csv.Escape(run.Opened[inc])}, to this row's time, " +
+                     $"as PoolWatch had them when it wrote this row; later events are not in this file ({AtClose})", note.Detail);
         Assert.True(run.Pid - firstKept > 3 * IncidentWriter.MaxEventRows, $"the window has {run.Pid - firstKept} events");
-        // report.md says so, written now: how many events.csv holds and to when (the first event after its first part), and
-        // how many more the window has so far (every event after the first part, to the window's end as measured now).
+        // The onset is where the growth first passed 5% of its rise, so it is measured later as the rise grows: after 25
+        // minutes of growth the window as measured now starts past some of the file's first rows. The file has its Note
+        // row and stays as written until the close (the incident's own first part follows the start meanwhile).
+        Assert.InRange(run.FirstOfWindow(inc), firstKept + 1, firstKept + IncidentWriter.MaxEventRows - 1);
+        // report.md says so, written now: how many events.csv holds, from when and to when (the first event after its first
+        // part), how many more have come since (every event after the file's: while the growth goes on the window's end as
+        // it is measured lags behind the newest events, and those after it have come since too), and where the window
+        // starts now: it does not call the file's rows the window's first events.
         Assert.True(run.Mgr.WriteNow(run.W.History, inc));
-        int more = run.Times.Count(kv => kv.Key >= firstKept + IncidentWriter.MaxEventRows && kv.Value <= run.EndOfWindow(inc));
-        Assert.True(more > 2 * IncidentWriter.MaxEventRows, $"{more} more");
-        Assert.Equal($"({first.Count} other events in events.csv: while the incident is open it holds the window's first 1,000 events, " +
-                     $"to {Fmt.Clock(run.Times[firstKept + IncidentWriter.MaxEventRows])}; the window has {more:N0} more so far, " +
-                     "and the latest of them, up to 1,000, are added when it closes)", EventsLine(inc));
+        Assert.Equal(open, RowsOf(EventsCsv(inc)));
+        Assert.Equal(OpenLine(run, inc, firstKept), EventsLine(inc));
+        Assert.True(run.EventsSince(firstKept) > 2 * IncidentWriter.MaxEventRows, $"{run.EventsSince(firstKept)} more");
+        Assert.True(run.EventsSince(firstKept) > run.EventsSince(firstKept, toWindowEnd: inc), "the window's end as measured is before the newest events");
 
         UntilClosed(run, inc);
-        var (f, g, l) = AssertBothEnds(run, inc, EventsCsv(inc), firstKept);
+        // Closed: the file shows the window its report gives. Its first part is the window's first 500 from its start as
+        // measured at the close, later than the open file's first rows (AssertBothEnds), the Gap row says where they are
+        // from, and the latest 500 end with the window.
+        var (f, g, l) = AssertBothEnds(run, inc, EventsCsv(inc));
+        Assert.InRange(f[0], firstKept + 1, firstKept + IncidentWriter.MaxEventRows - 1);
         // report.md's line under the window's events says it too: how many events.csv holds (none of them is listed: they
-        // are not the suspects' starts), how many it leaves out, and between which times.
-        string md = File.ReadAllText(Path.Combine(inc.Dir, "report.md"));
-        Assert.Contains($"({f.Count + l.Count} other events in events.csv; it leaves out {Said(g).Count:N0} events, " +
-                        $"between {Fmt.Clock(Said(g).From)} and {Fmt.Clock(Said(g).To)}, as its Gap row says)", md);
+        // are not the suspects' starts), and how many it leaves out and between which times; nothing of rows from before
+        // the window, as it has none.
+        Assert.Equal($"({f.Count + l.Count} other events in events.csv; it leaves out {Said(g).Count:N0} events, " +
+                     $"between {Fmt.Clock(Said(g).From)} and {Fmt.Clock(Said(g).To)}, as its Gap row says)", EventsLine(inc));
     }
 
     [Fact]
     public void AShortIncidentsEventsCsvHoldsEveryEventOnceAndNoGapRow()
     {
-        // 15 events a sample, 10 minutes of growth: its window has between 1,000 and 2,000 events, so both its parts are in
-        // use and none is left out.
-        var run = new Run(_dir) { PerSample = 15 };
+        // 10 events a sample, 10 minutes of growth: its window (about 13 minutes) has between 500 and 1,000 events, so both
+        // its parts are in use and none is left out.
+        var run = new Run(_dir) { PerSample = 10 };
         for (int i = 0; i < 30; i++) run.Step(grow: false);
         for (int i = 0; i < 60; i++) run.Step(grow: true);
         var inc = run.Mgr.Open.Single();
@@ -241,10 +336,10 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
     }
 
     /// <summary>
-    /// Half the events arrive late (the summarizer's rollups, timed at their first start, up to a minute late: 55% of the
+    /// Half the events arrive late (the summarizer's rollups, timed at their first start, up to a minute and a half late: 55% of the
     /// owner's events). The first part stays the window's earliest by time (a late event earlier than its last takes that
     /// one's place), and one that falls among those left out is counted with them, so the closed file is the first part, one
-    /// Gap row, then exactly the latest 1,000, in time order, no row inside the Gap row's range, every event of the window
+    /// Gap row, then exactly the latest 500, in time order, no row inside the Gap row's range, every event of the window
     /// between the first row and the last either in the file once or counted in the Gap row.
     /// </summary>
     [Fact]
@@ -273,7 +368,7 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
         var first = rows.Take(at).Where(IsEvent).ToList();
         var latest = rows.Skip(at + 1).Where(IsEvent).ToList();
         Assert.InRange(first.Count, 1, IncidentWriter.MaxEventRows);
-        Assert.Equal(IncidentWriter.MaxEventRows, latest.Count); // exactly the latest 1,000 after the Gap row
+        Assert.Equal(IncidentWriter.MaxEventRows, latest.Count); // exactly the latest 500 after the Gap row
         var (count, from, to) = Said(rows[at]);
         Assert.All(first, r => Assert.True(r.Time <= from, $"first part {r.Time:O} after the Gap row's first {from:O}"));
         Assert.All(latest, r => Assert.True(r.Time >= to, $"latest part {r.Time:O} before the Gap row's last {to:O}"));
@@ -297,10 +392,9 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
     {
         var run = Grown();
         var inc = run.Mgr.Open.Single();
-        int firstKept = Ends(EventsCsv(inc), whole: false).First[0];
         run.Mgr.Finish(run.W.History, run.W.Now);
         Assert.False(inc.IsOpen);
-        AssertBothEnds(run, inc, EventsCsv(inc), firstKept);
+        AssertBothEnds(run, inc, EventsCsv(inc));
 
         // A closed incident whose file is gone (its closing write lost): the end of the run writes both ends again.
         var second = Grown();
@@ -333,9 +427,8 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
     {
         var run = Grown();
         var inc = run.Mgr.Open.Single();
-        int firstKept = Ends(EventsCsv(inc), whole: false).First[0];
         UntilClosed(run, inc);
-        var (_, gap1, latest1) = AssertBothEnds(run, inc, EventsCsv(inc), firstKept);
+        var (first1, gap1, latest1) = AssertBothEnds(run, inc, EventsCsv(inc));
 
         // It grows again within the hour: re-opened. While open its file stays as its close wrote it (an alert's row aside).
         for (int i = 0; i < 90; i++) run.Step(grow: true);
@@ -346,9 +439,14 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
         Assert.Equal(gap1!.Detail, gapOpen!.Detail);
 
         UntilClosed(run, inc);
-        var (_, gap2, latest2) = AssertBothEnds(run, inc, EventsCsv(inc), firstKept);
+        // Its file shows the window its report gives now (AssertBothEnds): the first 500 events from the window's start as
+        // measured at this close, its latest part the window's newest, and the Gap row saying where the window started
+        // when this close wrote the file.
+        var (first2, gap2, latest2) = AssertBothEnds(run, inc, EventsCsv(inc));
+        Assert.True(first2[0] >= first1[0], $"{first2[0]} after {first1[0]}");
         Assert.True(latest2[^1] > latest1[^1] + 26 * 90, $"{latest2[^1]} after {latest1[^1]}");
-        Assert.True(Said(gap2).Count > Said(gap1).Count);
+        Assert.Equal(latest2[0] - first2[^1] - 1, Said(gap2).Count);
+        output.WriteLine($"first close: rows from {first1[0]}, {Said(gap1).Count:N0} left out; second close: rows from {first2[0]}, {Said(gap2).Count:N0} left out");
     }
 
     [Fact]
@@ -358,15 +456,21 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
         var inc = run.Mgr.Open.Single();
         Assert.True(run.Mgr.WriteNow(run.W.History, inc));
         string file = EventsCsv(inc), folderMd = File.ReadAllText(Path.Combine(inc.Dir, "report.md"));
-        var (first, gap, _) = Ends(file, whole: false);
+        var (folderFirst, gap, _) = Ends(file, whole: false);
         Assert.Null(gap); // its folder: the first part only
+        // The folder's file has its Note row and stays as it was written (the 500 events from where the window started when
+        // the incident opened) while the incident's own first part follows the window's start: its report says from when
+        // its events are and where the window starts now.
+        Assert.Equal(Enumerable.Range(run.FirstOfPart(inc), IncidentWriter.MaxEventRows), folderFirst);
+        Assert.True(run.FirstOfWindow(inc) > folderFirst[0], "the window's start was measured later since the file was begun");
+        Assert.Equal(OpenLine(run, inc, folderFirst[0]), EventsLine(inc));
         var live = run.Mgr.ExportFilesNow(run.W.History, inc)!;
         var redaction = new RedactionInfo("alice", "PC-1", [@"C:\Users\alice"]);
         string zip = Exporter.Export(inc.Dir, Path.Combine(_dir, "exports"), redaction, p => p, liveFiles: live);
         using var archive = ZipFile.OpenRead(zip);
         string Entry(string name) { using var reader = new StreamReader(archive.GetEntry(name)!.Open()); return reader.ReadToEnd(); }
         string exported = Entry("events.csv"), md = Entry("report.md");
-        var (f, g, latest) = AssertBothEnds(run, inc, exported, first[0]);
+        var (f, g, latest) = AssertBothEnds(run, inc, exported);
         Assert.True(run.Pid - 1 - latest[^1] < 26 * 6 * 2, $"{latest[^1]}, newest {run.Pid - 1}"); // to within minutes of now: the window of an open incident
         Assert.DoesNotContain("alice", exported, StringComparison.OrdinalIgnoreCase); // redacted as the folder's files are
         Assert.Contains("<HOME>", exported);
@@ -376,7 +480,6 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
         var (left, fromUtc, toUtc) = Said(g);
         string line = $"({f.Count + latest.Count} other events in events.csv; it leaves out {left:N0} events, between {Fmt.Clock(fromUtc)} and {Fmt.Clock(toUtc)}, as its Gap row says)";
         Assert.Contains(line, md);
-        Assert.Contains("while the incident is open it holds the window's first 1,000 events", folderMd);
         Assert.DoesNotContain("while the incident is open it holds", md);
         Assert.Equal(1, archive.Entries.Count(e => e.FullName == "report.md"));
         static string WithoutEventsLine(string text) => string.Join('\n', text.Split('\n').Where(l => !l.Contains("other events in")));
@@ -439,7 +542,9 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
     /// </summary>
     private (IncidentManager Mgr, World W, long IntakeTicks, long Events) TenOpen(double hours) => TenOpen(hours, new CountingHost(_dir));
 
-    private (IncidentManager Mgr, World W, long IntakeTicks, long Events) TenOpen(double hours, CountingHost host)
+    /// <param name="opened">Filled with where each incident's window started when it opened (its onset less 2 minutes as measured then).</param>
+    /// <param name="times">Filled with every event's time, in the order they came (by time).</param>
+    private (IncidentManager Mgr, World W, long IntakeTicks, long Events) TenOpen(double hours, CountingHost host, Dictionary<Incident, DateTime>? opened = null, List<DateTime>? times = null)
     {
         Directory.CreateDirectory(_dir);
         var w = new World { Interval = TimeSpan.FromSeconds(10) };
@@ -461,17 +566,19 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
             w.Sample(tags.Select(t => (t, bytes[t])).ToArray());
             var now = w.Now - w.Interval;
             var events = OwnersMix(now, rnd, ref pid);
+            times?.AddRange(events.Select(e => e.TimeUtc));
             long c0 = System.Diagnostics.Stopwatch.GetTimestamp();
             mgr.AddEvents(events, At(now));
             if (i >= 30) (ticks, count) = (ticks + (long)((System.Diagnostics.Stopwatch.GetTimestamp() - c0) * (1e7 / System.Diagnostics.Stopwatch.Frequency)), count + events.Count);
             mgr.Process(w.History, det, det.Evaluate(w.History), At(now));
+            if (opened is not null) foreach (var inc in mgr.Open) opened.TryAdd(inc, inc.OnsetUtc.AddMinutes(-2));
         }
         Assert.Equal(10, mgr.Open.Count);
         return (mgr, w, ticks, count);
     }
 
     /// <summary>
-    /// What the latest parts hold, with 10 incidents open for 3 hours at the owner's rate: the latest 1,000 events of each
+    /// What the latest parts hold, with 10 incidents open for 3 hours at the owner's rate: the latest 500 events of each
     /// are the newest, which the 90-minute buffer holds too, so they add little more than their references. Measured as the
     /// heap after a compacting full collection with them, less the same without them (<see cref="IncidentManager.ForgetLatestParts"/>).
     /// </summary>
@@ -489,7 +596,7 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
         output.WriteLine($"10 open incidents, 3 hours at 26 events a sample: the latest parts hold {mb:0.000} MB ({held.events:N0} events kept in all, " +
                          $"{mgr.EventCount:N0} in the shared buffer); the event intake {ticks * 100.0 / Math.Max(1, events):0} ns an event");
         Assert.True(with - without < 3L << 19, $"the latest parts hold {mb:0.000} MB"); // 1.5 MB
-        // Each holds its first 1,000 and its latest 1,000, the 500 before them while it is open, and the events since its
+        // Each holds its first 500 and its latest 500, the 500 before them while it is open, and the events since its
         // growth's end as last measured (a minute or two of them while it climbs on).
         Assert.InRange(held.events, 10 * (2 * IncidentWriter.MaxEventRows + IncidentManager.LatestSlack),
             10 * (2 * IncidentWriter.MaxEventRows + IncidentManager.LatestSlack + IncidentManager.TrimBatch + IncidentManager.AfterEndMax));
@@ -497,22 +604,28 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
 
     /// <summary>
     /// Ten incidents open for an hour at the owner's load, then the end of the run closes them: each closing write replaces its
-    /// events.csv once, with both ends (2,000 rows of the owner's lengths and the Gap row), and the rows after the Gap row are
+    /// events.csv once, with both ends (1,000 rows of the owner's lengths and the Gap row), and the rows after the Gap row are
     /// what the latest part adds.
     /// </summary>
     [Fact]
     public void TenIncidentsClosingAtTheOwnersLoadEachWriteBothEndsOnce()
     {
         var host = new CountingHost(_dir);
-        var (mgr, w, _, _) = TenOpen(hours: 1, host);
+        var opened = new Dictionary<Incident, DateTime>();
+        var times = new List<DateTime>();
+        var (mgr, w, _, _) = TenOpen(hours: 1, host, opened, times);
         var incidents = mgr.Open.ToList();
         var before = incidents.ToDictionary(i => i, i => new FileInfo(Path.Combine(i.Dir, "events.csv")).Length);
-        // While open, each events.csv was made once (its first write) and appended to after.
+        // While open, each events.csv was made at its first write and appended to after; one whose rows were still coming
+        // when the incident's first part followed the window's start (10 minutes on, and so on) was written again from it,
+        // and one that had its Note row by then stays as written until the close.
         var made = incidents.ToDictionary(i => i, i => host.Replaced.GetValueOrDefault(Path.Combine(i.Dir, "events.csv")));
-        Assert.All(made.Values, n => Assert.Equal(1, n));
+        output.WriteLine($"while open, each events.csv was made or started again {string.Join(", ", made.Values)} times");
+        Assert.All(made.Values, n => Assert.InRange(n, 1, 7));
         long spent = mgr.Budget.SpentMust;
         mgr.Finish(w.History, w.Now);
         long whole = 0, latestPart = 0;
+        int firstRows = 0, beforeWindow = 0;
         foreach (var inc in incidents)
         {
             Assert.Equal(made[inc] + 1, host.Replaced.GetValueOrDefault(Path.Combine(inc.Dir, "events.csv"))); // its close replaced it once, whole
@@ -521,14 +634,39 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
             int gap = rows.FindIndex(l => Csv.Split(l.TrimEnd('\r'))[1] == "Gap");
             Assert.True(gap > 0, inc.Id);
             Assert.Equal(IncidentWriter.MaxEventRows, rows.Skip(gap + 1).Count(l => Csv.Split(l.TrimEnd('\r'))[1] is not ("Alert" or "Release")));
+            // The first part is all 500 events from the window's start as it is measured at the close: the file shows the
+            // window its report gives. After an hour of growth the onset is measured several minutes later than when the
+            // incident opened (5% of its rise), and the first part followed it: none of its rows is from before the window.
+            var first = rows.Take(gap).Select(l => Csv.Split(l.TrimEnd('\r'))).Where(c => c[1] is not ("Alert" or "Release")).ToList();
+            Assert.Equal(IncidentWriter.MaxEventRows, first.Count);
+            var windowFrom = new DateTime(IncidentManager.EventWindowStartMs(inc) * TimeSpan.TicksPerMillisecond, DateTimeKind.Utc);
+            Assert.InRange(Time(first[0][0]), windowFrom, windowFrom.AddSeconds(10)); // the first event from there (a sample's events are 10 s apart at most)
+            Assert.Equal(windowFrom, inc.OnsetUtc.AddMinutes(-2));
+            Assert.True(windowFrom > opened[inc].AddMinutes(1), $"{inc.Id}: the window starts at {windowFrom:T} now, at {opened[inc]:T} when it opened");
+            Assert.EndsWith($"(events.csv keeps the first 500 events from {Csv.Escape(windowFrom)}, where the incident's window started when this file was written, and the latest 500 up to the window's end)",
+                Csv.Split(rows[gap].TrimEnd('\r'))[9]);
+            // Why it follows: the first 500 events from where the window started when the incident opened (a first part
+            // left there) would be mostly from before the window by now.
+            int early = times.Where(t => t >= opened[inc]).Take(IncidentWriter.MaxEventRows).Count(t => t < windowFrom);
+            Assert.True(early > 0, inc.Id);
+            beforeWindow += early;
+            firstRows += first.Count;
             whole += new FileInfo(Path.Combine(inc.Dir, "events.csv")).Length;
             latestPart += rows.Skip(gap).Sum(l => System.Text.Encoding.UTF8.GetByteCount(l) + 1);
         }
         long must = mgr.Budget.SpentMust - spent;
         output.WriteLine($"10 closing writes: events.csv {whole / 10 / 1024.0:0} KB each replaced whole ({before.Values.Average() / 1024.0:0} KB of first part before), " +
-                         $"of it the Gap row and the latest 1,000 rows {latestPart / 10 / 1024.0:0} KB; all the closing writes {must / 1048576.0:0.00} MB, through the budget as writes that must be made");
+                         $"of it the Gap row and the latest 500 rows {latestPart / 10 / 1024.0:0} KB, and {firstRows / 10.0:0} rows of the first part on average, all from the window's start " +
+                         $"as measured at the close (of the first 500 events from where the window started when each incident opened, {beforeWindow / 10.0:0} on average are from before it); " +
+                         $"all the closing writes {must / 1048576.0:0.00} MB, through the budget as writes that must be made");
         Assert.True(must >= whole, $"{must:N0} spent, {whole:N0} written to events.csv"); // each went through the budget
-        Assert.True(whole / 10 < 1L << 20, $"{whole / 10:N0} bytes an events.csv");
+        // After an hour of growth, most of the first 500 events from where the window started when the incident opened are
+        // from before the window (measured: 416 of the 500 on average): why the first part follows the window's start.
+        Assert.InRange(beforeWindow / 10.0, 300, 500);
+        // Both ends of 500 rows of the owner's lengths are under 320 KB (measured 291 KB, the latest 500 about 142 KB of it, all
+        // the closing writes 5.8 MB); 1,000 at each end wrote 460 KB here, and 166 KB when a close left out the first part's
+        // rows from before the window as measured then.
+        Assert.True(whole / 10 < 320L << 10, $"{whole / 10:N0} bytes an events.csv");
     }
 
     /// <summary>
@@ -601,10 +739,19 @@ public sealed class BothEndsTests(ITestOutputHelper output) : IDisposable
         long csv = host.BytesByName.GetValueOrDefault("events.csv"), whole = host.ReplacedBytesByName.GetValueOrDefault("events.csv");
         output.WriteLine($"{n} long incidents closing 18 minutes apart over {hours:0.0} h: events.csv wrote {csv / 1048576.0:0.00} MB, {csv / n / 1024.0:0} KB an incident " +
                          $"({whole / n / 1024.0:0} KB of it each one's opening and closing writes, which must be made), {csv / hours / 1048576.0:0.00} MB an hour " +
-                         $"({whole / hours / 1048576.0:0.00} MB of it must); all report-folder writes {host.Bytes / hours / 1048576.0:0.00} MB an hour; " +
+                         $"({whole / hours / 1048576.0:0.00} MB of it must); all report-folder writes {host.Bytes / hours / 1048576.0:0.00} MB an hour " +
+                         $"({mgr.Budget.SpentMust / hours / 1048576.0:0.00} MB of them must); " +
                          $"{released} of {n} closed let go of their latest parts, which hold {(with - without) / 1048576.0:0.000} MB; {held.events:N0} events held");
-        Assert.True(csv / n < 800L << 10, $"{csv / n:N0} bytes of events.csv an incident");
-        Assert.True(whole / n < 600L << 10, $"{whole / n:N0} bytes of events.csv's whole writes an incident");
+        foreach (var (name, b) in host.BytesByName.OrderByDescending(kv => kv.Value))
+            output.WriteLine($"  {name}: {b / hours / 1048576.0:0.000} MB an hour");
+        // Measured: 303 KB of events.csv an incident (296 KB of it the whole writes), 0.94 MB an hour of it and 2.24 MB an
+        // hour from the report folders in all (288 KB, 0.89 and 2.19 MB when a close left out the first part's rows from
+        // before the window as measured then: these incidents grow for 15 minutes, and few of their rows were).
+        // 1,000 at each end wrote 590 KB, 1.83 and 3.11 MB; 976632c, which kept the first 1,000 alone and wrote them as the
+        // budget allowed, 58 KB, 0.18 and 1.46 MB (DESIGN.md section 3).
+        Assert.True(csv / n < 360L << 10, $"{csv / n:N0} bytes of events.csv an incident");
+        Assert.True(whole / n < 350L << 10, $"{whole / n:N0} bytes of events.csv's whole writes an incident");
+        Assert.True(host.Bytes / hours < 2.4 * (1L << 20), $"{host.Bytes / hours / 1048576.0:0.00} MB an hour from the report folders");
         Assert.True(with - without < 1L << 20, $"the latest parts hold {(with - without) / 1048576.0:0.000} MB"); // only those of the last hour's, shared with the buffer
     }
 }

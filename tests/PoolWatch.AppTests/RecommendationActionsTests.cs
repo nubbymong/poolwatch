@@ -763,6 +763,7 @@ public sealed class RecommendationActionsTests : IDisposable
         public void ShowAdvanced(int tab) => AdvancedTabs.Add(tab);
         public void ShowActiveChanges() { }
         public void ShowReport(string? incidentDir) => Reports.Add(incidentDir);
+        public void ShowSettings() { }
         public Task<bool> StartTokenGuard() { GuardStarts++; return Task.FromResult(GuardProtects); }
     }
 }

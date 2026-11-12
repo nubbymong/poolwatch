@@ -201,7 +201,7 @@ if (Test-Path $smokeFile) {
     Assert-True ((@($records.choices) -join '|') -eq 'Reports only|Detailed recording') "Records offers Reports only and Detailed recording: $(@($records.choices) -join ', ')"
     Assert-True ("$($records.recommended)" -eq 'Reports only' -and "$($records.chosen)" -eq 'Reports only') "Reports only is recommended and chosen (recommended: $($records.recommended), chosen: $($records.chosen))"
     Assert-True ("$($records.days)" -eq '7 days') "Records cleans up after 7 days by default: $($records.days)"
-    Assert-True ('Nothing is recorded until the pool grows.' -in @($records.texts)) "Records says nothing is recorded until the pool grows"
+    Assert-True ('No all-day record is kept.' -in @($records.texts)) "Records says no all-day record is kept with Reports only"
     Assert-True ((@($records.buttons) -join '|') -eq 'Back|Next') "the Records step has Back and Next: $(@($records.buttons) -join ', ')"
     $ready = $steps[7]
     Assert-True ($null -ne $ready.updates) "the Ready step has the update notices tick"
@@ -259,12 +259,18 @@ if (Test-Path $smokeFile) {
 
     # Everything taken off the window is in the tray menu (the clear-task removals show only when there is one to remove).
     $tray = @($s.trayMenu)
-    foreach ($item in 'Open PoolWatch', 'Run setup again...', 'Active changes...', 'Capture now', 'Since boot report', 'Open incident folder',
+    foreach ($item in 'Open PoolWatch', 'Settings...', 'Run setup again...', 'Active changes...', 'Capture now', 'Since boot report', 'Open incident folder',
                       'Export vendor bundle...', 'Copy latest incident summary', 'Remove my clear task...', 'Remove old clear-cache tasks...',
                       'Report an issue...', 'About PoolWatch', 'Exit') {
         Assert-True ($item -in $tray) "tray menu has '$item'"
         Write-Host 'CHECK-RAN: ui-tray-menu-items'
     }
+    # Settings is reachable from the tray in both views (the Simple view's header has no Settings button): right under Open PoolWatch.
+    Assert-True ([array]::IndexOf($tray, 'Settings...') -eq [array]::IndexOf($tray, 'Open PoolWatch') + 1) "the tray menu's Settings... is right under Open PoolWatch: $($tray -join ', ')"
+    # Clicked with the main window hidden in the Simple view, it opened Settings on its own: centred on the screen, with a
+    # taskbar button, the main window still hidden (UiRunner closed it again).
+    $ts = $s.traySettings
+    Assert-True ($ts.opened -and $ts.title -eq 'PoolWatch settings' -and $ts.showInTaskbar -and $ts.centredOnScreen -and $ts.simpleView -and -not $ts.mainWindowShown) "the tray menu's Settings... opened Settings on its own: $($ts | ConvertTo-Json -Compress)"
     # Every window made for the test was closed again.
     Assert-True ((@($s.openForms) -join '|') -eq 'PoolWatch') "only the main window is left open ($(@($s.openForms) -join ', '))"
 

@@ -59,20 +59,24 @@ internal sealed class World
 
     public void Exit(int pid) => Procs.Remove(pid);
 
+    /// <summary>The pool's totals at the next samples (the same at every sample unless a test moves them: 300 MB of non-paged pool, far under its limit).</summary>
+    public PoolTotals Totals = new(400_000_000, 300_000_000, 350_000_000, 250_000_000);
+
     public void Sample(params (string tag, long bytes)[] tags)
     {
         var entries = tags.Select(t => new PoolTagEntry(PoolTag.Parse(t.tag), 0, 0, 0, 1, 0, (ulong)t.bytes)).ToList();
         entries.Add(new PoolTagEntry(PoolTag.Parse("Toke"), 0, 0, 0, 1, 0, 2_000_000));
-        var s = new Sample(Wall, new PoolTotals(400_000_000, 300_000_000, 350_000_000, 250_000_000), entries, Procs.Values.ToList()) { TickMs = Clocks.At(Now).Ms };
+        var s = new Sample(Wall, Totals, entries, Procs.Values.ToList()) { TickMs = Clocks.At(Now).Ms };
         Registry.ObserveSnapshot(s.Processes, Wall);
         History.Add(s);
         Index++;
     }
 
-    public void ScanHandles()
+    /// <param name="after">How long after the last sample the scan is stamped: none by default; in the app a scan has its own time, which can fall between two samples.</param>
+    public void ScanHandles(TimeSpan after = default)
     {
         var by = Procs.Values.ToDictionary(p => p.Key, p => new Dictionary<string, int>(_handles.GetValueOrDefault(p.Pid) ?? new()));
-        History.AddHandles(new TypedHandles(T0 + Interval * (Index - 1) + Shift(Index - 1), by) { Ms = Clocks.At(T0 + Interval * (Index - 1)).Ms }); // same tick as the last sample, as in the engine
+        History.AddHandles(new TypedHandles(T0 + Interval * (Index - 1) + Shift(Index - 1) + after, by) { Ms = Clocks.At(T0 + Interval * (Index - 1) + after).Ms }); // by default the same tick as the last sample, as in the engine
     }
 }
 
@@ -334,6 +338,9 @@ public class IncidentTests
             Assert.True(mgr.Open.Count == 0, string.Join(";", mgr.Open.Select(o => $"{o.Tag} rise={o.LastRiseUtc:HH:mm:ss} alert={o.LastAlertUtc:HH:mm:ss} now={w.Now:HH:mm:ss}")));
             var inc = Assert.Single(mgr.Closed);
             Assert.NotNull(inc.Retention);
+            // Found still held after its close: its level then, with the time of the sample it is of (its report gives the level with that time).
+            Assert.Equal((DateTime?)inc.Retention!.TimeUtc, inc.CurrentAtUtc);
+            Assert.True(inc.CurrentAtUtc >= inc.ClosedUtc);
             file -= 16 * Settings.MB; // handles closed
             for (int i = 0; i < 3; i++) Step();
             Assert.NotNull(inc.Release);

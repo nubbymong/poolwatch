@@ -61,7 +61,7 @@ internal static class ShowSignal
             try { onShow(); }
             catch (Exception ex) { log("show signal: " + ex.Message); }
         }, null, Timeout.Infinite, executeOnlyOnce: false);
-        return new Listener(signal, wait);
+        return new Listener(signal, wait, name);
     }
 
     /// <summary>
@@ -96,12 +96,9 @@ internal static class ShowSignal
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool AllowSetForegroundWindow(uint processId);
 
-    private sealed class Listener(EventWaitHandle signal, RegisteredWaitHandle wait) : IDisposable
+    /// <summary>Stops listening: once Dispose returns the event is gone, so a start finds none (<see cref="ExitSignal.StopListening"/>).</summary>
+    private sealed class Listener(EventWaitHandle signal, RegisteredWaitHandle wait, string name) : IDisposable
     {
-        public void Dispose()
-        {
-            wait.Unregister(null);
-            signal.Dispose();
-        }
+        public void Dispose() => ExitSignal.StopListening(wait, signal, name);
     }
 }

@@ -27,6 +27,14 @@ public sealed record Alert(AlertKind Kind, PoolTag Tag, DateTime TimeUtc, string
     public required long Ms { get; init; }
     /// <summary>Its onset's sample on the clock that only goes forward.</summary>
     public required long OnsetMs { get; init; }
+    /// <summary>
+    /// The limit the alert is about, for the rule that has one: the non-paged pool's
+    /// (<see cref="Settings.NonPagedTotalAlertBytes"/> as it was set when the alert fired, which the pool was over
+    /// then); null for a rule without one. An incident's headline names it ("Non-paged pool over 5.0 GB and rising"):
+    /// that alert's <see cref="Bytes"/> is the fastest-growing tag's rise in 10 minutes, not the pool's size or its
+    /// limit.
+    /// </summary>
+    public long? LimitBytes { get; init; }
 }
 
 /// <summary>
@@ -265,7 +273,7 @@ public sealed class Detector
             }
             if (best is { } b && bestGrowth >= rise / 4)
                 alerts.Add(new Alert(AlertKind.NonPagedTotal, b, now, $"non-paged pool {Fmt.Bytes((long)totals.CommittedNonPaged)} > {Fmt.Bytes(_settings.NonPagedTotalAlertBytes)} and rising ({Fmt.SignedBytes(rise)} in 10 min)",
-                    bestGrowth, TimeSpan.FromMinutes(10), h.Times[i10]) { Ms = nowMs, OnsetMs = h.Ms[i10] });
+                    bestGrowth, TimeSpan.FromMinutes(10), h.Times[i10]) { Ms = nowMs, OnsetMs = h.Ms[i10], LimitBytes = _settings.NonPagedTotalAlertBytes });
         }
         return alerts;
     }

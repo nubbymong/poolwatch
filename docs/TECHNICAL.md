@@ -112,7 +112,9 @@ said "NOT REDACTED" at the top, and with the older confidence words: "strongly c
 Everything goes under `C:\ProgramData\PoolWatch\` (administrators can change it; your account can read it). What it
 keeps is your choice (setup's Records step, or **Records** in Settings, which applies from the next sample, without a
 restart): **Reports only**, the default (also after an upgrade from 1.0.0-beta.2, until you choose in the Records step,
-which then opens alone at each start until you press Done), writes a report folder each time the pool grows and no
+which then opens alone at each start until you press Done or save a change of the record mode or the cleanup in
+Settings), writes a report folder
+each time the pool grows and no
 daily folder and no spawn-storm folder, so storms are found, shown in the window and noticed from memory; **Detailed
 recording** also writes the daily folder and the spawn-storm folders below. Either way it keeps the files listed last
 here (the log, the settings, `boots\`, `cache\` and the others). Turned off, the day's files stop at once
@@ -141,19 +143,118 @@ and removed, with the first few names:
   for the handle scan's write when that does not end within 10 s);
 - `incidents\<id>\`: `report.md`, `report.json`, `timeline.csv`, `processes.csv`, `events.csv`, `timeline.png`, and
   `capture.etl` when a trace was taken (a trace can add far more than the CSV files). `events.csv` holds both ends of
-  the incident's window: its first 1,000 events by time from 2 minutes before its onset, and its latest 1,000. While
-  the incident is open it holds up to the first 1,000 (fewer while the disk budget holds rows back), every one from its
-  first row to its last, added as PoolWatch writes the folder; once it has all of them, a last `Note` row says to when,
-  and no event row follows it. When the incident closes (and at the end of a run, or when it leaves memory, if the file
-  does not hold them yet) the file is replaced whole in one step with both ends, sorted by time, each event once; when
-  events between the two were left out, a `Gap` row between the two parts says how many, and the first and last of
-  their times (with Detailed recording the day's `events.csv` has every one). A re-opened incident's file keeps its first episode's first
-  part, and holds both ends as its last close wrote them until it closes again. At the owner's event mix and
-  command-line lengths a long incident's closing write of `events.csv` is about 0.46 to 0.58 MB (2,000 rows; the
-  latest 1,000 about 0.29 MB of it), once per close: a re-opened incident's next close writes it again, and so does a
-  trace attached after the close that measures the window's end again. Long incidents closing about 3 an hour (the
-  maintainer's rate) make that about 1.8 MB an hour of `events.csv`, written whatever the budget, and the report
-  folders 3.1 MB an hour in all (`BothEndsTests`). Its rows are appended in single writes while the
+  the window the incident's report gives: the first 500 events by time from the window's start (2 minutes before the
+  onset), and the latest 500 up to the window's end (on a busy PC about 3 minutes of events at each end). The onset
+  is measured again as the growth goes on, later as a long, steady growth's rise grows, and sometimes earlier, and
+  the first part follows the window's start: it is taken again from there, out of the events PoolWatch holds
+  (`IncidentManager.Follow`), a closed incident's at once (at its close, or when a trace attached measures it again),
+  an open one's at most every 10 minutes, and at once for an export. A person reads the report's window and expects
+  the file to show that window; a first part left where the incident opened would be mostly from before the growth
+  (after an hour on a busy PC, 416 of its 500 rows on average, `BothEndsTests`).
+  (An incident made for a trace of its own, as **Capture now** makes one, has no growth to measure: its trace is its
+  window. Its start and its window's end are the moment it was made until the trace finishes, and from then on exactly
+  the trace's own start and the trace's own end (a trace that could not record leaves them where they were), which
+  PoolWatch never measures or moves; so its `events.csv` and the events `report.md` lists run from the trace's start
+  to the trace's end, with no 2 minutes before it and no minute after it, however long the trace was.)
+  The first part is exactly the window's first events while PoolWatch holds every event from the window's start: it
+  holds the events of the last 90 minutes by default (`IncidentEventKeepMinutes`) and never more than 20,000, and the
+  onset is measured only within the 70 minutes of raw history, so the start is at most 72 minutes back when it last
+  moves, and 82 when an open incident's first part follows it. When PoolWatch no longer holds every event from the
+  start (a PC recording over about 14,600 events an hour, more than half as many again as the owner's; or, as an
+  incident opens, a slow growth on a PC with over about twice the owner's event rate), the first part is the first
+  events it still holds from there, up to 500. After a start measured later those can be the incident's own first
+  events from the new start on, which are then the window's first, often fewer than 500, and the file says how many;
+  where PoolWatch had let go of events from the start on, the file's `Note` and `Gap` rows and `report.md` say so,
+  with the time of the latest event it had let go by then ("the first 500 events PoolWatch still held from ... (by
+  then it had already let go of events up to ...)").
+  While the incident is open it holds that first part (fewer
+  while the disk budget holds rows back), every one from its first row to its last, added as PoolWatch writes the
+  folder; once it has all of it, a last `Note` row says how many events it holds, from when and to when, and no event
+  row follows it. When the first part follows the window's start, a file that has no `Note` row yet starts again from
+  it at its next write of rows (written whole: every event of the first part up to the last one it held already, and
+  up to 100 more), and one that has its `Note` row stays as written until the close. A file that has no `Note` row
+  yet starts again in the same way when a late event takes a place in a first part it holds whole (the first part's
+  last event moves on, and its row is no longer the first part's), so it never holds more than the first part's 500,
+  nor a row after its `Note` row's time. A file loses no row otherwise, and stays as it is
+  while the first part holds no event to start it with. When the incident
+  closes (and at the end of a run, or when it leaves memory, if the file does not hold them as they are: its
+  `report.md` is written with it then) the file is replaced
+  whole in one step with both ends of the window as it is measured then, sorted by time, each event once; when events
+  between the two were left out, a `Gap` row between the two parts says how many (every event between the two parts),
+  the first and last of their times, and what the file keeps: how many events from when ("the first 500 events from
+  2026-11-10T06:01:40.000Z, where the incident's window started when this file was written"), and how many up to the
+  window's end. A file that holds its first part alone (an incident with no more events than those 500) is written
+  by its closing write too: every row left, and whole, in time order, when it was added to out of time order while
+  the incident was open. Every write of a closed incident that must be made (its close, a trace attached, the write
+  for its window's late events, the end of a run) leaves its `events.csv` with every row it is to hold, in time
+  order. When a write of a closed incident's folder fails (another program holds one of its files open), PoolWatch
+  tries the folder again a minute or more after that, and a minute after each try that fails, while it holds
+  the incident, and once more when it stops. A write that cannot write `timeline.csv` or `processes.csv` still
+  writes every other file, so `report.md` and `report.json` are not behind for one of those two. The tries that
+  follow such a write are for the chart, `timeline.csv` and `processes.csv` alone, and write the two reports
+  again only when they made a file the report does not show yet (its chart line, the files its draft bug report
+  lists as attached), so a try that can make none of the three writes nothing; a try writes the whole folder
+  instead while more than those files is still to write (a write failed at another file), while a change that
+  has the folder written again waits (a new line on the incident's timeline that the write budget held back,
+  say), and when PoolWatch stops.
+  A try makes those three files from the window's samples
+  while PoolWatch still holds the samples from the start of the incident's window (it keeps the last
+  70 minutes of samples and lets the oldest go 32 at a time; the window of an incident that ran about 50 minutes
+  or longer starts at the oldest of them, so for such an incident that is at most 5 minutes 20 seconds after its
+  close, at a sample every 10 seconds). After that, of `timeline.png`, `timeline.csv` and `processes.csv`, one
+  that was written for
+  the incident's close stays as it is, and one that never was is written only when the try holds at least as many
+  of the window's samples as the file holds already (so a file that stops before the close is replaced by one
+  that reaches it); a try that would hold fewer leaves the file, and no further try is made for it.
+  `poolwatch.log` says once that the write failed, and once what came of it: that the folder is written again, or
+  that it is written again but for the file that stays as it is (of an incident that re-opened meanwhile, once
+  its chart and CSV files are written again).
+  Whenever a file's rows are not from where the window starts now (an open incident's
+  between two
+  follows or after its `Note` row, a re-opened one's until it closes again, one that waits for a write that must be
+  made), `report.md`'s line under the window's events says where the file's rows are from and where the window
+  starts now. An event of a
+  closed incident's window that comes after its last write (a short command's rollup is handed over up to a minute
+  and a half after its first start, so those of a trace's last seconds can) is taken as it comes: `report.md` lists
+  it at the next sample, as the budget allows, with its row in a file that holds the first part only (added at the
+  file's end, after rows of later times; at most 100 rows a write, the rest 100 at a time, 30 seconds apart, each
+  time with `report.md` again),
+  and counts the rows of a file that holds both ends as they are. Two minutes after the window's end, when every late
+  event of the window can have come, PoolWatch writes the folder once more if `events.csv` does not hold the window's
+  events as `report.md` lists them, each once and in time order (`IncidentManager.LateEventMargin`): a write that must
+  be made, whatever the budget, which replaces a file that holds both ends whole and gives another every row left,
+  in time order, with `report.md` beside it. It is made
+  once; again only when still more of the window's events come, and then no sooner than two minutes after the last
+  such write. Every incident PoolWatch holds in memory looks at each event before PoolWatch lets it go, and none
+  leaves memory while a trace that may be attached to it records or is read, so each event is kept or counted by its
+  own time against the incident's own window: no event from after the window's end is counted as left out. When the
+  end is measured again after events were counted (earlier than events the incident has already let go: it holds its
+  latest 500 up to the end, and 500 more while it is open; or, once more than 4,000 events came after it, later, to
+  among the earliest of those, which it had set aside), the incident takes its latest part and its counts again from
+  the events PoolWatch holds, when both ends are next written (`IncidentManager.Refit`), as the first part follows
+  the start; what it had let go that PoolWatch no longer holds either stays counted as it was made. Only where
+  PoolWatch no longer holds the events from after the new end (over 20,000 events since it;
+  the end is measured within the 70 minutes of raw history, and the events of 90 minutes are held) does such a count
+  hold events from after the end, and the `Gap` row and `report.md` then say that it runs past the window's end, and
+  where the window ends.
+  With Detailed
+  recording the day's `events.csv` has every event of the time Detailed recording was on: after a
+  switch during the day it holds only that time, and while an incident's rows wait for the budget its `report.md`
+  names the day's file only with Detailed recording, "has those of the time Detailed recording was on" after a switch
+  in the window. A re-opened incident's file holds both ends as its last
+  close wrote them until it closes again, when it is replaced with both ends of the whole window as it is measured
+  then. At the owner's event mix and command-line lengths a long incident's closing
+  write of `events.csv` is about 0.29 MB (1,000 rows; the latest 500 about 0.14 MB of it; 0.46 to 0.58 MB with 1,000
+  at each end), once per close: a re-opened incident's next close writes it again, and so do a trace attached after
+  the close that measures the window again and the write for its window's late events (above; a growth that closed
+  after the default 10 quiet minutes has none by then). Long incidents closing about 3 an hour (the maintainer's
+  rate) make
+  that about 0.94 MB an hour of `events.csv`, written whatever the budget, and the report folders 2.24 MB an hour in
+  all, over their 2 MB share; with Detailed recording PoolWatch then writes about 4.6 to 5.0 MB an hour before its log
+  and the files under `cache\` (the report folders, the day's CSV files and `findings.jsonl`), at its 5 MB budget
+  rather than inside it (`BothEndsTests`; the report folders wrote 3.1 MB with 1,000 at each end, 1.5 MB when only the
+  first 1,000 were kept). Its rows are appended
+  in single writes while the
   incident is open: copying the folder at that moment can fail (try again; Export report reads it beside the write,
   its whole rows only, and puts an open incident's both ends in the zip from memory, with a `report.md` that counts
   them), and a crash then can cut its last row short. What can wait in the report folders is held to 1 MB an hour (a

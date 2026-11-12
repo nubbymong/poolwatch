@@ -6,7 +6,8 @@ using PoolWatch.Engine;
 namespace PoolWatch.Ui;
 
 /// <summary>
-/// Settings, opened from the main window's Settings button: a short form in plain words with what most people change, in
+/// Settings, opened from the tray menu's Settings... (in either view) and the Advanced view's Settings button, one at a time
+/// (<see cref="SettingsWindow"/>): a short form in plain words with what most people change, in
 /// three columns (Start at logon, update notices, and the Codex shortcut when it can be made again; automatic cache
 /// clearing with its three rules by name, and the kernel pool notices' three choices under Notifications; Records, what
 /// PoolWatch keeps on disk, Reports only or Detailed recording with a line each, and when reports and records are cleaned
@@ -44,8 +45,10 @@ internal sealed class SettingsDialog : Form
     private AdvancedSettingsDialog? _advanced;
 
     /// <param name="shortcut">Offers to make the Codex shortcut again (ChatGPT desktop installed, the shortcut not on the desktop); null leaves it out.</param>
-    public SettingsDialog(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions, LiveSettings live, IShell shell, ShortcutOffer? shortcut = null)
-        : this(new SettingsEditor(analysis, actions, live, shell), shortcut)
+    /// <param name="store">setup.json, where Save records a changed record mode or cleanup as the owner's choice (<see cref="SettingsEditor"/>); null: not recorded.</param>
+    public SettingsDialog(MonitorEngine engine, AnalysisPipeline analysis, UiActions actions, LiveSettings live, IShell shell, ShortcutOffer? shortcut = null,
+        Engine.Setup.RecommendationStore? store = null)
+        : this(new SettingsEditor(analysis, actions, live, shell, store), shortcut)
     {
         _engine = engine;
         _live = live;
@@ -421,12 +424,15 @@ internal sealed class SettingsDialog : Form
 
     /// <summary>
     /// On a screen too short for the whole form (high scaling on a small display) it keeps its width and scrolls
-    /// vertically instead of running off the screen (<see cref="ScreenFit"/>).
+    /// vertically instead of running off the screen (<see cref="ScreenFit"/>), centred again as it opened: on the main
+    /// window, or on the screen when opened from the tray with the main window hidden.
     /// </summary>
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
-        if (ScreenFit.ToWorkingArea(this)) CenterToParent();
+        if (!ScreenFit.ToWorkingArea(this)) return;
+        if (StartPosition == FormStartPosition.CenterScreen) CenterToScreen();
+        else CenterToParent();
     }
 
     protected override void Dispose(bool disposing)

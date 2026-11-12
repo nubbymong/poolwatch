@@ -15,10 +15,11 @@ want, trims background work. Every change it makes is listed, with a way to put 
   (beside the reports, only its log, its settings, a summary of each boot and the Since boot report);
   **Detailed recording** also keeps a record of the whole day (the pool and its tags, programs and their handles,
   services, every program started) and report folders for its spawn storms, up to about 60 MB a day on a PC doing heavy
-  agentic coding. Choose in setup's new Records step, or under **Records** in Settings, where a change applies at once;
-  both also set when reports, records and exports are cleaned up (7 days by default). People upgrading from
-  1.0.0-beta.2, which always recorded, get Reports only and are asked once to choose: the Records step opens alone at
-  the first start, and again at each start until they press Done. What beta.2 recorded is cleaned up by the usual rule.
+  agentic coding. Choose in setup's new Records step, or under **Records** in Settings (**Settings...** in the tray
+  menu, in either view), where a change applies at once; both also set when reports, records and exports are cleaned
+  up (7 days by default). People upgrading from 1.0.0-beta.2, which always recorded, get Reports only and are asked
+  once to choose: the Records step opens alone at the first start, and again at each start until they press Done or
+  save a change of the record mode or the cleanup in Settings. What beta.2 recorded is cleaned up by the usual rule.
 - **Setup that fits itself to your PC.** At first start, Set up PoolWatch opens on its own, in eight short steps
   (about 3 minutes), before the main window. It reads the PC and lists each known cause of a growing kernel pool with
   how much it affects this PC, the highest first (high, medium, low, not known where it could not check, then none), and
@@ -31,7 +32,8 @@ want, trims background work. Every change it makes is listed, with a way to put 
   **How PoolWatch works**, from every step, explains the
   kernel pool and why emptying the cache is safe. The first time, closing setup asks first, with No (keep it open) the
   default; if you close it, PoolWatch keeps running in the tray, what you set with Next stays, and setup opens again
-  when you open PoolWatch and at its next start. Open setup again from the tray menu: **Run setup again...**.
+  when you open PoolWatch and at its next start. Open setup again from the tray menu: **Run setup again...**; and
+  Settings from there too, **Settings...**, in either view.
 - **Watches the kernel pool.** The kernel pool is the memory Windows and its drivers keep for themselves. PoolWatch
   sits in the tray, checks it every 10 seconds with little overhead, and when it grows works out which program,
   service or driver is behind it, and says how sure it is.
@@ -107,7 +109,60 @@ want, trims background work. Every change it makes is listed, with a way to put 
 - **Evidence you can share.** When something keeps growing, PoolWatch writes a report with a timeline, the likely
   causes and the evidence for each, ready for a bug report to the vendor. How sure PoolWatch is about a cause reads the
   same in the window, Copy summary, the reports and the exports: weak evidence, some evidence, strong evidence or
-  confirmed by a trace. In `report.md`, names, command lines and paths are shown as plain text: web and e-mail
+  confirmed by a trace. A trace you start with **Capture now** gets a report of its own: once the trace has finished,
+  that report starts exactly where the trace started and measures the growth from there (in 1.0.0-beta.2 the report of
+  a tag that was already rising started earlier, where PoolWatch measured the rise to begin, which could be before you
+  asked for the trace), and its events are the trace's own, from exactly where the trace started to exactly where it
+  ended, however long the trace was (in 1.0.0-beta.2 they began 2 minutes before the report's start and stopped a
+  minute after you asked for the trace, or a minute after the tag stopped rising, so a 5-minute trace's report held
+  the events of its first minute). Until the trace has finished, that report gives no growth: its title and its
+  Growth line say "its trace had not finished by 07:05:20" (the time of PoolWatch's latest measurement when the
+  report was written), and when a trace recorded nothing PoolWatch could use, they say that. A vendor bundle's
+  `incidents.md` lists such a trace in the same words, not as a growth (the time it gives for a trace that had not
+  finished is that of PoolWatch's latest measurement when the bundle was made). The report of a sharp
+  drop lists the events of the drop
+  (in 1.0.0-beta.2 its event
+  list was empty), and a report written again after its incident closed says what was so at its close, with the time:
+  the system's figures, the tag's allocation rates, which pool the tag was in, and the level the tag had reached. A
+  closed incident's report gives that level with the time it was measured ("244 MB at 07:05:53") and says "now" only
+  while the incident is open (in 1.0.0-beta.2 a report written again hours after the close still said "now" of the
+  level at the close). The same goes for what its trace showed, for its suspects and for a growth found still held
+  after its cause went quiet: a closed incident's report says the growth "was still held at 07:05:53" where an open
+  one's says "is still held", a suspect that had not exited is "still running when it closed", and its "Retained"
+  line gives the time it is of ("still held 12 MB of its 12 MB rise at 07:20:53") (in 1.0.0-beta.2 a closed
+  incident's report said "is still held", "still running" and "still holds", whenever it was written). The line
+  with the allocation rates says what they are over: the growth, the
+  drop in a sharp drop's report, or the trace in the report of a trace whose tag did not grow (in 1.0.0-beta.2 it
+  called that span the growth in a drop's and a trace's report too). A sharp drop's report says the drop in plain
+  words ("fell 140 MB in 1 min"; in 1.0.0-beta.2 it said the tag "is flat" or "grew"). In a closed incident's
+  report a tag that did not move "was flat", and one that only fell "fell" by how much (in 1.0.0-beta.2 both were
+  "is flat", whenever the report was written), and where it names no cause it says "No clear cause was found"
+  (an open incident's report says "No clear cause yet", as 1.0.0-beta.2 said of a closed one too). A likely cause's
+  line says what its handles and its activity did, not what they do now: "its File handles rose by 24,000" and
+  "rose and fell with the tag: strongly", in a report and in the window's details of a growing tag (in 1.0.0-beta.2
+  "holds 24,000 more File handles" and "rises and falls with the tag", which a report written after the program
+  had exited still said). The title of a report for the whole non-paged pool names the limit the pool went over
+  (5.0 GB unless you set another): "Non-paged pool over 5.0 GB and rising" while the incident is open, and
+  "Non-paged pool rose over 5.0 GB" once it has closed (in 1.0.0-beta.2 the figure was how much the fastest-growing
+  tag had risen in 10 minutes, so the title could read "over 100 MB and rising" of a pool at 5 GB, and it said "and
+  rising" after the incident had closed too). When a closed incident's
+  report cannot be written because another program holds one of its files, then for as long as PoolWatch still
+  holds the incident it keeps trying, about once a minute, and tries once more as it stops; its log says so once,
+  and once more when the files are written again. While it is `timeline.csv` or `processes.csv` that is held, the
+  rest of the report is written all the same, so `report.md` says that the incident closed, and when. The chart,
+  `timeline.csv` and `processes.csv` are made from the measurements PoolWatch holds of the incident's time; it
+  keeps the last 70 minutes of measurements, and lets the oldest go in batches. Once it no longer holds the
+  incident's first ones (for an incident that ran about 50 minutes or longer, that is within minutes of its
+  close), a try writes a file that could not be written before only when it has at least as many of the
+  incident's measurements as the file holds already, so a file that stops before the incident closed is replaced
+  by one that runs to the close; when a try would have fewer, it leaves the file as it is, the log names the
+  file, and no further try is made for it (in 1.0.0-beta.2 the report stayed as it was until something about the
+  incident changed, which for a closed incident could be never). The draft bug report at the end of `report.md`
+  lists as attached evidence only the files the folder held when that report was written (in 1.0.0-beta.2 it
+  always listed `timeline.csv`, `processes.csv` and `events.csv`). When the folder holds no `events.csv` (deleted by
+  hand, say), the line under the window's events says so instead of counting events in it. In `report.md`, names,
+  command lines and
+  paths are shown as plain text: web and e-mail
   addresses, `@` names, issue numbers and commit hashes in them go in code spans, so GitHub makes no link or mention of
   them. By default, Export report takes out your user and machine names, your home folder and values that look like
   passwords or keys. It does its best, so read the export before you share it.
@@ -121,10 +176,34 @@ want, trims background work. Every change it makes is listed, with a way to put 
   knows now, and Export report writes an open incident's folder whole first. About and `cache\profile.json` say what the
   budget wrote, how much of it could wait against what the budget allows, how often it held a write back, and which
   open incidents' reports or charts are behind. An
-  incident's `events.csv` holds both ends of its window: its first 1,000 events and, once it closes, its latest 1,000,
-  with a row between them saying how many events were left out and between which times. While the incident is open it
-  holds up to the first 1,000, every event from its first row to its last; Export report of an open incident has both
-  ends, with a `report.md` that counts them, and an export never takes half a row.
+  incident's `events.csv` holds both ends of the window its report shows: the first 500 events from the window's
+  start and, once it closes, the latest 500 up to the window's end (on a busy PC about 3 minutes of events at each
+  end), with a row between them saying how many events were left out, between which times, and what the file keeps.
+  PoolWatch measures a growth's start again as it grows, later for a long, steady one and sometimes earlier, and the
+  first 500 follow the window's start: they are taken again from where the window starts then (when the incident
+  closes, and at most every 10 minutes while it is open), so the file shows the window the report shows. Left where
+  the incident opened, they would be mostly from before the growth after an hour on a busy PC (416 of the 500, on
+  average, in a test of that load). On a PC so busy that PoolWatch no longer holds every event from the window's start
+  (by default it holds the events of the last 90 minutes, and never more than 20,000), the file keeps the first events
+  it still holds from there, up to 500: where those are the window's first events (the report had kept them itself,
+  from a start now measured later) there can be fewer than 500 and the file says how many, and where PoolWatch had let
+  go of events from the start on, the file and `report.md` say so, with the time up to which it had let events go. While
+  the incident is open the file holds those first events, every event from its first row to its last, never more
+  than 500; when the window's start moves while the file is still being filled, the file starts again from the new
+  start, and once its last row says to when it holds its first events it
+  stays as written until the incident closes, with `report.md` saying where its rows are from and where the window
+  starts now. Export report of an open incident
+  has both ends, with a `report.md` that counts them, and an export never takes half a row. When an incident closes,
+  its `events.csv` gets every event the close has to give it, in time order, each event once (a short incident's file
+  too, which holds the first events alone), and the row that says how many were left out counts only events of the
+  window: when the window's end is measured again, the latest 500 and that count are taken again from the events
+  PoolWatch holds (on a PC so busy that it no longer holds them, the row and `report.md` say that the count runs past
+  the window's end, and where the window ends). An event of a closed
+  incident's window that comes late (a short command's summary can come a minute and a half after it ran) is listed in
+  `report.md` at the next sample the budget has room for (its row is added at the end of a file that holds the first
+  events alone), and two minutes after the window's end PoolWatch writes the
+  folder once more, whatever the budget, when `events.csv` does not hold the window's events as `report.md` lists them,
+  each once and in time order.
   The incident list always shows your incidents, however many storm reports came after them.
 - **Lighter on the CPU and memory under agentic load.** On a PC starting hundreds of processes a minute with ten
   incidents open, 1.0.0-beta.2 spent 2.4% of one core and its memory rose for hours (170 MB of managed memory after
@@ -135,18 +214,26 @@ want, trims background work. Every change it makes is listed, with a way to put 
   shell's command line, only processes a ranking can name are kept for an incident's window, a process that ended over
   90 minutes ago keeps only its name and details (the latest 10,000 such), the one-minute history keeps each process's
   I/O for 2 hours and then each hour's 10 busiest by name (what the Since boot report names), an incident keeps the
-  first 1,000 events of its window and the latest 1,000, a closed one its first 1,000 alone once it can no longer
+  first 500 events of its window and its latest 500, a closed one its first 500 alone
+  once it can no longer
   re-open (its `events.csv` says how many it left out between them, and when; with Detailed recording the day's `events.csv` has every one),
   and at most
   20 closed incidents stay in memory (the rest are listed from their folders; a tag growing again an hour after its
   incident left memory gets a new one). Replaying a day of that load through PoolWatch's per-sample analysis (not its
-  process query, event trace, window or files) takes 0.12% of one core where it took 2.6% before this change, and holds
-  39 to 44 MB of managed memory from the sixth hour to the day's end, where it held 101 MB after 4 hours and rose. PoolWatch
-  as a whole is still over its own budget on such a PC (About and every report say how much). An incident open longer
-  than 70 minutes keeps where its growth began, so its growth no longer shrinks in its report, and PoolWatch's own
-  cache clears still count in it after they leave the 70 minutes.
+  process query, event trace, window or files) takes 0.14% to 0.17% of one core, from run to run, where it took 2.6%
+  before this change, and
+  holds about 40 MB of managed memory from the sixth hour to the day's end (36 to 42 MB, by the hour and by how the
+  test is run), where it held 101 MB after 4 hours and
+  rose. PoolWatch as a whole is still over its own budget on such a PC (About and every report say how much). An
+  incident open longer than 70 minutes keeps where its growth began, so its growth no longer shrinks in its report,
+  and PoolWatch's own cache clears still count in it after they leave the 70 minutes.
 - **The day's data files, light on the disk.** With Detailed recording, on a PC doing heavy agentic coding the day's
-  CSV files wrote about 4.7 MB an hour, nearly the whole 5 MB budget; in a test of that load they now write about 2.1 MB. Each day's files
+  CSV files wrote about 4.7 MB an hour, nearly the whole 5 MB budget; in a test of that load they now write about 2.1 MB.
+  With the reports of long incidents closing about 3 an hour beside them (about 2.2 MB an hour, a little over their
+  2 MB share, as each close writes both ends of its `events.csv`) and `findings.jsonl`, PoolWatch writes about 4.6 to
+  5.0 MB an hour on such a PC with Detailed recording, before its log and the files under `cache\`: at its 5 MB
+  budget, not inside it. With Reports
+  only, the default, the day's files and `findings.jsonl` are not written. Each day's files
   start with the whole picture and
   then hold what changed: a pool tag when it moved 1 MB (and every 10 minutes), a process once it has run a minute and
   while it is busy, a service when its host changes, handle counts when they change (and once more as a count leaves

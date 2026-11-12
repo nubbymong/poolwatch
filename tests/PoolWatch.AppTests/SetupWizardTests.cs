@@ -2880,6 +2880,17 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
         public Task<(int All, int CanPutBack)?> ActiveChanges() => Task.FromResult<(int All, int CanPutBack)?>(Changes);
         public void MarkCompleted() => Completed++;
         public void MarkRecordsChosen() => RecordsChosen++;
+        public event Action<Action<Settings>>? Applied;
+        /// <summary>Something follows <see cref="Applied"/> (the setup window, from when it is made until it is disposed).</summary>
+        public bool Followed => Applied is not null;
+
+        /// <summary>A setting put into effect elsewhere while setup is open (Settings' Save from the tray): the running settings change, then <see cref="Applied"/>, as <c>LiveSettings.Apply</c> does.</summary>
+        public void ApplyElsewhere(Action<Settings> change)
+        {
+            change(Running);
+            Applied?.Invoke(change);
+        }
+
         public void OpenWebPage(IWin32Window owner, string url) => Calls.Add("open " + url);
         public void Log(string line) { }
 
@@ -3025,6 +3036,11 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
         public Task<(int All, int CanPutBack)?> ActiveChanges() => Task.FromResult<(int All, int CanPutBack)?>((0, 0));
         public void MarkCompleted() { }
         public void MarkRecordsChosen() { }
+        public event Action<Action<Settings>>? Applied
+        {
+            add => live.Applied += value;
+            remove => live.Applied -= value;
+        }
         public void OpenWebPage(IWin32Window owner, string url) { }
         public void Log(string line) { }
         public bool ConfirmCloseFirstRun(IWin32Window owner) => false;
@@ -3035,6 +3051,7 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
         public void ShowAdvanced(int tab) { }
         public void ShowActiveChanges() { }
         public void ShowReport(string? incidentDir) { }
+        public void ShowSettings() { }
         public Task<bool> StartTokenGuard() => Task.FromResult(true);
     }
 }

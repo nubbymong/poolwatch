@@ -116,6 +116,9 @@ internal static class PoolCauses
     /// <summary>The same for a tag read back from a report ("Reff"); a tag that does not parse is shown as it is.</summary>
     public static string TagWords(string tag, TagInfo? info) => PoolTag.TryParse(tag, out var t) ? PlainWords.Tag(t, info) : $"Pool tag {tag}";
 
+    /// <summary>What Pool causes calls a lag trip's CPU trace (an incident of kind Capture made for one): not a "Manual capture", which is one the person started.</summary>
+    internal const string LagTrace = "CPU trace of a moment the PC lagged";
+
     /// <param name="nowMs">Now on the clock that only goes forward: an open incident's growth so far is timed on it from its
     /// onset (<see cref="IncidentRow.OnsetMs"/>), and a closed one's from its onset to its end. A row read back from disk has
     /// its times of day only, and is timed by them.</param>
@@ -144,7 +147,11 @@ internal static class PoolCauses
                     rate = r.Growth / Math.Max(1.0 / 60, over.Duration().TotalHours);
                 }
                 if (r.Kind == IncidentKind.NonPagedTotal) what += ", with " + PlainWords.NonPagedOverTheLimit;
-                else if (r.Kind == IncidentKind.Capture) what = "Manual capture: " + what;
+                // A trace taken on its own, by what started it: the person (Capture now), or a lag trip (its CPU trace has no
+                // tag of its own: the row's is only where its folder is filed). Not known for an older folder whose trace was
+                // never attached: neither is claimed.
+                else if (r.Kind == IncidentKind.Capture)
+                    what = r.TraceFor switch { CaptureSource.LagTrip => LagTrace, CaptureSource.Manual => "Manual capture: " + what, _ => "Capture: " + what };
                 break;
         }
         return new CauseRow("inc:" + r.Dir, CauseKind.Incident, what, much, fast, r.Top, r.Confidence,

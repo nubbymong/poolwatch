@@ -105,6 +105,10 @@ public sealed class RecordModeTests : IDisposable
         var log = new List<string>();
         var started = DateTime.UtcNow;
         using var sink = new CsvSink(Paths(), settings, verbose: false, l => { lock (log) log.Add(l); });
+        // What was logged so far, read under the lock it is written under: the handle scan's writer logs from its own
+        // thread (its own sink follows the mode there), also while this thread reads. (Read without the lock, the list
+        // changed under the read once: "Collection was modified; enumeration operation may not execute".)
+        string[] Logged() { lock (log) return [.. log]; }
         Everything(sink, 0);
         Assert.False(Directory.Exists(DayFolders));
         // What the day's files record and since when (the incidents' reports say it): Reports only, since the sink began.
@@ -120,7 +124,7 @@ public sealed class RecordModeTests : IDisposable
         Assert.True(sink.Records.Detailed);
         Assert.InRange(sink.Records.SinceUtc, switched, DateTime.UtcNow);
         Everything(sink, 1);
-        Assert.Contains(log, l => l.StartsWith("Detailed recording turned on", StringComparison.Ordinal));
+        Assert.Contains(Logged(), l => l.StartsWith("Detailed recording turned on", StringComparison.Ordinal));
         var processes = Lines(DayFile("processes.csv")).Skip(1).Select(Csv.Split).ToList();
         Assert.Equal(["500", "600"], processes.Select(r => r[1]).Order()); // every process: the whole picture
         Assert.Single(Lines(DayFile("services.csv")).Skip(1));
@@ -133,7 +137,7 @@ public sealed class RecordModeTests : IDisposable
         var off = DateTime.UtcNow;
         settings.RecordMode = RecordMode.ReportsOnly;
         Everything(sink, 2);
-        Assert.Contains(log, l => l.StartsWith("Detailed recording turned off", StringComparison.Ordinal));
+        Assert.Contains(Logged(), l => l.StartsWith("Detailed recording turned off", StringComparison.Ordinal));
         Assert.False(sink.Records.Detailed);
         Assert.InRange(sink.Records.SinceUtc, off, DateTime.UtcNow);
         Assert.Equal(totals, Lines(DayFile("totals.csv")).Length); // nothing added

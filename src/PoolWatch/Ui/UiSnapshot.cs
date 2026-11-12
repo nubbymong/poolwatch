@@ -35,6 +35,13 @@ internal sealed record IncidentRow(string Id, string Dir, DateTime OpenedUtc, st
     public long? OnsetMs { get; init; }
     public long? EndMs { get; init; }
     public DateTime? EndUtc { get; init; }
+    /// <summary>
+    /// What started the trace an incident of kind Capture was made for (<see cref="Incident.TraceFor"/>; from a folder, its
+    /// report.json's <c>traceFor</c>, or, in one an older PoolWatch wrote, a lag trip when its trace recorded for no tag): Pool
+    /// causes labels the row by it. Null when it is not known (an older folder whose trace was never attached), and for
+    /// another kind.
+    /// </summary>
+    public CaptureSource? TraceFor { get; init; }
     /// <summary>For a release: how much the tag dropped.</summary>
     public long Dropped { get; init; }
 }
@@ -207,7 +214,7 @@ internal static class UiData
                     cause is { } c ? PlainWords.Confidence(c.level) : "", i.IsOpen)
                 {
                     Level = cause?.level, OnsetUtc = i.OnsetUtc, EndUtc = i.EndUtc ?? i.ClosedUtc, Dropped = i.Release?.Dropped ?? 0, OpenedMs = i.OpenedMs, OnsetMs = i.OnsetMs,
-                    EndMs = i.EndMs ?? i.ClosedMs,
+                    EndMs = i.EndMs ?? i.ClosedMs, TraceFor = i.TraceFor,
                 };
             }).ToList();
             created = a.Incidents.CreatedCount;
@@ -324,10 +331,25 @@ internal static class UiData
                 (r.GetProperty("tag").GetString() ?? "").TrimEnd(), kind, r.GetProperty("growthBytes").GetInt64(), top, level is { } l ? PlainWords.Confidence(l) : "", false)
             {
                 Level = level, OnsetUtc = Time("onsetUtc"), EndUtc = Time("endUtc") ?? Time("closedUtc"), Dropped = dropped,
-                OpenedMs = at.MsOf(r.GetProperty("openedUtc").GetDateTime().ToUniversalTime()),
+                OpenedMs = at.MsOf(r.GetProperty("openedUtc").GetDateTime().ToUniversalTime()), TraceFor = kind == IncidentKind.Capture ? TraceForOf(r) : null,
             });
         }
         catch { return (false, null); } // still being written, or not an incident folder
+    }
+
+    /// <summary>
+    /// What started the trace a Capture incident's folder was made for, from its report.json: its <c>traceFor</c>; in a
+    /// folder an older PoolWatch wrote (no such name), a lag trip when its trace recorded for no tag (a lag trip's CPU
+    /// trace has none; Capture now always has one), the person when it recorded for some, and null (not known) when no
+    /// trace was attached.
+    /// </summary>
+    internal static CaptureSource? TraceForOf(System.Text.Json.JsonElement report)
+    {
+        if (report.TryGetProperty("traceFor", out var said) && said.ValueKind == System.Text.Json.JsonValueKind.String)
+            return Enum.TryParse<CaptureSource>(said.GetString(), out var source) && source is CaptureSource.Manual or CaptureSource.LagTrip ? source : null;
+        if (!report.TryGetProperty("capture", out var capture) || capture.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+        if (!capture.TryGetProperty("tags", out var tags) || tags.ValueKind != System.Text.Json.JsonValueKind.Array) return null;
+        return tags.GetArrayLength() == 0 ? CaptureSource.LagTrip : CaptureSource.Manual;
     }
 
     /// <summary>The growth and clear stats of the last <paramref name="span"/> (<see cref="GrowthLedger"/>).</summary>

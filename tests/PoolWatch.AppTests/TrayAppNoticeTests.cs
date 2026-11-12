@@ -54,6 +54,26 @@ public sealed class TrayAppNoticeTests
     }
 
     /// <summary>
+    /// Once the tray app stopped listening its event is gone, every time, so a start just after says "already running"
+    /// rather than set an event nothing listens on (the pool's wait thread let go of it only when it next looked: 2 of
+    /// 2,000 outlived their listener on the maintainer's PC, and the test above failed so once in a gate run).
+    /// </summary>
+    [Fact]
+    public void AStoppedListenerLeavesNoShowEventBehind()
+    {
+        int outlived = 0;
+        for (int i = 0; i < 2000; i++)
+        {
+            string name = _event + "-" + i;
+            var listener = ShowSignal.Listen(name, AdminOnlyAndMe, () => { }, _ => { });
+            Assert.NotNull(listener);
+            listener!.Dispose();
+            if (ShowSignal.Send(name)) outlived++;
+        }
+        Assert.Equal(0, outlived);
+    }
+
+    /// <summary>
     /// A second tray app started to show its window asks the running one and says nothing more when it was asked; it says
     /// "already running" only when no tray app of its session listens. One started with --tray (the logon task) opens no
     /// window and asks for none; a headless run says so on its console, as before.

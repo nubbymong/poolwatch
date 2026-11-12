@@ -50,7 +50,13 @@ public class OwnerTests
         Assert.Equal(2, top.Members.Count); // node + sed: one owner, not two rows
         Assert.True(top.Meaningful);
         Assert.Contains(top.Plain, p => p.StartsWith("file and other I/O:"));
-        Assert.Contains(top.Plain, p => p.StartsWith("rises and falls with the tag: strongly"));
+        // Its activity and its handles are said by what they did over the window ("rose and fell with", "rose by"), not as
+        // of now ("rises and falls with", "holds"): a process of the window can have exited since, and a closed incident
+        // keeps these lines in a report written again hours later.
+        Assert.Contains("rose and fell with the tag: strongly", top.Plain);
+        Assert.DoesNotContain(top.Plain, p => p.StartsWith("rises and falls "));
+        Assert.StartsWith("its File handles rose by ", top.Plain[0]);
+        Assert.DoesNotContain(top.Plain, p => p.StartsWith("holds "));
         Assert.DoesNotContain(top.Plain, p => p.Contains("Spearman") || p.Contains("quota") || p.Contains("episode"));
         var answer = OwnerRanking.Answer(new TagInfo("nt", "File objects", "builtin"), File, 0, growth + 50 * Settings.MB, growth, "the last 5 min", owners);
         Assert.StartsWith("File objects (File, non-paged) grew", answer.Line);
@@ -64,6 +70,30 @@ public class OwnerTests
         var owner = new OwnerSuspect { Owner = new Owner(OwnerKind.App, "app:x", "Stream Deck"), Members = [], Identities = [], Meaningful = true, ExplainedBytes = 600 * 1024, Confidence = Confidence.Weak };
         var a = OwnerRanking.Answer(new TagInfo("nt", "File objects", "builtin"), File, 0, 1, 300 * Settings.MB, "the last hour", [owner]);
         Assert.Equal("File objects (File, non-paged) grew 300 MB in the last hour. No clear cause yet: the suspects below account for 600 KB of a 300 MB rise.", a.Line);
+    }
+
+    [Fact]
+    public void ATagThatFellOrDidNotMoveIsSaidSoInThePastForAClosedIncident()
+    {
+        // The answer's first sentence for a tag that did not grow: "is flat" over a window that runs to now (the live
+        // view, an open incident), "was flat" for a closed incident (its report is written again hours later); a fall
+        // as a fall, "on its own" when PoolWatch's own cache clears freed more of the tag meanwhile; and a growth as
+        // before, with "No clear cause yet" of a window that runs to now and "No clear cause was found" for a closed
+        // incident, whose suspects are as they were last ranked.
+        var info = new TagInfo("nt", "File objects", "builtin");
+        string Line(long moved, bool closed = false, bool onItsOwn = false) => OwnerRanking.Answer(info, File, 0, 1, moved, "1 min", [], closed, onItsOwn).Line;
+        Assert.Equal("File objects (File, non-paged) is flat over 1 min.", Line(0));
+        Assert.Equal("File objects (File, non-paged) was flat over 1 min.", Line(0, closed: true));
+        Assert.Equal("File objects (File, non-paged) was flat over 1 min.", Line(0, closed: true, onItsOwn: true));
+        Assert.Equal("File objects (File, non-paged) fell 140 MB in 1 min.", Line(-140 * Settings.MB));
+        Assert.Equal("File objects (File, non-paged) fell 140 MB in 1 min.", Line(-140 * Settings.MB, closed: true));
+        Assert.Equal("File objects (File, non-paged) fell 200 MB on its own in 1 min.", Line(-200 * Settings.MB, closed: true, onItsOwn: true));
+        Assert.Equal("File objects (File, non-paged) grew 5 MB in 1 min. No clear cause yet: the suspects below account for 0 B of a 5 MB rise.", Line(5 * Settings.MB));
+        Assert.Equal("File objects (File, non-paged) grew 5 MB in 1 min. No clear cause yet: the suspects below account for 0 B of a 5 MB rise.", Line(5 * Settings.MB, onItsOwn: true));
+        Assert.Equal("File objects (File, non-paged) grew 5 MB in 1 min. No clear cause was found: the suspects below account for 0 B of a 5 MB rise.", Line(5 * Settings.MB, closed: true, onItsOwn: true));
+        // How an answer names the tag: by what it holds, with the tag and the pool that holds more of it; a tag with no short description by its name and owner.
+        Assert.Equal("File objects (File, paged)", OwnerRanking.Named(info, File, 2, 1));
+        Assert.Equal("File (nt, non-paged)", OwnerRanking.Named(new TagInfo("nt", "", "builtin"), File, 0, 1));
     }
 
     [Fact]

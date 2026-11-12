@@ -97,6 +97,84 @@ public class PoolCausesTests
         Assert.Equal("File objects (File) was released: freed 400 MB", r.Title);
     }
 
+    /// <summary>
+    /// A trace taken on its own is labelled by what started it: "Manual capture" only for one the person started with
+    /// Capture now, and a lag trip's CPU trace as that (its row's tag is only where its folder is filed, so it is not named
+    /// in the label). A folder an older PoolWatch wrote says which by whether its trace recorded for a tag (a lag trip's
+    /// has none); one whose trace was never attached does not say, and is labelled as neither. (Before, a lag trip's CPU
+    /// trace was a "Manual capture" too.)
+    /// </summary>
+    [Fact]
+    public void ATraceTakenOnItsOwnIsLabelledByWhatStartedIt()
+    {
+        var row = Incident(IncidentKind.Capture, 0, open: false);
+        Assert.Equal("Manual capture: File objects (File)", PoolCauses.ForIncident(row with { TraceFor = CaptureSource.Manual }, "File objects (File)", Now).What);
+        Assert.Equal("CPU trace of a moment the PC lagged", PoolCauses.ForIncident(row with { TraceFor = CaptureSource.LagTrip }, "File objects (File)", Now).What);
+        Assert.Equal("Capture: File objects (File)", PoolCauses.ForIncident(row, "File objects (File)", Now).What);
+        // A growth is never labelled so, whatever its row says.
+        Assert.Equal("File objects (File)", PoolCauses.ForIncident(Incident(IncidentKind.Growth, GB, open: true) with { TraceFor = CaptureSource.LagTrip }, "File objects (File)", Now).What);
+
+        static CaptureSource? Of(string json)
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            return UiData.TraceForOf(doc.RootElement);
+        }
+        // report.json's traceFor, as this PoolWatch writes it.
+        Assert.Equal(CaptureSource.LagTrip, Of("""{"traceFor":"LagTrip","capture":{"tags":["File"]}}"""));
+        Assert.Equal(CaptureSource.Manual, Of("""{"traceFor":"Manual","capture":{"tags":[]}}"""));
+        Assert.Null(Of("""{"traceFor":"PoolAlert"}""")); // not what a trace's own incident is made for
+        // An older folder: by its trace's tags, when it has a trace.
+        Assert.Equal(CaptureSource.LagTrip, Of("""{"capture":{"tags":[]}}"""));
+        Assert.Equal(CaptureSource.Manual, Of("""{"capture":{"tags":["File","Reff"]}}"""));
+        Assert.Null(Of("""{"capture":null}"""));
+        Assert.Null(Of("""{"kind":"Capture"}"""));
+    }
+
+    /// <summary>
+    /// The row of a trace's incident whose tag has not grown gives no growth and no rate: so the row of one whose trace
+    /// has not finished yet (it has no span until then, and so no growth), which the list shows from the moment the
+    /// trace is asked for. Nothing in it reads as what a trace found ("+0 B", "0 B/h"); the report's title, which the
+    /// row's details and Copy summary read, says that the trace had not finished
+    /// (<c>IncidentRewriteTests.ATracesReportSaysThatItsTraceHadNotFinishedUntilTheTraceIsAttached</c>).
+    /// </summary>
+    [Fact]
+    public void ATracesRowGivesNoGrowthAndNoRateWhileItsTagHasNotGrown()
+    {
+        foreach (var source in new CaptureSource?[] { CaptureSource.Manual, CaptureSource.LagTrip, null })
+        {
+            // As the incident is made: its start and its end one moment, no growth, and no cause yet.
+            var made = Incident(IncidentKind.Capture, 0, open: false) with
+            {
+                TraceFor = source, Top = "", Confidence = "", Level = null, OnsetUtc = Now.AddMinutes(-1), EndUtc = Now.AddMinutes(-1), OnsetMs = 3_540_000, EndMs = 3_540_000,
+            };
+            var r = PoolCauses.ForIncident(made, "File objects (File)", Now, nowMs: 3_600_000);
+            string what = source switch { CaptureSource.Manual => "Manual capture: File objects (File)", CaptureSource.LagTrip => "CPU trace of a moment the PC lagged", _ => "Capture: File objects (File)" };
+            Assert.Equal((what, "", "", "", "", ""), (r.What, r.HowMuch, r.HowFast, r.Grew, r.PerHour, r.Net));
+            Assert.Equal(((long?)null, (double?)null, (long?)null, (ImpactLevel?)null), (r.GrewBytes, r.PerHourBytes, r.NetBytes, r.Impact));
+            Assert.Equal(what, r.Title);
+            Assert.All(r.Cells, cell => Assert.DoesNotContain("0 B", cell));
+            Assert.False(r.Active);
+        }
+    }
+
+    /// <summary>
+    /// What started a trace reaches its incident's row: the pipeline makes a lag trip's incident as one (Capture now's
+    /// as the person's, the default), and the list's rows carry it, an incident's in memory from the incident and a
+    /// folder's from its report.json. Read from the source, as the pipeline and the list need the whole app to build
+    /// (<c>IncidentRewriteTests.ATracesIncidentSaysWhatStartedItsTrace</c> holds the incident and its report.json to it).
+    /// </summary>
+    [Fact]
+    public void WhatStartedATraceReachesItsIncidentsRow()
+    {
+        string src = Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch");
+        string pipeline = File.ReadAllText(Path.Combine(src, "Analysis", "AnalysisPipeline.cs"));
+        Assert.Contains("var inc = Incidents.CreateCapture(History, [], now, CaptureSource.LagTrip);", MainWindowLayoutTests.Block(pipeline, "private Incident? StartLagCapture(CaptureDecision d)"));
+        Assert.Contains("var inc = Incidents.CreateCapture(History, tags, now);", MainWindowLayoutTests.Block(pipeline, "public Incident? CaptureNow()"));
+        string snapshot = File.ReadAllText(Path.Combine(src, "Ui", "UiSnapshot.cs"));
+        Assert.Contains("EndMs = i.EndMs ?? i.ClosedMs, TraceFor = i.TraceFor,", MainWindowLayoutTests.Block(snapshot, "public static List<IncidentRow> Incidents(AnalysisPipeline a, string incidentsDir)"));
+        Assert.Contains("TraceFor = kind == IncidentKind.Capture ? TraceForOf(r) : null,", MainWindowLayoutTests.Block(snapshot, "private static (bool ok, IncidentRow? row) ReadRow(string dir, Core.Model.Moment at)"));
+    }
+
     /// <summary>A tag's ranking with one owner at <paramref name="level"/> (or none that stood out).</summary>
     private static TagViewData View(Confidence? level, long growth = 300 * MB)
     {

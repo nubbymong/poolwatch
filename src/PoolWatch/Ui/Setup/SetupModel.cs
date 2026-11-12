@@ -36,8 +36,9 @@ internal enum LeakState
 /// <summary>
 /// The words of the first-run setup, from the approved design (first run, version 6), with the changes agreed after it:
 /// no restore point, no tour button, and the token-leak guard's own words wherever it is offered; and the Records step's,
-/// from its approved design (records step, version 2), with one agreed change: "Nothing is recorded until the pool grows."
-/// (the log and settings are still written).
+/// from its approved design (records step, version 2), with one agreed change: the Reports only card's last line is "No
+/// all-day record is kept." (the approved "Nothing is written until the pool grows." was not true: the log and settings are
+/// still written, and so are reports with no growth behind them, the boot report and the crash and restart reports).
 /// </summary>
 internal static class SetupText
 {
@@ -134,8 +135,12 @@ internal static class SetupText
     public const string ReportsOnly = "Reports only", Detailed = "Detailed recording";
     public const string ReportsWhat = "A report each time the pool grows: what grew, the programs behind it, and a draft bug report for whoever makes the cause.";
     public const string ReportsWhy = "Enough to find a leak and report it. Most people need nothing more.";
-    /// <summary>The agreed truth fix of the approved "Nothing is written until the pool grows.": the log and settings are still written.</summary>
-    public const string ReportsCost = "Nothing is recorded until the pool grows.";
+    /// <summary>
+    /// The owner's truth fix (2026-11-10) of the approved "Nothing is written until the pool grows." and of the first fix,
+    /// "Nothing is recorded until the pool grows.": the boot report and the crash and restart reports are written without
+    /// any growth; what Reports only leaves out is the day's record (data\&lt;yyyyMMdd&gt;\).
+    /// </summary>
+    public const string ReportsCost = "No all-day record is kept.";
     public const string DetailedWhat = "The reports, plus a record of everything PoolWatch watches, all day: the pool and its memory tags, programs and their handles, services, and every program started.";
     public const string DetailedWhy = "Useful when a leak builds up slowly over days, to compare a good day with a bad one, or when a developer asks for more than a report.";
     public const string DetailedCost = "Up to about 60 MB a day on a PC doing heavy agentic coding.";
