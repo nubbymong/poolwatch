@@ -233,7 +233,10 @@ internal enum SetupPart { Step, Scan, Leak, Cache, Fixes, Busy, Summary, Updates
 /// (<see cref="NextWait"/>) on the Standby cache and Fixes steps once Next or Back brings them up, again once the scan's
 /// facts land while either shows or a change on either did not work, and on the Fixes step again when a switch or a Yes/No
 /// appears there while it shows; Next on the Fixes step applies only the switches and Yes/Nos the window showed when it
-/// was pressed. Called on the UI thread.
+/// was pressed. The Records step's Next waits the same moment once Next or Back brings it up and again when its choices
+/// are replaced while it shows (<see cref="FollowRecords"/>); the Records step alone, which opens by itself, is brought up
+/// by neither, so its Done waits until its window is first shown and that moment from then (<see cref="Shown"/>).
+/// Called on the UI thread.
 /// </summary>
 internal sealed class SetupSession
 {
@@ -269,10 +272,16 @@ internal sealed class SetupSession
     private HashSet<string> _toldInputs;
     /// <summary>
     /// When Next's wait last started: Next or Back brought up a step that applies changes, the scan's facts landed while one
-    /// showed, a change on one did not work, or a switch or a Yes/No appeared on the Fixes step while it showed; null when
-    /// none of these happened yet.
+    /// showed, a change on one did not work, a switch or a Yes/No appeared on the Fixes step while it showed, the window
+    /// of the Records step alone was first shown (<see cref="Shown"/>), or the Records step's choices were replaced while
+    /// it showed (<see cref="FollowRecords"/>); null when none of these happened yet.
     /// </summary>
     private long? _heldFrom;
+    /// <summary>
+    /// The Records step alone, whose window has not been shown yet: its Done waits until it is (<see cref="Shown"/>), and
+    /// <see cref="NextWait"/> from then, however long before that this session was made.
+    /// </summary>
+    private bool _waitsToBeShown;
     /// <summary>
     /// A wait came due while a change ran (a switch or a Yes/No appeared on the Fixes step): Next's wait starts when that
     /// change ends. The scan's facts are never shown while a change runs (<see cref="TakeLate"/>).
@@ -291,8 +300,9 @@ internal sealed class SetupSession
     /// <param name="clock">The tests: a clock they move on (<see cref="System.Diagnostics.Stopwatch"/> ticks), for Next's wait (<see cref="NextWait"/>).</param>
     /// <param name="recordsOnly">
     /// The Records step alone, as it opens by itself after an upgrade (<see cref="SetupFlow.RecordsOnly"/>): it reads nothing
-    /// of the PC and runs no check, and its Done waits a moment from when it opens (<see cref="NextWait"/>), since it opens
-    /// without being asked for, while the owner may be typing elsewhere.
+    /// of the PC and runs no check, and its Done waits until its window is first shown and a moment from then
+    /// (<see cref="Shown"/>, <see cref="NextWait"/>), since it opens without being asked for, while the owner may be typing
+    /// elsewhere.
     /// </param>
     public SetupSession(ISetupHost host, bool firstRun, bool advanced, TimeSpan? scanWait = null, Func<long>? clock = null, bool recordsOnly = false)
     {
@@ -310,7 +320,22 @@ internal sealed class SetupSession
         _recordsInEffect = (running.RecordMode, running.RetentionDays);
         Leak = ImpactRows.Leak(null, running.TokenGuardEnabled, host.LeakTestNow, checking: false, notRun: false);
         _toldInputs = FixInputs();
-        if (recordsOnly) _heldFrom = _clock();
+        _waitsToBeShown = recordsOnly;
+    }
+
+    /// <summary>
+    /// The setup window is on screen for the first time (<see cref="Form.Shown"/>). The Records step alone opens by itself,
+    /// so its Done waits <see cref="NextWait"/> from now, not from when this session was made: the window is built and
+    /// shown after that, later still on a slow sign-in, and a key meant for another program must not press Done before
+    /// the owner has seen the step. The whole setup opens on its Welcome step, which applies nothing: nothing to wait for.
+    /// UI thread.
+    /// </summary>
+    public void Shown()
+    {
+        if (!_waitsToBeShown) return;
+        _waitsToBeShown = false;
+        _heldFrom = _clock();
+        Changed?.Invoke(SetupPart.Next);
     }
 
     public SetupFlow Flow { get; }
@@ -376,7 +401,9 @@ internal sealed class SetupSession
     /// the tray opens while the Records step is open alone, Undo). When the record mode or the cleanup's days in effect
     /// changed, the Records step's choices become them, so its Next (Done, alone) never puts an older choice back over the
     /// newer one; Settings' Save of a changed one has recorded the choice already (setup.json). A change of anything else
-    /// leaves the step's choices as they are, the owner's own picks among them. UI thread.
+    /// leaves the step's choices as they are, the owner's own picks among them. When the choices are replaced while the
+    /// Records step shows, Next (Done, alone) waits <see cref="NextWait"/> from then: a press meant for the choices that
+    /// were on screen must not apply the ones that took their place before the owner has seen them. UI thread.
     /// </summary>
     public void FollowRecords()
     {
@@ -385,7 +412,7 @@ internal sealed class SetupSession
         _recordsInEffect = now;
         (Records, Days, _daysInEffect) = (now.RecordMode, now.RetentionDays, now.RetentionDays);
         Forget(RecordsKey);
-        Tell(SetupPart.Records);
+        Tell(SetupPart.Records, hold: Flow.Step == SetupStep.Records);
     }
 
     /// <summary>
@@ -403,16 +430,21 @@ internal sealed class SetupSession
     public bool CanGoNext => !Busy && !Flow.Finished && !WaitsForScan && NextHeldFor <= TimeSpan.Zero;
 
     /// <summary>
-    /// How much longer Next waits on the Standby cache or Fixes step: <see cref="NextWait"/> from when Next or Back brought
-    /// the step up, from when the scan's facts landed while it showed, from when a change on it did not work, or from when
-    /// a switch or a Yes/No appeared on the Fixes step while it showed (from when the change ended, when it appeared while a
-    /// change ran). Zero on every other step, or once the wait is over. The window enables Next again when it ends.
+    /// How much longer Next waits on a step that applies changes (Standby cache, Fixes, Records): <see cref="NextWait"/>
+    /// from when Next or Back brought the step up, from when the scan's facts landed while it showed, from when a change
+    /// on it did not work, from when a switch or a Yes/No appeared on the Fixes step while it showed (from when the change
+    /// ended, when it appeared while a change ran), or from when the Records step's choices were replaced while it showed
+    /// (<see cref="FollowRecords"/>). On the Records step alone: all of <see cref="NextWait"/> until its window is first
+    /// shown, and <see cref="NextWait"/> from then (<see cref="Shown"/>). Zero on every other step, or once the wait is
+    /// over. The window enables Next again when it ends.
     /// </summary>
     public TimeSpan NextHeldFor
     {
         get
         {
-            if (!AppliesChanges || _heldFrom is not { } from) return TimeSpan.Zero;
+            if (!AppliesChanges) return TimeSpan.Zero;
+            if (_waitsToBeShown) return NextWait;
+            if (_heldFrom is not { } from) return TimeSpan.Zero;
             var left = NextWait - System.Diagnostics.Stopwatch.GetElapsedTime(from, _clock());
             return left > TimeSpan.Zero ? left : TimeSpan.Zero;
         }

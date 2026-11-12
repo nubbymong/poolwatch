@@ -133,7 +133,7 @@ internal static class EtlParser
             cpuProfile = cpu.Result(traceLog, symbolPath); // its length is recorded by the caller that read its start and end
         }
         }
-        finally { try { File.Delete(checkWrite(etlx)); } catch { } } // can be large; never left behind (and never through a link)
+        finally { try { File.Delete(checkWrite(etlx)); } catch { } } // can be large: deleted here, after checkWrite's look for a link on its path
 
         bool parsed = poolEvents > 0;
         bool truncated = seen >= MaxEvents;

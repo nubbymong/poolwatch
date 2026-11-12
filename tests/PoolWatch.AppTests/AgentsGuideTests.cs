@@ -5,7 +5,8 @@ using PoolWatch.Engine;
 
 namespace PoolWatch.AppTests;
 
-/// <summary>AGENTS.md: embedded, written into the data folder only when needed and never through a link, and added to exports as it is.</summary>
+/// <summary>AGENTS.md: embedded, written into the data folder only when needed, and not through a link that the look
+/// before the write finds on its path, and added to exports as it is.</summary>
 public sealed class AgentsGuideTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "pw-agents-" + Guid.NewGuid().ToString("N"));
@@ -97,7 +98,7 @@ public sealed class AgentsGuideTests : IDisposable
         // Refused by the write policy itself, not only by File.Move failing on a junction.
         string log = File.ReadAllText(Path.Combine(_paths.DataRoot, "test.log"));
         Assert.Contains("AGENTS.md not written", log);
-        Assert.Contains("PoolWatch never writes or deletes through links", log);
+        Assert.Contains("is a link, or could not be checked for one, so PoolWatch did not write or delete through it", log);
     }
 
     private static Dictionary<string, string> Guide => new() { [AgentsGuide.FileName] = AgentsGuide.Text };

@@ -183,10 +183,37 @@ public static class Exporter
 
     /// <summary>
     /// The files of a report folder PoolWatch appends rows to while it runs (an incident's events.csv, a storm folder's
-    /// spawns.csv), which an export reads up to their last whole row (<see cref="Util.Csv.ReadCompleteRows"/>).
+    /// spawns.csv), which an export reads up to their last whole row (<see cref="Util.Csv.ReadCompleteRows(string)"/>).
     /// </summary>
     public static bool IsAppended(string relativePath) => relativePath is "events.csv" or "spawns.csv";
 
+    /// <summary>
+    /// How an export lists a report folder's files: every file in it and in its folders, as before, except what is a link
+    /// (a junction, a symbolic link, any other reparse point) as the listing meets it. A folder that is one then is not
+    /// gone into and a file that is one then is not listed, so nothing such a link leads to is put in the zip. The
+    /// listing is the only look: each file it gives is opened by its path afterwards, so a link put in a listed file's
+    /// place, or in the place of a folder the listing has gone into, after it was listed is followed.
+    /// </summary>
+    private static readonly EnumerationOptions NoLinks = new()
+    {
+        RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = false, MatchType = MatchType.Win32,
+    };
+
+    /// <summary>
+    /// Zips the report folder <paramref name="incidentDir"/> into <paramref name="exportsDir"/>. What it checks for
+    /// links: the report folder's own entry is looked at once, before anything is read, and a folder that is a link
+    /// then, or whose own entry cannot be read to tell, is refused (it throws); a file or folder in it that is a link as
+    /// the folder is listed is left out (<see cref="NoLinks"/>). Both are looks at a path, and the folder is listed, and
+    /// each file opened, by that path afterwards: a link put in the report folder's place after its look (the exports
+    /// folder is made and the zip's first entries are written in between), or in a listed file's place, is followed. The
+    /// folders above the report folder, the incidents folder among them, are not looked at, and nothing bounds the size of
+    /// what is read.
+    /// The report folders are in the data folder, where only administrators and SYSTEM can put a link, or, for a run
+    /// given <c>--out</c>, wherever that says, which someone who is not an administrator may be able to write. The zip
+    /// is made as administrator and kept where the signed-in account can read it, so in such a folder a link put there
+    /// after the look, or the incidents folder itself being a link, can put the folder it leads to in the zip
+    /// (SECURITY.md, Known limitations, which also says what folder to give <c>--out</c>).
+    /// </summary>
     /// <param name="checkWrite">The write policy (returns the path or throws).</param>
     /// <param name="extraFiles">Text files added at the root of the zip as they are, never redacted (the guide for AI
     /// assistants, which holds nothing about this PC), by file name. A file of the same name in the folder is left out.</param>
@@ -197,6 +224,9 @@ public static class Exporter
     public static string Export(string incidentDir, string exportsDir, RedactionInfo? redaction, Func<string, string> checkWrite,
         IReadOnlyDictionary<string, string>? extraFiles = null, IReadOnlyDictionary<string, string>? liveFiles = null)
     {
+        // A link, or a folder whose own entry cannot be read to tell (which counts as one: PathGuard.IsReparsePoint).
+        if (Util.PathGuard.IsReparsePoint(incidentDir.TrimEnd('\\', '/')))
+            throw new UnauthorizedAccessException($"'{incidentDir}' is a link, or could not be checked for one, so PoolWatch did not export it");
         Directory.CreateDirectory(checkWrite(exportsDir));
         string name = Path.GetFileName(incidentDir.TrimEnd('\\', '/')) + (redaction is not null ? "-redacted" : "") + ".zip";
         string zipPath = checkWrite(Path.Combine(exportsDir, name));
@@ -217,7 +247,7 @@ public static class Exporter
                 using var s = zip.CreateEntry(rel, CompressionLevel.Optimal).Open();
                 s.Write(new UTF8Encoding(false).GetBytes(redaction is null ? content : RedactText(content, redaction, IsStructured(rel))));
             }
-            foreach (var file in Directory.EnumerateFiles(incidentDir, "*", SearchOption.AllDirectories))
+            foreach (var file in Directory.EnumerateFiles(incidentDir, "*", NoLinks))
             {
                 string rel = Path.GetRelativePath(incidentDir, file).Replace('\\', '/');
                 if (rel.StartsWith("wpr-temp/", StringComparison.OrdinalIgnoreCase)) continue; // a running capture's buffers

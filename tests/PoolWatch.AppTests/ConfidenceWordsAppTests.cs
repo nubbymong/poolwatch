@@ -86,6 +86,58 @@ public class ConfidenceWordsAppTests
         Assert.All(OlderWords, old => Assert.DoesNotContain(old, md, StringComparison.Ordinal));
     }
 
+    /// <summary>A Markdown line outside its code spans, each escaped character left out; null when it leaves a code span open.</summary>
+    private static string? OutsideCodeSpans(string line)
+    {
+        var sb = new System.Text.StringBuilder();
+        bool code = false;
+        for (int i = 0; i < line.Length; i++)
+        {
+            char c = line[i];
+            if (code) { if (c == '`') code = false; continue; }
+            if (c == '\\' && i + 1 < line.Length) { i++; continue; }
+            if (c == '`') { code = true; continue; }
+            sb.Append(c);
+        }
+        return code ? null : sb.ToString();
+    }
+
+    /// <summary>
+    /// A suspect's summary holds names other programs chose: its owner's name, an exe's name (Windows allows a backtick,
+    /// brackets and parentheses in one) and a role taken from a command line. In the bundle's incidents.md they stay
+    /// text, through the escape report.md gives the same summary (<see cref="MdText.Text"/>): no link, image or HTML tag,
+    /// no bold, no code span left open, and nothing GitHub would make a link, a mention or an issue reference of.
+    /// </summary>
+    [Fact]
+    public void ABundlesIncidentsMdKeepsASuspectsNamesAndRoleAsText()
+    {
+        var owner = new OwnerSuspect
+        {
+            Owner = new Owner(OwnerKind.App, "app:inj", "INJ **Owner**"), Members = [], Identities = [], Meaningful = true, Confidence = Confidence.Correlated,
+        };
+        owner.Members.Add(new Suspect
+        {
+            Key = new PoolWatch.Core.Model.ProcessKey(100, 1), Image = "pwsh.exe", StartUtc = T0,
+            Direct = new DirectSignal(null, 0, 0, 0, 0, 0, false), Activity = new ActivitySignal("total", double.NaN, 0, double.NaN, 0, 0, false),
+            Lifecycle = new LifecycleSignal(false, false, false, []),
+        });
+        owner.Identities.Add(new ProcessIdentity("le`ak[INJ-IMAGE](x).exe", "command: [INJ-ROLE](https://example.invalid/r) @someone #12 <img src=x>", owner.Owner, false));
+        Assert.Equal("INJ **Owner**: le`ak[INJ-IMAGE](x).exe · command: [INJ-ROLE](https://example.invalid/r) @someone #12 <img src=x> under INJ **Owner**", owner.Summary);
+        var incident = new Incident
+        {
+            Id = "20261101-060000-Reff", Dir = "x", Tag = PoolTag.Parse("Reff"), Kind = IncidentKind.Growth, OpenedUtc = T0, OnsetUtc = T0,
+            StartBytes = 1L << 30, PeakBytes = 2L << 30, Owners = [owner],
+        };
+        string md = BundleBuilder.IncidentsMarkdown([incident]);
+        string line = Assert.Single(md.Split(Environment.NewLine), l => l.StartsWith("- Suspect: ", StringComparison.Ordinal));
+        Assert.Equal($"- Suspect: {MdText.Text(owner.Summary)} ({PlainWords.Confidence(Confidence.Correlated)})", line);
+        Assert.Equal(@"- Suspect: INJ \*\*Owner\*\*: le\`ak\[INJ-IMAGE\](x).exe · command: `[INJ-ROLE](https://example.invalid/r)` `@someone` `#12` &lt;img src=x> under INJ \*\*Owner\*\* (some evidence)", line);
+        string? outside = OutsideCodeSpans(line);
+        Assert.NotNull(outside); // every code span is closed
+        foreach (string live in new[] { "[", "]", "<", "*", "`", "://", "@", "#1" }) Assert.DoesNotContain(live, outside);
+        Assert.DoesNotContain(owner.Summary, md); // nowhere as it came
+    }
+
     [Fact]
     public void TheWordsAreTheColumnsOwn()
     {

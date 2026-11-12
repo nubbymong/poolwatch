@@ -34,7 +34,8 @@ internal sealed class TokenGuardSetting
     private bool _read;
 
     /// <param name="file">The record's path (the guard's folder made first).</param>
-    /// <param name="real">Checks a path before it is used (<see cref="Core.Util.PathGuard.CheckReal"/>: never through a link).</param>
+    /// <param name="real">Checks a path before it is used (<see cref="Core.Util.PathGuard.CheckReal"/>: it looks for a
+    /// link on the path, and throws when it finds one or cannot check).</param>
     /// <param name="signIn">This sign-in (default <see cref="TokenGuardNative.SignInId"/>); null when Windows does not say,
     /// and then no record is written or used, only the value in memory.</param>
     /// <param name="getLive">Reads the live timeout.</param>

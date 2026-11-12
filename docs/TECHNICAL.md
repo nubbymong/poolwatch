@@ -44,8 +44,10 @@ a click or a setting you turned on:
 
 Because it runs as administrator, it runs only from inside Program Files, and refuses a copy there whose folders or
 file you could change without administrator rights (anywhere else, such as Downloads or the Desktop, it refuses
-outright). Only the switches its tests use skip that check (see [Build from source](#build-from-source)). It never
-writes through a file-system link (a junction or symbolic link) and never installs a driver.
+outright). Only the switches its tests use skip that check (see [Build from source](#build-from-source)). Before each
+write it looks for a file-system link (a junction or symbolic link) on the path and does not write through one it
+finds (that is a look at the path before the write: SECURITY.md's known limitations say what it does not cover in a
+folder given with `--out` that others can change), and it never installs a driver.
 [SECURITY.md](../SECURITY.md) lists every action and how each is checked, and its
 [known limitations](../SECURITY.md#known-limitations).
 
@@ -313,6 +315,9 @@ administrator** on that file), it starts again through the launcher and does no 
 limitations, says what such a start still gets). The launcher starts PoolWatch only from a folder in Program Files that
 no one but an administrator can change, and only with administrator rights. A file named by a relative path is read from the
 folder you started it in.
+
+Give `--out` only a folder that only administrators can change (see
+[SECURITY.md](../SECURITY.md#known-limitations)).
 
 `--service-off` exits 13 when the service was not turned off (refused, not changed, or set to Disabled but not known
 to have stopped) or the services could not be read; `--service-restore` exits 8 when a service was not put back (its

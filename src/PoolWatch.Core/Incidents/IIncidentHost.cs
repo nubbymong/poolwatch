@@ -11,8 +11,9 @@ public sealed record TimelineChart(string Title, IReadOnlyList<DateTime> Times, 
 public interface IIncidentHost
 {
     string IncidentsDir { get; }
-    /// <summary>Returns the path if the write policy allows it, otherwise throws. The Windows host resolves links
-    /// (PathGuard.CheckReal): never a write or delete through a junction or symlink.</summary>
+    /// <summary>Returns the path if the write policy allows it, otherwise throws. The Windows host's check
+    /// (PathGuard.CheckReal) also looks for a junction or symlink on the path, before the write or delete that follows,
+    /// and throws when it finds one or cannot check.</summary>
     string CheckWrite(string path);
     FileDetails? DescribeFile(string? path);
     SystemInfo GetSystemInfo();

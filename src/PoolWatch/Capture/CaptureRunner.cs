@@ -110,7 +110,8 @@ internal sealed class CaptureRunner
         Wpr($"-cancel -instancename {Instance}", quiet: true);
         try
         {
-            // CheckReal, not the name test: a wpr-temp reached through a link is never deleted.
+            // CheckReal, not the name test: it looks for a link on the way to each wpr-temp right before the delete,
+            // and one with a link found on its path (or whose path cannot be checked) is not deleted.
             if (Directory.Exists(incidentsDir))
                 foreach (var d in Directory.EnumerateDirectories(incidentsDir, "wpr-temp", SearchOption.AllDirectories))
                     try { Directory.Delete(_paths.Guard.CheckReal(d), true); } catch { }

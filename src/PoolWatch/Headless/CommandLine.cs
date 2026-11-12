@@ -70,6 +70,7 @@ internal sealed class CommandLineOptions
         PoolWatch.exe --headless [options]  collect without UI
           --duration <seconds>   stop after this long (default: until the stop file or Ctrl+C)
           --out <dir>            write CSV / incidents / logs here instead of %ProgramData%\PoolWatch
+                                 (give --out only a folder that only administrators can change: see SECURITY.md)
           --config <file>        settings JSON to use (read-only)
           --interval <seconds>   override the sample interval
           --verbose-csv          with Detailed recording, write every tag and process row every sample

@@ -337,8 +337,9 @@ internal static class Program
     /// added to <see cref="KeptSummaryName"/> next to it, and the write throws, so the cleanup ends with exit code 1 and
     /// the uninstaller removes nothing; the next cleanup that writes the summary writes what is kept there first, then
     /// its own, and deletes that file. So the record of what a cleanup put back is not lost when a second cleanup adds
-    /// to it, nor when a Retry after a failed write replaces it. <paramref name="real"/> checks each path
-    /// (<c>PathGuard.CheckReal</c>: never through a link).
+    /// to it, nor when a Retry after a failed write replaces it. <paramref name="real"/> checks each path before it is
+    /// used (<c>PathGuard.CheckReal</c>, which looks for a link on the path and throws when it finds one or cannot
+    /// check for one).
     /// </summary>
     internal static void WriteSummary(string file, string summary, bool append, Func<string, string> real)
     {

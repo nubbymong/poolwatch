@@ -85,6 +85,16 @@ internal sealed class SetupWizardForm : Form
         Session.FollowRecords(); // a change put into effect before the window had a handle
     }
 
+    /// <summary>
+    /// The window is on screen for the first time: the Records step alone, which opens by itself, starts its Done's wait
+    /// now (<see cref="SetupSession.Shown"/>), so the wait is one the owner sees, however long the window took to show.
+    /// </summary>
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        Session.Shown();
+    }
+
     internal SetupSession Session { get; }
 
     /// <summary>"Open PoolWatch" (or Done, on the Records step alone) was pressed: setup is complete.</summary>

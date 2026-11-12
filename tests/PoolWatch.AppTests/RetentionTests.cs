@@ -363,8 +363,9 @@ public sealed class RetentionTests : IDisposable
 
     /// <summary>
     /// A thing retention lists that is itself a link (a junction in a daily folder's place) is stamped by its own
-    /// last-write time alone: nothing behind it is read, so rows added to a file there leave its record as it was. It is
-    /// never deleted (the delete refuses a link), and neither is what it leads to.
+    /// last-write time alone: nothing behind it is read, so rows added to a file there leave its record as it was. A
+    /// link that is there when retention looks before the delete is not deleted (the delete's check refuses it), and
+    /// neither is what it leads to.
     /// </summary>
     [Fact]
     public void AThingThatIsItselfALinkIsStampedByItsOwnTimeAloneAndNothingBehindItIsReadOrDeleted()

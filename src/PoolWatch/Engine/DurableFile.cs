@@ -7,7 +7,8 @@ namespace PoolWatch.Engine;
 /// Replaces a record file in one step: the text goes to "&lt;file&gt;.tmp", which is flushed to the disk and then moved over
 /// the old file. A reader sees the old file or the new one, never a half-written one; and after a power cut or a crash of
 /// the PC the new file holds what was written, where a rename without the flush can leave it empty or zero-filled. Both
-/// paths go through the guard (never through a link). Throws when the file cannot be written; the old one is then as it was.
+/// paths go through the guard, which looks for a link on each before it is opened or renamed and refuses a path where
+/// it finds one or cannot look. Throws when the file cannot be written; the old one is then as it was.
 /// What remains: the rename itself is not written through, so a power cut in the seconds after a save can bring back the
 /// old file whole (never an empty one), and with it the record as it was before that save.
 /// </summary>

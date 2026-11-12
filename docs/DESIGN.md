@@ -294,9 +294,11 @@ on), and every lasting one is listed under Active changes, where it can be put b
   2.5 MB in each hour; the sink's own CPU there is under 1 s in the 4 hours (under 0.01% of one core), its allocations
   70 MB an hour (142 before). The CI's agentic-load check (section 12) holds the whole app to the 5 MB.
 - **Where it writes**: only under its admin-only data folder `%ProgramData%\PoolWatch` (or an explicit headless
-  `--out` folder), apart from the few writes SECURITY.md lists, never in its install folder, never through a link, and never
-  on a ReFS volume (every Dev Drive is ReFS: its per-file metadata is the pool being measured). 7-day retention by
-  default.
+  `--out` folder), apart from the few writes SECURITY.md lists, never in its install folder, and never
+  on a ReFS volume (every Dev Drive is ReFS: its per-file metadata is the pool being measured). Before each write in
+  either folder it looks at the path for a link and does not write when it finds one (`PathGuard.CheckReal`): a look
+  at the path, made before the file is opened by that path, so for an `--out` folder that others can change see
+  SECURITY.md's Known limitations. 7-day retention by default.
 - **No WMI in the sampling path** (it is expensive). Native APIs only.
 - **PoolWatch must not become a crawler itself.** Every file-system lookup is bounded: explicit paths,
   modified-within windows, file and byte budgets, early exit.
@@ -465,9 +467,10 @@ Notes:
   (`RetentionClock.Stamp`, `AppPaths.StampOf`): for a file its last-write time and length; for a folder its own
   last-write time and the name, length and last-write time of every file and folder in it at any depth, each length read
   from the file itself (a folder's listing may not yet show the rows the CSV sink adds to a file it holds open), and
-  nothing read through a link: a link in a folder is left out with what is behind it, a folder that is itself a link (a
-  junction in a daily folder's place, say) is stamped by its own last-write time alone, and a file that is a link by its
-  own time and length; retention never deletes such a thing, as its delete refuses a link (`PathGuard.CheckReal`). The
+  nothing read through a link it finds there: a link in a folder is left out with what is behind it, a folder that is
+  itself a link (a junction in a daily folder's place, say) is stamped by its own last-write time alone, and a file
+  that is a link by its own time and length; nor does retention delete such a thing when it is a link at the look
+  before its delete, which refuses it then (`PathGuard.CheckReal`). The
   sink adds rows to the fixed-name files of the day's folder, which leaves the folder's own last-write time as it was,
   so the stamp, not that time, is what tells that the folder was written: after a clock set back to a day whose folder
   is still there, or set forward for a moment so that a later day's folder is made early, the rows that go into such a
@@ -495,8 +498,9 @@ Notes:
   listed (when Windows refuses the listing, say), each thing with a record is still judged by its own path there
   (a plain name only: `AppPaths.RecordedPath`), so what is due in it still goes, and the record of one no longer at
   its path goes; a thing not recorded yet is first seen once the folder can be listed. A due folder is deleted by
-  `AppPaths.DeleteTree`, which never follows a link (a link in it is deleted itself) and, unlike .NET's recursive
-  delete, never looks the folder up in the folder above it, so its files still go while that folder above cannot be
+  `AppPaths.DeleteTree`, which goes into no folder that its listing shows as a link (such a link in it is deleted
+  itself) and, unlike .NET's recursive delete, never looks the folder up in the folder above it, so its files still go
+  while that folder above cannot be
   listed. When a folder cannot be deleted whole (a file in it in use, say), what is left stays due while it holds
   only what was in it then, so a later check tries it again at once instead of counting it from 0 (in that run of
   PoolWatch; after a restart it is seen anew, so kept longer). A folder that cannot be listed, a thing that cannot
@@ -1067,8 +1071,38 @@ incident is open, and read by others as they are: a crash in the moment of an ap
 which a later write in the same run repairs (a file not as written is written whole again) and a later run leaves as
 it is. An export reads it, and a vendor bundle a storm folder's `spawns.csv`, beside their writer (sharing writes) and
 up to their last whole row (`Csv.ReadCompleteRows`: the last line break outside a quoted value), so a row being
-appended in that moment is never in the zip as half a row (it is in the folder). At the end of a run everything left
-is written.
+appended in that moment is never in the zip as half a row (it is in the folder). Both look for links before they
+read: an export looks at the report folder once and refuses one that is a link then, and leaves out every file and
+folder that is a link as it lists the folder (`Exporter.Export`, which lists the folder without its reparse points),
+and the bundle passes over a storm folder, or a `spawns.csv`, that is a link when it looks at them
+(`PathGuard.FirstLinkBelow`, from the first folder below the incidents folder), since a run given `--out` keeps its
+report folders where that says while every zip goes to the data folder's `exports`. Each look is at a path, and the
+folder or file is then opened by that path, so a link put in its place after the look is followed; neither looks at
+the incidents folder itself or at a folder above it; and Pool causes reads an incident folder's `report.json` with no
+look for a link (`UiData.ListDisk`, `UiActions.IncidentDetails` and `IncidentSummary`, `ReportIssueDialog.Digest`).
+The boot files (`boots\<boot>\baseline.json` and `summary.json`, which a run given `--out` keeps in that folder too)
+are read with no look for a link either, whole and by their paths (`BootTracker.TryRead`): this boot's as a run
+starts, and for a bundle those in the last 60 folders of `boots` by name (`BootTracker.Baselines` and `All`; the
+summaries also as a run ends). So is `cache\versions.txt` (`Diagnostics.CheckVersions`), and `cache\clears.json` and
+`cache\tagscan.json` are read whole, by their paths, after one look as PoolWatch starts (`PathGuard.CheckReal`). These
+are examples: everything a run given `--out` reads back from that folder is opened by its path, some of it after such
+a look at the path and some with none. Read with no look at the file itself are the notes left for a run in `requests`
+(`mark-*.txt`; `MarkInbox.Take` looks only before it deletes a note it has read, and `Marks.Clean` keeps at most 200
+characters of one) and the two position files in `cache`: `last-seen.txt` (`Diagnostics.CheckCrashes`;
+`CrashCursor.Parse` keeps numbers and, from each later line of exactly three words, the first word when that has at
+most 64 characters) and `eventlog-last.txt` (`EventLogFeed`, which keeps one number). What a run keeps of any of this
+it uses like its own data, and it writes some of it back into that folder: for example a note's text into the log,
+into the reports of incidents that cover its time and, with Detailed recording, into `findings.jsonl` and `events.csv`
+(`Diagnostics.OnFinding`); the boot summaries' values into `boots.md` as a run ends (`AnalysisPipeline.Finish`), and
+this boot's back into its `summary.json`; what was kept of `last-seen.txt`, `clears.json` and `tagscan.json` back into
+those files when PoolWatch next saves them; and a headless run's `summary.json` holds, among its values, notes, boot
+values, the versions and the clears (`HeadlessRunner`). In the data folder only administrators and SYSTEM can put a
+link. What that leaves open in a folder given with `--out` that someone without administrator rights can change (a
+bundle can hold one file of at most 5 MB that a link leads to, and what a boot file or a `versions.txt` behind a link
+gives under the names of such a file's values; an export the folder a link leads to, whatever its size; and what a run
+keeps of what it read through a link it can write back into that folder), and the advice (give `--out` only a folder
+that only administrators can write, in a place where no one else can rename or replace it), is in SECURITY.md under
+Known limitations. At the end of a run everything left is written.
 
 **Spawn storms** (`Core.Spawn.SpawnTracker`, `StormReports`). A parent that starts more than 30 short-lived children
 (each exited within 10 s) within 30 s, by default, opens a storm, which closes once its rate stayed under half that for a minute. A fork copy (a child
@@ -1096,8 +1130,11 @@ lists every storm in it (opened, closed, parent, starts, peak, fork copies, chil
 its last write as they are then (no lifetime). tools/Leaker's agent-load session (a burst every 2.5 minutes) makes one
 folder in an hour, where it made one a burst. A vendor bundle's `spawns.csv` is the most recently active storm folder's
 (`BundleBuilder.LatestStormSpawns`: of the folders held, the one whose storms were active last; after a restart, of the
-newest 500 storm folders, the one whose `spawns.csv` was written last), not the newest by name: a folder made in the
-morning can be the one still in use in the evening.
+newest 500 storm folders, the one whose `spawns.csv` was written last; a folder or a file that is a link when it is
+looked at is passed over, as said above), not
+the newest by name: a folder made in the morning can be the one still in use in the evening. It goes in only when it
+holds at most 5 MB (`BundleBuilder.StormSpawns`), which the read itself finds: at most 5 MB and one byte are read,
+through the handle the file was opened with, and a larger file is left out.
 
 These files are written as recorded, for you, and each report says so at the top ("NOT REDACTED"). **Export report**
 builds a zip for sharing, redacted by default: the user name, home and TEMP paths (long and 8.3 forms), machine name,
@@ -1180,7 +1217,31 @@ the same session (from the Start menu, or by Windows for a click on a notice in 
 shows that window and brings it to the front instead of saying "already running" (`ShowSignal`, section 19); one
 started with `--tray`, or with no tray app of its session listening, says "already running" as before. The icon comes
 back after Explorer restarts: Explorer's "TaskbarCreated", which Windows stops on its way to an elevated program
-(UIPI), is let through to a hidden window of the tray app's own, and the icon is added again then (`TaskbarWatch`). The
+(UIPI), is let through to a hidden window of the tray app's own (`TaskbarWatch`). Any program of the session can send
+that message there, so by itself it changes nothing: the watch looks which taskbar window there is
+(`TaskbarWatch.FindTaskbar`: the top-level window of the class `Shell_TrayWnd` that `FindWindowW` gives), and the
+icon is added again (taken off and put on, `TrayApp.AddIconAgain`), with one line in the log, only when that is another
+window than the one the watch last added it for, at most once every 5 seconds (`TaskbarWatch.MinGap`). Another taskbar
+that a message finds sooner waits for that time: each message's look that finds another taskbar records it as the one
+last heard of, and the watch's timer looks again when the time is over (`TaskbarWatch.Look`; not when a message has meanwhile
+found no taskbar window, or the one the icon was last added for) and adds the icon then only when the window there is
+the one last heard of, so an Explorer that restarts twice in a row keeps its icon. When another window is there then
+(usually a taskbar made since, which no message has yet said is in place: an add made then might not take, and its
+own message would then be passed over), that look adds nothing, records nothing and starts no further look, and the
+window's own message is handled as every message is. The
+watch starts with no taskbar window recorded, so the first message of a run that finds one adds the icon again once,
+whichever window it is: the taskbar there as the tray app starts is not taken as one that has the icon, as it may have
+appeared after the icon was made visible (a start that races Explorer's at sign-in) or not have been ready for it,
+and the icon would then be missing for that sign-in. Whose window the one found is, is not looked at, and any program
+of the session can make a top-level window of that class: one without administrator rights that keeps making such
+windows and sending the message has the icon added again, which closes a notice shown from it at that moment, and a
+line logged, at most once every 5 seconds for as long as it runs, and over days those lines push the earlier ones out
+of the log (rolled over at 2 MB, with one older file, `poolwatch.log.1`: `Engine/Log.cs`). Such a window, found in the
+place of Explorer's, can also keep the icon off a taskbar Explorer has just made: nothing is added while the window
+found is the one the icon was last added for, nor when the timer's look finds a window the last message did not find,
+and the icon is then missing at least until a later message finds a window other than the one it was last added for.
+It needs such a program already running and gives it nothing else (SECURITY.md, the security model's entry on this
+message). The
 token-leak watch (section 16) also looks in from the tray every 30 minutes, so it runs while the window is hidden (with no facts about the PC yet, as after an upgrade, it reads the PC first); its notice,
 when a check it started found the leak with the guard off, opens the window on the guard's offer (the Simple view's
 card, or the switch in Settings in the Advanced view). The token-leak guard's own notices (`GuardNotices`: small
@@ -1516,7 +1577,7 @@ that setup goes on with the facts PoolWatch had and shows the read when it ends.
 step that shows it: the Standby cache step writes the chosen rule (`LiveSettings.Apply`) and, exactly when the step
 shows the note, replaces the user's task first (from the same scan; the rule is written right after); the Fixes step's
 Next registers the sign-in task, creates the shortcut and turns the guard on through the same code as the cards. A Fixes
-row that appears while the step shows (the read or the leak check ended) holds Next for a second (`NewRowWait`), so a
+row that appears while the step shows (the read or the leak check ended) holds Next for a second (`NextWait`), so a
 Next pressed as it arrives never applies what the user had no time to see. A change that fails stays on the step with
 why, and Next again goes on without it. Each change is on the timeline as made in setup and listed under Active changes.
 Until setup was completed once (`setup.json`), it opens on its own at every start, the sign-in start included, and the
@@ -1531,7 +1592,9 @@ Once setup was completed but no record mode was ever chosen (`setup.json` withou
 1.0.0-beta.2 install, whose setup had no Records step), the Records step opens alone at each start (`FirstRunGate`,
 `SetupFlow.RecordsOnly`): the same page and words, the rail listing only Records, no Back, and Done, which applies the
 choice and records it; closed without Done it is cancelled at once (Reports only stays in force), and it opens again
-at the next start. Passing the Records step of the whole setup records the choice too, and so does a Settings Save
+at the next start. It opens by itself, so Done is held until its window is first shown and for a second from then
+(`SetupSession.Shown`, from the window's `OnShown`), however long before that its session was made.
+Passing the Records step of the whole setup records the choice too, and so does a Settings Save
 that changes the record mode or the cleanup's days (`AtOnceSettings.ChoosesRecords`, `SettingsEditor.Commit`); a
 Save that changes neither chooses nothing. Settings is reachable in either view: the Simple view's header has no
 Settings button (by its approved design), so the tray menu has **Settings...**, right under Open PoolWatch, which
@@ -1539,7 +1602,8 @@ opens the same window as the Advanced view's button (`SettingsWindow`: one at a 
 open comes to the front), over the main window when that shows, else on its own with a taskbar button. A Save while
 setup is open (the Records step alone opens at each start until Done) that puts another record mode or cleanup into
 effect moves the Records step's choices to it (`SetupSession.FollowRecords`, on the setup window's thread, from
-`LiveSettings.Applied`), so its Next or Done never puts an older choice back over it; a change of anything else
+`LiveSettings.Applied`), so its Next or Done never puts an older choice back over it, and, when the step shows as its
+choices are replaced, holds that Next or Done for a second from then; a change of anything else
 leaves the step's own picks as they are; a change put into effect before the setup window has a handle is read as it
 gets one. The CI UI run clicks the tray menu's Settings... with the main window hidden
 in the Simple view and checks that Settings opens on its own, with a taskbar button, centred on its screen (read from
@@ -2440,9 +2504,10 @@ replaces the file keeps what the failed run put back), to stop a PoolWatch start
 service profile can apply at its start) and undo what that one changed (with `--keep-changes`, only by removing the
 logon task and the desktop shortcut, as in the first run); then it waits 3 s. What still has a file in use after that
 does not stop it. Once Inno Setup has removed what its log names, the uninstaller deletes what is left of the install
-folder (only `%ProgramFiles%\PoolWatch`, never through a link; files a setup that finished at a restart put there are
-not in that log), and gives Windows what is still in use, each folder once it is empty, the folder itself and a Start
-menu entry still there, to delete at the next restart (`RestartReplace` again; no restart is asked for). A file an
+folder (only `%ProgramFiles%\PoolWatch`, and not when it finds that folder to be a link as it looks at it first,
+`IsLink`; files a setup that finished at a restart put there are not in that log), and gives Windows what is still in
+use, each folder once it is empty, the folder itself and a Start menu entry still there, to delete at the next restart
+(`RestartReplace` again; no restart is asked for). A file an
 earlier setup set aside for that restart and still in use would be moved into the folder then: the place it goes is made
 now, so that Windows deletes it after the move. Started by hand, it says what Windows deletes at the restart: the first
 ten files, each with the programs that have it open, their process IDs and accounts, and how many more, as its notice
@@ -2477,9 +2542,9 @@ done. The changes put back plainly past the first 10 are counted only. Its notic
 it comes before the delete. After the delete, `SayDataLeft` looks whether anything of the folder is left (a file another
 program still has open, or the folder itself, which a PoolWatch process still running holds open) and, if so, logs each
 file left with what has it open and says it in a box when someone is there (the first 10, and how many more), with what
-to do: delete it once no program has it in use. Nothing is read through a link. What is left is not given to Windows to
-delete at the next restart, as the install folder's rest is: a PoolWatch installed again before then keeps its data in
-the same folder, under the same names.
+to do: delete it once no program has it in use. It lists through no link it finds there, the folder itself included
+(`IsLink`, `FindDataLeft`). What is left is not given to Windows to delete at the next restart, as the install
+folder's rest is: a PoolWatch installed again before then keeps its data in the same folder, under the same names.
 
 **The exit signal** (`Engine/ExitSignal.cs`) is an auto-reset named event with an admin-only DACL (Administrators and
 SYSTEM), created by the tray app and by a headless run. Listening is one registered wait on the thread pool's shared
@@ -2491,7 +2556,9 @@ already exists, which PoolWatch did not create, is not used.
 **The show signal** (`Engine/ShowSignal.cs`) is the same kind of event, with the same admin-only DACL, one for each
 Windows session (`PoolWatch\Show-<session>`, `AdminNamespace.ShowEventName`), created by the tray app (not in the CI UI
 test) and listened on with a wait that runs each time it is set. A tray app started while the one-instance mutex is held
-lets the running one take the foreground (`AllowSetForegroundWindow`) and sets its own session's event, and the running
+opens its own session's event and, only once it is open, passes on the right to take the foreground
+(`AllowSetForegroundWindow`, for any process until the next input: it does not know the running one's process ID) and
+sets the event, and the running
 one shows its main window and brings it to the front; setting it does nothing else. With no event of its session to set (a headless run holds the mutex, or the tray app runs in another
 session) it says "already running" in a box as before, and so does one started with `--tray`, which opens no window.
 

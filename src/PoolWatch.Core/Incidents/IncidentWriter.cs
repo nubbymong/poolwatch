@@ -866,7 +866,9 @@ internal sealed class IncidentWriter
                           $"compression store {Fmt.Bytes((long)sys.CompressionWsBytes)}, {sys.Handles:N0} handles, {sys.Processes:N0} processes");
         foreach (var a in inc.Alerts)
             sb.AppendLine($"- Alert {Fmt.Clock(a.TimeUtc)}: {a.Rule} ({Fmt.SignedBytes(a.Kind == AlertKind.Release ? -a.Bytes : a.Bytes)}, onset {Fmt.Clock(a.OnsetUtc)})");
-        if (inc.Retention is { } ret) sb.AppendLine($"- **Retained**: {ret.Note}.");
+        // The note names the top suspect's exe, a name its program chose: it goes in as text, like every other suspect
+        // text in this report (report.json keeps the note as it is).
+        if (inc.Retention is { } ret) sb.AppendLine($"- **Retained**: {Md(ret.Note)}.");
         if (inc.Release is { } rel)
             sb.AppendLine($"- **Released**: {Fmt.Bytes(rel.FromBytes)} -> {Fmt.Bytes(rel.ToBytes)} between {Fmt.Clock(rel.FromUtc)} and {Fmt.Clock(rel.TimeUtc)}" +
                           (rel.ClearedBytes > 0 ? $"; {Fmt.OwnClearsFreed(rel.ClearedBytes, rel.ClearedAtUtc)} of it and {Fmt.Bytes(rel.Dropped)} fell on its own." : "."));

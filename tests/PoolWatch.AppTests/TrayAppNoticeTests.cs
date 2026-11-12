@@ -54,6 +54,33 @@ public sealed class TrayAppNoticeTests
     }
 
     /// <summary>
+    /// A second start passes the right to take the foreground on only once it has found a tray app listening: it opens the
+    /// event first and passes the right on right before it sets it, so a start that finds none, and ends in the "already
+    /// running" box, passes nothing on. The Windows call itself is not made here, as it would hand on the right of
+    /// whatever runs this test: the start gives it to Send as what to run once the event is open, and
+    /// <see cref="TheShowEventIsNamedOnlyThroughTheNamespaceAndTheSession"/> holds that from the source.
+    /// </summary>
+    [Fact]
+    public void ASecondStartPassesTheForegroundOnOnlyWhenATrayAppListens()
+    {
+        int passed = 0;
+        using var shown = new SemaphoreSlim(0);
+        Assert.False(ShowSignal.Send(_event, () => passed++)); // none listens: the box, and nothing passed on
+        Assert.Equal(0, passed);
+        using (var listener = ShowSignal.Listen(_event, AdminOnlyAndMe, () => shown.Release(), _ => { }))
+        {
+            Assert.NotNull(listener);
+            int shownWhenPassed = -1;
+            Assert.True(ShowSignal.Send(_event, () => { passed++; shownWhenPassed = shown.CurrentCount; }));
+            Assert.Equal(1, passed);
+            Assert.Equal(0, shownWhenPassed); // passed on before the event was set, so the running app has it as it shows its window
+            Assert.True(shown.Wait(TimeSpan.FromSeconds(10)));
+        }
+        Assert.False(ShowSignal.Send(_event, () => passed++)); // it exited: the box again, and nothing passed on
+        Assert.Equal(1, passed);
+    }
+
+    /// <summary>
     /// Once the tray app stopped listening its event is gone, every time, so a start just after says "already running"
     /// rather than set an event nothing listens on (the pool's wait thread let go of it only when it next looked: 2 of
     /// 2,000 outlived their listener on the maintainer's PC, and the test above failed so once in a gate run).
@@ -120,7 +147,12 @@ public sealed class TrayAppNoticeTests
         Assert.Contains("try { name = AdminNamespace.Shared.ShowEventName(TokenLeakGuard.OwnSession()); } catch (Exception ex) { log(\"show signal: not used (\" + ex.Message + \")\"); return null; } " +
                         "return Listen(name, AdminNamespace.AdminOnly, onShow, log);", Flat("public static IDisposable? Listen(Action onShow, Action<string> log)"));
         Assert.Contains("try { name = AdminNamespace.Shared.ShowEventName(TokenLeakGuard.OwnSession()); } catch (Exception) { return false; } " +
-                        "AllowSetForegroundWindow(AsfwAny); return Send(name);", Flat("public static bool Send()"));
+                        "return Send(name, static () => AllowSetForegroundWindow(AsfwAny));", Flat("public static bool Send()"));
+        // The right to take the foreground is passed on in that one place, as what Send runs once it has opened the event,
+        // right before it sets it (ASecondStartPassesTheForegroundOnOnlyWhenATrayAppListens): never before the open.
+        Assert.Single(Regex.Matches(code, @"(?<!extern bool )AllowSetForegroundWindow\("));
+        Assert.Contains("if (!EventWaitHandle.TryOpenExisting(name, out var signal)) return false; using (signal) { allowForeground?.Invoke(); return signal.Set(); }",
+            Flat("internal static bool Send(string name, Action? allowForeground = null)"));
         Assert.DoesNotContain("NameOf(", code); // only AdminNamespace makes the names
         string names = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "AdminNamespace.cs"));
         Assert.Contains("public string ShowEventName(int sessionId) => NameOf(ShowLeaf + \"-\" + sessionId.ToString(System.Globalization.CultureInfo.InvariantCulture));", names);
@@ -130,21 +162,28 @@ public sealed class TrayAppNoticeTests
 
     /// <summary>
     /// Explorer's "TaskbarCreated" reaches the tray app's own window: Windows' filter lets it through to that window
-    /// (asked again, Windows says it was let through already), and when it comes the icon is added again, for that message
-    /// only. An elevated PoolWatch's icon stayed gone after Explorer restarted: that message never got through.
+    /// (asked again, Windows says it was let through already), and when it comes and finds a taskbar window the icon was
+    /// not added for yet (here the first message of each watch, which adds once whichever window it finds; later in a
+    /// run, another window than the one the icon was last added for, as after Explorer restarted) the icon is added
+    /// again, for that message only. An elevated PoolWatch's icon stayed gone after Explorer restarted: that message
+    /// never got through. The watches that get a message here are given a taskbar window of the test's own, a number, in
+    /// place of this PC's.
     /// </summary>
     [Fact]
     public void TheTaskbarWatchLetsExplorersMessageThroughAndAddsTheIconAgainWhenItComes()
     {
         Assert.NotEqual(0, TaskbarWatch.TaskbarCreated);
         int added = 0;
-        using var watch = new TaskbarWatch(() => added++);
+        IntPtr taskbar = 0x1001;
+        using var watch = new TaskbarWatch(() => added++, () => taskbar, () => 0);
         Assert.True(watch.Allowed);
         Assert.True(TaskbarWatch.Allow(watch.Handle, out uint status));
         Assert.Equal(MsgFltInfoAlreadyAllowedForWindow, status);
+        taskbar = 0x2002; // the taskbar there as the message comes: the first message of a run adds for whichever it finds
         SendMessageW(watch.Handle, (uint)TaskbarWatch.TaskbarCreated, 0, 0);
         Assert.Equal(1, added);
-        SendMessageW(watch.Handle, WmUser, 0, 0); // any other message: nothing
+        taskbar = 0x3003;
+        SendMessageW(watch.Handle, WmUser, 0, 0); // any other message: nothing, whatever the taskbar
         Assert.Equal(1, added);
         // A window of this process that was never let through: Windows had nothing allowed for it.
         var plain = new NativeWindow();
@@ -156,8 +195,274 @@ public sealed class TrayAppNoticeTests
         }
         finally { plain.DestroyHandle(); }
         // A message whose action throws never takes the UI thread down.
-        using var throwing = new TaskbarWatch(() => throw new InvalidOperationException("the icon is gone"));
+        int tried = 0;
+        using var throwing = new TaskbarWatch(() => { tried++; throw new InvalidOperationException("the icon is gone"); }, () => taskbar, () => 0);
+        taskbar = 0x4004;
         SendMessageW(throwing.Handle, (uint)TaskbarWatch.TaskbarCreated, 0, 0);
+        Assert.Equal(1, tried);
+        // The tray app's watch looks for Explorer's own taskbar window, by its class, and measures its gap on the PC's timer.
+        string code = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "TaskbarWatch.cs"));
+        Assert.Contains("public TaskbarWatch(Action created) : this(created, FindTaskbar, System.Diagnostics.Stopwatch.GetTimestamp) { }", code);
+        Assert.Contains("internal static IntPtr FindTaskbar() => FindWindowW(\"Shell_TrayWnd\", null);", code);
+        _ = TaskbarWatch.FindTaskbar(); // whatever this PC has: the call is declared as Windows has it
+    }
+
+    /// <summary>
+    /// Any program of the session can send "TaskbarCreated" to the tray app's window, one without administrator rights too
+    /// (it is the one message let through to it), so a message alone does nothing: the icon is added again, and a line
+    /// written in the log, only when the taskbar window is another than the one the icon was last added for, and at most
+    /// once every few seconds. The first message of a run adds it once for the taskbar it finds, as the watch has added
+    /// it for none before (<see cref="TheTaskbarWatchAddsTheIconOnceAtTheFirstMessageOfARunThatFindsATaskbar"/>). After
+    /// that, ten thousand messages with the same taskbar add nothing; a new taskbar adds it once, however
+    /// many messages follow; taskbars that keep changing add it once every <see cref="TaskbarWatch.MinGap"/> at most, and
+    /// the one the last message found inside that time is added for when the time is over, so an Explorer that restarts
+    /// twice in a row keeps its icon; with no taskbar there is nothing to add it to.
+    /// </summary>
+    [Fact]
+    public void TheTaskbarWatchAddsTheIconAgainOnlyForAnotherTaskbarAndAtMostOnceEveryFewSeconds()
+    {
+        long gap = (long)(TaskbarWatch.MinGap.TotalSeconds * System.Diagnostics.Stopwatch.Frequency), now = 0;
+        Assert.Equal(TimeSpan.FromSeconds(5), TaskbarWatch.MinGap); // SECURITY.md and DESIGN.md say 5 seconds
+        int added = 0;
+        IntPtr taskbar = 0x1001;
+        using var watch = new TaskbarWatch(() => added++, () => taskbar, () => now);
+        void Flood(int messages = 10_000)
+        {
+            for (int i = 0; i < messages; i++) SendMessageW(watch.Handle, (uint)TaskbarWatch.TaskbarCreated, 0, 0);
+        }
+
+        Flood(1); // the first message of the run: the icon is added once for the taskbar it finds
+        Assert.Equal(1, added);
+        added = 0; // counted from here: what comes after that first message
+        now += 10 * gap;
+        Flood(); // the taskbar the icon is on: nothing, however many
+        Assert.Equal(0, added);
+        Assert.False(watch.LookDue);
+        taskbar = 0x2002; // Explorer restarted
+        Flood();
+        Assert.Equal(1, added);
+        Assert.False(watch.LookDue);
+        now += 10 * gap;
+        Flood(); // still that taskbar, long after: nothing
+        Assert.Equal(1, added);
+        // Taskbar windows that keep changing (a program can make a window of that class): once, then not again inside the gap.
+        for (int i = 0; i < 10_000; i++)
+        {
+            taskbar = 0x5000 + i;
+            SendMessageW(watch.Handle, (uint)TaskbarWatch.TaskbarCreated, 0, 0);
+        }
+        Assert.Equal(2, added);
+        Assert.True(watch.LookDue); // the last one is looked at again when the gap is over
+        now += gap / 2;
+        watch.Look(); // its timer, early
+        Assert.Equal(2, added);
+        Assert.True(watch.LookDue);
+        now += gap;
+        watch.Look(); // the gap is over: the taskbar there now gets the icon
+        Assert.Equal(3, added);
+        Assert.False(watch.LookDue);
+        Flood();
+        Assert.Equal(3, added);
+        // An Explorer that restarts twice in a row: the second taskbar gets the icon once the gap is over, with no further message.
+        now += 10 * gap;
+        taskbar = 0x7001;
+        Flood(1);
+        taskbar = 0x7002;
+        Flood(1);
+        Assert.Equal(4, added);
+        Assert.True(watch.LookDue);
+        now += 2 * gap;
+        watch.Look(); // its timer
+        Assert.Equal(5, added);
+        Assert.False(watch.LookDue);
+        // The taskbar the icon was added for is back before the look came due: nothing to do, and no look left.
+        now += 10 * gap;
+        taskbar = 0x8001;
+        Flood(1);
+        taskbar = 0x8002;
+        Flood(1);
+        taskbar = 0x8001;
+        Flood(1);
+        Assert.Equal(6, added);
+        Assert.False(watch.LookDue);
+        // No taskbar at all (Explorer is not running): nothing to add the icon to.
+        now += 10 * gap;
+        taskbar = IntPtr.Zero;
+        Flood();
+        Assert.Equal(6, added);
+        Assert.False(watch.LookDue);
+        taskbar = 0x9001; // Explorer is back
+        Flood();
+        Assert.Equal(7, added);
+        // A watch made while there is no taskbar (PoolWatch started before Explorer's): the first taskbar gets the icon at once.
+        taskbar = IntPtr.Zero;
+        int early = 0;
+        using var before = new TaskbarWatch(() => early++, () => taskbar, () => now);
+        taskbar = 0xA001;
+        SendMessageW(before.Handle, (uint)TaskbarWatch.TaskbarCreated, 0, 0);
+        Assert.Equal(1, early);
+    }
+
+    /// <summary>
+    /// The watch takes no taskbar window as one that has the icon until it added the icon for it itself, so the first
+    /// "TaskbarCreated" of a run adds the icon once for the taskbar that was there as the watch was made: that taskbar may
+    /// have appeared after the tray app made its icon visible (a start that races Explorer's at sign-in), or not have
+    /// been ready for the icon, and a watch that took it as one that has the icon passed Explorer's message over, so the
+    /// icon was missing for that sign-in. Not again for that taskbar, however many messages follow, at once or long
+    /// after; and the watch does not look at the taskbar as it is made (the look comes with a message).
+    /// </summary>
+    [Fact]
+    public void TheTaskbarWatchAddsTheIconOnceAtTheFirstMessageOfARunThatFindsATaskbar()
+    {
+        long gap = (long)(TaskbarWatch.MinGap.TotalSeconds * System.Diagnostics.Stopwatch.Frequency), now = 0;
+        int added = 0, looks = 0;
+        IntPtr taskbar = 0x1001;
+        using var watch = new TaskbarWatch(() => added++, () => { looks++; return taskbar; }, () => now);
+        Assert.Equal(0, added); // nothing is added without a message
+        Send(watch);
+        Assert.Equal(1, added);
+        Assert.Equal(1, looks); // one look, for the message: none as the watch was made
+        Assert.False(watch.LookDue);
+        Send(watch, 10_000); // that taskbar has the icon now: nothing, however many
+        Assert.Equal(1, added);
+        Assert.False(watch.LookDue);
+        now += 10 * gap;
+        Send(watch, 10_000); // nor long after
+        Assert.Equal(1, added);
+        Assert.False(watch.LookDue);
+    }
+
+    /// <summary>
+    /// A taskbar that appears after the watch was made (PoolWatch started before Explorer's taskbar was there) gets the
+    /// icon once, at the first message that finds it: the messages before it, which find no taskbar, add nothing and are
+    /// not that first one. After it the rules are the usual ones: nothing for that taskbar, and another taskbar inside
+    /// the gap waits for the gap to be over.
+    /// </summary>
+    [Fact]
+    public void TheTaskbarWatchAddsTheIconOnceForATaskbarThatAppearsAfterItWasMade()
+    {
+        long gap = (long)(TaskbarWatch.MinGap.TotalSeconds * System.Diagnostics.Stopwatch.Frequency), now = 0;
+        int added = 0;
+        IntPtr taskbar = IntPtr.Zero;
+        using var watch = new TaskbarWatch(() => added++, () => taskbar, () => now);
+        Send(watch, 100); // no taskbar yet: nothing to add the icon to
+        Assert.Equal(0, added);
+        Assert.False(watch.LookDue);
+        taskbar = 0xB001; // Explorer's taskbar is there
+        Send(watch);
+        Assert.Equal(1, added);
+        Send(watch, 10_000);
+        Assert.Equal(1, added);
+        Assert.False(watch.LookDue);
+        taskbar = 0xB002; // another taskbar, inside the gap
+        Send(watch);
+        Assert.Equal(1, added);
+        Assert.True(watch.LookDue);
+        now += 2 * gap;
+        watch.Look(); // its timer
+        Assert.Equal(2, added);
+        Assert.False(watch.LookDue);
+    }
+
+    /// <summary>
+    /// The look the watch makes by itself when the gap is over (its timer's) adds the icon only for the taskbar window
+    /// the last message found. An Explorer that starts three times inside one gap: the second taskbar's message comes
+    /// inside the gap and waits for it; when the gap is over the third taskbar window is there, but no message has come
+    /// for it yet, so nothing has said it is in place. The look adds nothing for it, records nothing and leaves no look
+    /// due; the third's own message then adds the icon once. (Before, that look added the icon for whatever window was
+    /// there and recorded it, so the third's own message was passed over: had that add not taken, the icon stayed
+    /// missing.)
+    /// </summary>
+    [Fact]
+    public void TheTaskbarWatchsLaterLookAddsNothingForATaskbarNoMessageHasComeFor()
+    {
+        long gap = (long)(TaskbarWatch.MinGap.TotalSeconds * System.Diagnostics.Stopwatch.Frequency), now = 0;
+        int added = 0;
+        IntPtr taskbar = 0xC001;
+        using var watch = new TaskbarWatch(() => added++, () => taskbar, () => now);
+        Send(watch); // the first taskbar of the run: added at once
+        Assert.Equal(1, added);
+        now += gap / 2;
+        taskbar = 0xC002; // Explorer restarted: the second taskbar's message, inside the gap
+        Send(watch);
+        Assert.Equal(1, added);
+        Assert.True(watch.LookDue);
+        taskbar = 0xC003; // Explorer restarted again: the third taskbar window is there, its message has not come yet
+        now += gap;
+        watch.Look(); // its timer, the gap over
+        Assert.Equal(1, added); // nothing for a window no message has come for
+        Assert.False(watch.LookDue); // and no look left: that window's own message is waited for
+        watch.Look(); // nor would a further look add it
+        Assert.Equal(1, added);
+        Assert.False(watch.LookDue);
+        Send(watch); // the third's own message: the gap is over, so it is added now
+        Assert.Equal(2, added);
+        Assert.False(watch.LookDue);
+        Send(watch, 10_000); // once: that taskbar has the icon
+        Assert.Equal(2, added);
+        // The same when the third's message comes while the gap is not over yet: the look that message starts adds it.
+        now += 10 * gap;
+        taskbar = 0xC101;
+        Send(watch);
+        Assert.Equal(3, added);
+        now += gap / 4;
+        taskbar = 0xC102; // the second's message, inside the gap
+        Send(watch);
+        taskbar = 0xC103; // the third is there, with no message yet
+        now += gap / 4;
+        watch.Look(); // a timer that fires early: nothing for the third, and no look left
+        Assert.Equal(3, added);
+        Assert.False(watch.LookDue);
+        Send(watch); // the third's message, still inside the gap: it waits for the gap
+        Assert.Equal(3, added);
+        Assert.True(watch.LookDue);
+        now += gap;
+        watch.Look(); // its timer: the third is the one last heard of now
+        Assert.Equal(4, added);
+        Assert.False(watch.LookDue);
+    }
+
+    /// <summary>
+    /// Every message's look records the taskbar window it found as the one last heard of, also inside the gap and while a
+    /// look is already due: the second taskbar's message inside the gap, then the third's inside the same gap, and the
+    /// look made when the gap is over adds the icon once, for the third, with no further message.
+    /// </summary>
+    [Fact]
+    public void TheTaskbarWatchsLaterLookAddsForTheTaskbarTheLastMessageFound()
+    {
+        long gap = (long)(TaskbarWatch.MinGap.TotalSeconds * System.Diagnostics.Stopwatch.Frequency), now = 0;
+        int added = 0;
+        IntPtr taskbar = 0xD001;
+        using var watch = new TaskbarWatch(() => added++, () => taskbar, () => now);
+        Send(watch); // the first taskbar of the run: added at once
+        Assert.Equal(1, added);
+        now += gap / 4;
+        taskbar = 0xD002; // the second taskbar's message, inside the gap
+        Send(watch);
+        Assert.Equal(1, added);
+        Assert.True(watch.LookDue);
+        now += gap / 4;
+        taskbar = 0xD003; // the third's message, inside the same gap, a look already due
+        Send(watch);
+        Assert.Equal(1, added);
+        Assert.True(watch.LookDue);
+        now += gap;
+        watch.Look(); // its timer, the gap over: the third is the one last heard of
+        Assert.Equal(2, added);
+        Assert.False(watch.LookDue);
+        Send(watch, 10_000); // the third has the icon: nothing more for it
+        Assert.Equal(2, added);
+        Assert.False(watch.LookDue);
+        now += 10 * gap;
+        taskbar = 0xD002; // and it was the third it was added for, not the second: the second is another taskbar
+        Send(watch);
+        Assert.Equal(3, added);
+    }
+
+    /// <summary>Sends "TaskbarCreated" to a watch's window, as Explorer's broadcast (or any program of the session) does.</summary>
+    private static void Send(TaskbarWatch to, int messages = 1)
+    {
+        for (int i = 0; i < messages; i++) SendMessageW(to.Handle, (uint)TaskbarWatch.TaskbarCreated, 0, 0);
     }
 
     /// <summary>
@@ -193,7 +498,7 @@ public sealed class TrayAppNoticeTests
         })
             Assert.Matches(new Regex(@"(?m)^[ \t]*" + Regex.Escape(line) + @"[ \t]*\r?$"), source);
         string flat = UninstallerTests.OneLine(source);
-        Assert.Contains("private void AddIconAgain() { _engine.Log.Info(\"Explorer's taskbar was created again: the tray icon is added to it again\"); " +
+        Assert.Contains("private void AddIconAgain() { _engine.Log.Info(\"a message said the taskbar is in place: the tray icon is added to it again\"); " +
                         "_icon.Visible = false; _icon.Visible = true; }", flat);
         Assert.Contains("private void ShowMain() { Form.Show(); if (Form.WindowState == FormWindowState.Minimized) Form.WindowState = FormWindowState.Normal; Form.Activate(); }", flat);
         // Every notice has a title of its own, and none is "PoolWatch".

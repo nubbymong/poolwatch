@@ -224,9 +224,10 @@ internal sealed class AppPaths
 
     /// <summary>
     /// The retention clock for this start of PoolWatch, counting on <paramref name="forwardMs"/> (the PC's working-time
-    /// timer, <see cref="Native.WorkingTime.Ms"/>), from the state its last save kept (read bounded, never through a link).
-    /// With none that can be read, everything retention judges is seen for the first time at the next check. Its saves go
-    /// to <see cref="RetentionStateFile"/> in one step (<see cref="DurableFile"/>).
+    /// timer, <see cref="Native.WorkingTime.Ms"/>), from the state its last save kept (read after
+    /// <see cref="PathGuard.CheckReal"/>'s look for a link on its path, and only when a look at its size finds it
+    /// within the bound). With none that can be read, everything retention judges is seen for the first time at the
+    /// next check. Its saves go to <see cref="RetentionStateFile"/> in one step (<see cref="DurableFile"/>).
     /// </summary>
     public RetentionClock OpenRetentionClock(Func<long> forwardMs, Action<string> log)
     {
@@ -266,7 +267,9 @@ internal sealed class AppPaths
 
     /// <summary>
     /// Deletes the daily data folders, incidents and exports (and the files directly in those folders) that retention
-    /// has kept as they are for longer than the retention period, only inside DataRoot and never through a link. It
+    /// has kept as they are for longer than the retention period, only inside DataRoot, and each only after
+    /// <see cref="PathGuard.CheckReal"/>'s look for a link on its path: one with a link found there, or that is one
+    /// itself, is not deleted. It
     /// lists them all first (<paramref name="list"/>, Windows' listing by default), each with its stamp
     /// (<see cref="StampOf"/>: for a folder that is not a link, also the name, length and last-write time of everything
     /// in it but a link, so rows added to its files count as a write into it), then asks <paramref name="clock"/>
@@ -339,8 +342,9 @@ internal sealed class AppPaths
             var (path, dir) = where[name];
             try
             {
-                // CheckReal refuses if this folder (or any folder above it) is a link, so a planted junction
-                // can never turn a retention sweep into a recursive delete of something outside the data root.
+                // CheckReal looks at this folder and each folder above it in the data root right before the delete, and
+                // throws when one is a link then (or cannot be checked): a junction it finds there does not turn a
+                // retention sweep into a recursive delete of something outside the data root.
                 Guard.CheckReal(path);
                 if (dir) DeleteTree(path);
                 else File.Delete(path);
@@ -402,12 +406,15 @@ internal sealed class AppPaths
     }
 
     /// <summary>
-    /// Deletes the folder <paramref name="folder"/> with everything in it, never through a link: a link in it (a junction,
-    /// a symbolic link) is deleted itself, its own entry, never what it leads to, and nothing is listed through it. Each
-    /// file and folder in it is deleted even when one before it could not be (the first error is thrown once all that can
-    /// go is gone, and the folder itself is then left). Unlike <see cref="Directory.Delete(string, bool)"/> with
-    /// recursive, it never looks the folder up in the folder above it, which that does first: so while that folder above
-    /// cannot be listed, what is in this folder still goes, and only the folder's own removal may be refused until then.
+    /// Deletes the folder <paramref name="folder"/> with everything in it, going into no folder its listing shows as a
+    /// link: such a link in it (a junction, a symbolic link) is deleted itself, its own entry, not what it leads to,
+    /// and nothing is listed through it. The listing is the look: a folder it shows as no link is gone into by its path
+    /// afterwards, and <paramref name="folder"/> itself is not looked at here (retention's
+    /// <see cref="PathGuard.CheckReal"/> looks at it right before). Each file and folder in it is deleted even when one
+    /// before it could not be (the first error is thrown once all that can go is gone, and the folder itself is then
+    /// left). Unlike <see cref="Directory.Delete(string, bool)"/> with recursive, it never looks the folder up in the
+    /// folder above it, which that does first: so while that folder above cannot be listed, what is in this folder
+    /// still goes, and only the folder's own removal may be refused until then.
     /// </summary>
     internal static void DeleteTree(string folder)
     {
@@ -464,10 +471,11 @@ internal sealed class AppPaths
     /// itself, so a file being written shows its size now) and the last-write time of every file and folder in it at any
     /// depth (<see cref="Contents"/>: a link and what is behind it are left out). A folder that is itself a link (a
     /// junction in a daily folder's place, say) is stamped by its own last-write time alone, as Windows gives it for the
-    /// link, so nothing is read through it either; retention never deletes one (<see cref="PathGuard.CheckReal"/> refuses
-    /// a link). A file that is a link gives its own time and length, as Windows reads them for the link. Null when a
-    /// last-write time is Windows' value for a path that is gone (1601-01-01); throws when any of it cannot be read or
-    /// listed. For a folder, what it holds is added to <paramref name="inside"/> when one is given.
+    /// link, so nothing is read through it either; nor does retention delete one that is a link at the look right
+    /// before its delete (<see cref="PathGuard.CheckReal"/> refuses it then). A file that is a link gives its own time
+    /// and length, as Windows reads them for the link. Null when a last-write time is Windows' value for a path that is
+    /// gone (1601-01-01); throws when any of it cannot be read or listed. For a folder, what it holds is added to
+    /// <paramref name="inside"/> when one is given.
     /// </summary>
     /// <param name="lastWriteUtc">A path's last-write time (a test gives its own); null: Windows', read with the file's length in one
     /// query of the file itself (one per file, where reading the time and the length apart took two).</param>

@@ -261,6 +261,51 @@ public class UntrustedTextTests
         finally { try { Directory.Delete(root, true); } catch { } }
     }
 
+    /// <summary>
+    /// A growth whose top suspect went quiet while the tag kept its rise is marked retained, and its report's "Retained"
+    /// line names that suspect's exe: the name stays text there as everywhere else in report.md, and report.json keeps
+    /// the note as PoolWatch made it.
+    /// </summary>
+    [Fact]
+    public void ARetainedIncidentsLineKeepsItsSuspectsExeNameAsText()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "pw-untrusted-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(root);
+            var settings = new Settings { GrowthRules = [new(1, 3 * Settings.MB)], IncidentQuietMinutes = 0.5, RetentionMinutes = 1 };
+            var w = new World();
+            var mgr = new IncidentManager(settings, new TagKnowledge(null, null), new UntrustedHost(root), w.Registry) { RewriteInterval = TimeSpan.Zero, Budget = new WriteBudget(1L << 30, 1L << 30) };
+            var det = new Detector(settings);
+            w.AddProcess(4, 0, "System");
+            w.AddProcess(100, 4, Image);
+            long file = 50 * Settings.MB;
+            void Step()
+            {
+                w.Sample(("File", file));
+                mgr.Process(w.History, det, det.Evaluate(w.History), At(w.Now - w.Interval));
+            }
+            for (int i = 0; i < 15; i++) Step();
+            for (int i = 0; i < 20; i++) { w.Io(100, other: 2000); file += 800_000; Step(); }
+            Incident? inc = null;
+            for (int i = 0; i < 90 && (inc = mgr.Closed.SingleOrDefault())?.Retention is null; i++) Step();
+            Assert.NotNull(inc?.Retention);
+            string note = inc!.Retention!.Note;
+            Assert.Contains($" after {Image} (PID 100) went quiet", note); // the note itself holds the name as it is
+
+            string md = File.ReadAllText(Path.Combine(inc.Dir, "report.md"));
+            string retained = Assert.Single(md.Split('\n').Select(l => l.TrimEnd('\r')), l => l.StartsWith("- **Retained**: ", StringComparison.Ordinal));
+            Assert.Contains($" after {ImageAsText} (PID 100) went quiet", retained);
+            var (_, balanced, live) = Outside(retained);
+            Assert.True(balanced, retained);
+            Assert.False(live, $"the Retained line has a live link bracket outside its code spans: {retained}");
+            Assert.DoesNotContain(Image, md); // nowhere in the report as it came
+            using var json = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(inc.Dir, "report.json")));
+            Assert.Equal(note, json.RootElement.GetProperty("retention").GetProperty("note").GetString());
+        }
+        finally { try { Directory.Delete(root, true); } catch { } }
+    }
+
     [Fact]
     public void AVendorDraftNamedLikeAMentionMentionsNoOneAndReferencesNothing()
     {

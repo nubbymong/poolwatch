@@ -243,11 +243,12 @@ public class PathGuardTests
     [Fact]
     public void CheckRealRefusesALinkInTheDataRoot()
     {
-        // An unelevated user could plant a junction/symlink inside the data root pointing elsewhere; an elevated
-        // PoolWatch must never delete or write THROUGH it. Check() (string policy) still allows the name — CheckReal
-        // resolves what it points at and refuses. On Windows the test plants a directory JUNCTION: it needs no
-        // privilege (a symlink needs SeCreateSymbolicLinkPrivilege, which a standard account lacks), so it is exactly
-        // what an unelevated attacker would use. Elsewhere it plants a symlink (FileAttributes.ReparsePoint on Unix too).
+        // An unelevated user could plant a junction/symlink inside the data root pointing elsewhere, and an elevated
+        // delete or write THROUGH it would land outside the root. The string policy (IsAllowed) still allows the name —
+        // CheckReal looks at each folder on the path and refuses when one is a link then. On Windows the test plants a
+        // directory JUNCTION: it needs no privilege (a symlink needs SeCreateSymbolicLinkPrivilege, which a standard
+        // account lacks), so it is exactly what an unelevated attacker would use. Elsewhere it plants a symlink
+        // (FileAttributes.ReparsePoint on Unix too).
         var data = Path.Combine(Path.GetTempPath(), "pwtest-real-" + Guid.NewGuid().ToString("N"));
         var outside = Path.Combine(Path.GetTempPath(), "pwtest-outside-" + Guid.NewGuid().ToString("N"));
         var link = Path.Combine(data, "evil");

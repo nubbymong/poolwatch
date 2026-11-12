@@ -36,8 +36,13 @@ internal static class BundleBuilder
                (i.OwnClearsFreed is { } own ? $"{i.LevelSaid(Fmt.Stamp)}, after {own} of it" : "");
     }
 
-    /// <summary>A suspect under its incident in incidents.md, its confidence in the words of Pool causes' Confidence column.</summary>
-    internal static string SuspectLine(Core.Correlation.OwnerSuspect o) => $"- Suspect: {o.Summary} ({Core.Util.PlainWords.Confidence(o.Confidence)})";
+    /// <summary>
+    /// A suspect under its incident in incidents.md, its confidence in the words of Pool causes' Confidence column. Its
+    /// summary holds names other programs chose (an owner's name, exe names, a role taken from a command line), so it goes
+    /// in as text, through the escape report.md gives the same summary (<see cref="FindingReport.Md"/>).
+    /// </summary>
+    internal static string SuspectLine(Core.Correlation.OwnerSuspect o) =>
+        $"- Suspect: {FindingReport.Md(o.Summary)} ({Core.Util.PlainWords.Confidence(o.Confidence)})";
 
     /// <summary>
     /// The bundle's incidents.md: the last 50 incidents, each with its <see cref="IncidentLine"/> and its first three
@@ -137,11 +142,12 @@ internal static class BundleBuilder
         files["git-and-spawns.md"] = git.ToString();
         try
         {
-            // The most recently active spawn-storm folder's trace (capped at 5 MB), its whole rows only.
+            // The most recently active spawn-storm folder's trace, its whole rows only: a folder or a file that is a link
+            // when LatestStormSpawns looks at it is passed over, and the file is left out when it holds more than
+            // MaxSpawnsBytes.
             List<(string? Dir, long LastActiveMs)> held;
             lock (d.Spawns) held = d.Spawns.Folders.Select(f => (f.Dir, f.LastActiveMs)).ToList();
-            if (LatestStormSpawns(held, engine.Paths.IncidentsDir) is { } sp && new FileInfo(sp).Length <= 5 << 20)
-                files["spawns.csv"] = Core.Util.Csv.ReadCompleteRows(sp);
+            if (StormSpawns(held, engine.Paths.IncidentsDir) is { } rows) files["spawns.csv"] = rows;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
 
@@ -170,16 +176,40 @@ internal static class BundleBuilder
     /// storm of its program that comes within an hour of the one before (SpawnTracker), so an older folder can be the one
     /// still in use. Of the folders PoolWatch holds (<paramref name="held"/>: its storms', the last active the latest), the
     /// latest with a spawns.csv; else, after a restart, of the newest <see cref="MaxStormFoldersLookedAt"/> storm folders in
-    /// <paramref name="incidentsDir"/>, the one whose spawns.csv was written last.
+    /// <paramref name="incidentsDir"/>, the one whose spawns.csv was written last. A storm folder that is a link (a
+    /// junction, a symbolic link) when it is looked at here, or whose spawns.csv is one then, is passed over, held or
+    /// not, and so is one that is not below <paramref name="incidentsDir"/>
+    /// (<see cref="Core.Util.PathGuard.FirstLinkBelow"/>, which looks at each part of the path from the first one below
+    /// <paramref name="incidentsDir"/>: that folder itself and the folders above it are not looked at). The look is at
+    /// the path, and <see cref="StormSpawns"/> opens the file by the path this gives afterwards, so a link put in the
+    /// folder's or the file's place after the look is followed. The incidents folder is in the data folder, where only
+    /// administrators and SYSTEM can put a link, or, for a run given <c>--out</c>, wherever that says, which someone who
+    /// is not an administrator may be able to write. The bundle is made as administrator and kept where the signed-in
+    /// account can read it, so in such a folder a link put there after the look, or the incidents folder itself being a
+    /// link, can put one file that it leads to, of at most <see cref="MaxSpawnsBytes"/>, in the bundle (SECURITY.md,
+    /// Known limitations, which also says what folder to give <c>--out</c>).
     /// </summary>
     internal static string? LatestStormSpawns(IEnumerable<(string? Dir, long LastActiveMs)> held, string incidentsDir)
     {
+        bool Real(string sp) => Core.Util.PathGuard.FirstLinkBelow(incidentsDir, sp) is null && File.Exists(sp);
         foreach (var (dir, _) in held.Where(h => h.Dir is not null).OrderByDescending(h => h.LastActiveMs))
-            if (Path.Combine(dir!, "spawns.csv") is var sp && File.Exists(sp)) return sp;
+            if (Path.Combine(dir!, "spawns.csv") is var sp && Real(sp)) return sp;
         if (!Directory.Exists(incidentsDir)) return null;
         return Directory.EnumerateDirectories(incidentsDir, "*-SpawnStorm*").Order(StringComparer.Ordinal).TakeLast(MaxStormFoldersLookedAt)
-            .Select(d => new FileInfo(Path.Combine(d, "spawns.csv"))).Where(f => f.Exists).MaxBy(f => f.LastWriteTimeUtc)?.FullName;
+            .Select(d => Path.Combine(d, "spawns.csv")).Where(Real).Select(sp => new FileInfo(sp)).MaxBy(f => f.LastWriteTimeUtc)?.FullName;
     }
+
+    /// <summary>The most a storm folder's spawns.csv may hold to go into the bundle: a larger one is left out.</summary>
+    internal const int MaxSpawnsBytes = 5 << 20;
+
+    /// <summary>
+    /// The bundle's spawns.csv: the whole rows of the most recently active storm folder's (<see cref="LatestStormSpawns"/>),
+    /// or null when there is none or it holds more than <see cref="MaxSpawnsBytes"/>. Its size is not taken from a look at
+    /// the file before the read: at most that many bytes and one more are read, through the handle the file was opened
+    /// with (<see cref="Core.Util.Csv.ReadCompleteRows(string, int)"/>).
+    /// </summary>
+    internal static string? StormSpawns(IEnumerable<(string? Dir, long LastActiveMs)> held, string incidentsDir) =>
+        LatestStormSpawns(held, incidentsDir) is { } sp ? Core.Util.Csv.ReadCompleteRows(sp, MaxSpawnsBytes) : null;
 
     private static string Iso(DateTime utc) => utc.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
 }

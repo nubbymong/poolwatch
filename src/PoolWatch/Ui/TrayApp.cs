@@ -69,7 +69,10 @@ internal sealed class TrayApp : ApplicationContext, IShell
     private readonly IncidentNotices _notices;
     /// <summary>A second start of PoolWatch shows the window (none in the CI UI test, or when its event could not be made).</summary>
     private readonly IDisposable? _showSignal;
-    /// <summary>Adds the tray icon again once Explorer's taskbar is back after a restart of Explorer.</summary>
+    /// <summary>
+    /// Adds the tray icon again when Explorer says its taskbar is in place: once at the first such message of a run that
+    /// finds a taskbar, and then when the taskbar is another window (Explorer restarted).
+    /// </summary>
     private readonly TaskbarWatch _taskbar;
     /// <summary>The token-leak guard in the tray while this sign-in is not protected: the amber dot, its line, and a click that turns it on.</summary>
     private readonly GuardTray _guardTray;
@@ -195,7 +198,9 @@ internal sealed class TrayApp : ApplicationContext, IShell
         // A second start of PoolWatch in this session (from the Start menu, or Windows starting it for a click on a notice
         // in the notification centre) shows the window instead of saying "already running" (never in the CI UI test).
         _showSignal = smoke ? null : ShowSignal.Listen(() => _ui.Post(_ => ShowWindow(), null), engine.Log.Info);
-        // Explorer restarted: its new taskbar gets the icon again (the message that says so is let through to this
+        // Explorer's taskbar is in place: it gets the icon again, once at the first such message of this run (the icon
+        // made visible above may not have taken: no taskbar yet, or one not ready, at sign-in) and then whenever the
+        // taskbar is another window, as after a restart of Explorer (the message that says so is let through to this
         // elevated app's own window for it).
         _taskbar = new TaskbarWatch(AddIconAgain);
         if (!_taskbar.Allowed) engine.Log.Info("the tray icon may not come back after Explorer restarts: Windows would not let its message through");
@@ -581,12 +586,13 @@ internal sealed class TrayApp : ApplicationContext, IShell
         title.Length <= PoolCauses.MaxNoticeTitle ? title : title[..(PoolCauses.MaxNoticeTitle - 3)].TrimEnd() + "...";
 
     /// <summary>
-    /// Explorer's taskbar is back after a restart of Explorer (<see cref="TaskbarWatch"/>): the icon is added to it again,
-    /// with its colour, tooltip and menu as they are (taken off what Windows still lists for it, then put on).
+    /// What <see cref="TaskbarWatch"/> runs, at the first "TaskbarCreated" of a run that finds a taskbar and then when
+    /// the taskbar window is another one, as after a restart of Explorer: the icon is added to the taskbar again, with
+    /// its colour, tooltip and menu as they are (taken off what Windows still lists for it, then put on).
     /// </summary>
     private void AddIconAgain()
     {
-        _engine.Log.Info("Explorer's taskbar was created again: the tray icon is added to it again");
+        _engine.Log.Info("a message said the taskbar is in place: the tray icon is added to it again");
         _icon.Visible = false;
         _icon.Visible = true;
     }

@@ -116,12 +116,15 @@ public sealed class PathGuard
     /// <summary>
     /// Returns the path when PoolWatch may write or delete there, else throws: the string policy
     /// (<see cref="IsAllowed"/>), and the path, or any directory between its allowed root and it, must not be a reparse
-    /// point (a symlink, junction or mount point). An elevated PoolWatch must never delete or write <em>through</em> a
-    /// link that an unelevated process could have planted inside the data root, because the link could redirect the
-    /// operation to a file or folder outside the root. The ONLY check for a write or a delete (call it
-    /// right before each one); the string-only check that some writes used is gone. With dataRootMustExist, a path in the
-    /// data root is refused while the data root is not there as a folder (it is gone, or a link or a file stands there),
-    /// and, with dataRootIdentity, while the folder there is not the one this guard was made for.
+    /// point (a symlink, junction or mount point) when this looks at it; one whose attributes cannot be read counts as
+    /// one. A link that an unelevated process planted below the root could redirect an elevated write or delete to a
+    /// file or folder outside it, so a path where it finds one is refused. This is a look at the path, which the caller
+    /// opens by that same path: it does not hold against a link put in place after the look, and it starts below the
+    /// allowed root, so a headless --out folder itself and the folders above a root are not looked at (SECURITY.md,
+    /// Known limitations). The ONLY check for a write or a delete (call it right before each one); the string-only
+    /// check that some writes used is gone. With dataRootMustExist, a path in the data root is refused while the data
+    /// root is not there as a folder (it is gone, or a link or a file stands there), and, with dataRootIdentity, while
+    /// the folder there is not the one this guard was made for.
     /// </summary>
     public string CheckReal(string path)
     {
@@ -151,7 +154,7 @@ public sealed class PathGuard
             if (part.Length == 0) continue;
             cur = Path.Combine(cur, part);
             if (IsReparsePoint(cur))
-                throw new UnauthorizedAccessException($"PoolWatch write policy: '{cur}' is a link; PoolWatch never writes or deletes through links");
+                throw new UnauthorizedAccessException($"PoolWatch write policy: '{cur}' is a link, or could not be checked for one, so PoolWatch did not write or delete through it");
         }
         return path;
     }

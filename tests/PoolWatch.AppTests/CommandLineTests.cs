@@ -79,7 +79,7 @@ public sealed class CommandLineTests
             Program.WriteSummary(file, "second" + Environment.NewLine, append: true, check);
             Assert.Equal("first" + Environment.NewLine + "second" + Environment.NewLine, File.ReadAllText(file));
             Assert.False(File.Exists(file + ".tmp"));
-            // Every path it touches goes through the check (PathGuard.CheckReal in PoolWatch: never through a link).
+            // Every path it touches goes through the check (PathGuard.CheckReal in PoolWatch, which looks for a link on it).
             Assert.Contains(file, real);
             Assert.Contains(file + ".tmp", real);
             // Appending with no file yet writes this run's summary alone.

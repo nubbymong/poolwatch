@@ -5210,9 +5210,10 @@ public sealed class UninstallerTests
     [Fact]
     public void TheUninstallerRemovesWhatIsStillInUseAtTheNextRestart()
     {
-        // After Inno Setup removed what the setup installed, what is left of the install folder goes too: all it can now
-        // (DelTree, which never follows a link), the rest at the next restart, each folder once empty and the folder
-        // itself last. Only PoolWatch's own folder in Program Files, and never through a link.
+        // After Inno Setup removed what the setup installed, what is left of the install folder goes too: all it can
+        // now (DelTree, which never follows a link), the rest at the next restart, each folder once empty and the
+        // folder itself last. Only PoolWatch's own folder in Program Files, and not when IsLink, looking at it right
+        // before, finds it to be a link.
         string rest = Body("RemoveRest");
         Assert.Contains("if (CompareText(App, ExpandConstant('{autopf}\\PoolWatch')) = 0) and DirExists(App) and not IsLink(App) then begin " +
                         "DelTree(App, True, True, True); if DirExists(App + '\\' + StageFolder) then KeepOutAtRestart(App); " +
@@ -6386,10 +6387,11 @@ public sealed class UninstallerTests
     /// After the data folder's delete (DelTree, whose result Inno Setup gives no caller), the uninstaller looks whether
     /// anything of the folder is left (SayDataLeft: the folder there at all, DirExists) and, if so, logs it and says it in
     /// a box when someone is there: each file left with what has it open (FindDataLeft, HoldersOf), the first MaxShown in
-    /// the box and how many more, and what to do. A link is never followed, the folder itself included (IsLink), and no
-    /// holder is asked about a link. What is left is not given to Windows to delete at the next restart, as the install
-    /// folder's rest is (RemoveRest): a PoolWatch installed again before then keeps its data in the same folder, under the
-    /// same names. Both routines are held whole, and the box's words are held through <see cref="DataLeftTextAsTheScript"/>.
+    /// the box and how many more, and what to do. A link it finds is not listed through, the folder itself included
+    /// (IsLink), and no holder is asked about a link. What is left is not given to Windows to delete at the next
+    /// restart, as the install folder's rest is (RemoveRest): a PoolWatch installed again before then keeps its data in
+    /// the same folder, under the same names. Both routines are held whole, and the box's words are held through
+    /// <see cref="DataLeftTextAsTheScript"/>.
     /// </summary>
     [Fact]
     public void WhatIsLeftOfTheDataFolderIsSaidAfterItsDeleteNeverReadThroughALinkAndNeverLeftToTheRestart()
@@ -6452,7 +6454,7 @@ public sealed class UninstallerTests
         // Its one box is shown only when someone is there; a silent uninstall logs the same text.
         Assert.Empty(BlocksAround("SayDataLeft", "Log(Text); if not UninstallSilent then MsgBox(Text, mbInformation, MB_OK);"));
         Assert.Single(Regex.Matches(Body("SayDataLeft"), @"MsgBox\("));
-        // Nothing of the data folder is given to Windows for the restart, and nothing of it is read through a link.
+        // Nothing of the data folder is given to Windows for the restart, and nothing of it is listed through a link it finds.
         Assert.DoesNotContain("RestartReplace", Body("SayDataLeft") + Body("FindDataLeft"));
         Assert.DoesNotContain("DeleteOneAtRestart", Body("SayDataLeft") + Body("FindDataLeft"));
         Assert.Equal(["if FindFirst(Dir + '\\*', Find) then try", "repeat ... until not FindNext(Find)", "if (Name <> '.') and (Name <> '..') then"],

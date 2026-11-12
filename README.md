@@ -239,8 +239,9 @@ install folder's `PoolWatch.exe`, also there as `PoolWatch-selfcontained.exe` in
 everything that starts PoolWatch starts), with an environment the launcher
 builds from Windows' own values (so nothing a program running as you put in your environment reaches it;
 SECURITY.md's known limitations say what PoolWatch's inner program, `app\PoolWatch.exe`, still gets when an
-administrator starts it as administrator by hand), and never writes through a file-system link (a junction or
-symbolic link).
+administrator starts it as administrator by hand), and before each write looks for a file-system link (a junction or
+symbolic link) on the path and does not write through one it finds (that is a look at the path before the write:
+SECURITY.md's known limitations say what it does not cover in a folder given with `--out` that others can change).
 [What it does with those rights](docs/TECHNICAL.md#why-it-needs-administrator-rights); how each action is checked:
 [SECURITY.md](SECURITY.md), which also lists the [known limitations](SECURITY.md#known-limitations).
 

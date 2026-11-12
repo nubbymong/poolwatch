@@ -100,6 +100,36 @@ public static class Csv
         return CompleteRows(r.ReadToEnd());
     }
 
+    /// <summary>
+    /// <see cref="ReadCompleteRows(string)"/> of a file that may hold at most <paramref name="maxBytes"/>: null when it
+    /// holds more. The size is not asked of the file before the read: at most <paramref name="maxBytes"/> and one byte
+    /// more are read, through the handle the file is opened with, so a file that grows, or stands in another's place,
+    /// after a look at its size is never read past the bound.
+    /// </summary>
+    public static string? ReadCompleteRows(string path, int maxBytes)
+    {
+        using var s = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        return ReadCompleteRows(s, maxBytes);
+    }
+
+    /// <summary>The same of an open file: at most <paramref name="maxBytes"/> and one byte more are read from it, whatever length it gives.</summary>
+    internal static string? ReadCompleteRows(Stream file, int maxBytes)
+    {
+        using var read = new MemoryStream();
+        var chunk = new byte[64 * 1024];
+        long left = (long)maxBytes + 1;
+        int n;
+        while (left > 0 && (n = file.Read(chunk, 0, (int)Math.Min(chunk.Length, left))) > 0)
+        {
+            read.Write(chunk, 0, n);
+            left -= n;
+        }
+        if (left == 0) return null; // more than the bound
+        read.Position = 0;
+        using var r = new StreamReader(read, Encoding.UTF8);
+        return CompleteRows(r.ReadToEnd());
+    }
+
     /// <summary>Splits one CSV line (no embedded newlines).</summary>
     public static List<string> Split(string line)
     {

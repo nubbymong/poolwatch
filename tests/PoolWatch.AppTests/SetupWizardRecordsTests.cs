@@ -139,8 +139,8 @@ public sealed partial class SetupWizardTests
 
     /// <summary>
     /// The Records step alone, as it opens after an upgrade: the same page, the rail listing only Records, no Back, Done;
-    /// it reads nothing of the PC and runs no check; Done waits a moment (it opened by itself), then applies the choice,
-    /// records it (setup.json) and finishes, never marking setup completed again.
+    /// it reads nothing of the PC and runs no check; Done waits a moment from when its window is shown (it opened by
+    /// itself), then applies the choice, records it (setup.json) and finishes, never marking setup completed again.
     /// </summary>
     [Fact]
     public async Task TheRecordsStepAloneShowsOnlyItselfAndDoneRecordsTheChoice()
@@ -164,6 +164,7 @@ public sealed partial class SetupWizardTests
             Assert.Equal((SetupText.Done, false, true), (view.NextText, view.BackButton.Visible, view.HowLink.Visible));
             Assert.Equal("Step 1 of 1: Records", view.Rail.AccessibleDescription);
             Assert.Empty(view.LayoutProblems());
+            session.Shown(); // its window is on screen: Done's moment starts now
             Assert.False(session.CanGoNext);
             Assert.False(session.Back());
             Assert.False(await session.NextAsync(null!)); // held for its moment
@@ -177,10 +178,124 @@ public sealed partial class SetupWizardTests
         // Its failure says Done, not Next.
         var failing = new FakeHost(Busy()) { RecordsResult = (false, "That did not work.") };
         var again = new SetupSession(failing, firstRun: false, advanced: false, clock: () => now, recordsOnly: true);
+        again.Shown();
         now += NextWaitTicks;
         Assert.False(await again.NextAsync(null!));
         Assert.Equal("That did not work. " + SetupText.DoneAgain, again.Error(SetupSession.RecordsKey));
         Assert.Equal(0, failing.RecordsChosen);
+    }
+
+    /// <summary>
+    /// The Records step alone opens by itself, perhaps while the owner types in another program, so its Done waits from
+    /// when its window is first shown, not from when setup made its session: the window is built and shown after that,
+    /// later still on a slow sign-in, and the wait is there for the owner to see the step before Done can be pressed.
+    /// Until the window is shown Done stays held, however long that takes, and from then it waits its whole moment. It
+    /// waits again when a Settings save replaces the step's choices on screen (a press meant for the ones that were there
+    /// must not apply the ones that took their place), not for a save of anything else. The whole setup opens on Welcome,
+    /// which applies nothing, so it waits for no window; its Records step waits like the lone one when its choices are
+    /// replaced while it shows, and not while another step shows.
+    /// </summary>
+    [Fact]
+    public async Task TheRecordsStepAlonesDoneWaitsFromWhenItsWindowIsShownAndAgainWhenItsChoicesAreReplaced()
+    {
+        var host = new FakeHost(Busy());
+        long now = 0;
+        var session = new SetupSession(host, firstRun: false, advanced: false, clock: () => now, recordsOnly: true);
+        await session.LoadAsync(CancellationToken.None);
+        var (view, fonts) = View(session, 100, new Size(880, 586));
+        using (view)
+        using (fonts)
+        {
+            // Made a minute before it is shown: Done is held all that time.
+            now += 60 * NextWaitTicks;
+            Assert.Equal(SetupSession.NextWait, session.NextHeldFor);
+            Assert.False(session.CanGoNext);
+            Assert.False(view.NextButton.Enabled);
+            Assert.False(await session.NextAsync(null!));
+            // Shown: its whole moment from now.
+            var told = new List<SetupPart>();
+            session.Changed += told.Add;
+            session.Shown();
+            Assert.Equal([SetupPart.Next], told);
+            Assert.Equal(SetupSession.NextWait, session.NextHeldFor);
+            Assert.False(view.NextButton.Enabled);
+            now += NextWaitTicks - 1;
+            Assert.False(await session.NextAsync(null!));
+            now += 1;
+            Assert.Equal(TimeSpan.Zero, session.NextHeldFor);
+            view.NextWaitOver(); // its timer went off
+            Assert.True(session.CanGoNext && view.NextButton.Enabled);
+            // A window is first shown once: told again, nothing waits again.
+            told.Clear();
+            session.Shown();
+            Assert.Empty(told);
+            Assert.True(session.CanGoNext);
+            // Settings' Save replaces the choices on screen: Done waits again, its whole moment.
+            host.ApplyElsewhere(s => { s.RecordMode = RecordMode.Detailed; s.RetentionDays = 10; });
+            session.FollowRecords();
+            Assert.Equal([SetupPart.Records, SetupPart.Next], told);
+            Assert.Equal(SetupSession.NextWait, session.NextHeldFor);
+            Assert.False(view.NextButton.Enabled);
+            Assert.False(await session.NextAsync(null!));
+            Assert.Empty(host.Calls); // nothing was applied by a press while Done was held
+            now += NextWaitTicks;
+            view.NextWaitOver();
+            Assert.True(view.NextButton.Enabled);
+            // A save of anything else replaces nothing on the step: no new wait.
+            told.Clear();
+            host.ApplyElsewhere(s => s.TokenGuardEnabled = !s.TokenGuardEnabled);
+            session.FollowRecords();
+            Assert.Empty(told);
+            Assert.True(await session.NextAsync(null!)); // Done
+        }
+        Assert.Equal(["records Detailed 10"], host.Calls);
+
+        // The whole setup: shown on Welcome, nothing waits; a save while another step shows moves the Records step's
+        // choices and holds nothing; a save while the Records step shows holds its Next.
+        var all = new FakeHost(Busy());
+        var whole = new SetupSession(all, firstRun: true, advanced: false, clock: () => now);
+        await whole.LoadAsync(CancellationToken.None);
+        var heard = new List<SetupPart>();
+        whole.Changed += heard.Add;
+        whole.Shown();
+        Assert.Empty(heard);
+        Assert.True(whole.CanGoNext);
+        all.ApplyElsewhere(s => { s.RecordMode = RecordMode.Detailed; s.RetentionDays = 10; });
+        whole.FollowRecords();
+        Assert.Equal([SetupPart.Records], heard);
+        Assert.Equal((RecordMode.Detailed, 10), (whole.Records, whole.Days));
+        await whole.GoTo(SetupStep.Records);
+        Assert.True(whole.CanGoNext);
+        heard.Clear();
+        all.ApplyElsewhere(s => s.RetentionDays = 20);
+        whole.FollowRecords();
+        Assert.Equal([SetupPart.Records, SetupPart.Next], heard);
+        Assert.Equal(SetupSession.NextWait, whole.NextHeldFor);
+        Assert.False(whole.CanGoNext);
+    }
+
+    /// <summary>What WinForms calls once a window is first on screen (<c>Form.OnShown</c>), for a window the tests never show.</summary>
+    private static void FirstShown(Form form) =>
+        typeof(Form).GetMethod("OnShown", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(form, [EventArgs.Empty]);
+
+    /// <summary>
+    /// The setup window tells its session when it is first shown, so the Records step alone starts its Done's wait then
+    /// (the session alone cannot know when its window is on screen): Done is held until then, and the window's first
+    /// showing has the footer told once.
+    /// </summary>
+    [Fact]
+    public void TheSetupWindowStartsTheLoneRecordsStepsWaitWhenItIsFirstShown()
+    {
+        var host = new FakeHost(Busy());
+        using var form = new SetupWizardForm(host, firstRun: false, advanced: false, recordsOnly: true);
+        _ = form.Handle;
+        var told = new List<SetupPart>();
+        form.Session.Changed += told.Add;
+        Assert.Equal(SetupSession.NextWait, form.Session.NextHeldFor); // not shown yet: held, whatever the time
+        Assert.False(form.View.NextButton.Enabled);
+        FirstShown(form);
+        Assert.Equal([SetupPart.Next], told);
+        Assert.True(form.View.NextWaitRunning); // the footer's timer enables Done when the moment is over
     }
 
     /// <summary>The Records step alone, closed without Done: cancelled at once, without asking, and nothing recorded.</summary>
@@ -219,6 +334,7 @@ public sealed partial class SetupWizardTests
         using (fonts)
         {
             var page = (RecordsPage)view.Pages[SetupStep.Records];
+            session.Shown(); // its window is on screen
             host.ApplyElsewhere(s => { s.RecordMode = RecordMode.Detailed; s.RetentionDays = 10; }); // Settings' Save
             session.FollowRecords();
             Assert.Equal((RecordMode.Detailed, 10), (session.Records, session.Days));
@@ -308,6 +424,7 @@ public sealed partial class SetupWizardTests
         try
         {
             _ = form.Handle;
+            FirstShown(form); // as when the tray app shows it: Done's moment starts
             Assert.True(form.RecordsOnly);
             Assert.Equal(before + 1, Told()); // the window follows LiveSettings through its host
             Assert.Equal((RecordMode.ReportsOnly, 7), (form.Session.Records, form.Session.Days));
@@ -320,7 +437,7 @@ public sealed partial class SetupWizardTests
             Application.DoEvents(); // the step follows on the window's thread
             Assert.Equal((RecordMode.Detailed, 30), (form.Session.Records, form.Session.Days));
 
-            // Done (it waits a moment from when the step opened): what the step shows is in effect already, and stays.
+            // Done (it waits a moment from when the Save moved the step's choices): what the step shows is in effect already, and stays.
             bool done = false;
             for (var waited = System.Diagnostics.Stopwatch.StartNew(); !done && waited.Elapsed < TimeSpan.FromSeconds(10);)
             {

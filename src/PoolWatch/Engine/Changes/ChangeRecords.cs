@@ -7,13 +7,15 @@ namespace PoolWatch.Engine.Changes;
 /// <summary>
 /// applied-changes.json: the changes PoolWatch made that have no store of their own (removed clear tasks of your own,
 /// scheduled-task and startup toggles, shortcuts). Always in the admin-only data root, never under a headless --out
-/// folder, since Undo acts on these records as an administrator; every read and write goes through the guard (never
-/// through a link), and a write goes to a temporary file, flushed to the disk, that is then moved over the old one (so a
-/// power cut cannot leave an empty list in its place). One instance per data root (<see cref="Open"/>), so the tray app,
-/// the Settings form and the tray menu all write through one object; thread-safe. The file is read again before every
-/// change and every listing, so a record another PoolWatch process wrote (the command line) is kept and shown; only two
-/// processes saving at the same moment can lose one of the two changes, as no lock spans processes. A file that is there
-/// but cannot be read is never written over, since it may hold the only copy of a removed task's definition.
+/// folder, since Undo acts on these records as an administrator; every read and write goes through the guard, which
+/// looks for a link on the path before the file is opened and refuses a path where it finds one or cannot look (a read
+/// of the list is also checked on the handle it opened: <see cref="ReadPlainFile"/>), and a write goes to a temporary
+/// file, flushed to the disk, that is then moved over the old one (so a power cut cannot leave an empty list in its
+/// place). One instance per data root (<see cref="Open"/>), so the tray app, the Settings form and the tray menu all
+/// write through one object; thread-safe. The file is read again before every change and every listing, so a record
+/// another PoolWatch process wrote (the command line) is kept and shown; only two processes saving at the same moment
+/// can lose one of the two changes, as no lock spans processes. A file that is there but cannot be read is never
+/// written over, since it may hold the only copy of a removed task's definition.
 /// </summary>
 internal sealed class ChangeRecords
 {
@@ -304,7 +306,8 @@ internal sealed class ChangeRecords
         if (facts.Links > 1) throw NotRead(file, "has another name on the disk (a hard link)");
         // Not at its place: a link on the way, or another PoolWatch's save replaced the file between the open and this look.
         if (!AtItsPlace(h, root, file))
-            throw LinkOnTheWay(root, file) ? NotRead(file, "is reached through a link") : new IOException($"{file} changed while PoolWatch read it");
+            throw LinkOnTheWay(root, file) ? NotRead(file, "is reached through a link, or a folder on the way to it could not be checked for one")
+                : new IOException($"{file} changed while PoolWatch read it");
         if (facts.Length > maxBytes) return null;
         // One byte more than its size, to tell a file that grew meanwhile (PoolWatch replaces it, never writes it in place).
         var bytes = new byte[facts.Length + 1];
@@ -332,7 +335,7 @@ internal sealed class ChangeRecords
     }
 
     private static UnauthorizedAccessException NotRead(string file, string what) =>
-        new($"PoolWatch read policy: '{file}' {what}, so PoolWatch does not read it; PoolWatch never reads through links");
+        new($"PoolWatch read policy: '{file}' {what}, so PoolWatch did not read it");
 
     /// <summary>
     /// Whether the handle is the entry at <paramref name="file"/>'s place below <paramref name="root"/>, with the root
@@ -355,7 +358,8 @@ internal sealed class ChangeRecords
         string json;
         try
         {
-            // Never read through a link either: no folder on the way (the guard), nor the file itself (its own handle).
+            // A read looks for links too: the guard at each folder on the way, before the open, then ReadPlainFile at
+            // the handle it opened (the file itself must be no link, and at its place below the data root).
             json = ReadPlainFile(_paths.DataRoot, _paths.Guard.CheckReal(FilePath), ChangeRecordFile.MaxBytes)
                    ?? throw Unreadable($"it is over {ChangeRecordFile.MaxBytes >> 20} MB");
         }

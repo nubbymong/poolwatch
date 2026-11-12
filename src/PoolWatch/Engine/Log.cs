@@ -54,9 +54,9 @@ internal sealed class Log : IDisposable
     private const int SharingViolation = unchecked((int)0x80070020), LockViolation = unchecked((int)0x80070021);
 
     /// <param name="checkWrite">The write policy (PathGuard.CheckReal), applied to every open of the log or of a new
-    /// file, to the roll-over and to each delete of an old new file, so a link planted in place of the log never
-    /// redirects an elevated write. A line to a kept file goes through its handle, checked when it was opened.
-    /// Null: no check (tests).</param>
+    /// file, to the roll-over and to each delete of an old new file: it looks for a link on the path before each of
+    /// them and refuses a path where it finds one or cannot check, so none of them is made through a link found at that
+    /// look. A line to a kept file goes through its handle, opened after such a look. Null: no check (tests).</param>
     /// <param name="now">The local time for each line and for a new file's name. Null: the system clock.</param>
     /// <param name="wait">The pause before each retry, in milliseconds. Null: Thread.Sleep.</param>
     /// <param name="rollGate">The proof that this process holds the one-instance mutex (only the steps that take the
