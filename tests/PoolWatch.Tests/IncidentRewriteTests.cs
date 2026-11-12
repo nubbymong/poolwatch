@@ -1507,15 +1507,18 @@ public sealed class IncidentRewriteTests : IDisposable
         Assert.Same(open, inc);
         string grew = $"{FileSaid} grew 96 MB in 2 min. Most likely cause: leaker (strong evidence).";
         Assert.Equal((grew, grew), PlainAnswer(inc!));
-        string line = "- **leaker** (strong evidence): its File handles rose by 24,000 (100% of the File-handle growth, about 96 MB of the rise); " +
-                      "file and other I/O: 24 k operations (100% of all); rose and fell with the tag: strongly. leaker: leaker.exe";
+        // A count and a share are written in the culture PoolWatch runs in ("24,000" and "100%" in English on Windows,
+        // "100 %" in the invariant culture of a Linux runner), so the expected text formats them the same way.
+        string rose = $"{24_000:N0}", all = $"{1.0:P0}";
+        string line = $"- **leaker** (strong evidence): its File handles rose by {rose} ({all} of the File-handle growth, about 96 MB of the rise); " +
+                      $"file and other I/O: 24 k operations ({all} of all); rose and fell with the tag: strongly. leaker: leaker.exe";
         Assert.Equal(line, Line(inc!, "- **leaker**"));
 
         // The live view ranks the owners of the last hour the same way (TagViewBuilder.Build): the same words.
         var window = CorrelationWindow.Recent(w.History, FileTag, TimeSpan.FromMinutes(60)).Window;
         var live = OwnerRanking.Rank(w.History, Correlator.Rank(w.History, w.Registry, FileTag, window, maxSuspects: 2000), FileTag, window, 96 * Settings.MB,
             s => PoolWatch.Core.Identity.ProcessIdentities.Of(w.Registry.Ancestry(s.Key)));
-        Assert.Equal("its File handles rose by 24,000 (100% of the File-handle growth, about 96 MB of the rise)", live[0].Plain[0]);
+        Assert.Equal($"its File handles rose by {rose} ({all} of the File-handle growth, about 96 MB of the rise)", live[0].Plain[0]);
 
         w.Exit(100);
         exited = true;
