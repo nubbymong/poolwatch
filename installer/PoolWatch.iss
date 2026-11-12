@@ -3911,7 +3911,8 @@ begin
   end;
 end;
 
-{ Whether Path is a link (a reparse point, such as a junction): the uninstaller never looks inside one. }
+{ Whether Path is a link (a reparse point, such as a junction), as its own entry says; False also when that entry cannot
+  be read. The uninstaller does not look inside a folder this finds to be a link. }
 function IsLink(const Path: String): Boolean;
 var
   Find: TFindRec;
@@ -4174,7 +4175,8 @@ end;
 { After DelTree of the data folder Dir: whether any of it is left (a file another program still has open, or the
   folder itself while a program holds it open), and if so, what. It is said in the log, each file left with what has
   it open (FindDataLeft), and in a box when someone is there, the first MaxShown of them and how many more, with what
-  to do: delete what is left once no program has it in use. A link is never followed, Dir itself included (IsLink).
+  to do: delete what is left once no program has it in use. A link the listing finds is not followed, and Dir is not
+  listed when IsLink finds it to be one.
   What is left stays: it is not given to Windows to delete at the next restart, since a PoolWatch installed again
   before then keeps its data in the same folder, under the same names, which Windows would then delete. The accounts
   of what has a file open are read afresh (Accounts). }

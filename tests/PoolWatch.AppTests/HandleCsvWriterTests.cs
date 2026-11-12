@@ -253,8 +253,10 @@ public sealed class HandleCsvWriterTests(ITestOutputHelper output) : IDisposable
     /// <summary>
     /// An owner-sized census (the System process with 1.4 million handles, 600 other processes with about 1,000 to 2,000
     /// each, 2 million in all, 820 rows picked): the day's first scan (every row) and the next (a third of the processes'
-    /// File counts moved) each cost under 250 ms of the writing thread's CPU and under 2 s of wall time; the tick's
-    /// hand-over under 50 ms.
+    /// File counts moved) each cost under 250 ms of the writing thread's CPU and under 2 s of wall time; a tick's
+    /// hand-over to the writer there is under 50 ms. The run's first hand-over, which makes that writer and starts its
+    /// thread (once a run, not each tick), is held to 1 s: timed in a cold process at the start of the whole suite, it
+    /// once took 60.8 ms.
     /// </summary>
     [Fact]
     public void AnOwnerSizedCensusIsWrittenWithinItsBudget()
@@ -295,8 +297,13 @@ public sealed class HandleCsvWriterTests(ITestOutputHelper output) : IDisposable
             Assert.True(cpuMs < 250, $"{what} scan: {cpuMs:0.0} ms of CPU");
             Assert.True(wall.Elapsed < TimeSpan.FromSeconds(2), $"{what} scan: {wall.Elapsed.TotalMilliseconds:0} ms");
         }
+        var making = Stopwatch.StartNew();
+        sink.PostHandles(first, names, procs, Now.AddMinutes(10)); // makes the writer and starts its thread
+        making.Stop();
+        output.WriteLine($"first hand-over (makes the writer): {making.Elapsed.TotalMilliseconds:0.00} ms");
+        Assert.True(making.Elapsed < TimeSpan.FromSeconds(1), $"first hand-over {making.Elapsed.TotalMilliseconds:0.0} ms");
         var handOver = Stopwatch.StartNew();
-        sink.PostHandles(first, names, procs, Now.AddMinutes(10));
+        sink.PostHandles(second, names, procs, Now.AddMinutes(15)); // to the writer there is, as each later tick
         handOver.Stop();
         output.WriteLine($"hand-over: {handOver.Elapsed.TotalMilliseconds:0.00} ms");
         Assert.True(handOver.Elapsed < TimeSpan.FromMilliseconds(50), $"hand-over {handOver.Elapsed.TotalMilliseconds:0.0} ms");

@@ -285,7 +285,8 @@ on), and every lasting one is listed under Active changes, where it can be put b
   largest, and a scan with more says how many it left out (a pid -2 row).
   `HandleCsvWriterTests` measures an owner-sized census (the System process with 1.4 million handles and 600 processes,
   2 million in all, 820 rows): 16 ms of CPU for the day's first scan and 2 ms for the next, asserted under 250 ms, and
-  the tick's hand-over under 1 ms.
+  a tick's hand-over to the writer there is under 1 ms (asserted under 50 ms); the run's first hand-over, which makes
+  that writer and starts its thread, is asserted under 1 s.
 - **The day's CSV files, measured.** `DailyCsvBudgetTests` measures the day's files at the sink's opener under the owner's shape for 4 hours
   (samples of about 330 processes with 25 short commands caught in each, 1,100 tags of which 180 over 1 MB and 10
   growing, the owner's hour of events.csv rows at their lengths with 66 minute rollups a minute, the services changing
