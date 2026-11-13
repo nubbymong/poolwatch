@@ -52,7 +52,8 @@ want, trims background work. Every change it makes is listed, with a way to put 
   started shows as a labelled band), with the growth and clears beside it, and **Show RAM**, on at first, for RAM in
   use, the cache and free memory behind it. **Pool causes** lists what grew, what the clears freed of it, its impact,
   the likely cause and how sure PoolWatch is, with what PoolWatch already does about it. Every list sorts by the column
-  you click.
+  you click. The Pool causes page no longer shows an error box, or stops laying out, when Windows switches desktops (a
+  lock, a UAC prompt) while the page is laid out, as when its window resizes.
 - **Clears the cache automatically.** On PCs with plenty of memory, Windows' file cache can hold file records in the
   kernel pool and grow it by gigabytes, above all on ReFS drives such as a Dev Drive. PoolWatch can empty the standby
   cache on a schedule, when the pool reaches a size, or whichever comes first, and shows what each clear freed. Your

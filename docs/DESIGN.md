@@ -1459,6 +1459,8 @@ graph's row gives its room to the tab (`MainForm.AdvancedRows`); the graph is ba
   arrow keys, Page Up, Page Down, Home and End scroll them. The list and its legend keep 58% of the tab (or what the
   owner dragged the splitter to); where that leaves the list no whole row, the splitter moves down exactly as far as
   its header and one row need, if the details then keep their title's first line, and otherwise stays (`CausesSplit`).
+  The split takes a failed paint of its splitter while Windows switches desktops (a lock, a UAC prompt) itself, puts
+  its panels' layout back, and lays out again 2 seconds later.
 - **Services** (`ServicesTab`, `ServicesTabView`, `ServiceRows`) lists the background services you may turn off, with
   their live cost, in two groups: **Windows services** (those the catalogue knows Windows' own start type for), each
   with its source line (`ServiceSourceText`: "Microsoft's virtual-desktop optimisation tool turns this off", "The CIS

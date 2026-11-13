@@ -3,6 +3,8 @@ using PoolWatch.Core.Growth;
 using PoolWatch.Core.Model;
 using PoolWatch.Ui;
 using Xunit.Abstractions;
+using ExternalException = System.Runtime.InteropServices.ExternalException;
+using Win32Exception = System.ComponentModel.Win32Exception;
 
 namespace PoolWatch.AppTests;
 
@@ -361,6 +363,585 @@ public sealed class MainWindowLayoutTests(ITestOutputHelper output)
         Assert.True(problems.Count == 0, at + Environment.NewLine + string.Join(Environment.NewLine, problems));
         p.Resize(new Size(P(smallest.Width), listLeast + split.SplitterWidth + least - 1));
         Assert.True(split.SplitterDistance == p.AtShare, "a pixel shorter, the list left its share " + at);
+    }
+
+    /// <summary>
+    /// A picture GDI+ cannot read: its stream is closed. As a SplitContainer's background it makes the paint of the
+    /// splitter fail in GDI+ with an ExternalException wherever the SplitContainer paints it, in a layout and as its
+    /// distance is set: the failure that paint has while Windows switches desktops (the lock screen, an elevation prompt),
+    /// which a test cannot have Windows do. With the picture set the desktop is away; with none, it is back.
+    /// </summary>
+    private static Bitmap UnreadablePicture()
+    {
+        using var drawn = new Bitmap(64, 64);
+        var png = new MemoryStream();
+        drawn.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+        png.Position = 0;
+        var picture = new Bitmap(png); // GDI+ keeps the stream, and reads the picture from it as it paints
+        png.Dispose();
+        return picture;
+    }
+
+    /// <summary>Pool causes' page at the window's own size.</summary>
+    private static CausesPage OwnPage() =>
+        new(100, CausesAreaAt(new Size(1100, 750)), PoolCausesTests.LongTitle, PoolCausesTests.LongGreenLines()[0]);
+
+    /// <summary>
+    /// The page resized, with the split's layout run from here and not from inside the resize's window message: what the
+    /// layout lets out comes back (out of the window message it ends the test run, as it would end in .NET's error box).
+    /// </summary>
+    private static Exception? ResizeAndLay(CausesPage p, Size area)
+    {
+        p.Split.SuspendLayout();
+        p.Resize(area);
+        return Record.Exception(() => p.Split.ResumeLayout(performLayout: true));
+    }
+
+    /// <summary>
+    /// What is wrong with the split's two panels: one whose layout is still suspended (asked to lay out, it does not), or
+    /// one whose controls had not followed its size (laid out again, they move).
+    /// </summary>
+    private static List<string> PanelProblems(CausesPage p)
+    {
+        var problems = new List<string>();
+        foreach (var (panel, name) in new[] { (p.Split.Panel1, "the list's panel"), (p.Split.Panel2, "the details' panel") })
+        {
+            string Controls() => string.Join(", ", panel.Controls.Cast<Control>().Select(c => c.Bounds));
+            string before = Controls();
+            int laid = 0;
+            void Laid(object? sender, LayoutEventArgs e) => laid++;
+            panel.Layout += Laid;
+            panel.PerformLayout();
+            panel.Layout -= Laid;
+            if (laid == 0) problems.Add($"{name}'s layout is still suspended");
+            if (Controls() != before) problems.Add($"{name}'s controls had not followed it: {before}, laid out again {Controls()}");
+        }
+        return problems;
+    }
+
+    /// <summary>
+    /// Where the page's split has its splitter (and where the mouse takes hold of it), its panels and their controls, and
+    /// the whole rows the list shows.
+    /// </summary>
+    private static string Laid(CausesPage p) =>
+        $"split {p.Split.Size}, splitter at {p.Split.SplitterDistance} (held at {p.Split.SplitterRectangle}), " +
+        $"panels {p.Split.Panel1.Bounds} and {p.Split.Panel2.Bounds}, list {p.List.Bounds}, details {p.Details.Bounds}, rows {p.Rows()}";
+
+    /// <summary>
+    /// What a plain SplitContainer lets out as its distance is set while its paint fails
+    /// (<see cref="UnreadablePicture"/>): GDI+'s exception on the .NET that CausesSplit was written against, nothing
+    /// on one whose SplitContainer takes its paint's failure itself (dotnet/winforms 14565).
+    /// </summary>
+    private static Exception? PaintFailure()
+    {
+        using var unreadable = UnreadablePicture(); // made first, so let go last: after the split that has it
+        using var split = new SplitContainer { Orientation = Orientation.Horizontal, Size = new Size(300, 300) };
+        _ = split.Handle; // a SplitContainer paints its splitter only once it has its window (never shown)
+        split.BackgroundImage = unreadable;
+        return Record.Exception(() => split.SplitterDistance = 120);
+    }
+
+    /// <summary>
+    /// Why the tests of a failing paint are skipped on a .NET whose SplitContainer lets no failure out.
+    /// </summary>
+    internal const string PaintNoLongerFails =
+        "This .NET no longer fails the splitter paint (dotnet/winforms 14565); CausesSplit's handling can go, " +
+        "all but OnKeyUp's: the base's own paint after a key is not part of 14565.";
+
+    /// <summary>
+    /// Why a test that needs the SplitContainer's paint to fail is skipped, for what <see cref="PaintFailure"/> let
+    /// out: not at all (null) where it let anything out, <see cref="PaintNoLongerFails"/> where it let nothing out.
+    /// </summary>
+    internal static string? PaintSkipReason(Exception? thrown) => thrown is null ? PaintNoLongerFails : null;
+
+    /// <summary>
+    /// <see cref="PaintSkipReason"/> on this .NET, found once, on a thread of its own: a test's attributes are made as
+    /// the tests are found, on a thread that goes on to other work, and WinForms keeps what it sets up for a control
+    /// on the control's thread.
+    /// </summary>
+    private static readonly Lazy<string?> PaintSkip = new(() =>
+    {
+        Exception? thrown = null;
+        var probe = new Thread(() =>
+        {
+            var broke = Record.Exception(() => thrown = PaintFailure());
+            thrown ??= broke; // a probe that broke: the tests run, and show what broke it
+        });
+        probe.Start();
+        probe.Join();
+        return PaintSkipReason(thrown);
+    });
+
+    /// <summary>
+    /// A fact about CausesSplit while the SplitContainer's paint of its splitter fails. It runs where .NET's
+    /// SplitContainer lets that failure out, as .NET 10.0's does. On a .NET that takes the failure itself these tests
+    /// can no longer fail the paint, so the fact is skipped and says so (<see cref="PaintNoLongerFails"/>): a .NET
+    /// update that mends the SplitContainer must not hold a release up. CausesSplit's OnKeyUp stays even then: the
+    /// base's own paint after a key is not part of that mend. On .NET 10.0.14 and older, where the paint is known to
+    /// fail, the probe must find the failure, so only a newer .NET can skip these tests.
+    /// </summary>
+    private sealed class WhenTheSplittersPaintFailsAttribute : FactAttribute
+    {
+        public WhenTheSplittersPaintFailsAttribute() => Skip = PaintSkip.Value;
+    }
+
+    [Fact]
+    public void ATestOfAFailingPaintIsSkippedOnlyWhereTheSplitContainerLetsNoFailureOut()
+    {
+        Assert.Equal(PaintNoLongerFails, PaintSkipReason(null));
+        Assert.Null(PaintSkipReason(new ExternalException()));
+        Assert.Null(PaintSkipReason(new OutOfMemoryException())); // another failure: the tests run and show it
+        // On a .NET known to fail the paint (10.0.14, where it was found, and older), the probe finds the failure, so a
+        // failure source that stopped failing shows here instead of skipping the tests quietly.
+        if (Environment.Version is { Major: 10, Minor: 0, Build: <= 14 })
+            Assert.True(PaintSkip.Value is null, $"the probe found no failure on .NET {Environment.Version}: {PaintSkip.Value}");
+        // Every test of a desktop switch needs the paint to fail, and is skipped where it does not.
+        var switches = typeof(MainWindowLayoutTests).GetMethods()
+            .Where(m => m.Name.StartsWith("ADesktopSwitch", StringComparison.Ordinal)).ToList();
+        Assert.NotEmpty(switches);
+        Assert.All(switches, m => Assert.Contains(m.GetCustomAttributesData(),
+            a => a.AttributeType == typeof(WhenTheSplittersPaintFailsAttribute)));
+    }
+
+    /// <summary>
+    /// The split's own handler of the owner's mouse or keys, called as its window procedure calls it for a message:
+    /// OnMouseDown, OnMouseMove, OnMouseUp, OnKeyDown or OnKeyUp (WinForms' protected methods, found by name: a
+    /// WinForms without one fails here, by name). What the split lets out of it comes back: out of the app's message
+    /// loop that is .NET's error box. No message is sent: for a key's message WinForms adds whichever of Shift, Ctrl
+    /// and Alt is held at that moment on the PC the tests run on, and a SplitContainer moves its splitter for the bare
+    /// arrow key only (on a PC in use, 5 of 662 arrow keys sent as messages came with its owner's Shift and moved
+    /// nothing).
+    /// </summary>
+    private static Exception? Handle(CausesPage p, string handler, EventArgs e)
+    {
+        const System.Reflection.BindingFlags Protected =
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var method = typeof(Control).GetMethod(handler, Protected, null, [e.GetType()], null)
+            ?? throw new MissingMethodException("Control", handler);
+        return Record.Exception(() =>
+            method.Invoke(p.Split, System.Reflection.BindingFlags.DoNotWrapExceptions, null, [e], null));
+    }
+
+    /// <summary>
+    /// The mouse at <paramref name="at"/> in the split, as its message gives it: with the left button (a press or a
+    /// release of it: one click; a move with it held: none) or, moving with no button held, with none.
+    /// </summary>
+    private static MouseEventArgs Mouse(Point at, int clicks = 1, MouseButtons held = MouseButtons.Left) =>
+        new(held, clicks, at.X, at.Y, 0);
+
+    /// <summary>The middle of the split's splitter, where the mouse takes hold of it.</summary>
+    private static Point OnSplitter(CausesPage p)
+    {
+        var bar = p.Split.SplitterRectangle;
+        return new Point(bar.Left + bar.Width / 2, bar.Top + bar.Height / 2);
+    }
+
+    /// <summary>
+    /// The owner takes hold of the splitter and drags it <paramref name="by"/> pixels down, not yet letting go. Gives
+    /// where the mouse is then.
+    /// </summary>
+    private static Point Drag(CausesPage p, int by)
+    {
+        var mouse = OnSplitter(p);
+        Assert.Null(Handle(p, "OnMouseDown", Mouse(mouse)));
+        mouse.Y += by;
+        Assert.Null(Handle(p, "OnMouseMove", Mouse(mouse, clicks: 0)));
+        return mouse;
+    }
+
+    /// <summary>
+    /// The owner clicks the splitter, which gives it the arrow keys from then on, and presses the down arrow, not yet
+    /// letting go.
+    /// </summary>
+    private static void PressDownArrow(CausesPage p)
+    {
+        var mouse = OnSplitter(p);
+        Assert.Null(Handle(p, "OnMouseDown", Mouse(mouse)));
+        Assert.Null(Handle(p, "OnMouseUp", Mouse(mouse)));
+        Assert.Null(Handle(p, "OnKeyDown", new KeyEventArgs(Keys.Down)));
+    }
+
+    /// <summary>
+    /// The page at the window's smallest size before its list has rows: the split at the list's share. Gives the rows.
+    /// Once they are added again, a fit moves the splitter down for the list's first row.
+    /// </summary>
+    private static ListViewItem[] BeforeItsRows(CausesPage page)
+    {
+        ListViewItem[] rows = [.. page.List.Items.Cast<ListViewItem>()];
+        page.List.Items.Clear();
+        page.Resize(CausesAreaAt(new Size(760, 540)));
+        Assert.Equal(page.AtShare, page.Split.SplitterDistance);
+        return rows;
+    }
+
+    /// <summary>
+    /// The window is resized while Windows switches desktops: the SplitContainer's paint of its splitter fails in GDI+ in
+    /// the middle of its layout, which leaves both panels' layout suspended. Nothing comes out of the split's layout
+    /// (out of a resize's window message it is .NET's error box, and the end of a test run: a full run ended there as an
+    /// installer's elevation prompt came up), the panels lay their controls out again at once, and the split waits to lay
+    /// out again. Still failing two seconds later, it waits again. Once the desktop is back its next layout puts the
+    /// splitter where a split that never failed has it, here moved down for the list's row, and at the window's own size
+    /// the list has its share as ever. A split that never fails has no timer, and one closed while it waits stops its own.
+    /// </summary>
+    [WhenTheSplittersPaintFails]
+    public void ADesktopSwitchDuringTheSplitsLayoutShowsNoErrorAndTheSplitLaysOutAgain()
+    {
+        Size own = CausesAreaAt(new Size(1100, 750)), mid = CausesAreaAt(new Size(1024, 720)), smallest = CausesAreaAt(new Size(760, 540));
+        using var unreadable = UnreadablePicture(); // made first, so let go last: after the split that has it
+        using var never = OwnPage(); // the same resizes with nothing failing
+        using var p = OwnPage();
+        never.Resize(mid);
+        never.Resize(smallest);
+        Assert.True(never.Split.SplitterDistance > never.AtShare && never.Rows() == 1, "not moved down for the list's row: " + Laid(never));
+        Assert.Equal(-1, never.Split.LayoutDueIn); // no timer where no paint failed
+
+        p.Split.BackgroundImage = unreadable; // the desktop is away
+        var escaped = ResizeAndLay(p, mid);
+        Assert.True(escaped is null, $"the split's layout let its paint's failure out: {escaped}");
+        Assert.Equal(CausesSplit.AgainMs, p.Split.LayoutDueIn); // it waits, for its two seconds
+        Assert.Empty(PanelProblems(p));
+        // A resize as the window gets it, the layout inside the resize's window message: nothing comes out of that either.
+        p.Resize(smallest);
+        Assert.True(p.Split.LayoutDue);
+        Assert.Empty(PanelProblems(p));
+        // Two seconds later the desktop is still away: that layout fails too, and the split waits again.
+        p.Split.LayOutAgain();
+        Assert.True(p.Split.LayoutDue, "the split gave up after a second layout that failed");
+        Assert.Empty(PanelProblems(p));
+        // The desktop is back: the next layout holds, and the split is as the one that never failed.
+        p.Split.BackgroundImage = null;
+        p.Split.LayOutAgain();
+        Assert.False(p.Split.LayoutDue, "a layout that held left another one due");
+        Assert.Equal(Laid(never), Laid(p));
+        // And on from there: the list's share at the window's own size.
+        never.Resize(own);
+        p.Resize(own);
+        Assert.Equal(p.AtShare, p.Split.SplitterDistance);
+        Assert.Equal(Laid(never), Laid(p));
+        // Closed while a layout is due: the timer goes with the split.
+        p.Split.BackgroundImage = unreadable;
+        Assert.Null(ResizeAndLay(p, mid));
+        Assert.True(p.Split.LayoutDue);
+        p.Form.Dispose();
+        Assert.False(p.Split.LayoutDue, "the split's timer outlived it");
+    }
+
+    /// <summary>
+    /// The list's first rows come while Windows switches desktops, and the window's refresh fits the split
+    /// (<see cref="CausesSplit.Fit"/>): the paint fails as the splitter's distance is set, with both panels' layout
+    /// suspended. Nothing comes out of the fit, the panels lay out again, and nothing is taken as fitted: once the desktop
+    /// is back the next layout fits the split, moved down for the list's row as in a window where nothing failed.
+    /// </summary>
+    [WhenTheSplittersPaintFails]
+    public void ADesktopSwitchAsTheSplitIsFittedShowsNoErrorAndTheNextLayoutFitsIt()
+    {
+        using var unreadable = UnreadablePicture(); // made first, so let go last: after the split that has it
+        using var never = OwnPage(); // the same with nothing failing
+        using var p = OwnPage();
+        ListViewItem[] neverRows = BeforeItsRows(never), rows = BeforeItsRows(p);
+        never.List.Items.AddRange(neverRows);
+        never.Split.Fit();
+        Assert.True(never.Split.SplitterDistance > never.AtShare && never.Rows() == 1, "not moved down for the list's row: " + Laid(never));
+        Assert.Equal(-1, never.Split.LayoutDueIn); // no timer where no paint failed
+
+        p.Split.BackgroundImage = unreadable; // the desktop is away as the rows come
+        p.List.Items.AddRange(rows);
+        var escaped = Record.Exception(p.Split.Fit);
+        Assert.True(escaped is null, $"the fit let the paint's failure out: {escaped}");
+        Assert.Equal(CausesSplit.AgainMs, p.Split.LayoutDueIn); // it waits, for its two seconds
+        Assert.Empty(PanelProblems(p));
+        p.Split.BackgroundImage = null; // the desktop is back
+        p.Split.LayOutAgain();
+        Assert.False(p.Split.LayoutDue, "a layout that held left another one due");
+        Assert.Equal(Laid(never), Laid(p));
+    }
+
+    /// <summary>
+    /// The desktop goes away between a SplitContainer's two paints of one layout. Resized so low that its lower panel
+    /// would have less than its least height, it paints its splitter and then sets its distance again, which paints once
+    /// more: its panels' layout is suspended once by the resize and once more by the set, and the second paint's failure
+    /// leaves both. The upper panel takes the new distance between the two paints, which is where the test takes the
+    /// desktop away. Both panels lay out again all the same, and once the desktop is back the split is as one that never
+    /// failed, there and at the window's own size.
+    /// </summary>
+    [WhenTheSplittersPaintFails]
+    public void ADesktopSwitchBetweenTheTwoPaintsOfOneLayoutLeavesNoPanelSuspended()
+    {
+        var own = CausesAreaAt(new Size(1100, 750));
+        var low = new Size(own.Width, 60); // lower than the window ever makes it
+        using var unreadable = UnreadablePicture(); // made first, so let go last: after the split that has it
+        using var never = OwnPage(); // the same resizes with nothing failing
+        using var p = OwnPage();
+        never.Resize(low);
+        Assert.Equal(-1, never.Split.LayoutDueIn); // no timer where no paint failed
+
+        bool between = false;
+        p.Split.Panel1.Resize += (_, _) =>
+        {
+            // The resize's own height for the panel comes first, before the first paint: the distance is not set yet then.
+            if (between || p.Split.Panel1.Height != p.Split.SplitterDistance) return;
+            between = true;
+            p.Split.BackgroundImage = unreadable; // the desktop is away
+        };
+        var escaped = ResizeAndLay(p, low);
+        Assert.True(escaped is null, $"the split's layout let its paint's failure out: {escaped}");
+        Assert.True(between, "the SplitContainer did not set its distance inside its resize: " + Laid(p));
+        Assert.Equal(CausesSplit.AgainMs, p.Split.LayoutDueIn); // it waits, for its two seconds
+        Assert.Empty(PanelProblems(p));
+        p.Split.BackgroundImage = null; // the desktop is back
+        p.Split.LayOutAgain();
+        Assert.False(p.Split.LayoutDue, "a layout that held left another one due");
+        Assert.Equal(Laid(never), Laid(p));
+        never.Resize(own);
+        p.Resize(own);
+        Assert.Equal(p.AtShare, p.Split.SplitterDistance);
+        Assert.Equal(Laid(never), Laid(p));
+    }
+
+    /// <summary>
+    /// The paint fails as the split is fitted, and before the split has laid out again the window's refresh fits it
+    /// once more (a new sample, every 10 seconds, and every resize of the window), with the desktop away and once it
+    /// is back. The SplitContainer had stored the distance before its paint failed, so that fit found the splitter
+    /// where it wanted it and took the split as fitted; the layout two seconds later put the splitter back by the
+    /// SplitContainer's own ratio, and nothing fitted it again: the list was left without its row. A fit now does
+    /// nothing while the split waits, and the layout it waits for fits it as in a window where nothing failed.
+    /// </summary>
+    [WhenTheSplittersPaintFails]
+    public void ADesktopSwitchAsTheSplitIsFittedIsNotTakenAsFittedByARefreshBeforeItLaysOutAgain()
+    {
+        using var unreadable = UnreadablePicture(); // made first, so let go last: after the split that has it
+        using var never = OwnPage(); // the same with nothing failing
+        using var p = OwnPage();
+        ListViewItem[] neverRows = BeforeItsRows(never), rows = BeforeItsRows(p);
+        never.List.Items.AddRange(neverRows);
+        never.Split.Fit();
+        never.Split.Fit(); // the next refresh
+        Assert.True(never.Split.SplitterDistance > never.AtShare && never.Rows() == 1,
+            "not moved down for the list's row: " + Laid(never));
+        Assert.Equal(-1, never.Split.LayoutDueIn);
+
+        p.Split.BackgroundImage = unreadable; // the desktop is away as the rows come
+        p.List.Items.AddRange(rows);
+        Assert.Null(Record.Exception(p.Split.Fit));
+        Assert.Equal(CausesSplit.AgainMs, p.Split.LayoutDueIn);
+        Assert.Null(Record.Exception(p.Split.Fit)); // the next refresh, the desktop still away
+        p.Split.BackgroundImage = null; // the desktop is back
+        Assert.Null(Record.Exception(p.Split.Fit)); // and one more, before the two seconds are over
+        Assert.Equal(CausesSplit.AgainMs, p.Split.LayoutDueIn);
+        p.Split.LayOutAgain();
+        Assert.False(p.Split.LayoutDue, "a layout that held left another one due");
+        Assert.Equal(Laid(never), Laid(p));
+    }
+
+    /// <summary>
+    /// The owner lets go of the splitter while Windows switches desktops. Letting go sets the distance the drag
+    /// reached, which paints the splitter: the paint's failure came out of the mouse's message (.NET's error box) and
+    /// left both panels' layout suspended. Nothing comes out of it now, the panels lay out again, and the split waits
+    /// to lay out again. The move is given up: once the desktop is back the splitter is where it was before the drag
+    /// and the list's share is what it was, with the mouse still moving over the splitter in between (the drag is
+    /// over), and the page lays out on as one where nothing happened. The same drag with the desktop there moves the
+    /// splitter, and is the list's new share.
+    /// </summary>
+    [WhenTheSplittersPaintFails]
+    public void ADesktopSwitchAsTheOwnerLetsGoOfTheSplitterShowsNoErrorAndTheMoveIsGivenUp()
+    {
+        const int by = 40;
+        var mid = CausesAreaAt(new Size(1024, 720));
+        using var unreadable = UnreadablePicture(); // made first, so let go last: after the split that has it
+        using var never = OwnPage(); // no drag, nothing failing
+        using var there = OwnPage(); // the same drag with the desktop there
+        using var p = OwnPage();
+        int opened = p.Split.SplitterDistance;
+
+        var mouse = Drag(there, by);
+        Assert.Null(Handle(there, "OnMouseUp", Mouse(mouse)));
+        Assert.Equal((opened + by, -1), (there.Split.SplitterDistance, there.Split.LayoutDueIn));
+        Assert.Equal((opened + by + 0.5) / there.Split.Height, there.Split.Share);
+
+        mouse = Drag(p, by);
+        p.Split.BackgroundImage = unreadable; // the desktop is away
+        var escaped = Handle(p, "OnMouseUp", Mouse(mouse));
+        Assert.True(escaped is null, $"letting go of the splitter let its paint's failure out: {escaped}");
+        Assert.Equal(CausesSplit.AgainMs, p.Split.LayoutDueIn);
+        Assert.Empty(PanelProblems(p));
+        p.Split.BackgroundImage = null; // the desktop is back
+        // The mouse moves on over the splitter, no button held.
+        Assert.Null(Handle(p, "OnMouseMove", Mouse(mouse, clicks: 0, held: MouseButtons.None)));
+        p.Split.LayOutAgain();
+        Assert.False(p.Split.LayoutDue, "a layout that held left another one due");
+        Assert.Equal(Laid(never), Laid(p));
+        Assert.Equal(never.Split.Share, p.Split.Share);
+        never.Resize(mid);
+        p.Resize(mid);
+        Assert.Equal(Laid(never), Laid(p));
+    }
+
+    /// <summary>
+    /// The owner moves the splitter with the down arrow (a click on the splitter gives it the keys) and lets go of the
+    /// key while Windows switches desktops. Letting go sets the distance, which paints the splitter: the paint's
+    /// failure came out of the key's message (.NET's error box) and left both panels' layout suspended. Nothing comes
+    /// out of it now, the panels lay out again, and the split waits to lay out again. The move is given up: once the
+    /// desktop is back the splitter is where it was, as in a page where nothing happened. The same key with the
+    /// desktop there moves the splitter a pixel down, and so does the next press of it after the one that failed: that
+    /// move is over, not one the next key goes on with. This fails the distance's paint only: while the split has a
+    /// background picture (this test's way to fail a paint) the base's own paint after a key skips its fill and draws
+    /// only the focus rectangle, which does not read the picture, so no test fails that one, and its catch
+    /// (CausesSplit.OnKeyUp, the same one) is checked by reading.
+    /// </summary>
+    [WhenTheSplittersPaintFails]
+    public void ADesktopSwitchAsTheOwnerLetsGoOfAnArrowKeyShowsNoErrorAndTheMoveIsGivenUp()
+    {
+        var mid = CausesAreaAt(new Size(1024, 720));
+        using var unreadable = UnreadablePicture(); // made first, so let go last: after the split that has it
+        using var never = OwnPage(); // no key, nothing failing
+        using var there = OwnPage(); // the same key with the desktop there
+        using var p = OwnPage();
+        int opened = p.Split.SplitterDistance;
+
+        PressDownArrow(there);
+        Assert.Null(Handle(there, "OnKeyUp", new KeyEventArgs(Keys.Down)));
+        Assert.Equal((opened + 1, -1), (there.Split.SplitterDistance, there.Split.LayoutDueIn));
+
+        PressDownArrow(p);
+        p.Split.BackgroundImage = unreadable; // the desktop is away
+        var escaped = Handle(p, "OnKeyUp", new KeyEventArgs(Keys.Down));
+        Assert.True(escaped is null, $"letting go of the key let the paint's failure out: {escaped}");
+        Assert.Equal(CausesSplit.AgainMs, p.Split.LayoutDueIn);
+        Assert.Empty(PanelProblems(p));
+        p.Split.BackgroundImage = null; // the desktop is back
+        p.Split.LayOutAgain();
+        Assert.False(p.Split.LayoutDue, "a layout that held left another one due");
+        Assert.Equal(Laid(never), Laid(p));
+        Assert.Equal(never.Split.Share, p.Split.Share);
+        // The key once more, the desktop there: as the first press of it where nothing failed.
+        Assert.Null(Handle(p, "OnKeyDown", new KeyEventArgs(Keys.Down)));
+        Assert.Null(Handle(p, "OnKeyUp", new KeyEventArgs(Keys.Down)));
+        Assert.Equal(Laid(there), Laid(p));
+        Assert.Equal(there.Split.Share, p.Split.Share);
+        there.Resize(mid);
+        p.Resize(mid);
+        Assert.Equal(Laid(there), Laid(p));
+    }
+
+    /// <summary>
+    /// What these tests fail the paint with is what GDI+ fails it with while Windows switches desktops: an
+    /// ExternalException itself, not one of the types made from it. CausesSplit takes exactly that type.
+    /// </summary>
+    [WhenTheSplittersPaintFails]
+    public void ADesktopSwitchFailsThePaintWithGdiPlusOwnExceptionItself()
+    {
+        var thrown = PaintFailure();
+        Assert.NotNull(thrown);
+        Assert.True(thrown.GetType() == typeof(ExternalException), $"the paint failed with {thrown}");
+    }
+
+    /// <summary>
+    /// Only GDI+'s own failure is taken as the paint's. ExternalException is also what Win32Exception, COMException
+    /// and SEHException are made from, and a fault of those kinds inside the same calls of the SplitContainer is not
+    /// the paint's: a split that took it would lay out again every two seconds for good and say nothing of the fault.
+    /// Here a Win32Exception (as a control's window that cannot be made is) comes as the lower panel lays its controls
+    /// out, which the SplitContainer has it do inside its own layout and whenever its distance is set. It comes out of
+    /// the split's layout, of a fit, and of the owner letting go of the splitter or of an arrow key, as it did before,
+    /// and nothing waits to lay out again.
+    /// </summary>
+    [Theory]
+    [InlineData("the split's layout")]
+    [InlineData("a fit")]
+    [InlineData("letting go of the splitter")]
+    [InlineData("letting go of an arrow key")]
+    public void OnlyADesktopSwitchsFailureIsTakenAndAnotherFaultComesOutOfTheSplit(string during)
+    {
+        using var p = OwnPage();
+        bool faulty = false;
+        p.Split.Panel2.Layout += (_, _) => { if (faulty) throw new Win32Exception(8); };
+        Func<Exception?> act;
+        switch (during)
+        {
+            case "the split's layout":
+                act = () => ResizeAndLay(p, CausesAreaAt(new Size(1024, 720)));
+                break;
+            case "a fit":
+                p.List.Items.AddRange(BeforeItsRows(p)); // its fit moves the splitter down for the list's row
+                act = () => Record.Exception(p.Split.Fit);
+                break;
+            case "letting go of the splitter":
+                var mouse = Drag(p, 40);
+                act = () => Handle(p, "OnMouseUp", Mouse(mouse));
+                break;
+            default:
+                PressDownArrow(p);
+                act = () => Handle(p, "OnKeyUp", new KeyEventArgs(Keys.Down));
+                break;
+        }
+        faulty = true;
+        var escaped = act();
+        faulty = false;
+        Assert.True(escaped is Win32Exception, $"{during} did not let the fault out, but: {escaped}");
+        Assert.Equal(-1, p.Split.LayoutDueIn);
+    }
+
+    /// <summary>
+    /// The split lays out again by its own timer: two seconds after the layout that failed, with only the window's
+    /// messages taken as the app's message loop takes them and nothing calling the layout. A split that never failed
+    /// has no timer at all.
+    /// </summary>
+    [WhenTheSplittersPaintFails]
+    public void ADesktopSwitchsSplitLaysOutAgainByItsOwnTimerTwoSecondsLater()
+    {
+        var mid = CausesAreaAt(new Size(1024, 720));
+        using var unreadable = UnreadablePicture(); // made first, so let go last: after the split that has it
+        using var never = OwnPage(); // the same resize with nothing failing
+        using var p = OwnPage();
+        never.Resize(mid);
+        Assert.Equal(-1, never.Split.LayoutDueIn);
+        Assert.Equal(2000, CausesSplit.AgainMs); // the two seconds DESIGN.md gives
+
+        p.Split.BackgroundImage = unreadable; // the desktop is away
+        Assert.Null(ResizeAndLay(p, mid));
+        Assert.Equal(CausesSplit.AgainMs, p.Split.LayoutDueIn);
+        p.Split.BackgroundImage = null; // the desktop is back
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while (p.Split.LayoutDue && waited.ElapsedMilliseconds < 2 * CausesSplit.AgainMs)
+        {
+            Application.DoEvents();
+            Thread.Sleep(10);
+        }
+        Assert.True(p.Split.LayoutDueIn == 0, $"the split's timer laid out nothing in {waited.Elapsed}");
+        Assert.Equal(Laid(never), Laid(p));
+    }
+
+    /// <summary>
+    /// The owner takes hold of the splitter and gives the drag up without a move; then the list's first rows come
+    /// while Windows switches desktops, and the paint fails as the split is fitted. The layout two seconds later first
+    /// puts the splitter back by the SplitContainer's own ratio, at the height the split was fitted at: that move is
+    /// the split's own. Taken as the end of the owner's drag, where it put the splitter was the list's new share. The
+    /// share stays the design's, and the page lays out on as one where nothing failed.
+    /// </summary>
+    [WhenTheSplittersPaintFails]
+    public void ADesktopSwitchAfterADragTheOwnerGaveUpLeavesTheListItsShare()
+    {
+        var own = CausesAreaAt(new Size(1100, 750));
+        using var unreadable = UnreadablePicture(); // made first, so let go last: after the split that has it
+        using var never = OwnPage(); // the same with nothing failing
+        using var p = OwnPage();
+        ListViewItem[] neverRows = BeforeItsRows(never), rows = BeforeItsRows(p);
+        never.Split.OnSplitterMoving(new SplitterCancelEventArgs(0, 0, 0, 0));
+        never.List.Items.AddRange(neverRows);
+        never.Split.Fit();
+        Assert.Equal(-1, never.Split.LayoutDueIn);
+
+        p.Split.OnSplitterMoving(new SplitterCancelEventArgs(0, 0, 0, 0)); // a drag begun, and given up
+        p.Split.BackgroundImage = unreadable; // the desktop is away as the rows come
+        p.List.Items.AddRange(rows);
+        Assert.Null(Record.Exception(p.Split.Fit));
+        Assert.Equal(CausesSplit.AgainMs, p.Split.LayoutDueIn);
+        p.Split.BackgroundImage = null; // the desktop is back
+        p.Split.LayOutAgain();
+        Assert.Equal(Laid(never), Laid(p));
+        Assert.Equal(0.58, p.Split.Share);
+        never.Resize(own);
+        p.Resize(own);
+        Assert.Equal(Laid(never), Laid(p));
     }
 
     private static ClearRecord Clear(DateTime at, long freed) => new()
