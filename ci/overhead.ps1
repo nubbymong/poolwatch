@@ -23,7 +23,7 @@ Assert-True ($scanTimes -ge $expectedScans) "handle scans ran: $scanTimes distin
 Assert-True (-not (Select-String -Path "$Out\poolwatch.log" -Pattern 'handle scan failed' -Quiet)) "no failed handle scans in the log"
 Assert-True ($summary.etwRunning -eq $true) "ETW process session still running at the end"
 Write-Host (Get-Content "$Out\overhead.json" -Raw)
-Assert-True ($o.cpuPercentOfOneCore -lt 0.5) ("CPU {0:N3}% of one core < 0.5%" -f $o.cpuPercentOfOneCore)
-Assert-True ($o.peakWorkingSetBytes -lt 100MB) ("peak working set {0:N1} MB < 100 MB" -f ($o.peakWorkingSetBytes / 1MB))
-Assert-True ($o.diskWriteBytesPerHour -lt 5MB) ("disk writes {0:N2} MB/h < 5 MB/h" -f ($o.diskWriteBytesPerHour / 1MB))
+Assert-True ($null -ne $o.cpuPercentOfOneCore -and $o.cpuPercentOfOneCore -lt 0.5) ("CPU {0:N3}% of one core < 0.5%" -f $o.cpuPercentOfOneCore)
+Assert-True ($null -ne $o.peakWorkingSetBytes -and $o.peakWorkingSetBytes -lt 100MB) ("peak working set {0:N1} MB < 100 MB" -f ($o.peakWorkingSetBytes / 1MB))
+Assert-True ($null -ne $o.diskWriteBytesPerHour -and $o.diskWriteBytesPerHour -lt 5MB) ("disk writes {0:N2} MB/h < 5 MB/h" -f ($o.diskWriteBytesPerHour / 1MB))
 Complete-Assertions 'Overhead'

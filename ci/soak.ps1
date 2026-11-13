@@ -176,7 +176,7 @@ if ($Assert) {
     Assert-True ($steady.Count -ge 3) ("the steady window (from 15 min) has >= 3 samples ({0})" -f $steady.Count)
     Assert-True ($cpuPct -lt 0.5) ("CPU {0:N3}% of one core < 0.5%" -f $cpuPct)
     Assert-True ($null -ne $steadyMaxWs -and $steadyMaxWs -lt 100) ("working set max over the steady window (from 15 min, {0} samples) {1} < 100 MB" -f $steady.Count, $steadyWsText)
-    Assert-True ($overhead.diskWriteBytesPerHour -lt 5MB) ("disk writes {0:N2} MB/h < 5 MB/h" -f ($overhead.diskWriteBytesPerHour / 1MB))
+    Assert-True ($null -ne $overhead.diskWriteBytesPerHour -and $overhead.diskWriteBytesPerHour -lt 5MB) ("disk writes {0:N2} MB/h < 5 MB/h" -f ($overhead.diskWriteBytesPerHour / 1MB))
     Assert-True $memoryFlat "memory flat: $memoryText"
     # Each count must be there before it is judged: a missing one reads as 0 ([int]$null) and would pass unread.
     Assert-True ($null -ne $profile.held.registryRecords -and [int]$profile.held.registryRecords -le 20000) "registry bounded ($($profile.held.registryRecords) <= 20000)"

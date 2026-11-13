@@ -293,8 +293,8 @@ on), and every lasting one is listed under Active changes, where it can be put b
   25 times an hour, handle scans with a third of their counts moving): 4.6 to 5.1 MB an hour before, 2.10 to 2.16 MB an
   hour now (`events.csv` 1.20, `processes.csv` 0.43, `tags.csv` 0.21, `handles.csv` 0.19, the rest 0.10), asserted under
   2.5 MB in each hour; the sink's own CPU there is under 1 s in the 4 hours (under 0.01% of one core), its allocations
-  70 MB an hour (142 before). The CI's agentic-load check (section 12) holds the whole app under 12 MB
-  an hour, a regression limit just above the 9.04 MB its first run measured; the 5 MB stays the goal.
+  70 MB an hour (142 before). The CI's agentic-load check (section 12) holds the whole app under 20 MB an hour, a
+  regression limit about 1.5 times the 12.79 MB measured in a run that took all its samples; the 5 MB stays the goal.
 - **Where it writes**: only under its admin-only data folder `%ProgramData%\PoolWatch` (or an explicit headless
   `--out` folder), apart from the few writes SECURITY.md lists, never in its install folder, and never
   on a ReFS volume (every Dev Drive is ReFS: its per-file metadata is the pool being measured). Before each write in
@@ -1695,13 +1695,15 @@ The code builds anywhere the .NET 10 SDK runs (`EnableWindowsTargeting`); it run
   growth incidents open beside it (a 10-minute rule of 6 MB there). Judged from 15 minutes as the soak judges, from
   outside and from PoolWatch's own files, each check with its marker: the load ran (Git Bash there, at least 500 starts
   a minute seen, fork copies seen and not counted), CPU under 3% of one core, working set under 350 MB, disk writes
-  under 12 MB an hour with the report folders' writes that could wait kept to what their 1 MB an hour allows
+  under 20 MB an hour with the report folders' writes that could wait kept to what their 1 MB an hour allows
   (`profile.json`'s `writeBudget`: `canWaitMB` within `canWaitAllowanceMB`, the bound the budget itself states and its
   tests hold), at most 10 spawn-storm folders an hour, and at least one growth incident with its `report.json` and
-  `report.md` in every incident folder. The three limits sit just above what the first run measured (1.96% of one
-  core, 280 MB, 9.04 MB an hour, at about 10,300 starts a minute, 3.4 times the 3,000 asked), so a change that takes
-  PoolWatch over one of them fails the release. The budget's 0.5%, 100 MB and 5 MB an hour stay the goal; PoolWatch
-  does not meet them under this load. It writes `agentic-soak.md` with the stages and the writes by file.
+  `report.md` in every incident folder. The CPU and memory limits sit just above what the first run measured (1.96%
+  of one core, 280 MB, at about 10,300 starts a minute, 3.4 times the 3,000 asked); the disk limit is about 1.5 times
+  the 12.79 MB an hour of a later run that took all 270 of its samples (about 12,400 starts a minute; the first run
+  took 50, its ticks stalled on the runner, and wrote 9.04 MB an hour). A change that takes PoolWatch over one of them
+  fails the release. The budget's 0.5%, 100 MB and 5 MB an hour stay the goal; PoolWatch does not meet them under this
+  load. It writes `agentic-soak.md` with the stages and the writes by file.
 - Text pins and check markers. Some app-layer tests hold a CI script, the setup script's [Code] or a source file to its
   text (`ScriptCode`), read without comments (a source file also without the code under an `#if`; a whole [Code]
   routine as written, with its comments): a definition only where it is the

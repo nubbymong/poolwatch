@@ -238,8 +238,8 @@ if (Test-Path $smokeFile) {
 
     # Report an issue: the preview is redacted, and the address carries only the title, version and Windows.
     $rep = $s.report
-    Assert-True ("$($rep.preview)".IndexOf($env:USERNAME, [StringComparison]::OrdinalIgnoreCase) -lt 0) "the report's preview does not hold the user name"
-    Assert-True ("$($rep.preview)".IndexOf($env:COMPUTERNAME, [StringComparison]::OrdinalIgnoreCase) -lt 0) "the report's preview does not hold the PC's name"
+    Assert-True (-not [string]::IsNullOrEmpty("$($rep.preview)") -and "$($rep.preview)".IndexOf($env:USERNAME, [StringComparison]::OrdinalIgnoreCase) -lt 0) "the report's preview does not hold the user name"
+    Assert-True (-not [string]::IsNullOrEmpty("$($rep.preview)") -and "$($rep.preview)".IndexOf($env:COMPUTERNAME, [StringComparison]::OrdinalIgnoreCase) -lt 0) "the report's preview does not hold the PC's name"
     Assert-True ([int]$rep.urlLength -gt 0 -and [int]$rep.urlLength -le 255) "the issue address is short ($($rep.urlLength) characters)"
     Assert-True (@($rep.layoutProblems).Count -eq 0) "Report an issue: nothing clipped or overlapping: $(@($rep.layoutProblems) -join '; ')"
 

@@ -46,7 +46,7 @@ public sealed class CiConfigTests
     /// <summary>
     /// The runs that judge PoolWatch's own cost (the soak, the agentic-load check, the overhead check) judge the worst
     /// case, Detailed recording, so the day's files and the spawn-storm folders are measured too. The soak and the
-    /// overhead check measure them against the 5 MB an hour. The agentic-load check measures them against its 12 MB
+    /// overhead check measure them against the 5 MB an hour. The agentic-load check measures them against its 20 MB
     /// an hour regression limit. The churn soak's config only records the day: no script in ci and no workflow reads
     /// that config, so nothing in the repository judges a churn soak. Every run that reads the day's files (the
     /// end-to-end and diagnostics scenarios, the headless check) records them. The default, Reports only, writes none
