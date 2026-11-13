@@ -22,7 +22,8 @@ safe.
 | ![Setup, step 1: Welcome](screenshots/6-setup-1-welcome.png) | ![Setup, step 2: How your PC is impacted](screenshots/6-setup-2-your-pc.png) |
 | ![Setup, step 3: You stay in control](screenshots/6-setup-3-safety.png) | ![Setup, step 4: the standby cache](screenshots/6-setup-4-standby-cache.png) |
 | ![Setup, step 5: Fixes for this PC](screenshots/6-setup-5-fixes.png) | ![Setup, step 6: Services, for later in the app](screenshots/6-setup-6-services.png) |
-| ![How PoolWatch works](screenshots/6-setup-how-it-works.png) | |
+| ![Setup, step 7: what PoolWatch keeps on disk](screenshots/6-setup-7-records.png) | ![Setup, step 8: PoolWatch is watching](screenshots/6-setup-8-ready.png) |
+| ![How PoolWatch works](screenshots/6-setup-how-it-works.png) | ![The Records step alone, as it opens after an upgrade from 1.0.0-beta.2](screenshots/6-setup-records-alone.png) |
 
 1. **Welcome.** What PoolWatch does, and a choice: **Simple** or **Advanced**. It picks the view the app opens in;
    you can switch it later in the app. Both run the same eight steps.
@@ -87,10 +88,11 @@ safe.
 
 **After an upgrade from 1.0.0-beta.2**, whose setup had no Records step and which always recorded, PoolWatch uses
 Reports only and opens that step alone at its first start (the same page, its rail listing only Records, with **Done**
-and no Back). Done keeps your choice and it does not open again; closed without Done, Reports only stays and the step
-opens again at each start until you press Done, or save a change of the record mode or the cleanup in Settings, which
-is a choice too (saved while the step is open, the step then shows it, so its Done keeps it). What beta.2 recorded is
-cleaned up by the usual rule, 7 days of the PC's awake time without a write.
+and no Back). Done is greyed for a second as the step opens. Done keeps your choice and it does not open again;
+closed without Done, Reports only stays and the step opens again at each start until you press Done, or save a
+change of the record mode or the cleanup in Settings, which is a choice too (saved while the step is open, the step
+then shows it, so its Done keeps it). What beta.2 recorded is cleaned up by the usual rule, 7 days of the PC's
+awake time without a write.
 
 Steps 4 and 5 wait until PoolWatch has read the PC ("Looking at your PC... Next is ready in a moment."), at most a
 minute; after that, setup goes on with what it knows. Nothing changes until you press **Next** on step 4 (the cache

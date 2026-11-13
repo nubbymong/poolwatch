@@ -139,7 +139,7 @@ record of the whole day). Nothing changes until you press **Next** on the step w
 ([setup in the user guide](docs/USER-GUIDE.md#at-first-start-set-up-poolwatch)).
 
 <p align="center">
-  <img alt="Set up PoolWatch, step 2 of 8, How your PC is impacted: each known cause of a growing kernel pool with its impact level. On the test machine each one is None, with Still watching, except Background services: Low impact, with Trim in the app" src="docs/screenshots/6-setup-2-your-pc.png">
+  <img alt="Set up PoolWatch, step 2 of 8, How your PC is impacted: each known cause of a growing kernel pool with its impact level. On the test machine Background services is Low impact, with Trim in the app; the Windows token leak is Not known (it could not be checked there) and the other three are None, each with Still watching" src="docs/screenshots/6-setup-2-your-pc.png">
 </p>
 
 ### 2. It watches, and says what grew
