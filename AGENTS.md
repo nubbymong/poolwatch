@@ -103,9 +103,9 @@ or change the wrong thing ([SECURITY.md](SECURITY.md), "Security model").
   to turn off). Nothing about the PC is sent anywhere. A new connection, or a change to this one, needs the security
   review below.
 - Stay light: under 0.5% of one core and a working set under 100 MB on a busy PC (the CI soak and overhead checks
-  enforce it). Nothing new on the sampling path. A new window or dialog is created when opened and disposed when
-  closed (the main window only hides, and stops refreshing while hidden); a new scan runs on demand or on a slow timer,
-  never on every sample.
+  enforce it; the agentic-load check holds regression limits instead). Nothing new on the sampling path. A new window
+  or dialog is created when opened and disposed when closed (the main window only hides, and stops refreshing while
+  hidden); a new scan runs on demand or on a slow timer, never on every sample.
 
 ### Security-sensitive code, and what each part must keep
 
