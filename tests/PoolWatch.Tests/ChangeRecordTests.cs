@@ -120,6 +120,59 @@ public class ChangeRecordTests
         Assert.Equal([first], ChangeRecordFile.Parse(ChangeRecordFile.ToJson([first, second])));
     }
 
+    /// <summary>
+    /// Every entry of the list that is not read is counted and kept, whatever the reason, not only one that cannot be
+    /// read as a record at all: a record that fails its checks (here its id does not match its target; a removed task's
+    /// definition over 64 KB is another), a second record for a target, and a record past the 500 a file is read for.
+    /// A save of the records read alone would lose each of them.
+    /// </summary>
+    [Theory]
+    [InlineData("its id does not match its target")]
+    [InlineData("the same record twice")]
+    [InlineData("one record past the bound")]
+    public void EveryEntryThatIsNotReadIsCountedAndKeptAsItIs(string why)
+    {
+        List<ChangeRecord> records = why switch
+        {
+            "its id does not match its target" => [Task(), Task(@"\Vendor\Cleanup") with { Id = @"task:\Other" }],
+            "the same record twice" => [Task(), Task()],
+            _ => Enumerable.Range(0, ChangeRecordFile.MaxRecords + 1).Select(i => Startup(name: "Helper" + i)).ToList(),
+        };
+        string json = ChangeRecordFile.ToJson(records);
+
+        var read = ChangeRecordFile.Parse(json, out int unread);
+
+        Assert.Equal(1, unread);
+        Assert.Equal(records[..^1], read); // the valid records are listed, the last one is not
+        Assert.Equal(records[..^1], ChangeRecordFile.Parse(json, out IReadOnlyList<string> kept));
+        string entry = Assert.Single(kept);
+        Assert.Equal(records[^1], System.Text.Json.JsonSerializer.Deserialize<ChangeRecord>(entry, ReadAsWritten)); // its text, as in the file
+        Assert.Contains(entry, json);
+    }
+
+    /// <summary>The entries a file could not be read for are written back after its records exactly as they were, so a save loses none of them.</summary>
+    [Fact]
+    public void TheEntriesNotReadAreWrittenBackAsTheyWere()
+    {
+        string good = ChangeRecordFile.ToJson([Task()]);
+        const string newer = """{ "id": "later:x", "kind": "SomethingNew", "changedUtc": "2026-10-28T09:12:00Z", "via": "a newer PoolWatch", "more": [1, "é"] }""";
+        string json = good.Replace("\"changes\": [", "\"changes\": [\n" + newer + ", null, 7,");
+        Assert.Equal([Task()], ChangeRecordFile.Parse(json, out IReadOnlyList<string> kept));
+        Assert.Equal([newer, "null", "7"], kept);
+
+        string saved = ChangeRecordFile.ToJson([Startup()], kept);
+
+        Assert.Contains(newer, saved);
+        Assert.Equal([Startup()], ChangeRecordFile.Parse(saved, out IReadOnlyList<string> again));
+        Assert.Equal(kept, again);
+    }
+
+    private static readonly System.Text.Json.JsonSerializerOptions ReadAsWritten = new()
+    {
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+    };
+
     public static TheoryData<string, ChangeRecord> InvalidRecords() => new()
     {
         { "id does not match", Task() with { Id = "task:\\Other" } },

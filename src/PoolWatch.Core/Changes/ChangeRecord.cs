@@ -59,8 +59,9 @@ public static class ChangeIds
 /// applied-changes.json: <c>{ "version": 1, "changes": [ ... ] }</c>, at most <see cref="MaxBytes"/> and
 /// <see cref="MaxRecords"/> records. Parsing is bounded and never throws: a file this build cannot read as a whole
 /// (malformed, too large, another version, a field written twice in one object) is null, so it is never written over,
-/// and a record that is invalid or of a kind this build does not know is left out on its own, and counted, so the list
-/// is not saved over it either (<see cref="Parse(string, out int)"/>).
+/// and an entry of the list that is invalid or of a kind this build does not know is left out on its own, and kept as
+/// its text (<see cref="Parse(string, out IReadOnlyList{string})"/>), which a save writes back as it is
+/// (<see cref="ToJson(IEnumerable{ChangeRecord}, IEnumerable{string})"/>), so none is lost.
 /// </summary>
 public static class ChangeRecordFile
 {
@@ -81,17 +82,26 @@ public static class ChangeRecordFile
     /// The valid records. Null when the file as a whole is not one this build reads, an empty one included: PoolWatch
     /// always writes the version and the list, so an empty file is one a power cut or a crash left, and may have held records.
     /// </summary>
-    public static List<ChangeRecord>? Parse(string json) => Parse(json, out _);
+    public static List<ChangeRecord>? Parse(string json) => Parse(json, out IReadOnlyList<string> _);
 
-    /// <summary>
-    /// <see cref="Parse(string)"/>, and how many entries of the file's list were left out (<paramref name="unread"/>):
-    /// invalid, of a kind this build does not know (a newer PoolWatch's), a second one for a target, or past
-    /// <see cref="MaxRecords"/>. Saving the records read would lose those, so ChangeRecords does not save over a file
-    /// that has one. 0 when the file is not read at all.
-    /// </summary>
+    /// <summary><see cref="Parse(string)"/>, and how many entries of the file's list were left out (<see cref="Parse(string, out IReadOnlyList{string})"/>).</summary>
     public static List<ChangeRecord>? Parse(string json, out int unread)
     {
-        unread = 0;
+        var records = Parse(json, out IReadOnlyList<string> left);
+        unread = left.Count;
+        return records;
+    }
+
+    /// <summary>
+    /// <see cref="Parse(string)"/>, and each entry of the file's list that was left out (<paramref name="unread"/>), as
+    /// its text in the file: invalid, of a kind this build does not know (a newer PoolWatch's), a second one for a
+    /// target, or past <see cref="MaxRecords"/>. Saving only the records read would lose those, perhaps with the only copy
+    /// of a removed task's definition, so ChangeRecords writes them back after its records. Empty when the file is not
+    /// read at all.
+    /// </summary>
+    public static List<ChangeRecord>? Parse(string json, out IReadOnlyList<string> unread)
+    {
+        unread = [];
         var list = new List<ChangeRecord>();
         if (string.IsNullOrWhiteSpace(json)) return null;
         if (Encoding.UTF8.GetByteCount(json) > MaxBytes) return null;
@@ -106,26 +116,49 @@ public static class ChangeRecordFile
                 !v.TryGetInt32(out int version) || version != Version || !root.TryGetProperty("changes", out var changes) ||
                 changes.ValueKind != JsonValueKind.Array) return null;
             var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var left = new List<string>();
             foreach (var e in changes.EnumerateArray())
             {
-                if (list.Count >= MaxRecords) break;
-                ChangeRecord? r;
-                try { r = e.Deserialize<ChangeRecord>(Json); }
-                catch (JsonException) { continue; } // a missing field or an unknown kind: this record only
+                ChangeRecord? r = null;
+                if (list.Count < MaxRecords) // past the bound, no entry is read, but each is kept
+                {
+                    try { r = e.Deserialize<ChangeRecord>(Json); }
+                    catch (JsonException) { } // a missing field or an unknown kind: this record only
+                }
                 if (r is not null && Invalid(r) is null && ids.Add(r.Id)) list.Add(r);
+                else left.Add(e.GetRawText());
             }
-            unread = changes.GetArrayLength() - list.Count;
+            unread = left;
         }
         // InvalidOperationException: a field's name that holds half of a surrogate pair written as an escape ("\ud800")
         // throws when it is compared with the name looked for.
-        catch (Exception ex) when (ex is JsonException or InvalidOperationException) { unread = 0; return null; }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException) { unread = []; return null; }
         return list;
     }
 
     private static readonly JsonDocumentOptions ReadOptions = new() { MaxDepth = 8, AllowDuplicateProperties = false };
 
-    public static string ToJson(IEnumerable<ChangeRecord> records) =>
-        JsonSerializer.Serialize(new { version = Version, changes = records.ToList() }, Json);
+    public static string ToJson(IEnumerable<ChangeRecord> records) => ToJson(records, []);
+
+    /// <summary>
+    /// The file: <paramref name="records"/>, then each entry of <paramref name="unread"/> (as
+    /// <see cref="Parse(string, out IReadOnlyList{string})"/> gave it) written back exactly as it was read.
+    /// </summary>
+    public static string ToJson(IEnumerable<ChangeRecord> records, IEnumerable<string> unread)
+    {
+        using var buffer = new MemoryStream();
+        using (var w = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = true }))
+        {
+            w.WriteStartObject();
+            w.WriteNumber("version", Version);
+            w.WriteStartArray("changes");
+            foreach (var r in records) JsonSerializer.Serialize(w, r, Json);
+            foreach (string entry in unread) w.WriteRawValue(entry); // checked to be one JSON value, then copied as it is
+            w.WriteEndArray();
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
 
     /// <summary>
     /// Why the record is not acted on, or null. The checks that need only the record: its id matches its target, every

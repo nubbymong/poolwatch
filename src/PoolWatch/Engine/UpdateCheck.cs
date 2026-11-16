@@ -400,13 +400,19 @@ internal sealed class UpdateCheck : IDisposable
         FileStream stream;
         try { stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read); }
         catch (FileNotFoundException) { return null; }
-        using (stream)
-        {
-            var bytes = new byte[MaxStateBytes + 1];
-            int read = 0, n;
-            while (read < bytes.Length && (n = stream.Read(bytes, read, bytes.Length - read)) > 0) read += n;
-            return read > MaxStateBytes ? null : bytes[..read];
-        }
+        using (stream) return ReadState(stream);
+    }
+
+    /// <summary>
+    /// At most <see cref="MaxStateBytes"/> bytes and one more from <paramref name="stream"/>: its bytes, or null when it
+    /// holds more. Its length is never asked: the bound is on the bytes read.
+    /// </summary>
+    internal static byte[]? ReadState(Stream stream)
+    {
+        var bytes = new byte[MaxStateBytes + 1];
+        int read = 0, n;
+        while (read < bytes.Length && (n = stream.Read(bytes, read, bytes.Length - read)) > 0) read += n;
+        return read > MaxStateBytes ? null : bytes[..read];
     }
 
     /// <summary>

@@ -478,34 +478,106 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.Equal(newer, File.ReadAllText(file));
     }
 
+    /// <summary>A record of a kind a newer PoolWatch has: this build does not read it.</summary>
+    private const string NewerKind = """{ "id": "later:x", "kind": "SomethingNew", "changedUtc": "2026-10-28T09:12:00Z", "via": "a newer PoolWatch" }""";
+
+    /// <summary>A record whose id does not match its target: this build does not read it either.</summary>
+    private const string IdNotItsTarget =
+        """{ "id": "task:\\Other", "kind": "ScheduledTask", "changedUtc": "2026-10-28T09:12:00Z", "via": "the Services tab", "name": "Cleanup", "location": "\\Vendor\\Cleanup", "enabledBefore": true }""";
+
+    public static TheoryData<string> RecordsThisBuildCannotRead() => new() { NewerKind, IdNotItsTarget };
+
     /// <summary>
-    /// A record this build cannot read (here of a kind a newer PoolWatch has) is left out of the list, and a save of that
-    /// list would lose it, perhaps with the only copy of a removed task's definition: the records it can read are listed,
-    /// and the file is never written over.
+    /// A record this build cannot read is left out of the list but kept in the file as it is, perhaps with the only copy
+    /// of a removed task's definition: a change is still recorded before it is switched, a put-back still removes its
+    /// own record, and the entry is written back after the records this build reads, unchanged, on every save.
     /// </summary>
-    [Fact]
-    public void AListWithARecordThisBuildCannotReadIsNeverWrittenOver()
+    [Theory]
+    [MemberData(nameof(RecordsThisBuildCannotRead))]
+    public void ARecordThisBuildCannotReadIsKeptAsItIs(string unread)
     {
         var task = ChangeRecordFixtures.Task();
         _f.Records.Put(task);
         string file = Path.Combine(_f.Paths.DataRoot, "applied-changes.json");
-        string newer = File.ReadAllText(file).Replace("\"changes\": [", """
-            "changes": [
-              { "id": "later:x", "kind": "SomethingNew", "changedUtc": "2026-10-28T09:12:00Z", "via": "a newer PoolWatch" },
-            """);
-        File.WriteAllText(file, newer);
+        File.WriteAllText(file, File.ReadAllText(file).Replace("\"changes\": [", "\"changes\": [\n" + unread + ","));
 
         var records = new ChangeRecords(_f.Paths, _f.Log);
-        Assert.Equal([task], records.All()); // what it can read is still listed
-        var refused = Assert.Throws<InvalidDataException>(() => records.Put(ChangeRecordFixtures.Startup()));
-        Assert.Contains("it holds 1 change this PoolWatch cannot read", refused.Message);
-        bool switched = false;
-        string? notSwitched = records.Toggle(ChangeKind.StartupEntry, "HKCU Run", "Helper", enable: false, "the Services tab", () => { switched = true; return null; });
-        Assert.StartsWith("not switched, because PoolWatch could not save how it was set: PoolWatch cannot read its list of changes", notSwitched);
-        Assert.False(switched); // never switched without its record
-        records.Remove(task); // put back, but its record stays
-        Assert.Equal(newer, File.ReadAllText(file));
-        Assert.Equal([task], records.All());
+        Assert.Equal([task], records.All(out int left)); // what it can read is listed
+        Assert.Equal(1, left);
+        bool recordedFirst = false;
+        string? notSwitched = records.Toggle(ChangeKind.StartupEntry, "HKCU Run", "Helper", enable: false, "the Services tab",
+            () => { recordedFirst = new ChangeRecords(_f.Paths, _f.Log).All().Any(r => r.Kind == RecordKind.StartupEntry); return null; });
+        Assert.Null(notSwitched);
+        Assert.True(recordedFirst); // recorded before it was switched
+        Assert.Contains(unread, File.ReadAllText(file));
+
+        records.Remove(task); // put back: its record goes
+        var now = new ChangeRecords(_f.Paths, _f.Log);
+        Assert.Equal([ChangeIds.StartupEntry("HKCU Run", "Helper")], now.All(out left).Select(r => r.Id));
+        Assert.Equal(1, left);
+        Assert.Contains(unread, File.ReadAllText(file)); // and the entry this build cannot read is still there, as it was
+        Assert.Equal(1, ChangeRecordFile.Parse(File.ReadAllText(file), out IReadOnlyList<string> kept)!.Count);
+        Assert.Equal([unread], kept);
+    }
+
+    /// <summary>
+    /// The entries this build cannot read count toward the 500 changes a list holds, since every save writes them too:
+    /// a change that would take the list past that is not recorded (so not made), and the file is left as it is.
+    /// </summary>
+    [Fact]
+    public void TheEntriesThisBuildCannotReadCountTowardTheBound()
+    {
+        var helpers = Enumerable.Range(0, ChangeRecordFile.MaxRecords - 1)
+            .Select(i => ChangeRecordFixtures.Startup() with { Id = ChangeIds.StartupEntry("HKCU Run", "Helper" + i), Name = "Helper" + i }).ToList();
+        string file = Path.Combine(_f.Paths.DataRoot, "applied-changes.json");
+        File.WriteAllText(file, ChangeRecordFile.ToJson(helpers, [NewerKind]));
+        string full = File.ReadAllText(file);
+
+        var records = new ChangeRecords(_f.Paths, _f.Log);
+        var refused = Assert.Throws<InvalidOperationException>(() => records.Put(ChangeRecordFixtures.Task()));
+        Assert.Contains($"at most {ChangeRecordFile.MaxRecords} changes", refused.Message);
+        Assert.Equal(full, File.ReadAllText(file));
+        records.Put(helpers[0] with { Via = "the setup guide" }); // one in place of one with its id is still recorded
+        Assert.Equal(ChangeRecordFile.MaxRecords - 1, new ChangeRecords(_f.Paths, _f.Log).All(out int left).Count);
+        Assert.Equal(1, left);
+    }
+
+    /// <summary>
+    /// While the list holds an entry this build cannot read, Active changes lists one more row, which says how many and
+    /// that they are kept, and cannot be put back: Put all back reports it as not done, so the uninstaller's cleanup ends
+    /// with "not everything was put back" (8) and the uninstaller keeps the data folder that holds the entry. The changes
+    /// it can read are put back as usual. Without the row, the cleanup would end with 0, and the uninstaller could delete
+    /// the folder with the entry in it.
+    /// </summary>
+    [Fact]
+    public void AnEntryThisBuildCannotReadIsARowThatIsNotPutBack()
+    {
+        var task = ChangeRecordFixtures.Task();
+        _f.Records.Put(task);
+        _f.Toggles.Tasks[task.Location!] = false; // the task as PoolWatch left it: off
+        string file = Path.Combine(_f.Paths.DataRoot, "applied-changes.json");
+        const string unread = NewerKind;
+        File.WriteAllText(file, File.ReadAllText(file).Replace("\"changes\": [", "\"changes\": [\n" + unread + ","));
+        var ledger = new ChangeLedger([_f.Recorded(_f.Live())], _f.Records, _f.Log);
+
+        var rows = ledger.List();
+        Assert.Equal(2, rows.Count);
+        var row = Assert.Single(rows, r => !r.CanUndo);
+        Assert.Equal(ChangeKind.Shortcut, row.Kind); // an uninstall that keeps your other changes still reports it
+        Assert.Contains("could not read 1 change in its list", row.What);
+        Assert.Contains("It is kept in the list as it is", row.Note);
+        Assert.Contains("3 changes in its list", RecordedSource.UnreadEntries(3).What);
+
+        string? summary = null;
+        int exit = Program.UninstallCleanup(false, () => new MemoryStream(), () => ledger.List(), which => Program.UninstallUndo(ledger, which), s => summary = s);
+
+        Assert.Equal(ExitCodes.NotAllPutBack, exit);
+        Assert.True(_f.Toggles.Tasks[task.Location!]); // the change it can read is put back
+        Assert.Contains("Put back: " + ChangeWords.Of(task), summary);
+        Assert.Contains("Could not put back: " + row.What, summary);
+        Assert.Empty(new ChangeRecords(_f.Paths, _f.Log).All(out int left)); // its record is gone
+        Assert.Equal(1, left);
+        Assert.Contains(unread, File.ReadAllText(file)); // the entry stays
     }
 
     [Theory]

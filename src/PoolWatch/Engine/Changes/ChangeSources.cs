@@ -249,12 +249,35 @@ internal sealed class RecordedSource : IChangeSource
             [Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), Environment.GetFolderPath(Environment.SpecialFolder.Programs)];
     }
 
-    public IEnumerable<ActiveChange> List() => _records.All().Select(Row);
+    /// <summary>
+    /// Each record, and, when the list holds entries this build cannot read (damaged, or a newer PoolWatch's), one row for
+    /// them (<see cref="UnreadEntries"/>): they stay in the list as they are and cannot be put back from here, so Put all
+    /// back and the uninstaller report them as not put back, and the uninstaller keeps the data folder that holds them,
+    /// instead of leaving them out.
+    /// </summary>
+    public IEnumerable<ActiveChange> List()
+    {
+        var rows = _records.All(out int unread).Select(Row).ToList();
+        if (unread > 0) rows.Add(UnreadEntries(unread));
+        return rows;
+    }
 
     /// <summary>Listed with the shortcuts, which an uninstall that keeps your other changes still undoes, so it reports this too.</summary>
     public ActiveChange Unread(string error) =>
         new("unread:applied-changes", ChangeKind.Shortcut, null, ChangeWords.Unread("the clear tasks, scheduled tasks, startup apps and shortcuts it changed"), false,
             ChangeWords.UnreadNote(error));
+
+    /// <summary>
+    /// The row for the <paramref name="count"/> entries of the list this build cannot read, which cannot be put back; with
+    /// the shortcuts, as <see cref="Unread"/> is (the two are never listed together: a list that cannot be read at all
+    /// lists only that row).
+    /// </summary>
+    internal static ActiveChange UnreadEntries(int count) =>
+        new("unread:applied-changes", ChangeKind.Shortcut, null,
+            ChangeWords.Unread($"{count} {(count == 1 ? "change" : "changes")} in its list of clear tasks, scheduled tasks, startup apps and shortcuts"), false,
+            ChangeWords.UnreadNote(count == 1
+                ? "That change is damaged, or a newer PoolWatch made it. It is kept in the list as it is: the newest PoolWatch may be able to put it back."
+                : $"Those {count} changes are damaged, or a newer PoolWatch made them. They are kept in the list as they are: the newest PoolWatch may be able to put them back."));
 
     private ActiveChange Row(ChangeRecord r)
     {

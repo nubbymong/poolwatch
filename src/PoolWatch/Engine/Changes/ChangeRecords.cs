@@ -15,8 +15,11 @@ namespace PoolWatch.Engine.Changes;
 /// write through one object; thread-safe. The file is read again before every change and every listing, so a record
 /// another PoolWatch process wrote (the command line) is kept and shown; only two processes saving at the same moment
 /// can lose one of the two changes, as no lock spans processes. A file that is there but cannot be read is never
-/// written over, since it may hold the only copy of a removed task's definition, and nor is one that holds a record
-/// this build cannot read (damaged, or a newer PoolWatch's): the records it can read are still listed and put back.
+/// written over, since it may hold the only copy of a removed task's definition. A record this build cannot read
+/// (damaged, or a newer PoolWatch's) is never lost either: each save writes it back as it is, after the records it
+/// reads, so the records it can read are still recorded, listed and put back (their own records removed as usual),
+/// and <see cref="All(out int)"/> says how many it could not read, which Active changes lists as a row that cannot be
+/// put back.
 /// </summary>
 internal sealed class ChangeRecords
 {
@@ -31,8 +34,11 @@ internal sealed class ChangeRecords
     private readonly object _lock = new();
     /// <summary>The records as last read, for <see cref="Has"/>.</summary>
     private List<ChangeRecord> _records = [];
-    /// <summary>How many records of the file as last read could not be read: while there is one, the file is not saved over.</summary>
-    private int _unread;
+    /// <summary>
+    /// The entries of the file as last read that this build could not read, each as its text in the file: a save writes
+    /// them back as they are, after the records it reads, so none is lost.
+    /// </summary>
+    private IReadOnlyList<string> _unread = [];
 
     /// <summary>Reads the file once for <see cref="Has"/> (tests use this to read it again, as a restart would).</summary>
     internal ChangeRecords(AppPaths paths, Log log)
@@ -57,6 +63,20 @@ internal sealed class ChangeRecords
 
     /// <summary>The records as the file holds them now. Throws when it is there but cannot be read.</summary>
     public IReadOnlyList<ChangeRecord> All() { lock (_lock) return Read(); }
+
+    /// <summary>
+    /// <see cref="All()"/>, and, from the same read, how many entries of the file this build cannot read
+    /// (<paramref name="unread"/>: damaged, or a newer PoolWatch's), which stay in the file as they are.
+    /// </summary>
+    public IReadOnlyList<ChangeRecord> All(out int unread)
+    {
+        lock (_lock)
+        {
+            var records = Read();
+            unread = _unread.Count;
+            return records;
+        }
+    }
 
     /// <summary>
     /// Whether a change of this kind is recorded (a shortcut was made, a clear task of your own was removed), as last read
@@ -265,26 +285,28 @@ internal sealed class ChangeRecords
         if (ChangeRecordFile.Invalid(record) is { } why) throw new ArgumentException("the change was not recorded: " + why); // shown as is: no parameter name
     }
 
-    /// <summary>The list with <paramref name="record"/> added, or in place of the one with its id; throws past the bound.</summary>
-    private static List<ChangeRecord> With(List<ChangeRecord> now, ChangeRecord record)
+    /// <summary>
+    /// The list with <paramref name="record"/> added, or in place of the one with its id; throws when an added record
+    /// would take the file past its bound. The entries this build cannot read are saved too, so they count: a file of
+    /// more entries than that would leave its last ones unread, to this build and to the newer PoolWatch that wrote them.
+    /// Called in an edit, under the lock, so the entries it counts are the file's as just read.
+    /// </summary>
+    private List<ChangeRecord> With(List<ChangeRecord> now, ChangeRecord record)
     {
         var next = now.Where(r => !SameId(r, record.Id)).Append(record).ToList();
-        return next.Count <= ChangeRecordFile.MaxRecords ? next : throw new InvalidOperationException($"PoolWatch keeps at most {ChangeRecordFile.MaxRecords} changes");
+        return next.Count <= now.Count || next.Count + _unread.Count <= ChangeRecordFile.MaxRecords ? next
+            : throw new InvalidOperationException($"PoolWatch keeps at most {ChangeRecordFile.MaxRecords} changes");
     }
 
     /// <summary>
-    /// Reads the file as it is now, edits that list and saves it (an edit that returns null changes nothing). Throws like
-    /// <see cref="Read"/> and the save, and, without saving, when the file holds a record this build could not read: the
-    /// save would lose it.
+    /// Reads the file as it is now, edits that list and saves it (an edit that returns null changes nothing), with the
+    /// entries this build could not read written back after it as they were. Throws like <see cref="Read"/> and the save.
     /// </summary>
     private void Edit(Func<List<ChangeRecord>, List<ChangeRecord>?> edit)
     {
         lock (_lock)
         {
             if (edit(Read()) is not { } next) return;
-            if (_unread > 0)
-                throw Unreadable($"it holds {_unread} {(_unread == 1 ? "change" : "changes")} this PoolWatch cannot read (damaged, or written by a newer " +
-                                 "PoolWatch), which a save would lose");
             Save(next);
             _records = next;
         }
@@ -373,8 +395,8 @@ internal sealed class ChangeRecords
             json = ReadPlainFile(_paths.DataRoot, _paths.Guard.CheckReal(FilePath), ChangeRecordFile.MaxBytes)
                    ?? throw Unreadable($"it is over {ChangeRecordFile.MaxBytes >> 20} MB");
         }
-        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { _unread = 0; return _records = []; }
-        var records = ChangeRecordFile.Parse(json, out int unread) ?? throw (string.IsNullOrWhiteSpace(json)
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { _unread = []; return _records = []; }
+        var records = ChangeRecordFile.Parse(json, out IReadOnlyList<string> unread) ?? throw (string.IsNullOrWhiteSpace(json)
             ? Unreadable("it is empty, as a power cut can leave a file", "restore it from a backup")
             : Unreadable("it is damaged, or a newer PoolWatch wrote it"));
         _unread = unread;
@@ -386,9 +408,10 @@ internal sealed class ChangeRecords
         new($"PoolWatch cannot read its list of changes, {FilePath}: {why}. The file is left as it is: {advice}, or delete it " +
             "to start a new list (the changes in it can then no longer be put back from PoolWatch).");
 
+    /// <summary>Writes <paramref name="records"/>, then the entries of the file this build could not read, as they were (under the lock, after a <see cref="Read"/>).</summary>
     private void Save(List<ChangeRecord> records)
     {
-        string json = ChangeRecordFile.ToJson(records);
+        string json = ChangeRecordFile.ToJson(records, _unread);
         if (Encoding.UTF8.GetByteCount(json) > ChangeRecordFile.MaxBytes) throw new InvalidOperationException($"{FileName} would be over {ChangeRecordFile.MaxBytes >> 20} MB");
         DurableFile.Replace(_paths.Guard, FilePath, json);
     }

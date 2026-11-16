@@ -181,15 +181,15 @@ public sealed class Settings
     public double IncidentEventKeepMinutes { get; set; } = 90;
     [Description("How often PoolWatch reads the services and their states, in seconds (5 to 3,600; default 60), and also when a new service host starts.")]
     public double ServiceIntervalSeconds { get; set; } = 60;
-    [Description("How often PoolWatch reads the drives (file system, label, type and Dev Drive flag), in minutes (default 60); with Detailed recording, into volumes.csv.")]
+    [Description("How often PoolWatch reads the drives (file system, label, type and Dev Drive flag), in minutes (1 to 1,440; default 60); with Detailed recording, into volumes.csv.")]
     public double VolumeIntervalMinutes { get; set; } = 60;
-    [Description("A handle count that takes longer than this many milliseconds skips the next one, to keep PoolWatch light (default 250).")]
+    [Description("A handle count that takes longer than this many milliseconds skips the next one, to keep PoolWatch light (10 to 60,000; default 250).")]
     public double HandleScanBudgetMs { get; set; } = 250;
 
     // CSV output: the day's files, written only with Detailed recording (RecordMode).
-    [Description("Detailed recording: how often the pool tags are checked for tags.csv, in seconds (default 60; never more often than SampleIntervalSeconds). After the day's first rows, a tag gets one when it moved 1 MB, at least every 10 minutes.")]
+    [Description("Detailed recording: how often the pool tags are checked for tags.csv, in seconds (from SampleIntervalSeconds to 3,600; default 60). After the day's first rows, a tag gets one when it moved 1 MB, at least every 10 minutes.")]
     public double TagCsvIntervalSeconds { get; set; } = 60;
-    [Description("Detailed recording: how often the processes are checked for processes.csv, in seconds (default 60; never more often than SampleIntervalSeconds). After the day's first rows, a process gets one once seen at two checks, then while busy.")]
+    [Description("Detailed recording: how often the processes are checked for processes.csv, in seconds (from SampleIntervalSeconds to 3,600; default 60). After the day's first rows, a process gets one once seen at two checks, then while busy.")]
     public double ProcessCsvIntervalSeconds { get; set; } = 60;
     [Description("Detailed recording: tags.csv leaves out pool tags smaller than this many bytes, apart from the tags PoolWatch always tracks (default 1,048,576: 1 MB). A tag that falls under it gets one last row, then none until it is over it again.")]
     public long TagCsvMinBytes { get; set; } = 1 * MB;
@@ -216,18 +216,18 @@ public sealed class Settings
     /// <summary>"Still rising" for the non-paged total rule: at least this much in 10 minutes.</summary>
     [Description("What counts as still rising for the non-paged pool alert (NonPagedTotalAlertBytes): at least this many bytes in 10 minutes (default 104,857,600, which is 100 MB).")]
     public long NonPagedTotalRiseBytesPer10Min { get; set; } = 100 * MB;
-    [Description("A growth incident whose likeliest cause has been quiet, or has exited, for this many minutes while its pool tag still holds at least half of its rise is marked as held (default 15).")]
+    [Description("A growth incident whose likeliest cause has been quiet, or has exited, for this many minutes while its pool tag still holds at least half of its rise is marked as held (0.5 to 600; default 15).")]
     public double RetentionMinutes { get; set; } = 15;
     [Description("A pool tag that falls by at least this many bytes from its highest point within ReleaseWindowMinutes is reported as released (default 104,857,600, which is 100 MB).")]
     public long ReleaseBytes { get; set; } = 100 * MB;
-    [Description("The window a release (ReleaseBytes) is measured over, in minutes; a tag is reported released at most once per window (default 10).")]
+    [Description("The window a release (ReleaseBytes) is measured over, in minutes; a tag is reported released at most once per window (1 to 60; default 10).")]
     public double ReleaseWindowMinutes { get; set; } = 10;
     /// <summary>Minimum growth for a tag to be shown as "growing" in the UI table, per 10 minutes.</summary>
     [Description("A pool tag that grows by at least this many bytes in 10 minutes shows as growing in Pool causes (default 10,485,760, which is 10 MB).")]
     public long GrowingDisplayBytesPer10Min { get; set; } = 10 * MB;
-    [Description("An incident closes after this many minutes without a new rise (default 10).")]
+    [Description("An incident closes after this many minutes without a new rise (0.5 to 600; default 10).")]
     public double IncidentQuietMinutes { get; set; } = 10;
-    [Description("An incident closes after it has been open this many minutes, whatever it does (default 120).")]
+    [Description("An incident closes after it has been open this many minutes, whatever it does (10 to 1,440; default 120).")]
     public double IncidentMaxMinutes { get; set; } = 120;
 
     // Confirmation trace. Every automatic trace goes through the capture governor (Core.Incidents.CaptureGovernor).
@@ -253,7 +253,7 @@ public sealed class Settings
     public string AiccResourcesRoot { get; set; } = "";
     [Description("A search of Claude Code transcripts, for the session that started a process, reads at most this many files (1 to 5,000; default 400).")]
     public int TranscriptMaxFiles { get; set; } = 400;
-    [Description("A search of Claude Code transcripts looks for a process's command within this many minutes before the process started (default 30).")]
+    [Description("A search of Claude Code transcripts looks for a process's command within this many minutes before the process started (1 to 1,440; default 30).")]
     public double TranscriptWindowMinutes { get; set; } = 30;
 
     // Spawn storms and git roots.
@@ -426,17 +426,21 @@ public sealed class Settings
         ShortLivedKeepMinutes = double.IsFinite(ShortLivedKeepMinutes) ? Math.Clamp(ShortLivedKeepMinutes, 1, 600) : 15;
         IncidentEventKeepMinutes = double.IsFinite(IncidentEventKeepMinutes) ? Math.Clamp(IncidentEventKeepMinutes, 5, 600) : 90;
         ServiceIntervalSeconds = Math.Clamp(ServiceIntervalSeconds, 5, 3600);
-        // A number too large for a double (1e400) reads as an infinity, which no time can be made of and JSON cannot
-        // hold (the next save would fail): a setting with no range of its own goes back to its default then.
-        VolumeIntervalMinutes = double.IsFinite(VolumeIntervalMinutes) ? VolumeIntervalMinutes : 60;
-        HandleScanBudgetMs = double.IsFinite(HandleScanBudgetMs) ? HandleScanBudgetMs : 250;
-        RetentionMinutes = double.IsFinite(RetentionMinutes) ? RetentionMinutes : 15;
-        ReleaseWindowMinutes = double.IsFinite(ReleaseWindowMinutes) ? ReleaseWindowMinutes : 10;
-        IncidentQuietMinutes = double.IsFinite(IncidentQuietMinutes) ? IncidentQuietMinutes : 10;
-        IncidentMaxMinutes = double.IsFinite(IncidentMaxMinutes) ? IncidentMaxMinutes : 120;
-        TranscriptWindowMinutes = double.IsFinite(TranscriptWindowMinutes) ? TranscriptWindowMinutes : 30;
-        TagCsvIntervalSeconds = Math.Max(double.IsFinite(TagCsvIntervalSeconds) ? TagCsvIntervalSeconds : 60, SampleIntervalSeconds);
-        ProcessCsvIntervalSeconds = Math.Max(double.IsFinite(ProcessCsvIntervalSeconds) ? ProcessCsvIntervalSeconds : 60, SampleIntervalSeconds);
+        // Each time is kept within a range its description gives: a huge one would overflow the TimeSpan made of it (from
+        // about 1.5e10 minutes), and 0 or less would read the drives at every tick or close every incident at once. The
+        // shortest are what CI's scenario configs use (half a minute of quiet and of a held incident). A number too large
+        // for a double (1e400) reads as an infinity, which JSON cannot hold (the next save would fail): that goes back to
+        // the default.
+        VolumeIntervalMinutes = double.IsFinite(VolumeIntervalMinutes) ? Math.Clamp(VolumeIntervalMinutes, 1, 24 * 60) : 60;
+        HandleScanBudgetMs = double.IsFinite(HandleScanBudgetMs) ? Math.Clamp(HandleScanBudgetMs, 10, 60_000) : 250;
+        RetentionMinutes = double.IsFinite(RetentionMinutes) ? Math.Clamp(RetentionMinutes, 0.5, 600) : 15;
+        ReleaseWindowMinutes = double.IsFinite(ReleaseWindowMinutes) ? Math.Clamp(ReleaseWindowMinutes, 1, 60) : 10;
+        IncidentQuietMinutes = double.IsFinite(IncidentQuietMinutes) ? Math.Clamp(IncidentQuietMinutes, 0.5, 600) : 10;
+        IncidentMaxMinutes = double.IsFinite(IncidentMaxMinutes) ? Math.Clamp(IncidentMaxMinutes, 10, 24 * 60) : 120;
+        TranscriptWindowMinutes = double.IsFinite(TranscriptWindowMinutes) ? Math.Clamp(TranscriptWindowMinutes, 1, 24 * 60) : 30;
+        // Never more often than the samples (SampleIntervalSeconds is at most 300, so the range is never empty).
+        TagCsvIntervalSeconds = double.IsFinite(TagCsvIntervalSeconds) ? Math.Clamp(TagCsvIntervalSeconds, SampleIntervalSeconds, 3600) : Math.Max(60, SampleIntervalSeconds);
+        ProcessCsvIntervalSeconds = double.IsFinite(ProcessCsvIntervalSeconds) ? Math.Clamp(ProcessCsvIntervalSeconds, SampleIntervalSeconds, 3600) : Math.Max(60, SampleIntervalSeconds);
         RetentionDays = Math.Clamp(RetentionDays, 1, 90);
         RecordMode = Enum.IsDefined(RecordMode) ? RecordMode : RecordMode.ReportsOnly;
         CaptureSeconds = Math.Clamp(CaptureSeconds, 5, CaptureHardCapSeconds);

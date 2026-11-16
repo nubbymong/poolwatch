@@ -69,6 +69,24 @@ public sealed class CiConfigTests
         Assert.Equal(RecordMode.ReportsOnly, new Settings().RecordMode); // the control: Reports only by default
     }
 
+    /// <summary>
+    /// The scenarios' short windows are within the settings' ranges, so their configs load as written: half a minute
+    /// without a rise before an incident closes, and of a quiet cause before its incident is held, a release measured
+    /// over one minute, an incident open ten minutes at most, and the CSV files checked every 10 seconds.
+    /// </summary>
+    [Fact]
+    public void TheScenariosShortWindowsLoadAsTheirConfigsWriteThem()
+    {
+        foreach (string name in new[] { "m2-config.json", "m3-config.json", "ui-config.json" })
+        {
+            var s = Config(name);
+            Assert.Equal((0.5, 0.5, 1.0, 10.0), (s.RetentionMinutes, s.IncidentQuietMinutes, s.ReleaseWindowMinutes, s.IncidentMaxMinutes));
+            Assert.Equal((10.0, 10.0), (s.TagCsvIntervalSeconds, s.ProcessCsvIntervalSeconds));
+        }
+        var diag = Config("diag-config.json");
+        Assert.Equal((0.5, 10.0, 10.0, 10.0), (diag.IncidentQuietMinutes, diag.IncidentMaxMinutes, diag.TagCsvIntervalSeconds, diag.ProcessCsvIntervalSeconds));
+    }
+
     [Fact]
     public void NoCiRunAsksGitHubForANewVersion()
     {

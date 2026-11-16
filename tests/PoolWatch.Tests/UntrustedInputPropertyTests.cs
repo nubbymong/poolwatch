@@ -432,6 +432,27 @@ public class UntrustedInputPropertyTests
         });
     }
 
+    /// <summary>
+    /// Every entry of a changed file's list is read or kept as its text, never left out, and a save of what was read
+    /// (its records, then the entries kept) loses nothing: read again, it gives the same records and keeps the same
+    /// entries, each exactly as it was.
+    /// </summary>
+    [Fact]
+    public void AChangedRecordsFileLosesNoEntryWhenItIsSavedAgain()
+    {
+        var files = Gen.OneOf(Mutated(Gen.OneOf(ChangeLists, TooManyChanges).Select(r => ChangeRecordFile.ToJson(r)), ChangeValues), AnyText);
+        ForAll(500, files, json =>
+        {
+            if (ChangeRecordFile.Parse(json, out IReadOnlyList<string> kept) is not { } records) return; // not read: never written over
+            using (var doc = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 8 }))
+                Assert.Equal(doc.RootElement.GetProperty("changes").GetArrayLength(), records.Count + kept.Count);
+            string saved = ChangeRecordFile.ToJson(records, kept);
+            if (Encoding.UTF8.GetByteCount(saved) > ChangeRecordFile.MaxBytes) return; // a save is refused then, and the file stays as it is
+            Assert.Equal(records, ChangeRecordFile.Parse(saved, out IReadOnlyList<string> again));
+            Assert.Equal(kept, again);
+        });
+    }
+
     /// <summary>Cases the property found: reading the version threw, as JsonElement.TryGetInt32 does on another kind.</summary>
     [Theory]
     [InlineData("""{ "version": "1", "changes": [] }""")]
@@ -773,11 +794,47 @@ public class UntrustedInputPropertyTests
         }
     }
 
+    /// <summary>
+    /// The settings that had no range: a huge time (1e308) made a TimeSpan that overflows, and 0 or less read the drives
+    /// at every tick or closed every incident at once. Each is now kept within the range its description gives, a value
+    /// far outside it reads as the nearest end, and the ends themselves are kept. The two CSV intervals start at the
+    /// sample interval (10 seconds by default).
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(Settings.VolumeIntervalMinutes), 1.0, 1440.0)]
+    [InlineData(nameof(Settings.HandleScanBudgetMs), 10.0, 60000.0)]
+    [InlineData(nameof(Settings.RetentionMinutes), 0.5, 600.0)]
+    [InlineData(nameof(Settings.ReleaseWindowMinutes), 1.0, 60.0)]
+    [InlineData(nameof(Settings.IncidentQuietMinutes), 0.5, 600.0)]
+    [InlineData(nameof(Settings.IncidentMaxMinutes), 10.0, 1440.0)]
+    [InlineData(nameof(Settings.TranscriptWindowMinutes), 1.0, 1440.0)]
+    [InlineData(nameof(Settings.TagCsvIntervalSeconds), 10.0, 3600.0)]
+    [InlineData(nameof(Settings.ProcessCsvIntervalSeconds), 10.0, 3600.0)]
+    public void ASettingThatHadNoRangeIsReadWithinItsRange(string name, double lo, double hi)
+    {
+        var property = typeof(Settings).GetProperty(name)!;
+        double Read(string value) => (double)property.GetValue(Settings.Parse($$"""{ "{{JsonNamingPolicy.CamelCase.ConvertName(name)}}": {{value}} }"""))!;
+        Assert.Equal(hi, Read("1e308"));
+        Assert.Equal(lo, Read("-5"));
+        Assert.Equal(lo, Read("0"));
+        Assert.Equal(lo, Read(lo.ToString(CultureInfo.InvariantCulture)));
+        Assert.Equal(hi, Read(hi.ToString(CultureInfo.InvariantCulture)));
+    }
+
     /// <summary>The bounds the settings' descriptions give, which the overhead budget and the elevated app's reads rely on.</summary>
     private static void WithinBounds(Settings s)
     {
         Assert.InRange(s.SampleIntervalSeconds, 1, 300);
         Assert.InRange(s.HandleIntervalSeconds, 5, 3600);
+        Assert.InRange(s.VolumeIntervalMinutes, 1, 24 * 60);
+        Assert.InRange(s.HandleScanBudgetMs, 10, 60_000);
+        Assert.InRange(s.RetentionMinutes, 0.5, 600);
+        Assert.InRange(s.ReleaseWindowMinutes, 1, 60);
+        Assert.InRange(s.IncidentQuietMinutes, 0.5, 600);
+        Assert.InRange(s.IncidentMaxMinutes, 10, 24 * 60);
+        Assert.InRange(s.TranscriptWindowMinutes, 1, 24 * 60);
+        Assert.InRange(s.TagCsvIntervalSeconds, s.SampleIntervalSeconds, 3600);
+        Assert.InRange(s.ProcessCsvIntervalSeconds, s.SampleIntervalSeconds, 3600);
         Assert.InRange(s.RetentionDays, 1, 90);
         Assert.InRange(s.CaptureSeconds, 5, Settings.CaptureHardCapSeconds);
         Assert.InRange(s.AutoClearMinMinutes, 30, 24 * 60);
