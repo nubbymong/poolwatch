@@ -12,6 +12,8 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
+    <!-- The property tests (UpdateCheckPropertyTests) make their random input with FsCheck. -->
+    <PackageReference Include="FsCheck" Version="3.6.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1" />
@@ -24,5 +26,7 @@
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
+    <!-- The random input of the property tests, shared with PoolWatch.Tests. -->
+    <Compile Include="..\PoolWatch.Tests\PropertyInputs.cs" Link="PropertyInputs.cs" />
   </ItemGroup>
 </Project>
