@@ -516,7 +516,7 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.Equal([ChangeIds.StartupEntry("HKCU Run", "Helper")], now.All(out left).Select(r => r.Id));
         Assert.Equal(1, left);
         Assert.Contains(unread, File.ReadAllText(file)); // and the entry this build cannot read is still there, as it was
-        Assert.Equal(1, ChangeRecordFile.Parse(File.ReadAllText(file), out IReadOnlyList<string> kept)!.Count);
+        Assert.Single(ChangeRecordFile.Parse(File.ReadAllText(file), out IReadOnlyList<string> kept)!);
         Assert.Equal([unread], kept);
     }
 
