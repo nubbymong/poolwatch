@@ -417,8 +417,8 @@ public sealed class Settings
     /// </summary>
     public void Normalize()
     {
-        SampleIntervalSeconds = Math.Clamp(SampleIntervalSeconds, 1, 300);
-        HandleIntervalSeconds = Math.Clamp(HandleIntervalSeconds, 5, 3600);
+        SampleIntervalSeconds = double.IsFinite(SampleIntervalSeconds) ? Math.Clamp(SampleIntervalSeconds, 1, 300) : 10;
+        HandleIntervalSeconds = double.IsFinite(HandleIntervalSeconds) ? Math.Clamp(HandleIntervalSeconds, 5, 3600) : 300;
         AutoClearPoolGb = double.IsFinite(AutoClearPoolGb) ? Math.Clamp(AutoClearPoolGb, 0, 1024) : 8;
         AutoClearEveryHours = double.IsFinite(AutoClearEveryHours) ? Math.Clamp(AutoClearEveryHours, 0, 24 * 7) : 1;
         AutoClearMinMinutes = double.IsFinite(AutoClearMinMinutes) ? Math.Clamp(AutoClearMinMinutes, 30, 24 * 60) : 30; // at most once per 30 min
@@ -429,7 +429,7 @@ public sealed class Settings
         RawHistoryMinutes = double.IsFinite(RawHistoryMinutes) ? Math.Clamp(RawHistoryMinutes, 5, 300) : 70;
         ShortLivedKeepMinutes = double.IsFinite(ShortLivedKeepMinutes) ? Math.Clamp(ShortLivedKeepMinutes, 1, 600) : 15;
         IncidentEventKeepMinutes = double.IsFinite(IncidentEventKeepMinutes) ? Math.Clamp(IncidentEventKeepMinutes, 5, 600) : 90;
-        ServiceIntervalSeconds = Math.Clamp(ServiceIntervalSeconds, 5, 3600);
+        ServiceIntervalSeconds = double.IsFinite(ServiceIntervalSeconds) ? Math.Clamp(ServiceIntervalSeconds, 5, 3600) : 60;
         // Each time is kept within a range its description gives: a huge one would overflow the TimeSpan made of it (from
         // about 1.5e10 minutes), and 0 or less would read the drives at every tick or close every incident at once. The
         // shortest are what CI's scenario configs use (half a minute of quiet and of a held incident). A number too large
@@ -451,11 +451,11 @@ public sealed class Settings
         // Never back to back; 1 minute is the floor (CI configs), the default an hour.
         AutoCaptureMinMinutes = double.IsFinite(AutoCaptureMinMinutes) ? Math.Clamp(AutoCaptureMinMinutes, 1, 24 * 60) : 60;
         TranscriptMaxFiles = Math.Clamp(TranscriptMaxFiles, 1, 5000);
-        SpawnStormWindowSeconds = Math.Clamp(SpawnStormWindowSeconds, 5, 600);
+        SpawnStormWindowSeconds = double.IsFinite(SpawnStormWindowSeconds) ? Math.Clamp(SpawnStormWindowSeconds, 5, 600) : 30;
         SpawnStormThreshold = Math.Clamp(SpawnStormThreshold, 2, 100_000);
-        ShortLivedSeconds = Math.Clamp(ShortLivedSeconds, 0.1, 600);
-        StrayGitCheckMinutes = Math.Clamp(StrayGitCheckMinutes, 1, 24 * 60);
-        TokenBucketSeconds = Math.Clamp(TokenBucketSeconds, 1, 3600);
+        ShortLivedSeconds = double.IsFinite(ShortLivedSeconds) ? Math.Clamp(ShortLivedSeconds, 0.1, 600) : 10;
+        StrayGitCheckMinutes = double.IsFinite(StrayGitCheckMinutes) ? Math.Clamp(StrayGitCheckMinutes, 1, 24 * 60) : 60;
+        TokenBucketSeconds = double.IsFinite(TokenBucketSeconds) ? Math.Clamp(TokenBucketSeconds, 1, 3600) : 60;
         AccumulationIntervalSeconds = double.IsFinite(AccumulationIntervalSeconds) ? Math.Clamp(AccumulationIntervalSeconds, 5, 3600) : 300;
         AccumulationWindowPoints = Math.Clamp(AccumulationWindowPoints, 2, 100);
         AccumulationMinCount = Math.Clamp(AccumulationMinCount, 2, 10_000);
@@ -479,10 +479,10 @@ public sealed class Settings
         MarkHotkey = MarkHotkey is { Length: <= 40 } hk ? hk : "";
         // 0 or less turns the probe off. A number that is not finite reads as the default first: NaN is never 0 or less,
         // so it would pass through the clamp.
-        LagProbeSeconds = LagProbeSeconds <= 0 ? 0 : Math.Clamp(LagProbeSeconds, 2, 600);
-        LagAlertRatio = Math.Clamp(LagAlertRatio, 1.5, 1000);
+        LagProbeSeconds = !double.IsFinite(LagProbeSeconds) ? 10 : LagProbeSeconds <= 0 ? 0 : Math.Clamp(LagProbeSeconds, 2, 600);
+        LagAlertRatio = double.IsFinite(LagAlertRatio) ? Math.Clamp(LagAlertRatio, 1.5, 1000) : 5;
         LagBaselineSamples = Math.Clamp(LagBaselineSamples, 3, 1000);
-        TokenWindowMinutes = Math.Clamp(TokenWindowMinutes, 1, 24 * 60);
+        TokenWindowMinutes = double.IsFinite(TokenWindowMinutes) ? Math.Clamp(TokenWindowMinutes, 1, 24 * 60) : 60;
         // A verdict needs TokenMinBuckets in the window: never ask for more buckets than the window can hold.
         TokenMinBuckets = Math.Clamp(TokenMinBuckets, 4, Math.Max(4, (int)(TokenWindowMinutes * 60 / TokenBucketSeconds) - 1));
         TokenMinOutstandingRise = Math.Max(1, TokenMinOutstandingRise);

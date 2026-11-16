@@ -276,7 +276,7 @@ internal sealed class RecordedSource : IChangeSource
     internal static ActiveChange UnreadEntries(int count, int duplicates = 0) =>
         new("unread:applied-changes", ChangeKind.Shortcut, null,
             ChangeWords.Unread($"{count} {(count == 1 ? "change" : "changes")} in its list of clear tasks, scheduled tasks, startup apps and shortcuts"), false,
-            ChangeWords.UnreadNote(UnreadWhy(count, duplicates)));
+            ChangeWords.UnreadNote(UnreadWhy(count, 0))); // for one run
 
     /// <summary>
     /// What the entries not read are: a second record of a change already listed is kept and is listed once the first is

@@ -138,7 +138,7 @@ public static class ChangeRecordFile
                 if (r is not null && Invalid(r) is null)
                 {
                     if (ids.Add(r.Id)) { list.Add(r); continue; }
-                    // not counted, for one run
+                    second++; // a second record for a target already read
                 }
                 left.Add(e.GetRawText());
             }
