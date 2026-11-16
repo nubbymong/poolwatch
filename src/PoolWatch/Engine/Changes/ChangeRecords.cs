@@ -142,7 +142,10 @@ internal sealed class ChangeRecords
     /// </summary>
     private readonly object _switching = new();
 
-    /// <summary>Runs Undo's switch back of a task or startup entry, its record's removal included, one at a time with <see cref="Toggle"/>.</summary>
+    /// <summary>
+    /// Runs Undo's switch back of a task or startup entry, from its read and check of the record to that record's removal,
+    /// one at a time with <see cref="Toggle"/>.
+    /// </summary>
     public T OneSwitchAtATime<T>(Func<T> switchBack) { lock (_switching) return switchBack(); }
 
     private string? ToggleNow(ChangeKind kind, string location, string name, bool enable, string via, Func<string?> toggle)

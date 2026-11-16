@@ -642,9 +642,96 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.Null(notSwitched);
         Assert.Equal([second], _f.Records.All()); // back as it was: the first record went, and the second is read
 
-        Assert.Equal((Ui.ActiveChangesView.ChangedSinceShown, false), Ui.ActiveChangesView.PutBackOne(ledger, shown));
+        Assert.Equal((ChangeWords.ChangedSinceShown, false), Ui.ActiveChangesView.PutBackOne(ledger, shown));
         Assert.Empty(_f.Toggles.Calls);
         Assert.True(_f.Toggles.Startup[@"HKCU Run\Helper"]); // still on, as it was turned
+    }
+
+    /// <summary>
+    /// The same, but the first record goes while Put all back runs (it puts back the startup apps, scheduled tasks and the
+    /// rest one at a time), after its match of each row to the one the window showed: the put-back reads the record again,
+    /// in one turn with the tab's switch, and acts only on the one its row was drawn from. The second record would turn
+    /// the app off, the opposite of the row.
+    /// </summary>
+    [Fact]
+    public void APutBackActsOnlyOnTheRecordItsRowWasDrawnFrom()
+    {
+        _ = TwoRecordsForOneApp();
+        var source = _f.Recorded(_f.Live());
+        var shown = Assert.Single(source.List(), r => r.CanUndo);
+
+        Assert.Null(_f.Records.Toggle(ChangeKind.StartupEntry, "HKCU Run", "Helper", enable: true, "the Services tab",
+            () => { _f.Toggles.Startup[@"HKCU Run\Helper"] = true; return null; }));
+        var result = source.Undo(shown, confirmed: false);
+
+        Assert.Equal(new UndoResult(false, ChangeWords.ChangedSinceShown), result);
+        Assert.Empty(_f.Toggles.Calls);
+        Assert.True(_f.Toggles.Startup[@"HKCU Run\Helper"]); // still on, as it was turned
+    }
+
+    /// <summary>
+    /// The tab's switch is under way (the app is turned on, which takes the first record back) when the put-back of the
+    /// row drawn from that record starts: the put-back waits for the switch, and only then reads the record and checks
+    /// it, so it finds the second record and leaves it. Read and checked before the wait, the first record would still be
+    /// there, and the put-back would switch the app by it once the tab's switch was done.
+    /// </summary>
+    [Fact]
+    public async Task APutBackChecksItsRecordInOneTurnWithTheServicesTabsSwitch()
+    {
+        _ = TwoRecordsForOneApp();
+        var source = _f.Recorded(_f.Live());
+        var shown = Assert.Single(source.List(), r => r.CanUndo);
+        Task<UndoResult>? undo = null;
+        bool undoWaited = false;
+
+        Assert.Null(Switch(ChangeKind.StartupEntry, enable: true, whileSwitching: () =>
+        {
+            undo = Task.Run(() => source.Undo(shown, confirmed: false));
+            undoWaited = !undo.Wait(1000);
+        }));
+        Assert.Equal(new UndoResult(false, ChangeWords.ChangedSinceShown), await undo!.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True(undoWaited); // until the tab's switch was done
+        Assert.Equal([@"startup HKCU Run\Helper True"], _f.Toggles.Calls); // the tab's switch alone
+        Assert.True(_f.Toggles.Startup[@"HKCU Run\Helper"]);
+    }
+
+    /// <summary>
+    /// A second record that says the same as the first and was made at the same moment, but is another record (another
+    /// PoolWatch made it): once the first is gone, a row drawn from the first is not put back from it, by Put back or by
+    /// Put all back. Only the record as a whole tells the two apart.
+    /// </summary>
+    [Fact]
+    public void ASecondRecordThatSaysTheSameAndWasMadeAtTheSameMomentIsStillAnotherRecord()
+    {
+        var first = ChangeRecordFixtures.Startup();
+        File.WriteAllText(Path.Combine(_f.Paths.DataRoot, "applied-changes.json"), ChangeRecordFile.ToJson([first, first with { Via = "another PoolWatch" }]));
+        _f.Toggles.Startup[@"HKCU Run\Helper"] = false;
+        var ledger = new ChangeLedger([_f.Recorded(_f.Live())], _f.Records, _f.Log);
+        var shown = Assert.Single(ledger.List(), r => r.CanUndo);
+
+        Assert.Null(_f.Records.Toggle(ChangeKind.StartupEntry, "HKCU Run", "Helper", enable: true, "the Services tab",
+            () => { _f.Toggles.Startup[@"HKCU Run\Helper"] = true; return null; }));
+        var now = Assert.Single(ledger.List()); // the second record, read now
+        Assert.Equal((shown.Id, shown.What, shown.ChangedUtc, shown.CanUndo), (now.Id, now.What, now.ChangedUtc, now.CanUndo));
+
+        Assert.Equal((ChangeWords.ChangedSinceShown, false), Ui.ActiveChangesView.PutBackOne(ledger, shown));
+        Assert.Equal(("Not done: " + shown.What + "\n" + ChangeWords.ChangedSinceShown, false),
+            Ui.ActiveChangesView.PutAllBack(ledger, Ui.ActiveChangesView.PutAllBackPlan([shown], _ => true)));
+        Assert.Empty(_f.Toggles.Calls);
+        Assert.Equal("another PoolWatch", Assert.Single(_f.Records.All()).Via); // left as it is
+    }
+
+    /// <summary>The record a row was drawn from is not in the command line's list, which the uninstaller reads line by line.</summary>
+    [Fact]
+    public void TheCommandLinesListLeavesOutTheRecordARowWasDrawnFrom()
+    {
+        _f.Records.Put(ChangeRecordFixtures.Startup());
+        var row = Assert.Single(_f.Recorded(_f.Live()).List());
+        Assert.Equal(ChangeRecordFile.Stamp(Assert.Single(_f.Records.All())), row.Stamp);
+
+        string json = ChangeLedger.ToJson([row]);
+        Assert.DoesNotContain("stamp", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("the Services tab", json); // the record's own words for where it was made
     }
 
     [Theory]

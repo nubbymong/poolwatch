@@ -484,8 +484,11 @@ internal static class ActiveChangesView
         return text.ToString();
     }
 
-    /// <summary>What Put all back runs: the changes to put back, and the ones you said No to with their result.</summary>
-    internal sealed record Plan(Func<ActiveChange, bool> Which, IReadOnlyList<(ActiveChange Change, UndoResult Result)> Declined);
+    /// <summary>
+    /// What Put all back runs: the changes to put back (Which, the rows of Shown as the window showed them), and the ones
+    /// you said No to with their result.
+    /// </summary>
+    internal sealed record Plan(Func<ActiveChange, bool> Which, IReadOnlyList<ActiveChange> Shown, IReadOnlyList<(ActiveChange Change, UndoResult Result)> Declined);
 
     /// <summary>
     /// Put all back after your yes: each warning is asked on its own (<paramref name="putBackAnyway"/>), as a single Put
@@ -497,17 +500,27 @@ internal static class ActiveChangesView
     internal static Plan PutAllBackPlan(IReadOnlyList<ActiveChange> shown, Func<string, bool> putBackAnyway)
     {
         var declined = shown.Where(c => c.CanUndo && c.AtStart is null && c.Warning is { } warning && !putBackAnyway(warning)).ToList();
-        return new(AsShown(shown.Except(declined)), declined.Select(c => (c, new UndoResult(false, "You chose not to put it back."))).ToList());
+        var putBack = shown.Except(declined).ToList();
+        return new(AsShown(putBack), putBack, declined.Select(c => (c, new UndoResult(false, "You chose not to put it back."))).ToList());
     }
 
     /// <summary>
     /// Put all back's run on the ledger (a worker thread): every change the plan takes, in the ledger's order
     /// (<see cref="ChangeLedger.UndoOrder"/>), never stopping at one that fails, then what to show: each result, the ones
-    /// not done first, and whether all were done.
+    /// not done first, and whether all were done. A row the window showed that the run did not reach (it changed since,
+    /// or is gone) is a result too, not done (<see cref="ChangeWords.ChangedSinceShown"/>): the question listed it, so
+    /// the results say it was left as it is, and the box is a warning.
     /// </summary>
     internal static (string Text, bool Done) PutAllBack(ChangeLedger ledger, Plan plan)
     {
-        var results = ledger.UndoAll(plan.Which, confirmed: true).Concat(plan.Declined).ToList();
+        var ran = ledger.UndoAll(plan.Which, confirmed: true);
+        var reached = ran.Select(r => r.Change.Id).ToHashSet(StringComparer.Ordinal);
+        List<(ActiveChange Change, UndoResult Result)> results =
+        [
+            .. ran,
+            .. plan.Shown.Where(c => !reached.Contains(c.Id)).Select(c => (Change: c, Result: new UndoResult(false, ChangeWords.ChangedSinceShown))),
+            .. plan.Declined,
+        ];
         return (PutAllBackResults(results), results.All(r => r.Result.Done));
     }
 
@@ -516,27 +529,28 @@ internal static class ActiveChangesView
     /// changed since is left for the next look. Turn off, Remove and Put back all run this.
     /// </summary>
     internal static (string Text, bool Done) PutBackOne(ChangeLedger ledger, ActiveChange c) =>
-        ledger.UndoAll(AsShown([c]), confirmed: c.Warning is not null) is [var only] ? (only.Result.Message, only.Result.Done) : (ChangedSinceShown, false);
-
-    internal const string ChangedSinceShown = "This change is no longer as the window showed it, so PoolWatch left it as it is. Look at the list again.";
+        ledger.UndoAll(AsShown([c]), confirmed: c.Warning is not null) is [var only] ? (only.Result.Message, only.Result.Done) : (ChangeWords.ChangedSinceShown, false);
 
     /// <summary>
     /// The put-back filter: only the changes the window showed, each as it was shown (its warning, whether it could be put
-    /// back, what it says and when it was made), so one made or changed since waits for the next look: one with a warning
-    /// you never saw, one Put all back's question listed as not possible, and another record for the same thing, such as
-    /// a second record that was kept unread while the window was drawn and is read once the first is put back (from the
-    /// Services tab, say), whose put-back may do the opposite of what the row said. Every warning it lets through was
-    /// accepted, so the put-back confirms.
+    /// back, what it says, when it was made and, for a recorded change, the record it was drawn from), so one made or
+    /// changed since waits for the next look: one with a warning you never saw, one Put all back's question listed as not
+    /// possible, and another record for the same thing, such as a second record that was kept unread while the window was
+    /// drawn and is read once the first is put back (from the Services tab, say), whose put-back may do the opposite of
+    /// what the row said, even one that says the same and was made at the same moment. It runs once, as Put all back
+    /// starts: a record that changes while the run goes on is checked again by its put-back (<see cref="RecordedSource.Undo"/>).
+    /// Every warning it lets through was accepted, so the put-back confirms.
     /// </summary>
     internal static Func<ActiveChange, bool> AsShown(IEnumerable<ActiveChange> shown)
     {
-        var asShown = new Dictionary<string, (string? Warning, bool CanUndo, string What, DateTime? ChangedUtc)>();
+        var asShown = new Dictionary<string, (string? Warning, bool CanUndo, string What, DateTime? ChangedUtc, string? Stamp)>();
         foreach (var c in shown) asShown.TryAdd(c.Id, Seen(c));
         return c => asShown.TryGetValue(c.Id, out var was) && was == Seen(c);
     }
 
     /// <summary>What of a row a put-back must find as the window showed it (<see cref="AsShown"/>).</summary>
-    private static (string? Warning, bool CanUndo, string What, DateTime? ChangedUtc) Seen(ActiveChange c) => (c.Warning, c.CanUndo, c.What, c.ChangedUtc);
+    private static (string? Warning, bool CanUndo, string What, DateTime? ChangedUtc, string? Stamp) Seen(ActiveChange c) =>
+        (c.Warning, c.CanUndo, c.What, c.ChangedUtc, c.Stamp);
 
     /// <summary>
     /// Each change Put all back went through, with what happened to it: the ones not done first, so they are the last to

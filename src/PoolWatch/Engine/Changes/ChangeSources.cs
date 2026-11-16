@@ -228,7 +228,8 @@ internal sealed class ServicesSource(ServicesController services, ProfileStore? 
 /// on it: a removed clear task by <see cref="ClearTaskReplacer.PutBack"/>; a task or startup entry must still be there
 /// (when it is gone the record goes and the message says so); a shortcut must be a .lnk directly in your Desktop or
 /// Start-menu Programs folder, opened without following links, a plain file whose bytes still match what PoolWatch wrote.
-/// Putting a change back removes only the record it acted on, as it was saved: one saved for that target since is kept.
+/// Putting a change back acts only on the record its row was drawn from (<see cref="ActiveChange.Stamp"/>), and removes
+/// only that record, as it was saved: one saved for that target since is kept.
 /// </summary>
 internal sealed class RecordedSource : IChangeSource
 {
@@ -310,12 +311,12 @@ internal sealed class RecordedSource : IChangeSource
         if (r.Kind != RecordKind.RemovedClearTask)
             return new ActiveChange(r.Id, kind, r.ChangedUtc, ChangeWords.Of(r), CanUndo: true, Note: null)
             {
-                Title = ChangeWords.TitleOf(r), Detail = ChangeWords.DetailOf(r), Group = group,
+                Title = ChangeWords.TitleOf(r), Detail = ChangeWords.DetailOf(r), Group = group, Stamp = ChangeRecordFile.Stamp(r),
             };
         var (canUndo, note, warning) = ClearTaskReplacer.Row(r, _records, _clearTasks);
         return new ActiveChange(r.Id, kind, r.ChangedUtc, ChangeWords.Of(r), canUndo, note)
         {
-            Warning = warning, Title = ChangeWords.TitleOf(r), Detail = ChangeWords.DetailOf(r), Group = group,
+            Warning = warning, Title = ChangeWords.TitleOf(r), Detail = ChangeWords.DetailOf(r), Group = group, Stamp = ChangeRecordFile.Stamp(r),
         };
     }
 
@@ -327,26 +328,39 @@ internal sealed class RecordedSource : IChangeSource
         _ => ChangeKind.Shortcut,
     };
 
+    /// <summary>
+    /// Puts back the record the row was drawn from (<see cref="ActiveChange.Stamp"/>), read again here, and no other: the
+    /// window's match of a row to the one it showed runs once, before Put all back starts, and the Services tab can take
+    /// the record back while the run goes on, so that a second record for that target is read under the row's id. Another
+    /// record there is left as it is (<see cref="ChangeWords.ChangedSinceShown"/>). A scheduled task or startup app is read,
+    /// checked and switched back in one turn with that tab's switch (<see cref="ChangeRecords.OneSwitchAtATime{T}"/>), so no
+    /// switch comes between the check and the switch back. The turn is taken by the row's kind: a record with the row's
+    /// stamp is of that kind, and a row with no stamp is never acted on.
+    /// </summary>
     public UndoResult Undo(ActiveChange change, bool confirmed)
     {
+        if (change.Kind is ChangeKind.ScheduledTask or ChangeKind.StartupEntry) return _records.OneSwitchAtATime(() => UndoNow(change, confirmed));
+        return UndoNow(change, confirmed);
+    }
+
+    private UndoResult UndoNow(ActiveChange change, bool confirmed)
+    {
         if (_records.All().FirstOrDefault(r => r.Id == change.Id) is not { } r) return new(true, "This change is already put back.");
+        if (ChangeRecordFile.Stamp(r) != change.Stamp) return new(false, ChangeWords.ChangedSinceShown);
         return r.Kind switch
         {
-            // Your yes holds only for the warning you saw (another PoolWatch may have saved a removal of that name since the
+            // Your yes holds only for the warning you saw (the permissions of what the task runs may have changed since the
             // list was read): PutBack checks it on the record it registers, this one, read again here.
             RecordKind.RemovedClearTask => ClearTaskReplacer.PutBack(r, confirmed, change.Warning, _clearTasks, _records, _live),
-            RecordKind.ScheduledTask => SwitchBack(r, $"the scheduled task {r.Location}", () => _toggles.TaskExists(r.Location!),
+            RecordKind.ScheduledTask => SwitchBackNow(r, $"the scheduled task {r.Location}", () => _toggles.TaskExists(r.Location!),
                 () => _toggles.SetTaskEnabled(r.Location!, r.EnabledBefore!.Value)),
-            RecordKind.StartupEntry => SwitchBack(r, $"the startup app {r.Name}", () => _toggles.StartupExists(r.Location!, r.Name!),
+            RecordKind.StartupEntry => SwitchBackNow(r, $"the startup app {r.Name}", () => _toggles.StartupExists(r.Location!, r.Name!),
                 () => _toggles.SetStartupEnabled(r.Location!, r.Name!, r.EnabledBefore!.Value)),
             _ => DeleteShortcut(r),
         };
     }
 
-    /// <summary>Puts a task or startup entry back as it was and removes its record, one at a time with the Services tab's switch.</summary>
-    private UndoResult SwitchBack(ChangeRecord r, string what, Func<bool> exists, Func<string?> set) =>
-        _records.OneSwitchAtATime(() => SwitchBackNow(r, what, exists, set));
-
+    /// <summary>Puts a task or startup entry back as it was and removes its record (in <see cref="Undo"/>'s turn with the Services tab's switch).</summary>
     private UndoResult SwitchBackNow(ChangeRecord r, string what, Func<bool> exists, Func<string?> set)
     {
         bool there;

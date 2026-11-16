@@ -862,34 +862,75 @@ public class UntrustedInputPropertyTests
     }
 
     /// <summary>
-    /// Every number setting with a fraction, not only those above: set to NaN or an infinity, alone or all at once, it
-    /// reads as its default, and the settings save. A growth alert's window that is NaN drops the alert, and an infinite
-    /// one is cut to 60 minutes. So no setting a later build adds can keep a number that is not finite unseen.
+    /// Every setting that is a floating-point number (a double, a float or a Half, or a Nullable one), not only those
+    /// above: set to NaN or an infinity of its own type, alone or all at once, it reads as its default, and the settings
+    /// save. A growth alert's window that is NaN drops the alert, and an infinite one is cut to 60 minutes. The growth
+    /// alerts are the only other setting that holds a floating-point number: one held anywhere else (in a list, an array,
+    /// a dictionary, or a property of a type of its own, at any depth) fails this test. So no setting a later build adds
+    /// can keep a number that is not finite unseen.
     /// </summary>
     [Fact]
     public void NoSettingKeepsANumberThatIsNotFinite()
     {
         var defaults = new Settings();
-        var numbers = typeof(Settings).GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(p => p.PropertyType == typeof(double) && p.CanWrite).ToList();
-        Assert.True(numbers.Count >= 30, $"only {numbers.Count} settings are numbers with a fraction");
-        foreach (double notFinite in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+        var settings = typeof(Settings).GetProperties(BindingFlags.Public | BindingFlags.Instance);
+        var numbers = settings.Where(p => FloatingPoint.Contains(Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType) && p.CanWrite).ToList();
+        Assert.True(numbers.Count >= 30, $"only {numbers.Count} settings are floating-point numbers");
+        var others = settings.Where(p => !numbers.Contains(p) && p.Name != nameof(Settings.GrowthRules) && HoldsFloatingPoint(p.PropertyType)).Select(p => p.Name).ToList();
+        Assert.Empty(others); // each would go unchecked
+        // The look finds one wherever it can be held, and only there.
+        Assert.True(HoldsFloatingPoint(typeof(List<GrowthRule>)) && HoldsFloatingPoint(typeof(Half?[])) && HoldsFloatingPoint(typeof(Dictionary<string, float>)));
+        Assert.False(HoldsFloatingPoint(typeof(ServiceProfileSet)) || HoldsFloatingPoint(typeof(TimeSpan)) || HoldsFloatingPoint(typeof(List<string>)));
+        foreach (int which in new[] { 0, 1, 2 }) // NaN, plus infinity, minus infinity
         {
-            var all = new Settings { GrowthRules = [new(double.NaN, 5), new(notFinite, 7)] };
+            double window = (double)NotFinite(typeof(double), which);
+            var all = new Settings { GrowthRules = [new(double.NaN, 5), new(window, 7)] };
             foreach (var p in numbers)
             {
+                object notFinite = NotFinite(p.PropertyType, which);
                 var one = new Settings();
                 p.SetValue(one, notFinite);
                 p.SetValue(all, notFinite);
                 one.Normalize();
-                Assert.True(p.GetValue(defaults)!.Equals(p.GetValue(one)), $"{p.Name} set to {notFinite} is {p.GetValue(one)}, not its default {p.GetValue(defaults)}");
+                Assert.True(Equals(p.GetValue(defaults), p.GetValue(one)), $"{p.Name} set to {notFinite} is {p.GetValue(one)}, not its default {p.GetValue(defaults)}");
                 _ = one.ToJson();
             }
             all.Normalize();
-            foreach (var p in numbers) Assert.True(p.GetValue(defaults)!.Equals(p.GetValue(all)), $"{p.Name} with every number set to {notFinite} is {p.GetValue(all)}");
-            (double, long)[] rules = double.IsPositiveInfinity(notFinite) ? [(60.0, 7L)] : [];
+            foreach (var p in numbers) Assert.True(Equals(p.GetValue(defaults), p.GetValue(all)), $"{p.Name} with every number set to {NotFinite(p.PropertyType, which)} is {p.GetValue(all)}");
+            (double, long)[] rules = double.IsPositiveInfinity(window) ? [(60.0, 7L)] : [];
             Assert.Equal(rules, all.GrowthRules.Select(r => (r.WindowMinutes, r.Bytes)));
             _ = all.ToJson();
         }
+    }
+
+    /// <summary>The floating-point types: each has NaN and the two infinities.</summary>
+    private static readonly Type[] FloatingPoint = [typeof(double), typeof(float), typeof(Half)];
+
+    /// <summary>NaN (0), plus infinity (1) or minus infinity (2), as a value of <paramref name="type"/> (of the type it holds, for a Nullable one).</summary>
+    private static object NotFinite(Type type, int which)
+    {
+        type = Nullable.GetUnderlyingType(type) ?? type;
+        if (type == typeof(float)) return new[] { float.NaN, float.PositiveInfinity, float.NegativeInfinity }[which];
+        if (type == typeof(Half)) return new[] { Half.NaN, Half.PositiveInfinity, Half.NegativeInfinity }[which];
+        return new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity }[which];
+    }
+
+    /// <summary>
+    /// Whether a value of <paramref name="type"/> can hold a floating-point number: it is one (or a Nullable one), or one
+    /// is held by what it holds (an array's, a list's or a dictionary's elements: .NET's own types are looked into only
+    /// through those) or by a public property of a type of its own, at any depth.
+    /// </summary>
+    private static bool HoldsFloatingPoint(Type type) => HoldsFloatingPoint(type, []);
+
+    private static bool HoldsFloatingPoint(Type type, HashSet<Type> seen)
+    {
+        type = Nullable.GetUnderlyingType(type) ?? type;
+        if (FloatingPoint.Contains(type)) return true;
+        if (type.IsPrimitive || type.IsEnum || type == typeof(string) || !seen.Add(type)) return false;
+        if (type.IsArray) return HoldsFloatingPoint(type.GetElementType()!, seen);
+        if (type.GetGenericArguments().Any(a => HoldsFloatingPoint(a, seen))) return true;
+        if (type.Namespace is "System" || type.Namespace?.StartsWith("System.", StringComparison.Ordinal) == true) return false;
+        return type.GetProperties(BindingFlags.Public | BindingFlags.Instance).Any(p => p.GetIndexParameters().Length == 0 && HoldsFloatingPoint(p.PropertyType, seen));
     }
 
     /// <summary>The bounds the settings' descriptions give, which the overhead budget and the elevated app's reads rely on.</summary>

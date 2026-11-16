@@ -502,16 +502,41 @@ public sealed class ClearTaskReplacerTests : IDisposable
     [Fact]
     public void YourYesHoldsOnlyForTheWarningYouSaw()
     {
-        _f.Records.PutRemovedTask(Own(xml: TaskXml.Ram(@"C:\Tools\RAMMap64.exe")), "the setup guide");
+        // Your yes was to RAMMap in a folder you can change; since then RAMMap's own rules could no longer be read. The
+        // record is the one the row was drawn from, the warning is not, so the put-back tries nothing until you look again.
+        _f.ClearTasks.AccessRules[@"C:\Program Files\Vendor"] = Sddl.AdminOnlyAnd("(A;OICI;0x1301bf;;;BU)");
+        _f.Records.PutRemovedTask(Own(xml: TaskXml.Ram(VendorRam)), "the setup guide");
         var source = _f.Recorded(_f.Live());
         var shown = Assert.Single(source.List());
-        Assert.Contains(@"C:\Tools", shown.Warning);
-        // Another removal of that name is saved after the list was read; its RAMMap is in another folder.
-        _f.Records.PutRemovedTask(Own(xml: TaskXml.Ram(@"C:\Other\RAMMap64.exe")), "the command line");
+        Assert.Contains("a folder you can change", shown.Warning);
+        _f.ClearTasks.AccessRules.Clear();
+        _f.ClearTasks.AccessRules[VendorRam] = Sddl.Unreadable;
 
         var refused = source.Undo(shown, confirmed: true);
         Assert.False(refused.Done);
         Assert.Contains("changed since you said yes", refused.Message); // why, and what to do: not a manual import
+        Assert.Empty(_f.ClearTasks.Calls);
+        Assert.Empty(_f.ClearTasks.Looked); // nothing is tried
+        Assert.False(File.Exists(_f.Records.ImportFile(ChangeRecordFixtures.ClearTask()))); // and no import file you did not ask for
+
+        var now = Assert.Single(source.List()); // asked again, with the warning as it is now
+        Assert.Contains("PoolWatch could not read", now.Warning);
+        Assert.True(source.Undo(now, confirmed: true).Done);
+        Assert.Equal([TaskXml.Ram(VendorRam)], _f.ClearTasks.RegisteredXml);
+    }
+
+    [Fact]
+    public void ARemovalOfThatNameSavedSinceTheListWasReadIsNotPutBackFromTheRowShown()
+    {
+        _f.Records.PutRemovedTask(Own(xml: TaskXml.Ram(@"C:\Tools\RAMMap64.exe")), "the setup guide");
+        var source = _f.Recorded(_f.Live());
+        var shown = Assert.Single(source.List());
+        Assert.Contains(@"C:\Tools", shown.Warning);
+        // Another removal of that name is saved after the list was read; its RAMMap is in another folder. The row and your
+        // yes were for the first record, so the put-back leaves the second as it is.
+        _f.Records.PutRemovedTask(Own(xml: TaskXml.Ram(@"C:\Other\RAMMap64.exe")), "the command line");
+
+        Assert.Equal(new UndoResult(false, ChangeWords.ChangedSinceShown), source.Undo(shown, confirmed: true));
         Assert.Empty(_f.ClearTasks.Calls);
         Assert.Empty(_f.ClearTasks.Looked); // nothing is tried
         Assert.False(File.Exists(_f.Records.ImportFile(ChangeRecordFixtures.ClearTask()))); // and no import file you did not ask for
@@ -529,13 +554,14 @@ public sealed class ClearTaskReplacerTests : IDisposable
         var source = _f.Recorded(_f.Live());
         var row = Assert.Single(source.List());
         Assert.True(row.CanUndo);
-        // The saved definition is changed after the list was read.
+        // The saved definition is changed after the list was read: that record is not the one the row was drawn from.
         _f.Records.Put(record with { TaskXml = TaskXml.Ram(@"C:\Windows\System32\cmd.exe", "/c RAMMap64.exe -Et") });
 
-        var result = source.Undo(row, confirmed: true);
-        Assert.False(result.Done);
-        Assert.Contains("RAMMap's memory clear", result.Message);
+        Assert.Equal(new UndoResult(false, ChangeWords.ChangedSinceShown), source.Undo(row, confirmed: true));
         Assert.Empty(_f.ClearTasks.Calls);
+        var now = Assert.Single(source.List()); // asked again, it is checked as it is now
+        Assert.False(now.CanUndo);
+        Assert.Contains("RAMMap's memory clear", now.Note);
 
         _f.Records.Put(record);
         Assert.True(source.Undo(row, confirmed: false).Done);
@@ -563,11 +589,12 @@ public sealed class ClearTaskReplacerTests : IDisposable
         var source = _f.Recorded(_f.Live());
         var shown = Assert.Single(source.List());
         // Saved again with a second RAMMap in another folder you can change: the first folder's warning would read the same.
+        // Another record than the row's, it is left as it is, and listed again it says it runs from more than one folder.
         _f.Records.PutRemovedTask(Own(xml: TaskXml.Of(
             @"<Exec><Command>C:\Tools\RAMMap64.exe</Command><Arguments>-Et</Arguments></Exec><Exec><Command>C:\Other\RAMMap64.exe</Command><Arguments>-Ew</Arguments></Exec>")),
             "the command line");
 
-        Assert.False(source.Undo(shown, confirmed: true).Done);
+        Assert.Equal(new UndoResult(false, ChangeWords.ChangedSinceShown), source.Undo(shown, confirmed: true));
         Assert.Empty(_f.ClearTasks.Calls);
         var now = Assert.Single(source.List());
         Assert.False(now.CanUndo);

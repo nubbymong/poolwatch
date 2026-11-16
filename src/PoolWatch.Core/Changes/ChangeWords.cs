@@ -106,6 +106,12 @@ public static class ChangeWords
     public const string UninstallPutsBackTheOthers = "Uninstalling puts each of these back, except where marked, or says why it could not.";
     /// <summary>The line on a row PoolWatch cannot put back, before its note (which says why and what to do).</summary>
     public const string CannotPutBack = "PoolWatch cannot put this back.";
+    /// <summary>
+    /// What a put-back says of a change that is no longer as the Active changes window showed it (another record under its
+    /// row's id, other words, or gone since), which it left as it is: a row's own button, each row Put all back showed and
+    /// did not reach, and a recorded change whose record is not the one its row was drawn from.
+    /// </summary>
+    public const string ChangedSinceShown = "This change is no longer as the window showed it, so PoolWatch left it as it is. Look at the list again.";
 
     /// <summary>
     /// The caveat of a change PoolWatch cannot put back: <see cref="CannotPutBack"/> and why, or the why alone when it

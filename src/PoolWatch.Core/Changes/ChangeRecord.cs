@@ -156,6 +156,14 @@ public static class ChangeRecordFile
     public static string ToJson(IEnumerable<ChangeRecord> records) => ToJson(records, []);
 
     /// <summary>
+    /// The record as one JSON text, every field as the file holds it: what an Active changes row of a recorded change is
+    /// drawn from. Two records give the same text only when every field is the same, so a put-back acts only on the record
+    /// its row was drawn from, never on a second record for that target read under the row's id once the first is gone,
+    /// even one that says the same and was made at the same moment.
+    /// </summary>
+    public static string Stamp(ChangeRecord record) => JsonSerializer.Serialize(record, Json);
+
+    /// <summary>
     /// The file: <paramref name="records"/>, then each entry of <paramref name="unread"/> (as
     /// <see cref="Parse(string, out IReadOnlyList{string})"/> gave it) written back exactly as it was read.
     /// </summary>

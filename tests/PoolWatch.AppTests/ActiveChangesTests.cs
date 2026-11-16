@@ -164,41 +164,71 @@ public sealed class ActiveChangesTests : IDisposable
         var shown = Row(ChangeKind.RemovedClearTask) with { Warning = @"This task runs RAMMap from C:\Tools." };
         var calls = new List<string>();
         var now = Ledger(new Source(calls, shown with { Warning = @"This task runs RAMMap from C:\Other." }));
-        Assert.Equal((ActiveChangesView.ChangedSinceShown, false), ActiveChangesView.PutBackOne(now, shown));
+        Assert.Equal((ChangeWords.ChangedSinceShown, false), ActiveChangesView.PutBackOne(now, shown));
         Assert.Empty(calls);
         Assert.Equal(("back", true), ActiveChangesView.PutBackOne(Ledger(new Source(calls, shown)), shown));
         Assert.Equal(["RemovedClearTask confirmed"], calls); // your yes to the warning you saw
     }
 
     /// <summary>
-    /// A row is put back only while the record behind its id is the one it showed: what it says and when it was made, not
-    /// only its warning. The list can hold a second record for one startup app, kept unread while the window was drawn
-    /// and read once the first is put back (turning the app on in the Services tab does that), and with the same id: the
-    /// stale row "Turned off the startup app Helper" would put back the second, "Turned on", and turn the app off. It is
-    /// left for the next look instead, by Put back and by Put all back, when either of the two differs.
+    /// A row is put back only while the record behind its id is the one it showed: what it says, when it was made and the
+    /// record itself (<see cref="ActiveChange.Stamp"/>), not only its warning. The list can hold a second record for one
+    /// startup app, kept unread while the window was drawn and read once the first is put back (turning the app on in the
+    /// Services tab does that), and with the same id: the stale row "Turned off the startup app Helper" would put back the
+    /// second, "Turned on", and turn the app off. It is left for the next look instead, by Put back and by Put all back,
+    /// when any of the three differs, the record alone included (a second record that says the same and was made at the
+    /// same moment). Put all back's results say so of it, as not done, so its box is a warning and does not say there was
+    /// nothing to put back.
     /// </summary>
     [Theory]
-    [InlineData(true, true)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    public void AStaleRowNeverPutsBackAnotherRecordWithItsId(bool otherWords, bool otherTime)
+    [InlineData(true, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    public void AStaleRowNeverPutsBackAnotherRecordWithItsId(bool otherWords, bool otherTime, bool otherRecord)
     {
         var first = new ActiveChange(ChangeIds.StartupEntry("HKCU Run", "Helper"), ChangeKind.StartupEntry, new DateTime(2026, 11, 16, 9, 0, 0, DateTimeKind.Utc),
-            ChangeWords.StartupEntry("Helper", enabledNow: false), CanUndo: true, Note: null);
+            ChangeWords.StartupEntry("Helper", enabledNow: false), CanUndo: true, Note: null) { Stamp = "the first record" };
         var second = first with
         {
             What = otherWords ? ChangeWords.StartupEntry("Helper", enabledNow: true) : first.What,
             ChangedUtc = otherTime ? first.ChangedUtc?.AddMinutes(5) : first.ChangedUtc,
+            Stamp = otherRecord ? "the second record" : first.Stamp,
         };
         var calls = new List<string>();
         var now = Ledger(new Source(calls, second));
 
-        Assert.Equal((ActiveChangesView.ChangedSinceShown, false), ActiveChangesView.PutBackOne(now, first));
+        Assert.Equal((ChangeWords.ChangedSinceShown, false), ActiveChangesView.PutBackOne(now, first));
         Assert.Empty(calls);
-        Assert.Equal("There was nothing to put back.", ActiveChangesView.PutAllBack(now, ActiveChangesView.PutAllBackPlan([first], _ => true)).Text);
+        Assert.Equal(("Not done: " + first.What + "\n" + ChangeWords.ChangedSinceShown, false),
+            ActiveChangesView.PutAllBack(now, ActiveChangesView.PutAllBackPlan([first], _ => true)));
         Assert.Empty(calls);
         Assert.Equal(("back", true), ActiveChangesView.PutBackOne(Ledger(new Source(calls, first)), first)); // as it was shown, it is put back
         Assert.Equal([first.Id], calls);
+    }
+
+    /// <summary>
+    /// The automatic clear's pool size is changed in Settings while Active changes is open, then Put all back is clicked:
+    /// its question listed the clear at 8 GB, and the row now says 10 GB, so the clear is left on as it is and every other
+    /// row is put back. The results say so of the clear first, as not done, so the box is a warning: without that line
+    /// they would list only what was done, with an information icon, and nothing would say the clear stays on.
+    /// </summary>
+    [Fact]
+    public void PutAllBackSaysWhatItLeftBecauseItChangedSinceTheWindowShowedIt()
+    {
+        var live = _f.Live(new Settings { AutoClearEnabled = true, AutoClearEveryHours = 1, AutoClearPoolGb = 8 });
+        var calls = new List<string>();
+        var ledger = Ledger(new SettingsSource(live, _f.Records, null), new Source(calls, Row(ChangeKind.LogonTask)));
+        var shown = ledger.List();
+        var clear = Assert.Single(shown, c => c.Kind == ChangeKind.AutoClear);
+
+        live.Apply("the automatic clear's pool size, in Settings", s => s.AutoClearPoolGb = 10);
+        var (text, done) = ActiveChangesView.PutAllBack(ledger, ActiveChangesView.PutAllBackPlan(shown, _ => true));
+
+        Assert.Equal(("Not done: " + clear.What + "\n" + ChangeWords.ChangedSinceShown + "\n\nDone: the LogonTask\nback", false), (text, done));
+        Assert.Equal(["LogonTask confirmed"], calls); // every other row is put back
+        Assert.True(live.Running.AutoClearEnabled); // the clear stays on, as Settings left it
+        Assert.Equal(10.0, live.Running.AutoClearPoolGb);
     }
 
     // ---------------------------------------------------------------- what each row says

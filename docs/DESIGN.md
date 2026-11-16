@@ -2022,11 +2022,16 @@ the end, for all its services); every other change with a warning is then asked 
 the question showed are put back, in a fixed order: the shortcut, startup apps, scheduled tasks, services, the
 automatic clear, a removed clear task, the token-leak guard, the sign-in task. Put all back and a row's own button put
 a change back only while it is as the window showed it (`ActiveChangesView.AsShown`): its warning, whether it can be
-put back, what it says and when it was made. One that changed since waits for the next look, as does a second record
-for the same change read since the window was drawn, which has the first one's id. Put all back never stops at a
-failure, and its results list what was not done first. Listing and putting back touch COM, the service manager and the
-registry, so they run off the UI thread; the window reads the list only when it opens and after a change, and each
-change writes a line on the timeline.
+put back, what it says, when it was made and, for a change kept in `applied-changes.json`, the record its row was drawn
+from, every field as saved (`ActiveChange.Stamp`). One that changed since waits for the next look, as does a second
+record for the same change read since the window was drawn, which has the first one's id, even one that says the same
+and was made at the same moment. That match runs once, as Put all back starts, so the put-back of a recorded change
+reads its record again and acts only on the one its row was drawn from (`RecordedSource.Undo`; a scheduled task or a
+startup app is read, checked and switched in one turn with the Services tab's switch): a record that the Services tab
+takes back while Put all back runs never lets a second one be put back in its place. Put all back never stops at a
+failure, and its results list what was not done first, each change it showed and left because it changed since among
+them. Listing and putting back touch COM, the service manager and the registry, so they run off the UI thread; the
+window reads the list only when it opens and after a change, and each change writes a line on the timeline.
 
 Not listed: cache clears that already ran (the cache refills by itself), programs the user ended, PoolWatch's own data
 folder, the older PoolWatch clear-cache tasks it removes by itself (its own unused leftovers), and task or startup
