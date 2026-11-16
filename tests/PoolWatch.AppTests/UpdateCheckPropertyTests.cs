@@ -116,4 +116,21 @@ public sealed class UpdateCheckPropertyTests : IDisposable
             Assert.Contains(available.PageUrl, new[] { ReleasePage.For("v" + version), ReleasePage.For("V" + version), ReleasePage.For(version.ToString()) });
         }));
     }
+
+    /// <summary>
+    /// Cases the property found: reading the tag or the page threw (JsonElement.GetString refuses half of a surrogate pair
+    /// written as an escape, and bytes that are not UTF-8), so the check ended with no outcome.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "tag_name": "\ud800", "html_url": "x" }""")]
+    [InlineData("""{ "tag_name": "v1.2.4", "prerelease": false, "draft": false, "html_url": "\udc00" }""")]
+    public void AnAnswerWithHalfOfASurrogatePairFailsTheCheck(string json) =>
+        Assert.Equal(new UpdateResult(Now, UpdateOutcome.Failed), Ask(Encoding.UTF8.GetBytes(json)).Result);
+
+    [Fact]
+    public void AnAnswerWithBytesThatAreNotUtf8FailsTheCheck()
+    {
+        byte[] body = [.. Encoding.UTF8.GetBytes("""{ "tag_name": "v1.2."""), 0xFF, .. Encoding.UTF8.GetBytes("""4", "html_url": "x" }""")];
+        Assert.Equal(new UpdateResult(Now, UpdateOutcome.Failed), Ask(body).Result);
+    }
 }

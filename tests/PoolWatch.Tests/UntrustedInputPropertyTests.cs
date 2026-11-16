@@ -185,6 +185,14 @@ public class UntrustedInputPropertyTests
         }));
     }
 
+    /// <summary>Cases the property found: each failed with a null reference, on loading or at a lookup after it.</summary>
+    [Theory]
+    [InlineData("[null]")]
+    [InlineData("""[{ "services": null, "name": "x", "category": "y" }]""")]
+    [InlineData("""[{ "services": ["ExampleSvc", null], "name": "x", "category": "y" }]""")]
+    [InlineData("""[{ "services": ["ExampleSvc"], "name": "x", "category": "y", "windowsDefault": { "ExampleSvc": null } }]""")]
+    public void ACatalogueWithNullWhereAValueGoesIsRefusedWhole(string json) => Assert.Throws<JsonException>(() => ServiceCatalogue.Load(json));
+
     // ------------------------------------------------------------------ version tags and release pages
 
     private static Gen<int> Numbers => Gen.OneOf(Gen.Choose(0, 20), Gen.Elements(0, 1, 9, 10, 99, 100, int.MaxValue - 1, int.MaxValue), Gen.Choose(0, int.MaxValue - 1));
@@ -367,6 +375,13 @@ public class UntrustedInputPropertyTests
             Assert.Equal(records.Count, records.Select(r => r.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count());
         }));
     }
+
+    /// <summary>Cases the property found: reading the version threw, as JsonElement.TryGetInt32 does on another kind.</summary>
+    [Theory]
+    [InlineData("""{ "version": "1", "changes": [] }""")]
+    [InlineData("""{ "version": null, "changes": [] }""")]
+    [InlineData("""{ "version": [1], "changes": [] }""")]
+    public void AChangesFileWhoseVersionIsNotANumberIsNotRead(string json) => Assert.Null(ChangeRecordFile.Parse(json));
 
     // ------------------------------------------------------------------ service-changes.json
 
@@ -650,6 +665,15 @@ public class UntrustedInputPropertyTests
         }));
     }
 
+    /// <summary>The case the property found: a null path read as no pooltag.txt, and as the default path once saved (null is left out).</summary>
+    [Fact]
+    public void ANullPoolTagPathReadsAsNoneAndStaysSoWhenSaved()
+    {
+        var settings = Settings.Parse("""{ "poolTagTxtPath": null }""");
+        Assert.Equal("", settings.PoolTagTxtPath);
+        Assert.Equal("", Settings.Parse(settings.ToJson()).PoolTagTxtPath);
+    }
+
     /// <summary>The bounds the settings' descriptions give, which the overhead budget and the elevated app's reads rely on.</summary>
     private static void WithinBounds(Settings s)
     {
@@ -730,6 +754,12 @@ public class UntrustedInputPropertyTests
             });
         }));
     }
+
+    /// <summary>Cases the property found: JsonObject refused the field written twice with an ArgumentException, which was not caught.</summary>
+    [Theory]
+    [InlineData("""{ "savedMs": 1, "savedMs": 2, "countedMs": 5, "items": [] }""")]
+    [InlineData("""{ "savedMs": 1, "countedMs": 5, "items": [{ "name": "a", "stamp": 1, "firstSeenMs": 1, "firstSeenMs": 2 }] }""")]
+    public void ARetentionStateWithAFieldWrittenTwiceIsNotRead(string json) => Assert.Null(RetentionClock.State.Parse(json));
 
     // ------------------------------------------------------------------ the cached scan of the PC
 

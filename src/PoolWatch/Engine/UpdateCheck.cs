@@ -294,6 +294,9 @@ internal sealed class UpdateCheck : IDisposable
                 : Answer.Fail("the release page is not PoolWatch's page for that release");
         }
         catch (JsonException) { return Answer.Fail("the answer is not valid JSON"); }
+        // JsonDocument checks the text of a string only when it is read: GetString throws on bytes that are not UTF-8,
+        // and on half of a surrogate pair written as an escape ("\ud800").
+        catch (InvalidOperationException) { return Answer.Fail("the answer holds text that is not valid Unicode"); }
 
         static bool Flag(JsonElement o, string name) => o.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.True;
     }
