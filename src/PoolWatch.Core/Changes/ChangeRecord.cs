@@ -58,9 +58,8 @@ public static class ChangeIds
 /// <summary>
 /// applied-changes.json: <c>{ "version": 1, "changes": [ ... ] }</c>, at most <see cref="MaxBytes"/> and
 /// <see cref="MaxRecords"/> records. Parsing is bounded and never throws: a file this build cannot read as a whole
-/// (malformed, too large, another version, a field written twice in one object) is null, so it is never written over,
-/// and a record that is invalid or of a kind this build does not know is left out on its own, and counted, so the list
-/// is not saved over it either (<see cref="Parse(string, out int)"/>).
+/// (malformed, too large, another version) is null, so it is never written over, and a record that is invalid or of a
+/// kind this build does not know is dropped on its own.
 /// </summary>
 public static class ChangeRecordFile
 {
@@ -81,30 +80,17 @@ public static class ChangeRecordFile
     /// The valid records. Null when the file as a whole is not one this build reads, an empty one included: PoolWatch
     /// always writes the version and the list, so an empty file is one a power cut or a crash left, and may have held records.
     /// </summary>
-    public static List<ChangeRecord>? Parse(string json) => Parse(json, out _);
-
-    /// <summary>
-    /// <see cref="Parse(string)"/>, and how many entries of the file's list were left out (<paramref name="unread"/>):
-    /// invalid, of a kind this build does not know (a newer PoolWatch's), a second one for a target, or past
-    /// <see cref="MaxRecords"/>. Saving the records read would lose those, so ChangeRecords does not save over a file
-    /// that has one. 0 when the file is not read at all.
-    /// </summary>
-    public static List<ChangeRecord>? Parse(string json, out int unread)
+    public static List<ChangeRecord>? Parse(string json)
     {
-        unread = 0;
         var list = new List<ChangeRecord>();
         if (string.IsNullOrWhiteSpace(json)) return null;
         if (Encoding.UTF8.GetByteCount(json) > MaxBytes) return null;
         try
         {
-            // A field written twice anywhere makes the whole file unread: JSON allows it and the last one would count, so
-            // {"version": 1, "changes": [...], "changes": []} would read as an empty list that the next save writes.
-            using var doc = JsonDocument.Parse(json, ReadOptions);
+            using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 8 });
             var root = doc.RootElement;
-            // TryGetInt32 throws on a version that is not a number ("1", null), so its kind is checked first.
-            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("version", out var v) || v.ValueKind != JsonValueKind.Number ||
-                !v.TryGetInt32(out int version) || version != Version || !root.TryGetProperty("changes", out var changes) ||
-                changes.ValueKind != JsonValueKind.Array) return null;
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("version", out var v) || !v.TryGetInt32(out int version) ||
+                version != Version || !root.TryGetProperty("changes", out var changes) || changes.ValueKind != JsonValueKind.Array) return null;
             var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var e in changes.EnumerateArray())
             {
@@ -114,15 +100,10 @@ public static class ChangeRecordFile
                 catch (JsonException) { continue; } // a missing field or an unknown kind: this record only
                 if (r is not null && Invalid(r) is null && ids.Add(r.Id)) list.Add(r);
             }
-            unread = changes.GetArrayLength() - list.Count;
         }
-        // InvalidOperationException: a field's name that holds half of a surrogate pair written as an escape ("\ud800")
-        // throws when it is compared with the name looked for.
-        catch (Exception ex) when (ex is JsonException or InvalidOperationException) { unread = 0; return null; }
+        catch (JsonException) { return null; }
         return list;
     }
-
-    private static readonly JsonDocumentOptions ReadOptions = new() { MaxDepth = 8, AllowDuplicateProperties = false };
 
     public static string ToJson(IEnumerable<ChangeRecord> records) =>
         JsonSerializer.Serialize(new { version = Version, changes = records.ToList() }, Json);

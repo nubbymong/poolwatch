@@ -99,15 +99,12 @@ public static class PoolTagTxt
     /// <summary>
     /// Reads at most <paramref name="maxBytes"/> of the file into one buffer and parses that. A file that is, or grows
     /// while it is read, larger than that is not used (empty result), and so is anything that is not a plain file: a link
-    /// (a symbolic link could lead to a device or a pipe), a path with a link on the way (a folder link could lead
-    /// anywhere), or a stream that cannot seek. The look for links is at the path, from the drive's root down, made
-    /// before the file is opened by that path (<see cref="Util.PathGuard.FirstLinkBelow"/>).
+    /// (a symbolic link could lead to a device or a pipe) or a stream that cannot seek.
     /// </summary>
     public static Dictionary<PoolTag, TagInfo> ReadBounded(string path, long maxBytes)
     {
-        string full = Path.GetFullPath(path);
-        if (Path.GetPathRoot(full) is not { Length: > 0 } root || Util.PathGuard.FirstLinkBelow(root, full) is not null) return new();
-        using var fs = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1, FileOptions.SequentialScan);
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) return new();
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1, FileOptions.SequentialScan);
         if (!fs.CanSeek) return new();
         long length = fs.Length;
         if (length > maxBytes || length >= int.MaxValue) return new();

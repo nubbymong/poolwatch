@@ -294,9 +294,6 @@ internal sealed class UpdateCheck : IDisposable
                 : Answer.Fail("the release page is not PoolWatch's page for that release");
         }
         catch (JsonException) { return Answer.Fail("the answer is not valid JSON"); }
-        // JsonDocument checks the text of a string only when it is read: GetString throws on bytes that are not UTF-8,
-        // and on half of a surrogate pair written as an escape ("\ud800").
-        catch (InvalidOperationException) { return Answer.Fail("the answer holds text that is not valid Unicode"); }
 
         static bool Flag(JsonElement o, string name) => o.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.True;
     }
@@ -356,16 +353,16 @@ internal sealed class UpdateCheck : IDisposable
     }
 
     /// <summary>
-    /// Reads the cache file as untrusted: size-bounded, and every field checked again, the page that it is the saved
-    /// release's own, so a file with anything out of place is ignored whole (the next check then comes a few minutes
-    /// after start-up). The saved check, or null.
+    /// Reads the cache file as untrusted: size-bounded, and every field checked again, so a file with anything out of
+    /// place is ignored whole (the next check then comes a few minutes after start-up). The saved check, or null.
     /// </summary>
     private UpdateResult? Load()
     {
         try
         {
-            if (ReadState(StateFile) is not { } bytes) return null;
-            using var doc = JsonDocument.Parse(bytes);
+            var file = new FileInfo(StateFile);
+            if (!file.Exists || file.Length > MaxStateBytes) return null;
+            using var doc = JsonDocument.Parse(File.ReadAllBytes(file.FullName));
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object ||
                 !DateTime.TryParse(Text(root, "checked"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var checkedUtc) ||
@@ -373,7 +370,7 @@ internal sealed class UpdateCheck : IDisposable
             string? latestText = Text(root, "latest"), page = Text(root, "page");
             if (latestText is not null || page is not null) // none yet when no check has worked
             {
-                if (!SemVersion.TryParse(latestText, out var latest) || latest.IsPreRelease || !ReleasePage.IsValid(page) || !IsPageOf(latest, page)) return null;
+                if (!SemVersion.TryParse(latestText, out var latest) || latest.IsPreRelease || !ReleasePage.IsValid(page)) return null;
                 _latest = (latest, page!);
             }
             Available = NewerThanRunning();
@@ -388,34 +385,6 @@ internal sealed class UpdateCheck : IDisposable
             return null;
         }
     }
-
-    /// <summary>
-    /// The cache file's bytes, or null when there is no file or it holds more than <see cref="MaxStateBytes"/>. Its size
-    /// is not asked of the file before the read: at most that many bytes and one more are read, through the handle the
-    /// file was opened with, so a file that grows, or stands in another's place, after a look at its size is never read
-    /// past the bound.
-    /// </summary>
-    private static byte[]? ReadState(string file)
-    {
-        FileStream stream;
-        try { stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read); }
-        catch (FileNotFoundException) { return null; }
-        using (stream)
-        {
-            var bytes = new byte[MaxStateBytes + 1];
-            int read = 0, n;
-            while (read < bytes.Length && (n = stream.Read(bytes, read, bytes.Length - read)) > 0) read += n;
-            return read > MaxStateBytes ? null : bytes[..read];
-        }
-    }
-
-    /// <summary>
-    /// Whether <paramref name="page"/> is the page of the release <paramref name="version"/> under a tag that
-    /// <see cref="ParseRelease"/> takes for it (the version with a small or a capital "v" before it, or alone: "v1.2.0",
-    /// "1.2.0"), so a saved notice never names one release and opens another, as an answer from GitHub never does.
-    /// </summary>
-    private static bool IsPageOf(SemVersion version, string? page) =>
-        page == ReleasePage.For("v" + version) || page == ReleasePage.For("V" + version) || page == ReleasePage.For(version.ToString());
 
     /// <summary>A plain handler for the one request: no cookies, and no redirects (the address is fixed, so one is a failure, never followed).</summary>
     internal static SocketsHttpHandler NewHandler() => new() { AllowAutoRedirect = false, UseCookies = false };
