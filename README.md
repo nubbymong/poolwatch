@@ -30,6 +30,7 @@
 <p align="center">
   <a href="https://github.com/nubbymong/poolwatch/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush"><img alt="Tests on main: status" src="https://github.com/nubbymong/poolwatch/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push"></a>
   <a href="LICENSE"><img alt="Licence: MIT" src="https://img.shields.io/github/license/nubbymong/poolwatch"></a>
+  <a href="https://www.bestpractices.dev/projects/16751"><img alt="OpenSSF Best Practices: passing" src="https://www.bestpractices.dev/projects/16751/badge"></a>
 </p>
 
 <p align="center">
