@@ -123,10 +123,6 @@ public sealed class Settings
     /// <summary>Clear when paged + non-paged pool is over this (GB); 0 = no pool rule.</summary>
     [Description("Empty the cache when the kernel pool (paged plus non-paged) reaches this many GB (0 to 1,024; default 8); 0 turns this rule off. A clear at this size that frees little holds the rule back for 6 hours. Applied when you save.")]
     public double AutoClearPoolGb { get; set; } = 8;
-    [Description("A float setting with a plain clamp, for one run of the tests.")]
-    public float MutantRatio { get; set; } = 1;
-    [Description("A list of floats, for one run of the tests.")]
-    public List<float> MutantSteps { get; set; } = [];
     /// <summary>Clear every N hours; 0 = no schedule.</summary>
     [Description("Empty the cache every this many hours, counted from the last clear, or from PoolWatch's start before the first (0 to 168; default 1); 0 turns this rule off. Applied when you save.")]
     public double AutoClearEveryHours { get; set; } = 1;
@@ -424,7 +420,6 @@ public sealed class Settings
         SampleIntervalSeconds = double.IsFinite(SampleIntervalSeconds) ? Math.Clamp(SampleIntervalSeconds, 1, 300) : 10;
         HandleIntervalSeconds = double.IsFinite(HandleIntervalSeconds) ? Math.Clamp(HandleIntervalSeconds, 5, 3600) : 300;
         AutoClearPoolGb = double.IsFinite(AutoClearPoolGb) ? Math.Clamp(AutoClearPoolGb, 0, 1024) : 8;
-        MutantRatio = Math.Clamp(MutantRatio, 0.5f, 10f);
         AutoClearEveryHours = double.IsFinite(AutoClearEveryHours) ? Math.Clamp(AutoClearEveryHours, 0, 24 * 7) : 1;
         AutoClearMinMinutes = double.IsFinite(AutoClearMinMinutes) ? Math.Clamp(AutoClearMinMinutes, 30, 24 * 60) : 30; // at most once per 30 min
         AutoClearMode = AutoClearMode is "lowpriority" or "standby" ? AutoClearMode : "auto";
