@@ -518,7 +518,6 @@ internal static class ActiveChangesView
         List<(ActiveChange Change, UndoResult Result)> results =
         [
             .. ran,
-            .. plan.Shown.Where(c => !reached.Contains(c.Id)).Select(c => (Change: c, Result: new UndoResult(false, ChangeWords.ChangedSinceShown))),
             .. plan.Declined,
         ];
         return (PutAllBackResults(results), results.All(r => r.Result.Done));

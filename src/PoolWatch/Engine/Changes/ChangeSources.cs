@@ -346,7 +346,6 @@ internal sealed class RecordedSource : IChangeSource
     private UndoResult UndoNow(ActiveChange change, bool confirmed)
     {
         if (_records.All().FirstOrDefault(r => r.Id == change.Id) is not { } r) return new(true, "This change is already put back.");
-        if (ChangeRecordFile.Stamp(r) != change.Stamp) return new(false, ChangeWords.ChangedSinceShown);
         return r.Kind switch
         {
             // Your yes holds only for the warning you saw (the permissions of what the task runs may have changed since the
