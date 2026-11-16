@@ -339,13 +339,14 @@ internal sealed class RecordedSource : IChangeSource
     /// </summary>
     public UndoResult Undo(ActiveChange change, bool confirmed)
     {
-        if (change.Kind is ChangeKind.ScheduledTask or ChangeKind.StartupEntry) return _records.OneSwitchAtATime(() => UndoNow(change, confirmed));
-        return UndoNow(change, confirmed);
+        if (_records.All().FirstOrDefault(r => r.Id == change.Id) is not { } r) return new(true, "This change is already put back.");
+        if (ChangeRecordFile.Stamp(r) != change.Stamp) return new(false, ChangeWords.ChangedSinceShown);
+        if (change.Kind is ChangeKind.ScheduledTask or ChangeKind.StartupEntry) return _records.OneSwitchAtATime(() => UndoNow(r, change, confirmed));
+        return UndoNow(r, change, confirmed);
     }
 
-    private UndoResult UndoNow(ActiveChange change, bool confirmed)
+    private UndoResult UndoNow(ChangeRecord r, ActiveChange change, bool confirmed)
     {
-        if (_records.All().FirstOrDefault(r => r.Id == change.Id) is not { } r) return new(true, "This change is already put back.");
         return r.Kind switch
         {
             // Your yes holds only for the warning you saw (the permissions of what the task runs may have changed since the

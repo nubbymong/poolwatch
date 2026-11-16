@@ -518,6 +518,7 @@ internal static class ActiveChangesView
         List<(ActiveChange Change, UndoResult Result)> results =
         [
             .. ran,
+            .. plan.Shown.Where(c => !reached.Contains(c.Id)).Select(c => (Change: c, Result: new UndoResult(false, ChangeWords.ChangedSinceShown))),
             .. plan.Declined,
         ];
         return (PutAllBackResults(results), results.All(r => r.Result.Done));
@@ -549,7 +550,7 @@ internal static class ActiveChangesView
 
     /// <summary>What of a row a put-back must find as the window showed it (<see cref="AsShown"/>).</summary>
     private static (string? Warning, bool CanUndo, string What, DateTime? ChangedUtc, string? Stamp) Seen(ActiveChange c) =>
-        (c.Warning, c.CanUndo, c.What, c.ChangedUtc, c.Stamp);
+        (c.Warning, c.CanUndo, c.What, c.ChangedUtc, (string?)null);
 
     /// <summary>
     /// Each change Put all back went through, with what happened to it: the ones not done first, so they are the last to

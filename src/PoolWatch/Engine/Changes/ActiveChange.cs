@@ -71,7 +71,6 @@ internal sealed record ActiveChange(string Id, ChangeKind Kind, DateTime? Change
     /// second record for that target, read once the first is gone, is never acted on from a row drawn from the first. Not
     /// in the command line's list (<see cref="ChangeLedger.ToJson"/>), whose shape the uninstaller reads.
     /// </summary>
-    [JsonIgnore]
     public string? Stamp { get; init; }
 
     /// <summary>A feature PoolWatch turned on (the logon task, its settings, its shortcut), or something it turned off.</summary>
