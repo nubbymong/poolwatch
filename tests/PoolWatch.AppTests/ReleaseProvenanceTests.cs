@@ -268,7 +268,8 @@ public sealed class ReleaseProvenanceTests
     /// <summary>
     /// The rights check fails each of these: permissions on one line, for a job or for the workflow; a job's block with a
     /// comment on its key's line, with a blank line in it, or under a job header with a comment after it; a second
-    /// permissions key in a job; a quoted permissions key; and a job header in a form the check does not read. Each case
+    /// permissions key, in a job or in the workflow; a quoted permissions key; and a job header in a form the check does
+    /// not read. Each case
     /// is ci.yml as it is with one change,
     /// made here in memory and not in the file: to the workflow's own permissions, or to the header of a job that has no
     /// permissions key of its own, with lines after it. Each case names the start of the problem the check must report.
@@ -286,6 +287,7 @@ public sealed class ReleaseProvenanceTests
     [InlineData("build", "  build:\n    \"permissions\": write-all\n", "ci.yml has ")]
     [InlineData("build", "  \"build\":\n    permissions:\n      id-token: write\n", "jobs: has ")]
     [InlineData("", "permissions: write-all\n", "the workflow")]
+    [InlineData("", "permissions:\n  contents: read\npermissions:\n  contents: read\n", "the workflow has 2 permissions keys")]
     public void TheRightsCheckFailsRightsItCannotReadAsABlock(string job, string change, string problem)
     {
         string ci = Ci(), changed;
