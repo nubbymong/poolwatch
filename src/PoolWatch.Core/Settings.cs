@@ -431,16 +431,16 @@ public sealed class Settings
         // shortest are what CI's scenario configs use (half a minute of quiet and of a held incident). A number too large
         // for a double (1e400) reads as an infinity, which JSON cannot hold (the next save would fail): that goes back to
         // the default.
-        VolumeIntervalMinutes = double.IsFinite(VolumeIntervalMinutes) ? VolumeIntervalMinutes : 60;
-        HandleScanBudgetMs = double.IsFinite(HandleScanBudgetMs) ? HandleScanBudgetMs : 250;
-        RetentionMinutes = double.IsFinite(RetentionMinutes) ? RetentionMinutes : 15;
-        ReleaseWindowMinutes = double.IsFinite(ReleaseWindowMinutes) ? ReleaseWindowMinutes : 10;
-        IncidentQuietMinutes = double.IsFinite(IncidentQuietMinutes) ? IncidentQuietMinutes : 10;
-        IncidentMaxMinutes = double.IsFinite(IncidentMaxMinutes) ? IncidentMaxMinutes : 120;
-        TranscriptWindowMinutes = double.IsFinite(TranscriptWindowMinutes) ? TranscriptWindowMinutes : 30;
+        VolumeIntervalMinutes = double.IsFinite(VolumeIntervalMinutes) ? Math.Clamp(VolumeIntervalMinutes, 1, 24 * 60) : 60;
+        HandleScanBudgetMs = double.IsFinite(HandleScanBudgetMs) ? Math.Clamp(HandleScanBudgetMs, 10, 60_000) : 250;
+        RetentionMinutes = double.IsFinite(RetentionMinutes) ? Math.Clamp(RetentionMinutes, 0.5, 600) : 15;
+        ReleaseWindowMinutes = double.IsFinite(ReleaseWindowMinutes) ? Math.Clamp(ReleaseWindowMinutes, 1, 60) : 10;
+        IncidentQuietMinutes = double.IsFinite(IncidentQuietMinutes) ? Math.Clamp(IncidentQuietMinutes, 0.5, 600) : 10;
+        IncidentMaxMinutes = double.IsFinite(IncidentMaxMinutes) ? Math.Clamp(IncidentMaxMinutes, 10, 24 * 60) : 120;
+        TranscriptWindowMinutes = double.IsFinite(TranscriptWindowMinutes) ? Math.Clamp(TranscriptWindowMinutes, 1, 24 * 60) : 30;
         // Never more often than the samples (SampleIntervalSeconds is at most 300, so the range is never empty).
-        TagCsvIntervalSeconds = Math.Max(double.IsFinite(TagCsvIntervalSeconds) ? TagCsvIntervalSeconds : 60, SampleIntervalSeconds);
-        ProcessCsvIntervalSeconds = Math.Max(double.IsFinite(ProcessCsvIntervalSeconds) ? ProcessCsvIntervalSeconds : 60, SampleIntervalSeconds);
+        TagCsvIntervalSeconds = double.IsFinite(TagCsvIntervalSeconds) ? Math.Clamp(TagCsvIntervalSeconds, SampleIntervalSeconds, 3600) : Math.Max(60, SampleIntervalSeconds);
+        ProcessCsvIntervalSeconds = double.IsFinite(ProcessCsvIntervalSeconds) ? Math.Clamp(ProcessCsvIntervalSeconds, SampleIntervalSeconds, 3600) : Math.Max(60, SampleIntervalSeconds);
         RetentionDays = Math.Clamp(RetentionDays, 1, 90);
         RecordMode = Enum.IsDefined(RecordMode) ? RecordMode : RecordMode.ReportsOnly;
         CaptureSeconds = Math.Clamp(CaptureSeconds, 5, CaptureHardCapSeconds);

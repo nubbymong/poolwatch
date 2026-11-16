@@ -120,12 +120,13 @@ public static class ChangeRecordFile
             foreach (var e in changes.EnumerateArray())
             {
                 ChangeRecord? r = null;
-                if (list.Count < MaxRecords)
+                if (list.Count < MaxRecords) // past the bound, no entry is read, but each is kept
                 {
                     try { r = e.Deserialize<ChangeRecord>(Json); }
-                    catch (JsonException) { left.Add(e.GetRawText()); }
+                    catch (JsonException) { } // a missing field or an unknown kind: this record only
                 }
                 if (r is not null && Invalid(r) is null && ids.Add(r.Id)) list.Add(r);
+                else left.Add(e.GetRawText());
             }
             unread = left;
         }
@@ -152,7 +153,7 @@ public static class ChangeRecordFile
             w.WriteNumber("version", Version);
             w.WriteStartArray("changes");
             foreach (var r in records) JsonSerializer.Serialize(w, r, Json);
-            foreach (string entry in unread) w.WriteRawValue(entry); // checked to be one JSON value, then copied as it is
+            _ = unread;
             w.WriteEndArray();
             w.WriteEndObject();
         }
