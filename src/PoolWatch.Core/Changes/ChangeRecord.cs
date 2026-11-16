@@ -89,8 +89,10 @@ public static class ChangeRecordFile
         {
             using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 8 });
             var root = doc.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("version", out var v) || !v.TryGetInt32(out int version) ||
-                version != Version || !root.TryGetProperty("changes", out var changes) || changes.ValueKind != JsonValueKind.Array) return null;
+            // TryGetInt32 throws on a version that is not a number ("1", null), so its kind is checked first.
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("version", out var v) || v.ValueKind != JsonValueKind.Number ||
+                !v.TryGetInt32(out int version) || version != Version || !root.TryGetProperty("changes", out var changes) ||
+                changes.ValueKind != JsonValueKind.Array) return null;
             var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var e in changes.EnumerateArray())
             {

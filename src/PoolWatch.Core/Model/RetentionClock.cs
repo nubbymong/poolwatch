@@ -119,8 +119,9 @@ public sealed class RetentionClock
 
         /// <summary>
         /// The saved state, or null when the text is not one (never throws): oversize text, a missing or unreadable value, a
-        /// time below 0 or beyond any a PC counts, a record first seen after the time counted, an empty name, or a name twice
-        /// (in any case).
+        /// time below 0 or beyond any a PC counts, a record first seen after the time counted, an empty name, a name twice
+        /// (in any case), or a field written twice in one object (JSON allows it; JsonObject refuses it with an
+        /// ArgumentException when the object is first read).
         /// </summary>
         public static State? Parse(string json)
         {
@@ -138,7 +139,7 @@ public sealed class RetentionClock
                 }
                 return new State(savedMs, counted, items);
             }
-            catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException) { return null; }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException or ArgumentException) { return null; }
         }
 
         private static bool Ms(JsonNode? node, out long ms)

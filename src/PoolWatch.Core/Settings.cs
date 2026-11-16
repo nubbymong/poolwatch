@@ -450,7 +450,9 @@ public sealed class Settings
         // use (Util.SymbolPaths); here it is only bounded.
         AiccResourcesRoot = LocalPathOr(AiccResourcesRoot, "");
         ClaudeVersionsDir = LocalPathOr(ClaudeVersionsDir, "");
-        PoolTagTxtPath = string.IsNullOrEmpty(PoolTagTxtPath) ? PoolTagTxtPath : LocalPathOr(PoolTagTxtPath, DefaultPoolTagTxtPath);
+        // A null path (written by hand: PoolWatch never saves one) reads as "", no pooltag.txt, as it already worked
+        // until the next save: saved, null is left out, so the file would read back as the default path instead.
+        PoolTagTxtPath = string.IsNullOrEmpty(PoolTagTxtPath) ? "" : LocalPathOr(PoolTagTxtPath, DefaultPoolTagTxtPath);
         SymbolPath = SymbolPath is { Length: <= MaxSymbolPathLength } sp && !sp.Any(char.IsControl) ? sp : "";
         WatchedApps = (WatchedApps ?? []).Where(a => !string.IsNullOrWhiteSpace(a)).Select(a => a.Trim())
             .Where(a => a.Length <= 64 && a.IndexOfAny(NotInAppName) < 0 && !a.Any(char.IsControl))
