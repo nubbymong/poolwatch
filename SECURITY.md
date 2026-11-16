@@ -445,6 +445,10 @@ after an upgrade has **Done** in its place), so setup guards it against a press 
   `packages.lock.json`.
 - A release is built and signed by CI from a `v*` tag; every file is checked for a valid signature from the expected
   certificate and an RFC 3161 timestamp before anything is published, together with `SHA256SUMS.txt`.
+- Once a release is published, the release workflow signs SLSA build provenance for its files (the setup, both zips and
+  `SHA256SUMS.txt`) through GitHub's artifact attestations: a short-lived Sigstore certificate issued for that workflow
+  run, so there is no signing key to keep or steal. GitHub keeps the attestation, and the release carries it too, as
+  `PoolWatch-<tag>.intoto.jsonl` ([how to check a file against it](docs/TECHNICAL.md#verify-a-release)).
 
 ## Known limitations
 

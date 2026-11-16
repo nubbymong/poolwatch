@@ -4,7 +4,7 @@ name: CI
 # installer test and the UI smoke test, and on Windows on Arm the unit tests, then the x64 build's self-test, headless
 # checks and the same scenarios under emulation. The soak, the overhead check and the agentic-load overhead check run on
 # demand (workflow_dispatch) and on a release tag, where they are required. A tag v* also signs the build and the
-# installer, verifies every signature and publishes the release.
+# installer, verifies every signature, publishes the release and attests the provenance of its files.
 #
 # Fork pull requests are safe: this runs on pull_request (never pull_request_target), no job a pull request can reach
 # holds a secret or a write token, and the signing secrets live in the "release" environment, which only a v* tag can use.
@@ -680,6 +680,9 @@ jobs:
     timeout-minutes: 30   # a hung silent installer must not hold the runner (and the signing session) for the 6 h default
     permissions:
       contents: read
+    outputs:
+      # For the provenance job: the release files' SHA-256 hashes, from the step that takes them (id: subjects).
+      hashes: ${{ steps.subjects.outputs.hashes }}
     env:
       # The code-signing certificate's leaf (SSL.com eSigner, "Nicholas Moger"). It EXPIRES 2027-08-10: renew the
       # certificate before then and put the new leaf's thumbprint here. Files signed before that keep verifying (they
@@ -872,6 +875,22 @@ jobs:
           [IO.File]::WriteAllText("$PWD/release/SHA256SUMS.txt", ($lines -join "`n") + "`n")
           Get-Content release/SHA256SUMS.txt
 
+      # The provenance job attests exactly the files the publish job puts on the release (the setup, both zips and
+      # SHA256SUMS.txt) by the hashes taken here, where they were made: one "<sha256>  <name>" line each, as sha256sum
+      # writes them, base64-encoded so that the job's output is one line.
+      - name: Hash the release files for their provenance
+        id: subjects
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          # The publish job's files, in its order.
+          $names = "PoolWatch-$tag-setup-win-x64.exe", "PoolWatch-$tag-win-x64.zip", "PoolWatch-$tag-win-x64-selfcontained.zip", 'SHA256SUMS.txt'
+          $lines = foreach ($name in $names) { "$((Get-FileHash -LiteralPath "release/$name" -Algorithm SHA256).Hash.ToLowerInvariant())  $name" }
+          $text = ($lines -join "`n") + "`n"
+          Write-Host $text
+          "hashes=$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text)))" >> $env:GITHUB_OUTPUT
+
       - name: Upload the signed release files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -917,3 +936,63 @@ jobs:
           # A re-run for a tag that already has a release replaces its files.
           gh release create "$GITHUB_REF_NAME" $files --repo "$GITHUB_REPOSITORY" --title "PoolWatch $GITHUB_REF_NAME" --generate-notes --verify-tag $prerelease \
             || gh release upload "$GITHUB_REF_NAME" $files --repo "$GITHUB_REPOSITORY" --clobber
+
+  # Release, part 3: provenance (a v* tag only), once the release is published. GitHub's attest action signs SLSA build
+  # provenance for the four files the publish job put on the release, by the hashes the sign job took where it made
+  # them, with a short-lived Sigstore certificate issued for this workflow run (no key is kept; the signature is logged
+  # in Sigstore's public transparency log). GitHub keeps the attestation, where gh attestation verify finds it, and this
+  # job attaches it to the release as PoolWatch-<tag>.intoto.jsonl, the file OpenSSF Scorecard looks for: one Sigstore
+  # bundle on one line, the layout the SLSA project's own generator writes under that name. It then checks each file on
+  # the release against that copy. This job holds no signing secret, and runs nothing the build made.
+  provenance:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [sign, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write       # this run's identity, which the signing certificate is issued for
+      attestations: write   # keeping the attestation with GitHub
+      contents: write       # attaching it to the release
+    steps:
+      - name: Write the release files' hashes
+        env:
+          HASHES: ${{ needs.sign.outputs.hashes }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$HASHES" | base64 -d > "$RUNNER_TEMP/subjects.sha256"
+          cat "$RUNNER_TEMP/subjects.sha256"
+          # Exactly the publish job's four files, in its order, each with a SHA-256: an empty output fails here.
+          names="$(awk '{ print $2 }' "$RUNNER_TEMP/subjects.sha256" | paste -sd ' ')"
+          expected="PoolWatch-$GITHUB_REF_NAME-setup-win-x64.exe PoolWatch-$GITHUB_REF_NAME-win-x64.zip PoolWatch-$GITHUB_REF_NAME-win-x64-selfcontained.zip SHA256SUMS.txt"
+          if [ "$names" != "$expected" ] || grep -Evxq '[0-9a-f]{64}  [A-Za-z0-9._-]+' "$RUNNER_TEMP/subjects.sha256"; then
+            echo "::error::the sign job's hashes are not one '<sha256>  <name>' line for each of: $expected"
+            exit 1
+          fi
+
+      - name: Attest the release files' provenance
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/subjects.sha256
+
+      - name: Attach the provenance to the release, and check the release's files against it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          name="PoolWatch-$GITHUB_REF_NAME.intoto.jsonl"
+          # The action writes its bundle as one line of JSON: one attestation, one line.
+          if [ "$(wc -l < "$BUNDLE")" -ne 1 ]; then echo "::error::the attestation bundle is not one line"; exit 1; fi
+          cp "$BUNDLE" "$RUNNER_TEMP/$name"
+          # A re-run for the tag replaces the file, as the publish job's re-run replaces the others.
+          gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/$name" --repo "$GITHUB_REPOSITORY" --clobber
+          # Each published file, downloaded from the release as anyone gets it, against the release's own copy of the
+          # provenance: signed by this workflow, for this tag and its commit.
+          mkdir "$RUNNER_TEMP/released"
+          cd "$RUNNER_TEMP/released"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+          for f in "PoolWatch-$GITHUB_REF_NAME-setup-win-x64.exe" "PoolWatch-$GITHUB_REF_NAME-win-x64.zip" "PoolWatch-$GITHUB_REF_NAME-win-x64-selfcontained.zip" SHA256SUMS.txt; do
+            gh attestation verify "$f" --bundle "$name" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml" --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA"
+          done
