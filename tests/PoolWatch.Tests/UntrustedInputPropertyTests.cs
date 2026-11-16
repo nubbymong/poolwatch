@@ -747,6 +747,32 @@ public class UntrustedInputPropertyTests
         Assert.Equal("", Settings.Parse(settings.ToJson()).PoolTagTxtPath);
     }
 
+    /// <summary>
+    /// Another case the property found: a number too large for a double (1e400, or -1e400) reads as an infinity, so each
+    /// setting with no range of its own reads as its default then, and the settings save and read back.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(Settings.VolumeIntervalMinutes))]
+    [InlineData(nameof(Settings.HandleScanBudgetMs))]
+    [InlineData(nameof(Settings.RetentionMinutes))]
+    [InlineData(nameof(Settings.ReleaseWindowMinutes))]
+    [InlineData(nameof(Settings.IncidentQuietMinutes))]
+    [InlineData(nameof(Settings.IncidentMaxMinutes))]
+    [InlineData(nameof(Settings.TranscriptWindowMinutes))]
+    [InlineData(nameof(Settings.TagCsvIntervalSeconds))]
+    [InlineData(nameof(Settings.ProcessCsvIntervalSeconds))]
+    public void ANumberTooLargeForADoubleReadsAsTheSettingsDefault(string name)
+    {
+        var property = typeof(Settings).GetProperty(name)!;
+        double expected = (double)property.GetValue(Settings.Parse("{}"))!;
+        foreach (string big in new[] { "1e400", "-1e400" })
+        {
+            var settings = Settings.Parse($$"""{ "{{JsonNamingPolicy.CamelCase.ConvertName(name)}}": {{big}} }""");
+            Assert.Equal(expected, (double)property.GetValue(settings)!);
+            Assert.Equal(settings.ToJson(), Settings.Parse(settings.ToJson()).ToJson());
+        }
+    }
+
     /// <summary>The bounds the settings' descriptions give, which the overhead budget and the elevated app's reads rely on.</summary>
     private static void WithinBounds(Settings s)
     {
@@ -836,7 +862,7 @@ public class UntrustedInputPropertyTests
     [Theory]
     [InlineData("""{ "savedMs": 1, "savedMs": 2, "countedMs": 5, "items": [] }""")]
     [InlineData("""{ "savedMs": 1, "countedMs": 5, "items": [{ "name": "a", "stamp": 1, "firstSeenMs": 1, "firstSeenMs": 2 }] }""")]
-    [InlineData("""{ "savedMs": 1, "savedMs": 2, "countedMs": 5, "items": [] }""")]
+    [InlineData("""{ "savedMs": 1, "\u0073avedMs": 2, "countedMs": 5, "items": [] }""")] // the same name, once with an escape
     public void ARetentionStateWithAFieldWrittenTwiceIsNotRead(string json) => Assert.Null(RetentionClock.State.Parse(json));
 
     // ------------------------------------------------------------------ the cached scan of the PC

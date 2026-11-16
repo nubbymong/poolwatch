@@ -426,8 +426,17 @@ public sealed class Settings
         ShortLivedKeepMinutes = double.IsFinite(ShortLivedKeepMinutes) ? Math.Clamp(ShortLivedKeepMinutes, 1, 600) : 15;
         IncidentEventKeepMinutes = double.IsFinite(IncidentEventKeepMinutes) ? Math.Clamp(IncidentEventKeepMinutes, 5, 600) : 90;
         ServiceIntervalSeconds = Math.Clamp(ServiceIntervalSeconds, 5, 3600);
-        TagCsvIntervalSeconds = Math.Max(TagCsvIntervalSeconds, SampleIntervalSeconds);
-        ProcessCsvIntervalSeconds = Math.Max(ProcessCsvIntervalSeconds, SampleIntervalSeconds);
+        // A number too large for a double (1e400) reads as an infinity, which no time can be made of and JSON cannot
+        // hold (the next save would fail): a setting with no range of its own goes back to its default then.
+        VolumeIntervalMinutes = double.IsFinite(VolumeIntervalMinutes) ? VolumeIntervalMinutes : 60;
+        HandleScanBudgetMs = double.IsFinite(HandleScanBudgetMs) ? HandleScanBudgetMs : 250;
+        RetentionMinutes = double.IsFinite(RetentionMinutes) ? RetentionMinutes : 15;
+        ReleaseWindowMinutes = double.IsFinite(ReleaseWindowMinutes) ? ReleaseWindowMinutes : 10;
+        IncidentQuietMinutes = double.IsFinite(IncidentQuietMinutes) ? IncidentQuietMinutes : 10;
+        IncidentMaxMinutes = double.IsFinite(IncidentMaxMinutes) ? IncidentMaxMinutes : 120;
+        TranscriptWindowMinutes = double.IsFinite(TranscriptWindowMinutes) ? TranscriptWindowMinutes : 30;
+        TagCsvIntervalSeconds = Math.Max(double.IsFinite(TagCsvIntervalSeconds) ? TagCsvIntervalSeconds : 60, SampleIntervalSeconds);
+        ProcessCsvIntervalSeconds = Math.Max(double.IsFinite(ProcessCsvIntervalSeconds) ? ProcessCsvIntervalSeconds : 60, SampleIntervalSeconds);
         RetentionDays = Math.Clamp(RetentionDays, 1, 90);
         RecordMode = Enum.IsDefined(RecordMode) ? RecordMode : RecordMode.ReportsOnly;
         CaptureSeconds = Math.Clamp(CaptureSeconds, 5, CaptureHardCapSeconds);

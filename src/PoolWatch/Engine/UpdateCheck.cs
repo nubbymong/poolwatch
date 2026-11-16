@@ -411,8 +411,8 @@ internal sealed class UpdateCheck : IDisposable
 
     /// <summary>
     /// Whether <paramref name="page"/> is the page of the release <paramref name="version"/> under a tag that
-    /// <see cref="ParseRelease"/> takes for it ("v1.2.0", "V1.2.0" or "1.2.0"), so a saved notice never names one release
-    /// and opens another, as an answer from GitHub never does.
+    /// <see cref="ParseRelease"/> takes for it (the version with a small or a capital "v" before it, or alone: "v1.2.0",
+    /// "1.2.0"), so a saved notice never names one release and opens another, as an answer from GitHub never does.
     /// </summary>
     private static bool IsPageOf(SemVersion version, string? page) =>
         page == ReleasePage.For("v" + version) || page == ReleasePage.For("V" + version) || page == ReleasePage.For(version.ToString());
