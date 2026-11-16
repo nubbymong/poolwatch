@@ -76,18 +76,48 @@ public class UntrustedInputPropertyTests
         Assert.NotEmpty(Packs);
         Assert.All(Packs, p => Assert.Null(KnowledgeBase.Parse(p).Problem)); // the changes start from packs that are used
         var packs = Gen.OneOf(Mutated(Gen.Elements(Packs), PackValues), AnyText);
-        Check.One(Cases(500), Prop.ForAll(Arb.From(packs), json =>
+        ForAll(500, packs, json =>
         {
             var (issue, problem) = KnowledgeBase.Parse(json);
             Assert.True((issue is null) != (problem is null), "a pack is used, or left out with why");
-            if (issue is not null) CheckPack(issue);
+            if (issue is not null)
+            {
+                Strict(json);
+                CheckPack(issue);
+            }
             var kb = KnowledgeBase.Load([("pack.json", json)]);
             Assert.Equal(issue is null ? 0 : 1, kb.Entries.Count);
             Assert.Equal(issue is null ? 1 : 0, kb.Problems.Count);
-        }));
+        });
     }
 
-    /// <summary>What docs/knowledge-packs.md says of a pack PoolWatch uses.</summary>
+    /// <summary>
+    /// The JSON docs/knowledge-packs.md asks of a pack: strict (no comments and no trailing commas, which JsonDocument's
+    /// default options refuse), no field given twice in one object, nested at most 8 deep.
+    /// </summary>
+    private static void Strict(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        Assert.InRange(Depth(doc.RootElement), 1, 8);
+    }
+
+    /// <summary>How deep the objects and lists go, the outermost counted as 1; checks each object's field names on the way.</summary>
+    private static int Depth(JsonElement e)
+    {
+        switch (e.ValueKind)
+        {
+            case JsonValueKind.Object:
+                var names = e.EnumerateObject().Select(p => p.Name).ToList();
+                Assert.True(names.Count == names.Distinct(StringComparer.Ordinal).Count(), "a field given twice: " + string.Join(", ", names));
+                return 1 + e.EnumerateObject().Select(p => Depth(p.Value)).DefaultIfEmpty(0).Max();
+            case JsonValueKind.Array:
+                return 1 + e.EnumerateArray().Select(Depth).DefaultIfEmpty(0).Max();
+            default:
+                return 0;
+        }
+    }
+
+    /// <summary>What docs/knowledge-packs.md says of each field of a pack PoolWatch uses.</summary>
     private static void CheckPack(KnownIssue issue)
     {
         Assert.Matches(@"^[a-z0-9]+(-[a-z0-9]+)*\z", issue.Id);
@@ -145,7 +175,10 @@ public class UntrustedInputPropertyTests
             char.GetUnicodeCategory(c) is UnicodeCategory.Format or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator);
     }
 
-    /// <summary>An https address on a site a pack may link to, written plainly: no user name, no port, nothing a command line splits on.</summary>
+    /// <summary>
+    /// An https address on a site a pack may link to, written plainly: no user name, no port, and only the characters
+    /// docs/knowledge-packs.md allows (letters, digits and - . _ ~ : / ? # = &amp; % +), so nothing a command line splits on.
+    /// </summary>
     private static void Site(string url)
     {
         var uri = new Uri(url, UriKind.Absolute);
@@ -153,7 +186,7 @@ public class UntrustedInputPropertyTests
         Assert.Contains(uri.Host, LinkSites);
         Assert.StartsWith("https://" + uri.Host + "/", url);
         Assert.True(uri.IsDefaultPort && uri.UserInfo.Length == 0, url);
-        Assert.DoesNotContain(url, c => char.IsWhiteSpace(c) || c is '"' or '\'' or '`' or > '~');
+        Assert.All(url, c => Assert.True(char.IsAsciiLetterOrDigit(c) || "-._~:/?#=&%+".Contains(c), url));
     }
 
     // ------------------------------------------------------------------ the services catalogue
@@ -165,11 +198,13 @@ public class UntrustedInputPropertyTests
     {
         var catalogues = Mutated(Gen.Constant(CatalogueJson),
             [.. ProtectedJson, "[\"vmicvss\", null]", "{\"WinDefend\":\"manual\"}", "[\"wisvc\"]", "\"Automatic\"", "\"manual\"", "{\"x\":null}"]);
-        Check.One(Cases(300), Prop.ForAll(Arb.From(catalogues), json =>
+        ForAll(300, catalogues, json =>
         {
             ServiceCatalogue catalogue;
             try { catalogue = ServiceCatalogue.Load(json); }
             catch (JsonException) { return; } // refused whole: the unit tests name the row that does not load
+            // The texts a row shows: the Services tab and the presets read them (ServicePlan.Tick reads the category).
+            Assert.All(catalogue.Entries, e => Assert.True(e.Name is not null && e.Category is not null && e.Lose is not null, string.Join(", ", e.Services)));
             foreach (bool insider in new[] { false, true })
             {
                 foreach (string name in Protected.Concat(insider ? new[] { "wisvc", "WISVC" } : Array.Empty<string>()))
@@ -182,15 +217,23 @@ public class UntrustedInputPropertyTests
                     Assert.Contains(catalogue.WindowsDefault(name), new ServiceStartType?[] { null, ServiceStartType.Automatic, ServiceStartType.Manual });
                 }
             }
-        }));
+        });
     }
 
-    /// <summary>Cases the property found: each failed with a null reference, on loading or at a lookup after it.</summary>
+    /// <summary>
+    /// JSON null where a value goes. The property found the first four: a null row or list of services failed with a null
+    /// reference on loading, a null service name with a null key on loading, and a null Windows default at a lookup after
+    /// it. The last three, found in review, put null in a row's texts, which the code that reads a row does not expect:
+    /// ServicePlan.Tick, for one, fails on a null category.
+    /// </summary>
     [Theory]
     [InlineData("[null]")]
     [InlineData("""[{ "services": null, "name": "x", "category": "y" }]""")]
     [InlineData("""[{ "services": ["ExampleSvc", null], "name": "x", "category": "y" }]""")]
     [InlineData("""[{ "services": ["ExampleSvc"], "name": "x", "category": "y", "windowsDefault": { "ExampleSvc": null } }]""")]
+    [InlineData("""[{ "services": ["ExampleSvc"], "name": null, "category": "y" }]""")]
+    [InlineData("""[{ "services": ["ExampleSvc"], "name": "x", "category": null }]""")]
+    [InlineData("""[{ "services": ["ExampleSvc"], "name": "x", "category": "y", "lose": null }]""")]
     public void ACatalogueWithNullWhereAValueGoesIsRefusedWhole(string json) => Assert.Throws<JsonException>(() => ServiceCatalogue.Load(json));
 
     // ------------------------------------------------------------------ version tags and release pages
@@ -225,7 +268,7 @@ public class UntrustedInputPropertyTests
             from prefix in Gen.Elements("", "v", "V")
             from build in Gen.Elements("", "+78b1fec", "+build.1", "+0")
             select (v, text: prefix + v + build);
-        Check.One(Cases(500), Prop.ForAll(Arb.From(cases), c =>
+        ForAll(500, cases, c =>
         {
             bool read = SemVersion.TryParse(c.text, out var back);
             Assert.Equal(c.text.Length <= SemVersion.MaxLength, read);
@@ -233,36 +276,38 @@ public class UntrustedInputPropertyTests
             Assert.Equal(c.v.PreRelease.Length > 0, c.v.IsPreRelease);
             string page = ReleasePage.For("v" + c.v);
             Assert.Equal(page.Length <= ReleasePage.MaxLength, ReleasePage.IsValid(page));
-        }));
+        });
     }
 
     [Fact]
     public void AVersionIsReadOnlyFromTextThatIsExactlyOne()
     {
         var texts = Gen.OneOf(AnyText, Edited(Versions.Select(v => "v" + v)), Edited(Gen.Elements("1.0.0", "v1.2.3-rc.1+abc", "V10.20.30-alpha.1.x-y")));
-        Check.One(Cases(1000), Prop.ForAll(Arb.From(texts), text =>
+        ForAll(1000, texts, text =>
         {
             if (!SemVersion.TryParse(text, out var v)) return;
             Assert.InRange(text.Length, 1, SemVersion.MaxLength);
             string core = text[0] is 'v' or 'V' ? text[1..] : text;
             int plus = core.IndexOf('+');
             Assert.Equal(plus < 0 ? core : core[..plus], v.ToString()); // the text names exactly this version
+            // and what follows "+" is build metadata as semver.org writes it: dot-separated identifiers, none empty.
+            if (plus >= 0) Assert.Matches(@"^[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*\z", core[(plus + 1)..]);
             Assert.True(SemVersion.TryParse(v.ToString(), out var again) && again == v);
             Assert.DoesNotContain(text, c => c > '~' || char.IsWhiteSpace(c));
-        }));
+        });
     }
 
     [Fact]
     public void VersionsAreInTheOrderSemVerGives()
     {
         var pairs = from a in CloseVersions from b in Gen.OneOf(CloseVersions, Versions) select (a, b);
-        Check.One(Cases(1000), Prop.ForAll(Arb.From(pairs), p =>
+        ForAll(1000, pairs, p =>
         {
             int order = Math.Sign(p.a.CompareTo(p.b));
             Assert.Equal(Precedence(p.a, p.b), order);
             Assert.Equal(-order, Math.Sign(p.b.CompareTo(p.a)));
             Assert.Equal(p.a == p.b, order == 0);
-        }));
+        });
     }
 
     /// <summary>semver.org's precedence, written again: the numbers, then a release after its pre-releases, then each identifier, numbers by value (here as big integers).</summary>
@@ -295,7 +340,7 @@ public class UntrustedInputPropertyTests
     {
         string tagPage = ReleasePage.For("");
         var urls = Gen.OneOf(AnyText, Edited(Gen.Elements(tagPage + "v1.2.0", tagPage + "v1.0.0-rc.1", ReleasePage.Prefix, ReleasePage.Prefix + "download/v1.0.0/PoolWatch.exe")));
-        Check.One(Cases(1000), Prop.ForAll(Arb.From(urls), url =>
+        ForAll(1000, urls, url =>
         {
             if (!ReleasePage.IsValid(url)) return;
             Assert.StartsWith(tagPage, url);
@@ -303,7 +348,7 @@ public class UntrustedInputPropertyTests
             string tag = url[tagPage.Length..];
             Assert.DoesNotContain("..", tag);
             Assert.All(tag, c => Assert.True(char.IsAsciiLetterOrDigit(c) || c is '-' or '.' or '_', url));
-        }));
+        });
     }
 
     // ------------------------------------------------------------------ applied-changes.json
@@ -345,7 +390,13 @@ public class UntrustedInputPropertyTests
     }
 
     /// <summary>Records with different ids, in any case: the file keeps one record for each target.</summary>
-    private static Gen<List<ChangeRecord>> ChangeLists => Gen.ListOf(ChangeRecords).Select(l => l.DistinctBy(r => r.Id, StringComparer.OrdinalIgnoreCase).ToList());
+    private static Gen<List<ChangeRecord>> ChangeLists => Gen.ListOf(ChangeRecords).Select(OnePerTarget);
+
+    /// <summary>More records than a file is read for (<see cref="ChangeRecordFile.MaxRecords"/>), so the property reaches that bound.</summary>
+    private static Gen<List<ChangeRecord>> TooManyChanges =>
+        Gen.Choose(ChangeRecordFile.MaxRecords + 20, ChangeRecordFile.MaxRecords + 60).SelectMany(n => Gen.ListOf(ChangeRecords, n)).Select(OnePerTarget);
+
+    private static List<ChangeRecord> OnePerTarget(List<ChangeRecord> records) => records.DistinctBy(r => r.Id, StringComparer.OrdinalIgnoreCase).ToList();
 
     private static readonly string[] ChangeValues =
     [
@@ -356,24 +407,29 @@ public class UntrustedInputPropertyTests
     [Fact]
     public void ChangeRecordsReadBackAsTheyAreSaved()
     {
-        Check.One(Cases(300), Prop.ForAll(Arb.From(ChangeLists), records =>
+        ForAll(300, ChangeLists, records =>
         {
             Assert.All(records, r => Assert.Null(ChangeRecordFile.Invalid(r))); // the generator makes only records PoolWatch writes
             Assert.Equal(records, ChangeRecordFile.Parse(ChangeRecordFile.ToJson(records)));
-        }));
+        });
     }
 
     [Fact]
     public void AChangedRecordsFileIsReadOnlyAsFarAsItHoldsValidRecords()
     {
-        var files = Gen.OneOf(Mutated(ChangeLists.Select(r => ChangeRecordFile.ToJson(r)), ChangeValues), AnyText);
-        Check.One(Cases(500), Prop.ForAll(Arb.From(files), json =>
+        var files = Gen.OneOf(
+            Mutated(Gen.OneOf(ChangeLists, TooManyChanges).Select(r => ChangeRecordFile.ToJson(r)), ChangeValues),
+            JustOver(ChangeLists.Select(r => ChangeRecordFile.ToJson(r)), ChangeRecordFile.MaxBytes),
+            AnyText);
+        ForAll(500, files, json =>
         {
-            if (ChangeRecordFile.Parse(json) is not { } records) return; // not read: never written over
+            var read = ChangeRecordFile.Parse(json);
+            if (Encoding.UTF8.GetByteCount(json) > ChangeRecordFile.MaxBytes) Assert.Null(read); // too large: not read at all
+            if (read is not { } records) return; // not read: never written over
             Assert.InRange(records.Count, 0, ChangeRecordFile.MaxRecords);
             Assert.All(records, r => Assert.Null(ChangeRecordFile.Invalid(r)));
             Assert.Equal(records.Count, records.Select(r => r.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count());
-        }));
+        });
     }
 
     /// <summary>Cases the property found: reading the version threw, as JsonElement.TryGetInt32 does on another kind.</summary>
@@ -408,25 +464,28 @@ public class UntrustedInputPropertyTests
     [Fact]
     public void ServiceChangesReadBackAsTheyAreSaved()
     {
-        Check.One(Cases(300), Prop.ForAll(Arb.From(Gen.ListOf(ServiceChanges)), changes =>
+        ForAll(300, Gen.ListOf(ServiceChanges), changes =>
         {
             Assert.Equal(changes, ServiceChangeLog.Parse(ServiceChangeLog.ToJson(changes)));
-        }));
+        });
     }
 
     [Fact]
     public void AChangedServiceChangesFileIsReadWholeOrNotAtAll()
     {
         var files = Gen.OneOf(Mutated(Gen.ListOf(ServiceChanges).Select(c => ServiceChangeLog.ToJson(c)), "\"Disabled\"", "\"disabled\"", "9", "-2"), AnyText);
-        Check.One(Cases(500), Prop.ForAll(Arb.From(files), json =>
+        ForAll(500, files, json =>
         {
             if (ServiceChangeLog.Parse(json) is not { } changes) return; // not read: never written over
+            // Read whole: a record for each item of the file's list, none of them dropped.
+            using var doc = JsonDocument.Parse(json);
+            Assert.Equal(doc.RootElement.GetArrayLength(), changes.Count);
             Assert.All(changes, c =>
             {
                 Assert.NotNull(c);
                 Assert.False(string.IsNullOrEmpty(c.Service));
             });
-        }));
+        });
     }
 
     // ------------------------------------------------------------------ an AI agent's answer
@@ -466,14 +525,16 @@ public class UntrustedInputPropertyTests
     public void AnAgentAnswerOnlyEverPlansWhatIsOnThePcAndPassesTheGate()
     {
         string[] values = [.. ProtectedJson, "\"ExampleFilter\"", "[\"WinDefend\",\"windefend\"]", "{\"services\":[\"WinDefend\"]}", "\"" + new string('x', 513) + "\"", "2"];
-        var answers = Gen.OneOf(AsBytes(Mutated(AgentAnswers, values)), AsBytes(AgentAnswers), AnyBytes);
+        var answers = Gen.OneOf(AsBytes(Mutated(AgentAnswers, values)), AsBytes(AgentAnswers),
+            JustOver(AgentAnswers, AgentAnswer.MaxBytes).Select(t => Encoding.UTF8.GetBytes(t)), AnyBytes);
         var services = AgentList.Items.Where(i => i.Service is not null).Select(i => i.Service!.Service.Name).ToList();
         var startup = AgentList.Items.Where(i => i.Startup is not null).Select(i => i.Startup!).ToList();
         var tasks = AgentList.Items.Where(i => i.Task is not null).Select(i => i.Task!).ToList();
-        Check.One(Cases(500), Prop.ForAll(Arb.From(answers), bytes =>
+        ForAll(500, answers, bytes =>
         {
             var result = AgentAnswer.Read(bytes, AgentList);
             Assert.True((result.Plan is null) != (result.Error is null), "an answer is read into a plan, or refused with why");
+            if (bytes.Length > AgentAnswer.MaxBytes) Assert.Null(result.Plan); // too large: refused unread
             if (result.Plan is not { } plan) return;
             foreach (var planned in plan.Services)
             {
@@ -489,12 +550,15 @@ public class UntrustedInputPropertyTests
             Assert.Equal(plan.Services.Count, plan.Services.Select(s => s.Option.Service.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count());
             Assert.Equal(plan.Startup.Count, plan.Startup.Select(p => p.Entry).Distinct().Count());
             Assert.Equal(plan.Tasks.Count, plan.Tasks.Select(p => p.Task).Distinct().Count());
-        }));
+        });
     }
 
     // ------------------------------------------------------------------ Startup-folder shortcuts
 
-    /// <summary>A shortcut as Windows writes one ([MS-SHLLINK]): the header, an optional item list, LinkInfo with a local path, optional arguments.</summary>
+    /// <summary>
+    /// A minimal shortcut in the [MS-SHLLINK] layout: the header (shown normally), an optional item list of one item and its
+    /// terminator, LinkInfo with the VolumeID of a fixed drive, a local base path and an empty suffix, and optional arguments.
+    /// </summary>
     private static byte[] Lnk(string target, string? args, bool idList)
     {
         var ms = new MemoryStream();
@@ -503,21 +567,30 @@ public class UntrustedInputPropertyTests
         new Guid("00021401-0000-0000-C000-000000000046").ToByteArray().CopyTo(header, 4);
         uint flags = 0x2 | 0x80 | (args is null ? 0u : 0x20u) | (idList ? 0x1u : 0u);
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(0x14), flags);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(0x3C), 1); // ShowCommand: SW_SHOWNORMAL
         ms.Write(header);
         if (idList)
         {
-            ms.Write([4, 0]);
-            ms.Write([1, 2, 3, 4]);
+            ms.Write([8, 0]);             // IDListSize: the item and the terminator
+            ms.Write([6, 0, 1, 2, 3, 4]); // one item: its size, then its data
+            ms.Write([0, 0]);             // TerminalID
         }
+        var volumeId = new byte[0x11]; // VolumeIDSize, DriveType, DriveSerialNumber, VolumeLabelOffset, then an empty label
+        BinaryPrimitives.WriteUInt32LittleEndian(volumeId, (uint)volumeId.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(volumeId.AsSpan(4), 3); // DRIVE_FIXED
+        BinaryPrimitives.WriteUInt32LittleEndian(volumeId.AsSpan(8), 0x1234ABCD);
+        BinaryPrimitives.WriteUInt32LittleEndian(volumeId.AsSpan(0xC), 0x10);
         var basePath = Encoding.Latin1.GetBytes(target + "\0");
-        int size = 0x1C + basePath.Length + 1;
+        int volumeAt = 0x1C, baseAt = volumeAt + volumeId.Length, suffixAt = baseAt + basePath.Length, size = suffixAt + 1;
         var li = new byte[size];
         BinaryPrimitives.WriteUInt32LittleEndian(li, (uint)size);
-        BinaryPrimitives.WriteUInt32LittleEndian(li.AsSpan(4), 0x1C);
-        BinaryPrimitives.WriteUInt32LittleEndian(li.AsSpan(8), 1);
-        BinaryPrimitives.WriteUInt32LittleEndian(li.AsSpan(0x10), 0x1C);
-        BinaryPrimitives.WriteUInt32LittleEndian(li.AsSpan(0x18), (uint)(0x1C + basePath.Length)); // an empty suffix
-        basePath.CopyTo(li, 0x1C);
+        BinaryPrimitives.WriteUInt32LittleEndian(li.AsSpan(4), 0x1C); // LinkInfoHeaderSize: no Unicode offsets
+        BinaryPrimitives.WriteUInt32LittleEndian(li.AsSpan(8), 1); // VolumeIDAndLocalBasePath
+        BinaryPrimitives.WriteUInt32LittleEndian(li.AsSpan(0xC), (uint)volumeAt);
+        BinaryPrimitives.WriteUInt32LittleEndian(li.AsSpan(0x10), (uint)baseAt);
+        BinaryPrimitives.WriteUInt32LittleEndian(li.AsSpan(0x18), (uint)suffixAt); // an empty suffix: its terminating zero
+        volumeId.CopyTo(li, volumeAt);
+        basePath.CopyTo(li, baseAt);
         ms.Write(li);
         if (args is not null)
         {
@@ -527,7 +600,7 @@ public class UntrustedInputPropertyTests
         return ms.ToArray();
     }
 
-    /// <summary>Shortcuts as Windows writes them: a target of 1 to 40 single-byte characters, arguments or none, an item list or none.</summary>
+    /// <summary>Such shortcuts: a target of 1 to 40 single-byte characters, arguments or none, an item list or none.</summary>
     private static Gen<(string Target, string? Args, byte[] Bytes)> Shortcuts =>
         from target in Gen.Choose(1, 40).SelectMany(n => Gen.ArrayOf(Gen.Choose(1, 255).Select(c => (char)c), n)).Select(c => new string(c))
         from args in Gen.OneOf(Gen.Constant<string?>(null), Names.Select(n => (string?)n))
@@ -537,22 +610,22 @@ public class UntrustedInputPropertyTests
     [Fact]
     public void AShortcutReadsBackAsItIsWritten()
     {
-        Check.One(Cases(500), Prop.ForAll(Arb.From(Shortcuts), s =>
+        ForAll(500, Shortcuts, s =>
         {
             Assert.Equal<(string, string?)?>((s.Target, s.Args), ShellLink.Read(s.Bytes));
-        }));
+        });
     }
 
     [Fact]
     public void AnyBytesInAStartupFolderAreReadSafely()
     {
         var files = Gen.OneOf(AnyBytes, Shortcuts.SelectMany(s => Damaged(s.Bytes)));
-        Check.One(Cases(2000), Prop.ForAll(Arb.From(files), bytes =>
+        ForAll(2000, files, bytes =>
         {
             if (ShellLink.Read(bytes) is not { } link) return;
             Assert.NotEmpty(link.Target);
             Assert.True(link.Arguments is null || link.Arguments.Length > 0);
-        }));
+        });
     }
 
     // ------------------------------------------------------------------ settings.json
@@ -651,7 +724,7 @@ public class UntrustedInputPropertyTests
     public void SettingsAreReadWithinTheirBoundsAndReadBackAsTheyAreSaved()
     {
         var texts = Gen.OneOf(SettingsTexts, Mutated(Gen.Elements(new Settings().ToJson(), RichSettings()), [.. SettingTexts, .. SettingLists]), AnyText);
-        Check.One(Cases(500), Prop.ForAll(Arb.From(texts), json =>
+        ForAll(500, texts, json =>
         {
             foreach (bool explicitConfig in new[] { false, true })
             {
@@ -662,7 +735,7 @@ public class UntrustedInputPropertyTests
                 string saved = settings.ToJson();
                 Assert.Equal(saved, Settings.Parse(saved, explicitConfig).ToJson()); // saved, then read again: nothing changes
             }
-        }));
+        });
     }
 
     /// <summary>The case the property found: a null path read as no pooltag.txt, and as the default path once saved (null is left out).</summary>
@@ -729,20 +802,20 @@ public class UntrustedInputPropertyTests
     [Fact]
     public void TheRetentionClocksStateReadsBackAsItIsSaved()
     {
-        Check.One(Cases(300), Prop.ForAll(Arb.From(RetentionStates), state =>
+        ForAll(300, RetentionStates, state =>
         {
             var back = RetentionClock.State.Parse(state.ToJson())!;
             Assert.NotNull(back);
             Assert.Equal((state.SavedMs, state.CountedMs), (back.SavedMs, back.CountedMs));
             Assert.Equal(state.Items.OrderBy(i => i.Key, StringComparer.Ordinal), back.Items.OrderBy(i => i.Key, StringComparer.Ordinal));
-        }));
+        });
     }
 
     [Fact]
     public void AChangedRetentionStateIsReadOnlyWhenEveryTimeInItCanBe()
     {
         var files = Gen.OneOf(Mutated(RetentionStates.Select(s => s.ToJson()), "2305843009213693951", "2305843009213693952", "\"Name\"", "\"NAME\""), AnyText);
-        Check.One(Cases(500), Prop.ForAll(Arb.From(files), json =>
+        ForAll(500, files, json =>
         {
             if (RetentionClock.State.Parse(json) is not { } state) return;
             Assert.InRange(state.SavedMs, 0, MaxStateMs);
@@ -752,10 +825,13 @@ public class UntrustedInputPropertyTests
                 Assert.NotEmpty(i.Key);
                 Assert.InRange(i.Value.FirstSeenMs, 0, state.CountedMs);
             });
-        }));
+        });
     }
 
-    /// <summary>Cases the property found: JsonObject refused the field written twice with an ArgumentException, which was not caught.</summary>
+    /// <summary>
+    /// Cases the property found: JsonObject refused the field written twice with an ArgumentException, which was not caught.
+    /// The state is now parsed with a field given twice refused, as a JsonException.
+    /// </summary>
     [Theory]
     [InlineData("""{ "savedMs": 1, "savedMs": 2, "countedMs": 5, "items": [] }""")]
     [InlineData("""{ "savedMs": 1, "countedMs": 5, "items": [{ "name": "a", "stamp": 1, "firstSeenMs": 1, "firstSeenMs": 2 }] }""")]
@@ -771,8 +847,18 @@ public class UntrustedInputPropertyTests
             "\"C:\\\\\"", "\"c:\\\\\"", "\"C:\"", "\"C:/\"", "\"\\\\\\\\?\\\\C:\\\\\"", "\"1:\\\\\"", "\"\\u0130:\\\\\"", "\"NTFS\"", "\"ReFS \"",
             "\"FAT-32\"", "\"x64\"", "\"ARM64\"", "\"arm64\"", "\"Starts\"", "\"starts\"", "\"Starts, TaskOff\"",
         ];
-        var files = Gen.OneOf(Mutated(Gen.Constant(EnvironmentFactsTests.Sample().ToJson()), values), AnyText);
-        Check.One(Cases(500), Prop.ForAll(Arb.From(files), json =>
+        // And a scan with more of each list than a scan keeps (32 of each, 5 names of running services), so the property
+        // reaches those bounds.
+        var full = EnvironmentFactsTests.Sample() with
+        {
+            Volumes = [.. Enumerable.Range(0, 40).Select(i => new VolumeFact($"{(char)('A' + i % 26)}:\\", "NTFS", false, null))],
+            UnreadVolumes = [.. Enumerable.Range(0, 40).Select(i => $"{(char)('A' + i % 26)}:\\")],
+            AiTools = [.. Enumerable.Range(0, 40).Select(i => new ToolFact("Example tool " + i, "1." + i))],
+            OwnClearTasks = [.. Enumerable.Range(0, 40).Select(i => @"\Example clear " + i)],
+            OptionalServiceExamples = [.. Enumerable.Range(0, 40).Select(i => "Example Service " + i)],
+        };
+        var files = Gen.OneOf(Mutated(Gen.Elements(EnvironmentFactsTests.Sample().ToJson(), full.ToJson()), values), AnyText);
+        ForAll(500, files, json =>
         {
             if (EnvironmentFacts.Parse(json) is not { } facts) return;
             Assert.Contains(facts.Architecture, new[] { "x64", "ARM64" });
@@ -790,6 +876,6 @@ public class UntrustedInputPropertyTests
             Assert.InRange(facts.OptionalServiceExamples.Count, 0, 5);
             Assert.True(facts.OptionalServicesRunning >= 0);
             Assert.NotEmpty(facts.PlainLines());
-        }));
+        });
     }
 }

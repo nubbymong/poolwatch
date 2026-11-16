@@ -230,10 +230,12 @@ public sealed class ServiceCatalogue
     public static ServiceCatalogue Load(string json)
     {
         var entries = JsonSerializer.Deserialize<List<CatalogueEntry>>(json, Options) ?? new();
-        // JSON null where a row, its list of services, a service's name or a Windows default goes: refused whole, as text
-        // that is not JSON is, and not later at a lookup (which would fail on it).
-        if (entries.Any(e => e is null || e.Services is null || e.Services.Any(s => s is null) || (e.WindowsDefaults?.Values.Any(v => v is null) ?? false)))
-            throw new JsonException("The services catalogue has null where a row, a list of services, a service's name or a Windows default goes.");
+        // JSON null where a row, its list of services, a service's name, a Windows default or one of the row's texts (its
+        // name, category, or what is lost) goes: refused whole, as text that is not JSON is, and not later when the row is
+        // used (a lookup, or the presets reading the category, would fail on it).
+        if (entries.Any(e => e is null || e.Services is null || e.Services.Any(s => s is null) || (e.WindowsDefaults?.Values.Any(v => v is null) ?? false)
+                             || e.Name is null || e.Category is null || e.Lose is null))
+            throw new JsonException("The services catalogue has null where a row, a list of services, a service's name, a Windows default or a row's text goes.");
         return new ServiceCatalogue(entries.Where(e => e.Services.Count > 0));
     }
 

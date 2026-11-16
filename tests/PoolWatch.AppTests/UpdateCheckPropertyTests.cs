@@ -35,17 +35,29 @@ public sealed class UpdateCheckPropertyTests : IDisposable
         try { Directory.Delete(_root, recursive: true); } catch { }
     }
 
-    /// <summary>GitHub giving the same answer each time it is asked.</summary>
-    private sealed class OneAnswer(byte[] body) : HttpMessageHandler
+    /// <summary>
+    /// GitHub giving the same answer each time it is asked, with its length stated, or without (as a chunked answer is), so
+    /// that the check reads it until it ends or passes the limit.
+    /// </summary>
+    private sealed class OneAnswer(byte[] body, bool statesLength) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) });
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = statesLength ? new ByteArrayContent(body) : new StreamContent(new NoLength(body)),
+            });
+    }
+
+    /// <summary>A body that does not say how long it is.</summary>
+    private sealed class NoLength(byte[] bytes) : MemoryStream(bytes)
+    {
+        public override bool CanSeek => false;
     }
 
     /// <summary>One check with a new UpdateCheck (nothing known from before), on a thread-pool thread, as its timer runs it.</summary>
-    private (UpdateResult Result, UpdateRelease? Available) Ask(byte[] body)
+    private (UpdateResult Result, UpdateRelease? Available) Ask(byte[] body, bool statesLength = true)
     {
-        using var check = new UpdateCheck(_paths, _log, () => true, () => new OneAnswer(body), Running, () => AppClocks.At(Now), TimeSpan.FromSeconds(30));
+        using var check = new UpdateCheck(_paths, _log, () => true, () => new OneAnswer(body, statesLength), Running, () => AppClocks.At(Now), TimeSpan.FromSeconds(30));
         var result = Task.Run(() => check.CheckNow(CancellationToken.None)).GetAwaiter().GetResult();
         return (result, check.Available);
     }
@@ -70,7 +82,7 @@ public sealed class UpdateCheckPropertyTests : IDisposable
             from draft in Gen.Elements(false, false, true)
             from page in Gen.Elements("its own", "another release's", "a download")
             select (v, tag: prefix + v, prerelease, draft, page);
-        Check.One(Cases(200), Prop.ForAll(Arb.From(releases), r =>
+        ForAll(200, releases, r =>
         {
             string url = r.page switch
             {
@@ -86,7 +98,7 @@ public sealed class UpdateCheckPropertyTests : IDisposable
                 : UpdateOutcome.UpToDate;
             Assert.Equal(new UpdateResult(Now, expected), result);
             Assert.Equal(expected == UpdateOutcome.Newer ? new UpdateRelease(r.v.ToString(), url) : null, available);
-        }));
+        });
     }
 
     [Fact]
@@ -98,15 +110,19 @@ public sealed class UpdateCheckPropertyTests : IDisposable
             JsonSerializer.Serialize(ReleasePage.For("v99.0.0")), JsonSerializer.Serialize(ReleasePage.Prefix + "download/v99.0.0/PoolWatch.exe"),
             "\"https://github.com/someone-else/poolwatch/releases/tag/v99.0.0\"", JsonSerializer.Serialize(ReleasePage.For("v99.0.0") + "?x=1"),
         ];
-        var seeds = Gen.Elements(
-            Release("v1.2.4", ReleasePage.For("v1.2.4"), false, false),
-            Release("v2.0.0", ReleasePage.For("v2.0.0"), false, false),
-            Release("v2.0.0-rc.1", ReleasePage.For("v2.0.0-rc.1"), true, false));
-        var answers = Gen.OneOf(AsBytes(Mutated(seeds, values)), AnyBytes);
-        Check.One(Cases(300), Prop.ForAll(Arb.From(answers), body =>
+        string[] newer = [Release("v1.2.4", ReleasePage.For("v1.2.4"), false, false), Release("v2.0.0", ReleasePage.For("v2.0.0"), false, false)];
+        var seeds = Gen.Elements(newer.Append(Release("v2.0.0-rc.1", ReleasePage.For("v2.0.0-rc.1"), true, false)).ToArray());
+        // And an answer that would offer an update but for its size: just over the limit, so it must be refused.
+        var bodies = Gen.OneOf(
+            AsBytes(Mutated(seeds, values)),
+            JustOver(Gen.Elements(newer), UpdateCheck.MaxResponseBytes).Select(t => Encoding.UTF8.GetBytes(t)),
+            AnyBytes);
+        var answers = from body in bodies from statesLength in Gen.Elements(true, false) select (body, statesLength);
+        ForAll(300, answers, a =>
         {
-            var (result, available) = Ask(body); // an answer that ends the check without an outcome fails here
+            var (result, available) = Ask(a.body, a.statesLength); // an answer that ends the check without an outcome fails here
             Assert.Equal(Now, result.CheckedUtc);
+            if (a.body.Length > UpdateCheck.MaxResponseBytes) Assert.Equal(UpdateOutcome.Failed, result.Outcome); // too large: refused
             Assert.Equal(available is not null, result.Outcome == UpdateOutcome.Newer);
             if (available is null) return;
             Assert.True(SemVersion.TryParse(available.Version, out var version), available.Version);
@@ -114,7 +130,7 @@ public sealed class UpdateCheckPropertyTests : IDisposable
             Assert.True(version.CompareTo(Running) > 0, available.Version);
             Assert.True(ReleasePage.IsValid(available.PageUrl), available.PageUrl);
             Assert.Contains(available.PageUrl, new[] { ReleasePage.For("v" + version), ReleasePage.For("V" + version), ReleasePage.For(version.ToString()) });
-        }));
+        });
     }
 
     /// <summary>

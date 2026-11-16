@@ -20,7 +20,8 @@ yours that runs RAMMap. Work PoolWatch builds on without shipping it is credited
 | Microsoft Visual C++ runtime static libraries | from the Visual Studio C++ build tools CI links the launcher with | compiled into the launcher by its NativeAOT build (the .NET runtime's native libraries are built against the static Visual C++ runtime): code from those of `libcmt.lib`, `libvcruntime.lib`, `libcpmt.lib`, `libconcrt.lib` and `oldnames.lib` that the link uses, and GUID definitions from the Windows SDK's `uuid.lib` if it uses that. CI lists the libraries each build's link used, from the linker's map, and stops the build on any library this file does not cover. The Universal C Runtime is not compiled in: the launcher uses Windows' own (`ucrtbase.dll`, through the `api-ms-win-crt` DLLs), and imports no Visual C++ runtime DLL; CI stops the build if either changes | Microsoft's Visual Studio licence terms (Distributable Code), which come with those build tools and let a program built with them carry that code; the Windows SDK's licence terms for `uuid.lib`; not open source |
 | [Inno Setup](https://jrsoftware.org/isinfo.php) | 6.7.3 | the installer's setup program and the uninstaller, `unins000.exe` | the Inno Setup License (below): permissive, any purpose including commercial, keeping its copyright notice; © Jordan Russell, portions © Martijn Laan |
 
-The test projects use xUnit (Apache 2.0) and the .NET test SDK (MIT); they are not part of a release.
+The test projects use xUnit (Apache 2.0), the .NET test SDK (MIT), and FsCheck (BSD-3-Clause) with FSharp.Core (MIT)
+for the property tests; they are not part of a release.
 
 ### Note on the native DLLs
 

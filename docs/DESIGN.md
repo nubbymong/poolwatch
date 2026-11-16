@@ -1627,6 +1627,12 @@ The code builds anywhere the .NET 10 SDK runs (`EnableWindowsTargeting`); it run
 - Unit tests (xUnit, `tests/PoolWatch.Tests`): parsing against byte fixtures, tag lookup, detection on synthetic
   series, ranking, transcript lookup on fixture files, redaction, the recommendation rules, the known-issue packs. They
   also run on Linux.
+- Property tests (FsCheck, in both test projects): the code that reads input PoolWatch does not control, or reads as
+  untrusted although it writes it (the knowledge packs, the services catalogue, version tags and release pages,
+  applied-changes.json, service-changes.json, an AI agent's answer, Startup-folder shortcuts, settings.json, the
+  retention clock's state, the cached scan of the PC, and GitHub's answer to the update check), is given hundreds of
+  random inputs on each run, most of them a good file changed at random. Each reader must never throw but as it
+  documents, never take more than 10 seconds on one input, and read only what is within its bounds.
 - App-layer tests (`tests/PoolWatch.AppTests`, Windows only): every system change goes through an injected fake; no
   test changes a service, task, registry value or ACL, writes a shortcut outside its own TEMP folder, or ends a process.
 - End-to-end on the Windows CI runner (elevated): PoolWatch runs headless while `tools/Leaker` reproduces a pattern

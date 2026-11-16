@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -11,13 +13,72 @@ namespace PoolWatch.Tests;
 /// Random input for the property tests, made with FsCheck: text and bytes as a file or an answer from the network may hold
 /// them, and documents in the form PoolWatch reads, each changed at random from a good one. Most changes keep the
 /// document JSON, so it gets past the JSON parser to the reader's own checks; the others break it as text. Every case is
-/// made from FsCheck's random seed, which a failure prints with the case, so a failing case can be made again.
-/// PoolWatch.AppTests compiles this file too.
+/// made from FsCheck's random seed, which a failure prints with the case; <see cref="Cases"/> says how to make a failing
+/// case again. PoolWatch.AppTests compiles this file too.
 /// </summary>
 internal static class PropertyInputs
 {
-    /// <summary>How a property runs: <paramref name="cases"/> random cases; the first that fails fails the test, with the case.</summary>
-    public static Config Cases(int cases) => Config.QuickThrowOnFailure.WithMaxTest(cases).WithQuietOnSuccess(true);
+    /// <summary>
+    /// Checks <paramref name="property"/> on <paramref name="cases"/> random inputs from <paramref name="inputs"/>, each on a
+    /// thread of its own: the first input it fails on, or that takes longer than <see cref="CaseTime"/>, fails the test,
+    /// and the failure prints that input.
+    /// </summary>
+    public static void ForAll<T>(int cases, Gen<T> inputs, Action<T> property) =>
+        Check.One(Cases(cases), Prop.ForAll(Arb.From(inputs), (T input) => InTime(() => property(input), CaseTime)));
+
+    /// <summary>
+    /// The longest one case may take. A case takes milliseconds, the first of a test a little longer while its code is
+    /// compiled, so a case this slow is a reader that hangs, or slows down badly, on that input.
+    /// </summary>
+    public static readonly TimeSpan CaseTime = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Runs <paramref name="run"/> on a thread of its own and waits at most <paramref name="limit"/>: a case that never ends
+    /// fails with a <see cref="TimeoutException"/> instead of holding up the test run, and a case that fails throws what
+    /// it threw.
+    /// </summary>
+    internal static void InTime(Action run, TimeSpan limit)
+    {
+        ExceptionDispatchInfo? failure = null;
+        var thread = new Thread(() =>
+        {
+            try { run(); }
+            catch (Exception ex) { failure = ExceptionDispatchInfo.Capture(ex); }
+        }) { IsBackground = true, Name = "property case" };
+        thread.Start();
+        if (!thread.Join(limit))
+            throw new TimeoutException($"The case took longer than {limit.TotalSeconds:0.#} s: the reader hangs, or slows down badly, on it.");
+        failure?.Throw();
+    }
+
+    /// <summary>
+    /// How a property runs: <paramref name="cases"/> random cases from a new random seed each run; the first that fails fails
+    /// the test, with the case. To make a failure again, copy the three numbers of its line "Replay directly at failing step
+    /// with (seed,gamma,size)" into the environment variable FSCHECK_REPLAY, as "seed,gamma,size", and run that test alone
+    /// (dotnet test --filter): its first case is then the one that failed.
+    /// </summary>
+    public static Config Cases(int cases)
+    {
+        var config = Config.QuickThrowOnFailure.WithMaxTest(cases).WithQuietOnSuccess(true);
+        var replay = ReplayFrom(Environment.GetEnvironmentVariable("FSCHECK_REPLAY"));
+        return replay is null ? config : config.WithReplay(global::Microsoft.FSharp.Core.FSharpOption<Replay>.Some(replay));
+    }
+
+    /// <summary>
+    /// FSCHECK_REPLAY's seed, gamma and size, written as a failure prints them ("(1,2,3)", or without the brackets), or
+    /// null when it is not set. Anything else in it stops the test, so a mistyped replay is never taken for a pass.
+    /// </summary>
+    internal static Replay? ReplayFrom(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        string[] parts = text.Trim().TrimStart('(').TrimEnd('.', ')').Split(',');
+        if (parts.Length == 3 &&
+            ulong.TryParse(parts[0].Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out ulong seed) &&
+            ulong.TryParse(parts[1].Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out ulong gamma) &&
+            int.TryParse(parts[2].Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out int size))
+            return new Replay(new Rnd(seed, gamma), global::Microsoft.FSharp.Core.FSharpOption<int>.Some(size));
+        throw new InvalidOperationException($"FSCHECK_REPLAY is \"{text}\": it takes the three numbers a failure prints, as \"seed,gamma,size\".");
+    }
 
     // ------------------------------------------------------------------ what changed input is made of
 
@@ -80,8 +141,9 @@ internal static class PropertyInputs
 
     /// <summary>
     /// A document from <paramref name="seeds"/> changed 1 to 4 times: mostly in its structure (a value of its kind at an edge,
-    /// or of another kind, or one of <paramref name="extra"/>; a value taken out, put in twice or moved; a field added), and
-    /// otherwise as text (cut short, a piece taken out, repeated or put in, a field written twice).
+    /// or of another kind, or one of <paramref name="extra"/>; a value taken out, replaced by a copy of another value of the
+    /// document, or wrapped in a list; a field or an item added), and otherwise as text (cut short, a piece taken out,
+    /// repeated or put in, a field written twice).
     /// </summary>
     public static Gen<string> Mutated(Gen<string> seeds, params string[] extra) =>
         from seed in seeds
@@ -93,6 +155,15 @@ internal static class PropertyInputs
         from seed in seeds
         from r in Gen.Choose(0, int.MaxValue - 1)
         select Mutate(seed, new Random(r), [], json: false);
+
+    /// <summary>
+    /// The text with spaces after it (JSON allows them there) to 1 to 16 bytes more than <paramref name="maxBytes"/> as UTF-8:
+    /// a file or an answer just over a reader's limit, which it must refuse unread, however good the text before the spaces.
+    /// </summary>
+    public static Gen<string> JustOver(Gen<string> texts, int maxBytes) =>
+        from text in texts
+        from over in Gen.Choose(1, 16)
+        select text + new string(' ', Math.Max(0, maxBytes + over - Encoding.UTF8.GetByteCount(text)));
 
     /// <summary>The text as UTF-8 bytes: as it is, with a byte order mark, with a byte changed, or with bytes that are not UTF-8.</summary>
     public static Gen<byte[]> AsBytes(Gen<string> texts) =>

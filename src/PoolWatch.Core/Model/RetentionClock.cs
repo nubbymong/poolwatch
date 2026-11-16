@@ -120,16 +120,16 @@ public sealed class RetentionClock
         /// <summary>
         /// The saved state, or null when the text is not one (never throws): oversize text, a missing or unreadable value, a
         /// time below 0 or beyond any a PC counts, a record first seen after the time counted, an empty name, a name twice
-        /// (in any case), or a field written twice in one object (JSON allows it; JsonObject refuses it with an
-        /// ArgumentException when the object is first read).
+        /// (in any case), or a field written twice in one object (JSON allows it, so the text is parsed with it refused:
+        /// JsonObject would otherwise throw on it when the object is first read).
         /// </summary>
         public static State? Parse(string json)
         {
             if (json.Length > MaxJsonChars) return null;
             try
             {
-                if (JsonNode.Parse(json) is not JsonObject o || !Ms(o["savedMs"], out long savedMs) || !Ms(o["countedMs"], out long counted)
-                    || o["items"] is not JsonArray list) return null;
+                if (JsonNode.Parse(json, documentOptions: NoFieldTwice) is not JsonObject o || !Ms(o["savedMs"], out long savedMs)
+                    || !Ms(o["countedMs"], out long counted) || o["items"] is not JsonArray list) return null;
                 var items = new Dictionary<string, Kept>(StringComparer.OrdinalIgnoreCase);
                 foreach (var node in list)
                 {
@@ -139,8 +139,10 @@ public sealed class RetentionClock
                 }
                 return new State(savedMs, counted, items);
             }
-            catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException or ArgumentException) { return null; }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException) { return null; }
         }
+
+        private static readonly JsonDocumentOptions NoFieldTwice = new() { AllowDuplicateProperties = false };
 
         private static bool Ms(JsonNode? node, out long ms)
         {
