@@ -269,10 +269,9 @@ public sealed class ReleaseProvenanceTests
     /// The rights check fails each of these: permissions on one line, for a job or for the workflow; a job's block with a
     /// comment on its key's line, with a blank line in it, or under a job header with a comment after it; a second
     /// permissions key, in a job or in the workflow; a quoted permissions key; and a job header in a form the check does
-    /// not read. Each case
-    /// is ci.yml as it is with one change,
-    /// made here in memory and not in the file: to the workflow's own permissions, or to the header of a job that has no
-    /// permissions key of its own, with lines after it. Each case names the start of the problem the check must report.
+    /// not read. Each case is ci.yml as it is with one change, made here in memory and not in the file: to the workflow's
+    /// own permissions, or to the header of a job that has no permissions key of its own, with lines after it. Each case
+    /// names the start of the problem the check must report.
     /// For each case of a job, the test first shows that the check as first written passed the change: its reading
     /// (<see cref="FirstReading"/>) found no right there but contents: read, which every job may hold.
     /// </summary>
