@@ -294,7 +294,7 @@ internal sealed class ChangeRecords
     private List<ChangeRecord> With(List<ChangeRecord> now, ChangeRecord record)
     {
         var next = now.Where(r => !SameId(r, record.Id)).Append(record).ToList();
-        return next.Count <= now.Count || next.Count <= ChangeRecordFile.MaxRecords ? next
+        return next.Count <= now.Count || next.Count + _unread.Count <= ChangeRecordFile.MaxRecords ? next
             : throw new InvalidOperationException($"PoolWatch keeps at most {ChangeRecordFile.MaxRecords} changes");
     }
 
@@ -411,7 +411,7 @@ internal sealed class ChangeRecords
     /// <summary>Writes <paramref name="records"/>, then the entries of the file this build could not read, as they were (under the lock, after a <see cref="Read"/>).</summary>
     private void Save(List<ChangeRecord> records)
     {
-        string json = ChangeRecordFile.ToJson(records);
+        string json = ChangeRecordFile.ToJson(records, _unread);
         if (Encoding.UTF8.GetByteCount(json) > ChangeRecordFile.MaxBytes) throw new InvalidOperationException($"{FileName} would be over {ChangeRecordFile.MaxBytes >> 20} MB");
         DurableFile.Replace(_paths.Guard, FilePath, json);
     }

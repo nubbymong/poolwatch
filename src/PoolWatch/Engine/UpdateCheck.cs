@@ -409,11 +409,10 @@ internal sealed class UpdateCheck : IDisposable
     /// </summary>
     internal static byte[]? ReadState(Stream stream)
     {
-        if (stream.Length > MaxStateBytes) return null;
-        var bytes = new byte[stream.Length];
+        var bytes = new byte[MaxStateBytes + 1];
         int read = 0, n;
         while (read < bytes.Length && (n = stream.Read(bytes, read, bytes.Length - read)) > 0) read += n;
-        return bytes[..read];
+        return read > MaxStateBytes ? null : bytes[..read];
     }
 
     /// <summary>

@@ -257,7 +257,9 @@ internal sealed class RecordedSource : IChangeSource
     /// </summary>
     public IEnumerable<ActiveChange> List()
     {
-        return _records.All().Select(Row).ToList();
+        var rows = _records.All(out int unread).Select(Row).ToList();
+        if (unread > 0) rows.Add(UnreadEntries(unread));
+        return rows;
     }
 
     /// <summary>Listed with the shortcuts, which an uninstall that keeps your other changes still undoes, so it reports this too.</summary>
