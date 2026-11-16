@@ -77,4 +77,33 @@ public class InputBoundsTests
         }
         finally { try { File.Delete(file); } catch { } }
     }
+
+    /// <summary>
+    /// A folder link on the way to pooltag.txt could lead anywhere, so the file is not read through one: the path is looked
+    /// at for a link from the drive's root down. On Windows the test plants a directory junction (no privilege needed, as
+    /// a standard user's would be), elsewhere a symbolic link.
+    /// </summary>
+    [Fact]
+    public void PoolTagTxtIsNotReadThroughAFolderLink()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "pw-pooltag-" + Guid.NewGuid().ToString("N"));
+        string real = Path.Combine(root, "real"), link = Path.Combine(root, "linked");
+        Directory.CreateDirectory(real);
+        File.WriteAllText(Path.Combine(real, "pooltag.txt"), "File - nt - File objects\n");
+        bool linkGone;
+        try
+        {
+            Assert.Single(PoolTagTxt.ReadBounded(Path.Combine(real, "pooltag.txt"), TagKnowledge.MaxPoolTagTxtBytes)); // no link on the way: read
+            LinkHelper.MakeDirectoryLink(link, real);
+            Assert.True(File.Exists(Path.Combine(link, "pooltag.txt"))); // the link leads to the file
+            Assert.Empty(PoolTagTxt.ReadBounded(Path.Combine(link, "pooltag.txt"), TagKnowledge.MaxPoolTagTxtBytes));
+            Assert.False(new TagKnowledge(Path.Combine(link, "pooltag.txt"), null).PoolTagTxtLoaded);
+        }
+        finally
+        {
+            linkGone = LinkHelper.DeleteLinkOnly(link);
+            if (linkGone) try { Directory.Delete(root, recursive: true); } catch { }
+        }
+        Assert.True(linkGone);
+    }
 }

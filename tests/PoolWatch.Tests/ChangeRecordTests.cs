@@ -61,6 +61,29 @@ public class ChangeRecordTests
     [Fact]
     public void AnEmptyListHoldsNoChanges() => Assert.Empty(ChangeRecordFile.Parse("{\"version\": 1, \"changes\": []}")!);
 
+    /// <summary>
+    /// JSON allows a field twice, and the last one counts: the list would read as empty, or a record as another, and the
+    /// next save would write that over the file. PoolWatch never writes a field twice, so such a file is not read at all.
+    /// </summary>
+    [Fact]
+    public void AFileWithAFieldWrittenTwiceIsNotRead()
+    {
+        string good = ChangeRecordFile.ToJson([Task()]);
+        Assert.Equal([Task()], ChangeRecordFile.Parse(good));
+        Assert.Null(ChangeRecordFile.Parse("""{ "version": 1, "changes": [], "changes": [] }"""));
+        Assert.Null(ChangeRecordFile.Parse(good[..good.LastIndexOf('}')] + ", \"changes\": [] }")); // its records, then an empty list
+        Assert.Null(ChangeRecordFile.Parse(good.Replace("\"via\": \"the Services tab\"", "\"via\": \"the Services tab\", \"via\": \"the setup guide\""))); // in a record
+    }
+
+    /// <summary>
+    /// Half of a surrogate pair written as an escape in a field's name: comparing that name with the one looked for
+    /// throws, and the file is not read (null), so it is never written over.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "version": 1, "changes": [], "ve\ud800": 0 }""")]
+    [InlineData("""{ "version": 1, "changes": [], "ch\udc00x": 0 }""")]
+    public void AFileWithHalfOfASurrogatePairInAFieldNameIsNotRead(string json) => Assert.Null(ChangeRecordFile.Parse(json));
+
     [Fact]
     public void AnUnknownOrBrokenRecordIsDroppedAlone()
     {

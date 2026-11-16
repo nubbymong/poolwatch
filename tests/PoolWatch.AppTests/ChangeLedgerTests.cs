@@ -478,6 +478,36 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.Equal(newer, File.ReadAllText(file));
     }
 
+    /// <summary>
+    /// A record this build cannot read (here of a kind a newer PoolWatch has) is left out of the list, and a save of that
+    /// list would lose it, perhaps with the only copy of a removed task's definition: the records it can read are listed,
+    /// and the file is never written over.
+    /// </summary>
+    [Fact]
+    public void AListWithARecordThisBuildCannotReadIsNeverWrittenOver()
+    {
+        var task = ChangeRecordFixtures.Task();
+        _f.Records.Put(task);
+        string file = Path.Combine(_f.Paths.DataRoot, "applied-changes.json");
+        string newer = File.ReadAllText(file).Replace("\"changes\": [", """
+            "changes": [
+              { "id": "later:x", "kind": "SomethingNew", "changedUtc": "2026-10-28T09:12:00Z", "via": "a newer PoolWatch" },
+            """);
+        File.WriteAllText(file, newer);
+
+        var records = new ChangeRecords(_f.Paths, _f.Log);
+        Assert.Equal([task], records.All()); // what it can read is still listed
+        var refused = Assert.Throws<InvalidDataException>(() => records.Put(ChangeRecordFixtures.Startup()));
+        Assert.Contains("it holds 1 change this PoolWatch cannot read", refused.Message);
+        bool switched = false;
+        string? notSwitched = records.Toggle(ChangeKind.StartupEntry, "HKCU Run", "Helper", enable: false, "the Services tab", () => { switched = true; return null; });
+        Assert.StartsWith("not switched, because PoolWatch could not save how it was set: PoolWatch cannot read its list of changes", notSwitched);
+        Assert.False(switched); // never switched without its record
+        records.Remove(task); // put back, but its record stays
+        Assert.Equal(newer, File.ReadAllText(file));
+        Assert.Equal([task], records.All());
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData(" \r\n")]

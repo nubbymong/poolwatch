@@ -830,11 +830,13 @@ public class UntrustedInputPropertyTests
 
     /// <summary>
     /// Cases the property found: JsonObject refused the field written twice with an ArgumentException, which was not caught.
-    /// The state is now parsed with a field given twice refused, as a JsonException.
+    /// The state is now parsed with a field given twice refused, as a JsonException. A name written once as it is and once
+    /// with an escape is the same name twice, and is refused too.
     /// </summary>
     [Theory]
     [InlineData("""{ "savedMs": 1, "savedMs": 2, "countedMs": 5, "items": [] }""")]
     [InlineData("""{ "savedMs": 1, "countedMs": 5, "items": [{ "name": "a", "stamp": 1, "firstSeenMs": 1, "firstSeenMs": 2 }] }""")]
+    [InlineData("""{ "savedMs": 1, "savedMs": 2, "countedMs": 5, "items": [] }""")]
     public void ARetentionStateWithAFieldWrittenTwiceIsNotRead(string json) => Assert.Null(RetentionClock.State.Parse(json));
 
     // ------------------------------------------------------------------ the cached scan of the PC

@@ -1808,7 +1808,9 @@ or says why it could not (a change Windows would not let it put back). Its data 
 `applied-changes.json` holds only the changes with no store of their own. It is admin-only and in the data folder, never
 under `--out`; at most 1 MB and 500 records; written to a temporary file and moved; one thread-safe instance per data
 folder, so every window and the tray write through one object. The list of changes is read, as well as written,
-through the link guard, and read again before every change and every listing, never written over from an old copy.
+through the link guard, and read again before every change and every listing, never written over from an old copy,
+and never written over while it holds a record this build cannot read (damaged, or a newer PoolWatch's: a save would
+lose it); the records it can read are still listed and put back.
 Every record is read as untrusted (bounded, every field validated) and checked against the live system right before it
 is acted on: a shortcut must be a `.lnk` directly in the user's Desktop or Start-menu Programs folder; a task
 definition must parse with DTDs prohibited, be at most 64 KB, carry no access rules of its own, have only actions that
@@ -2179,7 +2181,8 @@ once per version, also across restarts. The window's footer says "PoolWatch x.y.
 the tray menu "PoolWatch x.y.z is available"; the link and the menu item open the page through the same allow-list as
 every other link. Both read the release each time they are drawn (a release taken back gives the older one, or none)
 and show nothing while the setting is off. Nothing is downloaded or run. The last check and the latest stable release
-seen live in `cache\update-check.json`, at most 4 KB, read back as untrusted. Failures (offline, the rate limit, a
+seen live in `cache\update-check.json`, at most 4 KB, read back as untrusted (its page must be that release's own).
+Failures (offline, the rate limit, a
 refused or malformed answer) are quiet: the first is logged as one line, the next only after a check works again. The
 first check loads the HTTP and TLS libraries once (a few MB); the timer wakes at most four times a day and does no I/O
 then.

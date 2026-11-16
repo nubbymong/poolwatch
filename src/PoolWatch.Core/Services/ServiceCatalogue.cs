@@ -329,17 +329,18 @@ public sealed class ServiceCatalogue
     private static readonly string[] ProtectedPrefixes = { "vmic" };
 }
 
-/// <summary>Loads the shipped catalogue (embedded services-catalogue.json) or an external data file.</summary>
+/// <summary>
+/// Loads the shipped catalogue, the embedded services-catalogue.json, and only that one: an elevated PoolWatch never
+/// takes which services are optional from a file someone who is not an administrator could write.
+/// </summary>
 public static class DefaultCatalogue
 {
     /// <summary>The shipped catalogue, read once (settings use it to check the services a profile lists).</summary>
     public static ServiceCatalogue Shared => _shared.Value;
     private static readonly Lazy<ServiceCatalogue> _shared = new(() => Load());
 
-    public static ServiceCatalogue Load(string? externalFile = null)
+    public static ServiceCatalogue Load()
     {
-        if (externalFile is not null && System.IO.File.Exists(externalFile))
-            try { return ServiceCatalogue.Load(System.IO.File.ReadAllText(externalFile)); } catch { }
         using var s = typeof(ServiceCatalogue).Assembly.GetManifestResourceStream("services-catalogue.json");
         if (s is null) return new ServiceCatalogue(System.Array.Empty<CatalogueEntry>());
         using var r = new System.IO.StreamReader(s);
