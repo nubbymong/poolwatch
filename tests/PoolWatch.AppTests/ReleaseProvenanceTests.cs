@@ -39,12 +39,14 @@ public sealed class ReleaseProvenanceTests
     }
 
     /// <summary>
-    /// The lines right under a key of the job itself (indented six spaces), as "key: value" in order, comments left out;
-    /// none when the job has no such key.
+    /// The lines of the block under a key at <paramref name="indent"/> (a key of the job itself by default; "" for a key
+    /// of the workflow's), as "key: value" in order, comments left out; none when there is no such block. As YAML reads
+    /// it, the block may follow a comment on the key's line and goes on past blank lines and comment lines, up to the next
+    /// line that is not one of those and is indented no deeper than the key.
     /// </summary>
-    private static List<string> Under(string job, string key)
+    private static List<string> Under(string text, string key, string indent = "    ")
     {
-        var block = Regex.Match(job, $@"(?m)^    {Regex.Escape(key)}:\n(?<lines>(?:      .*\n)+)");
+        var block = Regex.Match(text, $@"(?m)^{indent}{Regex.Escape(key)}:[ \t]*(?:#.*)?\n(?<lines>(?:(?:{indent}  .*|[ \t]*(?:#.*)?)\n)*)");
         if (!block.Success) return [];
         return block.Groups["lines"].Value.Split('\n')
             .Select(l => Regex.Replace(l, @"(^|\s+)#.*$", "").Trim())
@@ -52,6 +54,52 @@ public sealed class ReleaseProvenanceTests
             .Select(l => Regex.Replace(l, @":\s+", ": "))
             .Order(StringComparer.Ordinal)
             .ToList();
+    }
+
+    /// <summary>
+    /// What follows the key on each line of a key at <paramref name="indent"/>, comments left out: "" for the block form,
+    /// the rights themselves for a one-line form ("write-all", "{ id-token: write }").
+    /// </summary>
+    private static List<string> KeyLines(string text, string key, string indent) =>
+        Regex.Matches(text, $@"(?m)^{indent}{Regex.Escape(key)}:(?<v>.*)$")
+            .Select(m => Regex.Replace(m.Groups["v"].Value, @"(^|\s+)#.*$", "").Trim())
+            .ToList();
+
+    /// <summary>How many times <paramref name="part"/> is in <paramref name="text"/>.</summary>
+    private static int Occurrences(string text, string part) => Regex.Matches(text, Regex.Escape(part)).Count;
+
+    /// <summary>
+    /// What is wrong with the rights the workflow <paramref name="ci"/> asks for, each in plain words (none: nothing). The
+    /// workflow's own token is contents: read and nothing more. The provenance job may hold id-token, attestations and
+    /// contents write, the publish job contents write, and every other job contents read at most. The workflow and each
+    /// job have at most one permissions key, in the block form ("permissions:" and one "scope: access" line under it
+    /// each), the form this check reads: a one-line form ("permissions: write-all", "permissions: { id-token: write }")
+    /// fails, so that no job can hold a right the check does not see.
+    /// </summary>
+    private static List<string> RightsProblems(string ci)
+    {
+        var problems = new List<string>();
+        var own = KeyLines(ci, "permissions", "");
+        if (own.Count != 1) problems.Add($"the workflow has {own.Count} permissions keys of its own, not one");
+        problems.AddRange(own.Where(v => v.Length > 0).Select(v => $"the workflow's own permissions are on one line ({v}), not a block"));
+        var ownRights = Under(ci, "permissions", "");
+        if (ownRights.Count != 1 || ownRights[0] != "contents: read")
+            problems.Add($"the workflow's own token is not contents: read alone ({string.Join(", ", ownRights)})");
+        foreach (var (name, job) in Jobs(ci))
+        {
+            string[] allowed = name switch
+            {
+                "provenance" => ["attestations: write", "contents: write", "id-token: write"],
+                "publish" => ["contents: write"],
+                _ => ["contents: read"],
+            };
+            var keys = KeyLines(job, "permissions", "    ");
+            if (keys.Count > 1) problems.Add($"the job {name} has {keys.Count} permissions keys");
+            problems.AddRange(keys.Where(v => v.Length > 0).Select(v => $"the job {name} asks for permissions: {v} on one line, not as a block"));
+            var more = Under(job, "permissions").Where(r => !allowed.Contains(r)).ToList();
+            if (more.Count > 0) problems.Add($"the job {name} asks for {string.Join(", ", more)}");
+        }
+        return problems;
     }
 
     /// <summary>
@@ -71,9 +119,11 @@ public sealed class ReleaseProvenanceTests
     /// The provenance job runs on a v* tag only, once the release is published, as sign and publish do. It attests the
     /// files the publish job puts on the release, by the hashes the sign job takes of them where it makes them (after it
     /// writes SHA256SUMS.txt, before it uploads them) and passes on as a job output: the publish job's list, the sign job's
-    /// and the provenance job's two name the same files in the same order. The job attaches the attestation to the release
-    /// under the name Scorecard's Signed-Releases check looks for (.intoto.jsonl), then checks each file on the release
-    /// against that copy: signed by ci.yml, for the tag and its commit.
+    /// and the provenance job's two name the same files in the same order. The job checks each file on the release against
+    /// the attestation (signed by ci.yml on a GitHub-hosted runner, for the tag and its commit), and only once all pass
+    /// attaches it to the release, in its one upload, under the name Scorecard's Signed-Releases check looks for
+    /// (.intoto.jsonl). Last, the release's copy must be the attestation, byte for byte. So the release never carries
+    /// provenance that its files do not match.
     /// </summary>
     [Fact]
     public void TheProvenanceCoversExactlyTheFilesThePublishJobPutsOnTheRelease()
@@ -106,38 +156,105 @@ public sealed class ReleaseProvenanceTests
         Assert.Matches(@"\n        uses: actions/attest@[0-9a-f]{40} # v[0-9]", provenance);
         Assert.Contains("\n          subject-checksums: ${{ runner.temp }}/subjects.sha256\n", provenance);
 
-        // It attaches the attestation as an .intoto.jsonl file and checks the release's files against that copy.
-        Assert.Contains("\n          name=\"PoolWatch-$GITHUB_REF_NAME.intoto.jsonl\"\n", provenance);
-        Assert.Contains("gh release upload \"$GITHUB_REF_NAME\" \"$RUNNER_TEMP/$name\" --repo \"$GITHUB_REPOSITORY\" --clobber", provenance);
-        Assert.Contains("gh release download \"$GITHUB_REF_NAME\" --repo \"$GITHUB_REPOSITORY\"", provenance);
-        Assert.Contains("gh attestation verify \"$f\" --bundle \"$name\" --repo \"$GITHUB_REPOSITORY\"", provenance);
-        Assert.Contains("--signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci.yml\" --source-ref \"$GITHUB_REF\" --source-digest \"$GITHUB_SHA\"", provenance);
+        // Its last step, failing on the first command that fails, checks each file on the release against the bundle,
+        // then attaches the bundle as an .intoto.jsonl file, then checks that the release's copy is the bundle: these
+        // lines, each after the one before it.
+        string[] order =
+        [
+            "\n      - name: Check the release's files against the provenance, then attach it to the release\n",
+            "\n          set -euo pipefail\n",
+            "\n          name=\"PoolWatch-$GITHUB_REF_NAME.intoto.jsonl\"\n",
+            "\n          cp \"$BUNDLE\" \"$RUNNER_TEMP/$name\"\n",
+            "\n          for f in ",
+            "\n            gh release download \"$GITHUB_REF_NAME\" --repo \"$GITHUB_REPOSITORY\" --pattern \"$f\"\n",
+            "\n            gh attestation verify \"$f\" --bundle \"$RUNNER_TEMP/$name\" --repo \"$GITHUB_REPOSITORY\" \\\n"
+                + "              --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci.yml\" --source-ref \"$GITHUB_REF\" --source-digest \"$GITHUB_SHA\" --deny-self-hosted-runners\n",
+            "\n          done\n",
+            "\n          gh release upload \"$GITHUB_REF_NAME\" \"$RUNNER_TEMP/$name\" --repo \"$GITHUB_REPOSITORY\" --clobber\n",
+            "\n          gh release download \"$GITHUB_REF_NAME\" --repo \"$GITHUB_REPOSITORY\" --pattern \"$name\" --dir \"$RUNNER_TEMP/attached\"\n",
+            "\n          cmp \"$BUNDLE\" \"$RUNNER_TEMP/attached/$name\"\n",
+        ];
+        int at = 0;
+        foreach (string line in order)
+        {
+            int next = provenance.IndexOf(line, at, StringComparison.Ordinal);
+            Assert.True(next >= 0, $"the provenance job has no line, after the one before it in this test's list: {line.Trim()}");
+            at = next + 1;
+        }
+        // The upload above is the job's only one: nothing goes on the release before every file passes.
+        Assert.Single(Regex.Matches(provenance, "gh release upload"));
     }
 
     /// <summary>
     /// The workflow's own token is read-only, and its triggers are the four it had (no pull_request_target, so a fork's
     /// pull request never runs with a write token or a secret). Of the jobs, only the provenance job may get the run's
     /// identity token (to sign) and keep an attestation, and only it and the publish job may write the repository's
-    /// contents; the provenance job asks for nothing more.
+    /// contents; the provenance job asks for nothing more. Every permissions key is a block, which the check reads.
     /// </summary>
     [Fact]
     public void OnlyTheProvenanceJobHoldsItsRightsAndTheWorkflowsOwnStayReadOnly()
     {
         string ci = Ci();
         Assert.Contains("\non:\n  push:\n    branches: [main]\n    tags: ['v*']\n  pull_request:\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\n", ci);
-        var jobs = Jobs(ci);
-        Assert.Equal(["attestations: write", "contents: write", "id-token: write"], Under(jobs["provenance"], "permissions"));
-        foreach (var (name, job) in jobs)
+        Assert.Equal(["attestations: write", "contents: write", "id-token: write"], Under(Jobs(ci)["provenance"], "permissions"));
+        var problems = RightsProblems(ci);
+        Assert.True(problems.Count == 0, string.Join("; ", problems));
+    }
+
+    /// <summary>
+    /// The rights check fails rights written in a form it does not read as a block: on one line, for a job or for the
+    /// workflow, or as a block with a comment on its key's line or a blank line in it. Each case is ci.yml as it is with
+    /// one change, made here in memory and not in the file: to a job that has no permissions key of its own, or to the
+    /// workflow's own. The check before this one read a job's rights only from a block right under its key, so for a job's
+    /// one-line form it read no rights and passed the job; each such case first shows that.
+    /// </summary>
+    [Theory]
+    [InlineData("build", "    permissions: write-all\n", true)]
+    [InlineData("build", "    permissions: read-all # every scope, read only\n", true)]
+    [InlineData("e2e", "    permissions: { id-token: write, attestations: write }\n", true)]
+    [InlineData("build", "    permissions: # the job's rights\n      id-token: write\n", false)]
+    [InlineData("build", "    permissions:\n      contents: read\n\n      id-token: write\n", false)]
+    [InlineData("", "permissions: write-all\n", true)]
+    public void TheRightsCheckFailsRightsItCannotReadAsABlock(string job, string permissions, bool oneLine)
+    {
+        string ci = Ci(), changed;
+        var before = RightsProblems(ci);
+        Assert.True(before.Count == 0, "ci.yml as it is fails the rights check: " + string.Join("; ", before));
+        if (job.Length == 0)
         {
-            string[] allowed = name switch
-            {
-                "provenance" => ["attestations: write", "contents: write", "id-token: write"],
-                "publish" => ["contents: write"],
-                _ => ["contents: read"],
-            };
-            var more = Under(job, "permissions").Where(r => !allowed.Contains(r)).ToList();
-            Assert.True(more.Count == 0, $"the job {name} asks for {string.Join(", ", more)}");
+            const string own = "\npermissions:\n  contents: read\n";
+            Assert.True(Occurrences(ci, own) == 1, "ci.yml's own permissions are not the one block this test changes");
+            changed = ci.Replace(own, "\n" + permissions, StringComparison.Ordinal);
         }
+        else
+        {
+            string header = $"\n  {job}:\n";
+            Assert.True(Occurrences(ci, header) == 1, $"ci.yml has not one job {job}");
+            Assert.Null(Key(Jobs(ci)[job], "permissions"));
+            changed = ci.Replace(header, header + permissions, StringComparison.Ordinal);
+            // What the check before this one read: no block under the key, so no rights, and nothing to fail.
+            if (oneLine) Assert.Empty(Under(Jobs(changed)[job], "permissions"));
+        }
+        Assert.NotEqual(ci, changed);
+        string who = job.Length == 0 ? "the workflow" : $"the job {job} ";
+        Assert.Contains(RightsProblems(changed), p => p.StartsWith(who, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// docs/TECHNICAL.md gives users the provenance job's own check, as far as a user can give it: this repository, ci.yml
+    /// as the signer, the release's tag as the source ref, and a GitHub-hosted runner. The job checks the release's files
+    /// that way before it attaches the provenance, so a file that passes there passes for the user too.
+    /// </summary>
+    [Fact]
+    public void TheDocumentedCheckAsksWhatTheProvenanceJobsOwnCheckAsks()
+    {
+        string doc = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "docs", "TECHNICAL.md")).Replace("\r\n", "\n");
+        var commands = Regex.Matches(doc, @"(?m)^gh attestation verify .*$").Select(m => m.Value).ToList();
+        string command = Assert.Single(commands) + " ";
+        foreach (string flag in new[] { "--repo nubbymong/poolwatch ", "--signer-workflow nubbymong/poolwatch/.github/workflows/ci.yml ", "--source-ref refs/tags/vX.Y.Z ", "--deny-self-hosted-runners " })
+            Assert.Contains(flag, command);
+        Assert.Contains(" --source-ref \"$GITHUB_REF\" ", Jobs(Ci())["provenance"]);
+        Assert.Contains(" --deny-self-hosted-runners\n", Jobs(Ci())["provenance"]);
     }
 
     /// <summary>
