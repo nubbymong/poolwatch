@@ -536,7 +536,7 @@ internal static class ActiveChangesView
     }
 
     /// <summary>What of a row a put-back must find as the window showed it (<see cref="AsShown"/>).</summary>
-    private static (string? Warning, bool CanUndo, string What, DateTime? ChangedUtc) Seen(ActiveChange c) => (c.Warning, c.CanUndo, c.What, null); // for one run
+    private static (string? Warning, bool CanUndo, string What, DateTime? ChangedUtc) Seen(ActiveChange c) => (c.Warning, c.CanUndo, c.What, c.ChangedUtc);
 
     /// <summary>
     /// Each change Put all back went through, with what happened to it: the ones not done first, so they are the last to
