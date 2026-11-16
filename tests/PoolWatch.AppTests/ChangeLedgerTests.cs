@@ -368,12 +368,13 @@ public sealed class ChangeLedgerTests : IDisposable
         var plain = Change(ChangeKind.LogonTask);
         var cannot = Change(ChangeKind.Shortcut, canUndo: false) with { Warning = "never asked" };
         var asked = new List<string>();
-        var (which, declined) = Ui.ActiveChangesView.PutAllBackPlan([declinedRow, accepted, plain, cannot], w => { asked.Add(w); return w == accepted.Warning; });
+        var (which, shown, declined) = Ui.ActiveChangesView.PutAllBackPlan([declinedRow, accepted, plain, cannot], w => { asked.Add(w); return w == accepted.Warning; });
 
         Assert.Equal([declinedRow.Warning, accepted.Warning], asked); // a row with no warning, or one that cannot be undone, is not asked about
         Assert.False(which(declinedRow));
         Assert.True(which(accepted));
         Assert.True(which(plain));
+        Assert.Equal([accepted, plain, cannot], shown); // what the run must reach, or say it left: not the one you declined
         var (change, result) = Assert.Single(declined);
         Assert.Equal((declinedRow, false, "You chose not to put it back."), (change, result.Done, result.Message));
 
@@ -403,9 +404,10 @@ public sealed class ChangeLedgerTests : IDisposable
 
         // The yes accepts it: no box per service (each with No as its default), only the other warning is asked.
         var asked = new List<string>();
-        var (which, declined) = Ui.ActiveChangesView.PutAllBackPlan([maps, sys, clear, plain], w => { asked.Add(w); return true; });
+        var (which, shown, declined) = Ui.ActiveChangesView.PutAllBackPlan([maps, sys, clear, plain], w => { asked.Add(w); return true; });
         Assert.Equal([clear.Warning], asked);
         Assert.True(which(maps) && which(sys) && which(clear) && which(plain));
+        Assert.Equal([maps, sys, clear, plain], shown);
         Assert.Empty(declined);
         var calls = new List<string>();
         Ledger(new FakeSource(calls, maps, sys, plain)).UndoAll(which, confirmed: true);
