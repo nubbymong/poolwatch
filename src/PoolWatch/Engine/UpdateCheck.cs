@@ -296,6 +296,7 @@ internal sealed class UpdateCheck : IDisposable
         catch (JsonException) { return Answer.Fail("the answer is not valid JSON"); }
         // JsonDocument checks the text of a string only when it is read: GetString throws on bytes that are not UTF-8,
         // and on half of a surrogate pair written as an escape ("\ud800").
+        catch (InvalidOperationException) { return Answer.Fail("the answer holds text that is not valid Unicode"); }
 
         static bool Flag(JsonElement o, string name) => o.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.True;
     }
@@ -372,7 +373,7 @@ internal sealed class UpdateCheck : IDisposable
             string? latestText = Text(root, "latest"), page = Text(root, "page");
             if (latestText is not null || page is not null) // none yet when no check has worked
             {
-                if (!SemVersion.TryParse(latestText, out var latest) || latest.IsPreRelease || !ReleasePage.IsValid(page)) return null;
+                if (!SemVersion.TryParse(latestText, out var latest) || latest.IsPreRelease || !ReleasePage.IsValid(page) || !IsPageOf(latest, page)) return null;
                 _latest = (latest, page!);
             }
             Available = NewerThanRunning();
@@ -404,7 +405,7 @@ internal sealed class UpdateCheck : IDisposable
             var bytes = new byte[MaxStateBytes + 1];
             int read = 0, n;
             while (read < bytes.Length && (n = stream.Read(bytes, read, bytes.Length - read)) > 0) read += n;
-            return bytes[..read];
+            return read > MaxStateBytes ? null : bytes[..read];
         }
     }
 

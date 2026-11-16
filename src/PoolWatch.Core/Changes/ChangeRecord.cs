@@ -118,7 +118,7 @@ public static class ChangeRecordFile
         }
         // InvalidOperationException: a field's name that holds half of a surrogate pair written as an escape ("\ud800")
         // throws when it is compared with the name looked for.
-        catch (Exception ex) when (ex is JsonException or InvalidOperationException) { unread = 0; return null; }
+        catch (JsonException) { unread = 0; return null; }
         return list;
     }
 

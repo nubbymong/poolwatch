@@ -282,6 +282,9 @@ internal sealed class ChangeRecords
         lock (_lock)
         {
             if (edit(Read()) is not { } next) return;
+            if (_unread > 0)
+                throw Unreadable($"it holds {_unread} {(_unread == 1 ? "change" : "changes")} this PoolWatch cannot read (damaged, or written by a newer " +
+                                 "PoolWatch), which a save would lose");
             Save(next);
             _records = next;
         }
