@@ -120,13 +120,12 @@ public static class ChangeRecordFile
             foreach (var e in changes.EnumerateArray())
             {
                 ChangeRecord? r = null;
-                if (list.Count < MaxRecords) // past the bound, no entry is read, but each is kept
+                if (list.Count < MaxRecords)
                 {
                     try { r = e.Deserialize<ChangeRecord>(Json); }
-                    catch (JsonException) { } // a missing field or an unknown kind: this record only
+                    catch (JsonException) { left.Add(e.GetRawText()); }
                 }
                 if (r is not null && Invalid(r) is null && ids.Add(r.Id)) list.Add(r);
-                else left.Add(e.GetRawText());
             }
             unread = left;
         }
