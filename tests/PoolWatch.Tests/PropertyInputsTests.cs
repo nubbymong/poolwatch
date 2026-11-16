@@ -32,7 +32,7 @@ public class PropertyInputsTests
     }
 
     [Theory]
-    [InlineData("(1,2,3)", 1UL, 2UL, 3)]
+    [InlineData("(1,3,7)", 1UL, 3UL, 7)]
     [InlineData("5468017883443469810,12266597578681389103,7", 5468017883443469810UL, 12266597578681389103UL, 7)]
     [InlineData(" (18446744073709551615, 1, 100). ", ulong.MaxValue, 1UL, 100)]
     public void AReplayIsReadAsAFailurePrintsIt(string text, ulong seed, ulong gamma, int size) =>
@@ -48,7 +48,8 @@ public class PropertyInputsTests
     [InlineData("1,2")]
     [InlineData("1,2,3,4")]
     [InlineData("a,b,c")]
-    [InlineData("1,2,-3")]
+    [InlineData("1,3,-7")]
+    [InlineData("1,2,7")]
     [InlineData("18446744073709551616,1,1")]
     public void AReplayThatIsNotThreeNumbersStopsTheTest(string text) => Assert.Throws<InvalidOperationException>(() => ReplayFrom(text));
 

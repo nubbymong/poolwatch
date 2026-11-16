@@ -65,8 +65,9 @@ internal static class PropertyInputs
     }
 
     /// <summary>
-    /// FSCHECK_REPLAY's seed, gamma and size, written as a failure prints them ("(1,2,3)", or without the brackets), or
-    /// null when it is not set. Anything else in it stops the test, so a mistyped replay is never taken for a pass.
+    /// FSCHECK_REPLAY's seed, gamma and size, written as a failure prints them ("(1,3,7)", or without the brackets), or
+    /// null when it is not set. Anything else in it (an even gamma too, which FsCheck never prints) stops the test, so a
+    /// mistyped replay is never taken for a pass.
     /// </summary>
     internal static Replay? ReplayFrom(string? text)
     {
@@ -74,7 +75,7 @@ internal static class PropertyInputs
         string[] parts = text.Trim().TrimStart('(').TrimEnd('.', ')').Split(',');
         if (parts.Length == 3 &&
             ulong.TryParse(parts[0].Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out ulong seed) &&
-            ulong.TryParse(parts[1].Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out ulong gamma) &&
+            ulong.TryParse(parts[1].Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out ulong gamma) && gamma % 2 == 1 &&
             int.TryParse(parts[2].Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out int size))
             return new Replay(new Rnd(seed, gamma), global::Microsoft.FSharp.Core.FSharpOption<int>.Some(size));
         throw new InvalidOperationException($"FSCHECK_REPLAY is \"{text}\": it takes the three numbers a failure prints, as \"seed,gamma,size\".");
