@@ -368,12 +368,13 @@ public sealed class ChangeLedgerTests : IDisposable
         var plain = Change(ChangeKind.LogonTask);
         var cannot = Change(ChangeKind.Shortcut, canUndo: false) with { Warning = "never asked" };
         var asked = new List<string>();
-        var (which, declined) = Ui.ActiveChangesView.PutAllBackPlan([declinedRow, accepted, plain, cannot], w => { asked.Add(w); return w == accepted.Warning; });
+        var (which, shown, declined) = Ui.ActiveChangesView.PutAllBackPlan([declinedRow, accepted, plain, cannot], w => { asked.Add(w); return w == accepted.Warning; });
 
         Assert.Equal([declinedRow.Warning, accepted.Warning], asked); // a row with no warning, or one that cannot be undone, is not asked about
         Assert.False(which(declinedRow));
         Assert.True(which(accepted));
         Assert.True(which(plain));
+        Assert.Equal([accepted, plain, cannot], shown); // what the run must reach, or say it left: not the one you declined
         var (change, result) = Assert.Single(declined);
         Assert.Equal((declinedRow, false, "You chose not to put it back."), (change, result.Done, result.Message));
 
@@ -403,9 +404,10 @@ public sealed class ChangeLedgerTests : IDisposable
 
         // The yes accepts it: no box per service (each with No as its default), only the other warning is asked.
         var asked = new List<string>();
-        var (which, declined) = Ui.ActiveChangesView.PutAllBackPlan([maps, sys, clear, plain], w => { asked.Add(w); return true; });
+        var (which, shown, declined) = Ui.ActiveChangesView.PutAllBackPlan([maps, sys, clear, plain], w => { asked.Add(w); return true; });
         Assert.Equal([clear.Warning], asked);
         Assert.True(which(maps) && which(sys) && which(clear) && which(plain));
+        Assert.Equal([maps, sys, clear, plain], shown);
         Assert.Empty(declined);
         var calls = new List<string>();
         Ledger(new FakeSource(calls, maps, sys, plain)).UndoAll(which, confirmed: true);
@@ -476,6 +478,262 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.False(switched); // never switched without its record
         records.Remove(ChangeRecordFixtures.ClearTask());
         Assert.Equal(newer, File.ReadAllText(file));
+    }
+
+    /// <summary>A record of a kind a newer PoolWatch has: this build does not read it.</summary>
+    private const string NewerKind = """{ "id": "later:x", "kind": "SomethingNew", "changedUtc": "2026-10-28T09:12:00Z", "via": "a newer PoolWatch" }""";
+
+    /// <summary>A record whose id does not match its target: this build does not read it either.</summary>
+    private const string IdNotItsTarget =
+        """{ "id": "task:\\Other", "kind": "ScheduledTask", "changedUtc": "2026-10-28T09:12:00Z", "via": "the Services tab", "name": "Cleanup", "location": "\\Vendor\\Cleanup", "enabledBefore": true }""";
+
+    public static TheoryData<string> RecordsThisBuildCannotRead() => new() { NewerKind, IdNotItsTarget };
+
+    /// <summary>
+    /// A record this build cannot read is left out of the list but kept in the file as it is, perhaps with the only copy
+    /// of a removed task's definition: a change is still recorded before it is switched, a put-back still removes its
+    /// own record, and the entry is written back after the records this build reads, unchanged, on every save.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(RecordsThisBuildCannotRead))]
+    public void ARecordThisBuildCannotReadIsKeptAsItIs(string unread)
+    {
+        var task = ChangeRecordFixtures.Task();
+        _f.Records.Put(task);
+        string file = Path.Combine(_f.Paths.DataRoot, "applied-changes.json");
+        File.WriteAllText(file, File.ReadAllText(file).Replace("\"changes\": [", "\"changes\": [\n" + unread + ","));
+
+        var records = new ChangeRecords(_f.Paths, _f.Log);
+        Assert.Equal([task], records.All(out int left)); // what it can read is listed
+        Assert.Equal(1, left);
+        bool recordedFirst = false;
+        string? notSwitched = records.Toggle(ChangeKind.StartupEntry, "HKCU Run", "Helper", enable: false, "the Services tab",
+            () => { recordedFirst = new ChangeRecords(_f.Paths, _f.Log).All().Any(r => r.Kind == RecordKind.StartupEntry); return null; });
+        Assert.Null(notSwitched);
+        Assert.True(recordedFirst); // recorded before it was switched
+        Assert.Contains(unread, File.ReadAllText(file));
+
+        records.Remove(task); // put back: its record goes
+        var now = new ChangeRecords(_f.Paths, _f.Log);
+        Assert.Equal([ChangeIds.StartupEntry("HKCU Run", "Helper")], now.All(out left).Select(r => r.Id));
+        Assert.Equal(1, left);
+        Assert.Contains(unread, File.ReadAllText(file)); // and the entry this build cannot read is still there, as it was
+        Assert.Single(ChangeRecordFile.Parse(File.ReadAllText(file), out IReadOnlyList<string> kept)!);
+        Assert.Equal([unread], kept);
+    }
+
+    /// <summary>
+    /// The entries this build cannot read count toward the 500 changes a list holds, since every save writes them too:
+    /// a change that would take the list past that is not recorded (so not made), and the file is left as it is.
+    /// </summary>
+    [Fact]
+    public void TheEntriesThisBuildCannotReadCountTowardTheBound()
+    {
+        var helpers = Enumerable.Range(0, ChangeRecordFile.MaxRecords - 1)
+            .Select(i => ChangeRecordFixtures.Startup() with { Id = ChangeIds.StartupEntry("HKCU Run", "Helper" + i), Name = "Helper" + i }).ToList();
+        string file = Path.Combine(_f.Paths.DataRoot, "applied-changes.json");
+        File.WriteAllText(file, ChangeRecordFile.ToJson(helpers, [NewerKind]));
+        string full = File.ReadAllText(file);
+
+        var records = new ChangeRecords(_f.Paths, _f.Log);
+        var refused = Assert.Throws<InvalidOperationException>(() => records.Put(ChangeRecordFixtures.Task()));
+        Assert.Contains($"at most {ChangeRecordFile.MaxRecords} changes", refused.Message);
+        Assert.Equal(full, File.ReadAllText(file));
+        records.Put(helpers[0] with { Via = "the setup guide" }); // one in place of one with its id is still recorded
+        Assert.Equal(ChangeRecordFile.MaxRecords - 1, new ChangeRecords(_f.Paths, _f.Log).All(out int left).Count);
+        Assert.Equal(1, left);
+    }
+
+    /// <summary>
+    /// While the list holds an entry this build cannot read, Active changes lists one more row, which says how many and
+    /// that they are kept, and cannot be put back: Put all back reports it as not done, so the uninstaller's cleanup ends
+    /// with "not everything was put back" (8) and the uninstaller keeps the data folder that holds the entry. The changes
+    /// it can read are put back as usual. Without the row, the cleanup would end with 0, and the uninstaller could delete
+    /// the folder with the entry in it.
+    /// </summary>
+    [Fact]
+    public void AnEntryThisBuildCannotReadIsARowThatIsNotPutBack()
+    {
+        var task = ChangeRecordFixtures.Task();
+        _f.Records.Put(task);
+        _f.Toggles.Tasks[task.Location!] = false; // the task as PoolWatch left it: off
+        string file = Path.Combine(_f.Paths.DataRoot, "applied-changes.json");
+        const string unread = NewerKind;
+        File.WriteAllText(file, File.ReadAllText(file).Replace("\"changes\": [", "\"changes\": [\n" + unread + ","));
+        var ledger = new ChangeLedger([_f.Recorded(_f.Live())], _f.Records, _f.Log);
+
+        var rows = ledger.List();
+        Assert.Equal(2, rows.Count);
+        var row = Assert.Single(rows, r => !r.CanUndo);
+        Assert.Equal(ChangeKind.Shortcut, row.Kind); // an uninstall that keeps your other changes still reports it
+        Assert.Contains("could not read 1 change in its list", row.What);
+        Assert.Contains("It is kept in the list as it is", row.Note);
+        Assert.Contains("3 changes in its list", RecordedSource.UnreadEntries(3).What);
+
+        string? summary = null;
+        int exit = Program.UninstallCleanup(false, () => new MemoryStream(), () => ledger.List(), which => Program.UninstallUndo(ledger, which), s => summary = s);
+
+        Assert.Equal(ExitCodes.NotAllPutBack, exit);
+        Assert.True(_f.Toggles.Tasks[task.Location!]); // the change it can read is put back
+        Assert.Contains("Put back: " + ChangeWords.Of(task), summary);
+        Assert.Contains("Could not put back: " + row.What, summary);
+        Assert.Empty(new ChangeRecords(_f.Paths, _f.Log).All(out int left)); // its record is gone
+        Assert.Equal(1, left);
+        Assert.Contains(unread, File.ReadAllText(file)); // the entry stays
+    }
+
+    /// <summary>
+    /// The list with two records for one startup app: the first, that PoolWatch turned it off, and a second, later, that
+    /// PoolWatch turned it on (a newer PoolWatch can save one next to one this build saved). The app is off, as the first left it.
+    /// </summary>
+    private (ChangeRecord First, ChangeRecord Second) TwoRecordsForOneApp()
+    {
+        var first = ChangeRecordFixtures.Startup();
+        var second = first with { EnabledBefore = false, ChangedUtc = first.ChangedUtc.AddMinutes(5), Via = "a newer PoolWatch" };
+        File.WriteAllText(Path.Combine(_f.Paths.DataRoot, "applied-changes.json"), ChangeRecordFile.ToJson([first, second]));
+        _f.Toggles.Startup[@"HKCU Run\Helper"] = false;
+        return (first, second);
+    }
+
+    /// <summary>
+    /// A second record for a change already listed is kept as every entry not read is, and its row says what it is, not
+    /// that it is damaged or a newer PoolWatch's: it is listed once the first is put back, and then it is. With other
+    /// entries not read, the note says each kind.
+    /// </summary>
+    [Fact]
+    public void ASecondRecordForAChangeAlreadyListedSaysSoAndIsListedOnceTheFirstIsPutBack()
+    {
+        var (first, second) = TwoRecordsForOneApp();
+        var ledger = new ChangeLedger([_f.Recorded(_f.Live())], _f.Records, _f.Log);
+
+        var rows = ledger.List();
+        Assert.Equal(2, rows.Count);
+        var kept = Assert.Single(rows, r => !r.CanUndo);
+        Assert.Contains("That change is a second record of a change already listed. It is kept in the list as it is, and is listed once the first is put back.", kept.Note);
+        Assert.DoesNotContain("damaged", kept.Note);
+        var shown = Assert.Single(rows, r => r.CanUndo);
+        Assert.Equal(ChangeWords.Of(first), shown.What);
+
+        Assert.Equal(("Turned the startup app Helper back on.", true), Ui.ActiveChangesView.PutBackOne(ledger, shown));
+        Assert.True(_f.Toggles.Startup[@"HKCU Run\Helper"]);
+        var now = Assert.Single(ledger.List()); // the second record, read now; no entry is left unread
+        Assert.Equal((second.Id, ChangeWords.Of(second), true), (now.Id, now.What, now.CanUndo));
+
+        string both = RecordedSource.UnreadEntries(3, duplicates: 1).Note!;
+        Assert.Contains("One of them is a second record of a change already listed: it is listed once the first is put back.", both);
+        Assert.Contains("The other 2 are damaged, or a newer PoolWatch made them", both);
+        Assert.Contains("Those 2 changes are second records of changes already listed.", RecordedSource.UnreadEntries(2, duplicates: 2).Note);
+        Assert.DoesNotContain("second record", RecordedSource.UnreadEntries(2).Note);
+    }
+
+    /// <summary>
+    /// Active changes drew its row from the first record; then the app was turned on in the Services tab, which takes the
+    /// first record back, so the second is read under the same id. Put back on the row drawn before finds a record that
+    /// says another thing and was made at another time, and leaves it for the next look: putting the second back would
+    /// turn the app off, the opposite of what the row said.
+    /// </summary>
+    [Fact]
+    public void ARowDrawnBeforeTheFirstRecordWentNeverPutsBackTheSecond()
+    {
+        var (_, second) = TwoRecordsForOneApp();
+        var ledger = new ChangeLedger([_f.Recorded(_f.Live())], _f.Records, _f.Log);
+        var shown = Assert.Single(ledger.List(), r => r.CanUndo);
+
+        string? notSwitched = _f.Records.Toggle(ChangeKind.StartupEntry, "HKCU Run", "Helper", enable: true, "the Services tab",
+            () => { _f.Toggles.Startup[@"HKCU Run\Helper"] = true; return null; });
+        Assert.Null(notSwitched);
+        Assert.Equal([second], _f.Records.All()); // back as it was: the first record went, and the second is read
+
+        Assert.Equal((ChangeWords.ChangedSinceShown, false), Ui.ActiveChangesView.PutBackOne(ledger, shown));
+        Assert.Empty(_f.Toggles.Calls);
+        Assert.True(_f.Toggles.Startup[@"HKCU Run\Helper"]); // still on, as it was turned
+    }
+
+    /// <summary>
+    /// The same, but the first record goes while Put all back runs (it puts back the startup apps, scheduled tasks and the
+    /// rest one at a time), after its match of each row to the one the window showed: the put-back reads the record again,
+    /// in one turn with the tab's switch, and acts only on the one its row was drawn from. The second record would turn
+    /// the app off, the opposite of the row.
+    /// </summary>
+    [Fact]
+    public void APutBackActsOnlyOnTheRecordItsRowWasDrawnFrom()
+    {
+        _ = TwoRecordsForOneApp();
+        var source = _f.Recorded(_f.Live());
+        var shown = Assert.Single(source.List(), r => r.CanUndo);
+
+        Assert.Null(_f.Records.Toggle(ChangeKind.StartupEntry, "HKCU Run", "Helper", enable: true, "the Services tab",
+            () => { _f.Toggles.Startup[@"HKCU Run\Helper"] = true; return null; }));
+        var result = source.Undo(shown, confirmed: false);
+
+        Assert.Equal(new UndoResult(false, ChangeWords.ChangedSinceShown), result);
+        Assert.Empty(_f.Toggles.Calls);
+        Assert.True(_f.Toggles.Startup[@"HKCU Run\Helper"]); // still on, as it was turned
+    }
+
+    /// <summary>
+    /// The tab's switch is under way (the app is turned on, which takes the first record back) when the put-back of the
+    /// row drawn from that record starts: the put-back waits for the switch, and only then reads the record and checks
+    /// it, so it finds the second record and leaves it. Read and checked before the wait, the first record would still be
+    /// there, and the put-back would switch the app by it once the tab's switch was done.
+    /// </summary>
+    [Fact]
+    public async Task APutBackChecksItsRecordInOneTurnWithTheServicesTabsSwitch()
+    {
+        _ = TwoRecordsForOneApp();
+        var source = _f.Recorded(_f.Live());
+        var shown = Assert.Single(source.List(), r => r.CanUndo);
+        Task<UndoResult>? undo = null;
+        bool undoWaited = false;
+
+        Assert.Null(Switch(ChangeKind.StartupEntry, enable: true, whileSwitching: () =>
+        {
+            undo = Task.Run(() => source.Undo(shown, confirmed: false));
+            undoWaited = !undo.Wait(1000);
+        }));
+        Assert.Equal(new UndoResult(false, ChangeWords.ChangedSinceShown), await undo!.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True(undoWaited); // until the tab's switch was done
+        Assert.Equal([@"startup HKCU Run\Helper True"], _f.Toggles.Calls); // the tab's switch alone
+        Assert.True(_f.Toggles.Startup[@"HKCU Run\Helper"]);
+    }
+
+    /// <summary>
+    /// A second record that says the same as the first and was made at the same moment, but is another record (another
+    /// PoolWatch made it): once the first is gone, a row drawn from the first is not put back from it, by Put back or by
+    /// Put all back. Only the record as a whole tells the two apart.
+    /// </summary>
+    [Fact]
+    public void ASecondRecordThatSaysTheSameAndWasMadeAtTheSameMomentIsStillAnotherRecord()
+    {
+        var first = ChangeRecordFixtures.Startup();
+        File.WriteAllText(Path.Combine(_f.Paths.DataRoot, "applied-changes.json"), ChangeRecordFile.ToJson([first, first with { Via = "another PoolWatch" }]));
+        _f.Toggles.Startup[@"HKCU Run\Helper"] = false;
+        var ledger = new ChangeLedger([_f.Recorded(_f.Live())], _f.Records, _f.Log);
+        var shown = Assert.Single(ledger.List(), r => r.CanUndo);
+
+        Assert.Null(_f.Records.Toggle(ChangeKind.StartupEntry, "HKCU Run", "Helper", enable: true, "the Services tab",
+            () => { _f.Toggles.Startup[@"HKCU Run\Helper"] = true; return null; }));
+        var now = Assert.Single(ledger.List()); // the second record, read now
+        Assert.Equal((shown.Id, shown.What, shown.ChangedUtc, shown.CanUndo), (now.Id, now.What, now.ChangedUtc, now.CanUndo));
+
+        Assert.Equal((ChangeWords.ChangedSinceShown, false), Ui.ActiveChangesView.PutBackOne(ledger, shown));
+        Assert.Equal(("Not done: " + shown.What + "\n" + ChangeWords.ChangedSinceShown, false),
+            Ui.ActiveChangesView.PutAllBack(ledger, Ui.ActiveChangesView.PutAllBackPlan([shown], _ => true)));
+        Assert.Empty(_f.Toggles.Calls);
+        Assert.Equal("another PoolWatch", Assert.Single(_f.Records.All()).Via); // left as it is
+    }
+
+    /// <summary>The record a row was drawn from is not in the command line's list, which the uninstaller reads line by line.</summary>
+    [Fact]
+    public void TheCommandLinesListLeavesOutTheRecordARowWasDrawnFrom()
+    {
+        _f.Records.Put(ChangeRecordFixtures.Startup());
+        var row = Assert.Single(_f.Recorded(_f.Live()).List());
+        Assert.Equal(ChangeRecordFile.Stamp(Assert.Single(_f.Records.All())), row.Stamp);
+
+        string json = ChangeLedger.ToJson([row]);
+        Assert.DoesNotContain("stamp", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("the Services tab", json); // the record's own words for where it was made
     }
 
     [Theory]

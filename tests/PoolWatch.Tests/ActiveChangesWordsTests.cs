@@ -197,7 +197,7 @@ public class ActiveChangesWordsTests
             ChangeWords.TokenGuardOffPutBack, ChangeWords.TokenGuardOffRefused, ChangeWords.TokenGuardOffNotOurs, ChangeWords.TokenGuardSettingTitle,
             ChangeWords.TokenGuardSettingStill, ChangeWords.TokenGuardSettingStillNote, ChangeWords.TokenGuardOffUnreported,
             ChangeWords.TokenGuardSettingNotPutBack, ChangeWords.TokenGuardSettingPutBackTip,
-            ChangeWords.TurnOff, ChangeWords.Remove, ChangeWords.PutBack, ChangeWords.CannotPutBackLine("It ran with a saved password."),
+            ChangeWords.TurnOff, ChangeWords.Remove, ChangeWords.PutBack, ChangeWords.CannotPutBackLine("It ran with a saved password."), ChangeWords.ChangedSinceShown,
             ChangeWords.Timeline(ChangeWords.TurnOff, false, ChangeWords.TokenGuardTitle, ChangeWords.TokenGuardOff),
             ChangeWords.Timeline(ChangeWords.Remove, true, ChangeWords.ShortcutTitle, "Deleted the shortcut."),
             ChangeWords.Timeline(ChangeWords.PutBack, true, ChangeWords.StartupEntry("Helper", false), "Turned the startup app Helper back on."),

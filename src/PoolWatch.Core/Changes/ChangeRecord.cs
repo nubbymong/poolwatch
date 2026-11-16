@@ -58,8 +58,10 @@ public static class ChangeIds
 /// <summary>
 /// applied-changes.json: <c>{ "version": 1, "changes": [ ... ] }</c>, at most <see cref="MaxBytes"/> and
 /// <see cref="MaxRecords"/> records. Parsing is bounded and never throws: a file this build cannot read as a whole
-/// (malformed, too large, another version) is null, so it is never written over, and a record that is invalid or of a
-/// kind this build does not know is dropped on its own.
+/// (malformed, too large, another version, a field written twice in one object) is null, so it is never written over,
+/// and an entry of the list that is invalid or of a kind this build does not know is left out on its own, and kept as
+/// its text (<see cref="Parse(string, out IReadOnlyList{string})"/>), which a save writes back as it is
+/// (<see cref="ToJson(IEnumerable{ChangeRecord}, IEnumerable{string})"/>), so none is lost.
 /// </summary>
 public static class ChangeRecordFile
 {
@@ -80,33 +82,106 @@ public static class ChangeRecordFile
     /// The valid records. Null when the file as a whole is not one this build reads, an empty one included: PoolWatch
     /// always writes the version and the list, so an empty file is one a power cut or a crash left, and may have held records.
     /// </summary>
-    public static List<ChangeRecord>? Parse(string json)
+    public static List<ChangeRecord>? Parse(string json) => Parse(json, out IReadOnlyList<string> _);
+
+    /// <summary><see cref="Parse(string)"/>, and how many entries of the file's list were left out (<see cref="Parse(string, out IReadOnlyList{string})"/>).</summary>
+    public static List<ChangeRecord>? Parse(string json, out int unread)
     {
+        var records = Parse(json, out IReadOnlyList<string> left);
+        unread = left.Count;
+        return records;
+    }
+
+    /// <summary>
+    /// <see cref="Parse(string)"/>, and each entry of the file's list that was left out (<paramref name="unread"/>), as
+    /// its text in the file: invalid, of a kind this build does not know (a newer PoolWatch's), a second one for a
+    /// target, or past <see cref="MaxRecords"/>. Saving only the records read would lose those, perhaps with the only copy
+    /// of a removed task's definition, so ChangeRecords writes them back after its records. Empty when the file is not
+    /// read at all.
+    /// </summary>
+    public static List<ChangeRecord>? Parse(string json, out IReadOnlyList<string> unread) => Parse(json, out unread, out _);
+
+    /// <summary>
+    /// <see cref="Parse(string, out IReadOnlyList{string})"/>, and how many of the entries left out are a second record for
+    /// a target already read (<paramref name="duplicates"/>): valid, and read once the first is gone (put back), as a save
+    /// writes the entries left out after the records, so the first stays first. Active changes says so of them, not that
+    /// they are damaged.
+    /// </summary>
+    public static List<ChangeRecord>? Parse(string json, out IReadOnlyList<string> unread, out int duplicates)
+    {
+        unread = [];
+        duplicates = 0;
         var list = new List<ChangeRecord>();
         if (string.IsNullOrWhiteSpace(json)) return null;
         if (Encoding.UTF8.GetByteCount(json) > MaxBytes) return null;
         try
         {
-            using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 8 });
+            // A field written twice anywhere makes the whole file unread: JSON allows it and the last one would count, so
+            // {"version": 1, "changes": [...], "changes": []} would read as an empty list that the next save writes.
+            using var doc = JsonDocument.Parse(json, ReadOptions);
             var root = doc.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("version", out var v) || !v.TryGetInt32(out int version) ||
-                version != Version || !root.TryGetProperty("changes", out var changes) || changes.ValueKind != JsonValueKind.Array) return null;
+            // TryGetInt32 throws on a version that is not a number ("1", null), so its kind is checked first.
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("version", out var v) || v.ValueKind != JsonValueKind.Number ||
+                !v.TryGetInt32(out int version) || version != Version || !root.TryGetProperty("changes", out var changes) ||
+                changes.ValueKind != JsonValueKind.Array) return null;
             var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var left = new List<string>();
+            int second = 0;
             foreach (var e in changes.EnumerateArray())
             {
-                if (list.Count >= MaxRecords) break;
-                ChangeRecord? r;
-                try { r = e.Deserialize<ChangeRecord>(Json); }
-                catch (JsonException) { continue; } // a missing field or an unknown kind: this record only
-                if (r is not null && Invalid(r) is null && ids.Add(r.Id)) list.Add(r);
+                ChangeRecord? r = null;
+                if (list.Count < MaxRecords) // past the bound, no entry is read, but each is kept
+                {
+                    try { r = e.Deserialize<ChangeRecord>(Json); }
+                    catch (JsonException) { } // a missing field or an unknown kind: this record only
+                }
+                if (r is not null && Invalid(r) is null)
+                {
+                    if (ids.Add(r.Id)) { list.Add(r); continue; }
+                    second++; // a second record for a target already read
+                }
+                left.Add(e.GetRawText());
             }
+            unread = left;
+            duplicates = second;
         }
-        catch (JsonException) { return null; }
+        // InvalidOperationException: a field's name that holds half of a surrogate pair written as an escape ("\ud800")
+        // throws when it is compared with the name looked for.
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException) { unread = []; duplicates = 0; return null; }
         return list;
     }
 
-    public static string ToJson(IEnumerable<ChangeRecord> records) =>
-        JsonSerializer.Serialize(new { version = Version, changes = records.ToList() }, Json);
+    private static readonly JsonDocumentOptions ReadOptions = new() { MaxDepth = 8, AllowDuplicateProperties = false };
+
+    public static string ToJson(IEnumerable<ChangeRecord> records) => ToJson(records, []);
+
+    /// <summary>
+    /// The record as one JSON text, every field as the file holds it: what an Active changes row of a recorded change is
+    /// drawn from. Two records give the same text only when every field is the same, so a put-back acts only on the record
+    /// its row was drawn from, never on a second record for that target read under the row's id once the first is gone,
+    /// even one that says the same and was made at the same moment.
+    /// </summary>
+    public static string Stamp(ChangeRecord record) => JsonSerializer.Serialize(record, Json);
+
+    /// <summary>
+    /// The file: <paramref name="records"/>, then each entry of <paramref name="unread"/> (as
+    /// <see cref="Parse(string, out IReadOnlyList{string})"/> gave it) written back exactly as it was read.
+    /// </summary>
+    public static string ToJson(IEnumerable<ChangeRecord> records, IEnumerable<string> unread)
+    {
+        using var buffer = new MemoryStream();
+        using (var w = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = true }))
+        {
+            w.WriteStartObject();
+            w.WriteNumber("version", Version);
+            w.WriteStartArray("changes");
+            foreach (var r in records) JsonSerializer.Serialize(w, r, Json);
+            foreach (string entry in unread) w.WriteRawValue(entry); // checked to be one JSON value, then copied as it is
+            w.WriteEndArray();
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
 
     /// <summary>
     /// Why the record is not acted on, or null. The checks that need only the record: its id matches its target, every

@@ -455,6 +455,8 @@ public sealed class UpdateCheckTests : IDisposable
     [InlineData("""{"checked":"2026-10-28T09:00:00Z","result":"Newer","latest":"9.0.0"}""")]
     [InlineData("""{"checked":"yesterday","result":"Newer","latest":"9.0.0","page":"https://github.com/nubbymong/poolwatch/releases/tag/v9.0.0"}""")]
     [InlineData("""{"checked":"2026-10-28T09:00:00Z","result":"Sideways","latest":"9.0.0","page":"https://github.com/nubbymong/poolwatch/releases/tag/v9.0.0"}""")]
+    [InlineData("""{"checked":"2026-10-28T09:00:00Z","result":"Newer","latest":"9.9.9","page":"https://github.com/nubbymong/poolwatch/releases/tag/v1.0.0"}""")] // another release's page
+    [InlineData("""{"checked":"2026-10-28T09:00:00Z","result":"Newer","latest":"9.9.9","page":"https://github.com/nubbymong/poolwatch/releases/tag/v9.9.99"}""")]
     public void ASavedFileWithAnythingOutOfPlaceIsIgnored(string content)
     {
         Directory.CreateDirectory(_paths.CacheDir);
@@ -465,6 +467,93 @@ public sealed class UpdateCheckTests : IDisposable
 
         Assert.Null(check.Available);
         Assert.Null(check.LastResult);
+    }
+
+    /// <summary>A saved release with its own page under any tag GitHub's answer may give it ("v", "V" or nothing before the version) comes back.</summary>
+    [Theory]
+    [InlineData("v9.0.0")]
+    [InlineData("V9.0.0")]
+    [InlineData("9.0.0")]
+    public void ASavedReleaseWithItsOwnPageComesBack(string tag)
+    {
+        Directory.CreateDirectory(_paths.CacheDir);
+        File.WriteAllText(Path.Combine(_paths.CacheDir, UpdateCheck.StateName),
+            $$"""{"checked":"2026-10-28T09:00:00Z","result":"Newer","latest":"9.0.0","page":"{{ReleasePage.For(tag)}}"}""");
+        using var check = NewCheck(new FakeGitHub(Body(Release("v1.0.0"))));
+
+        check.Start();
+
+        Assert.Equal(new UpdateRelease("9.0.0", ReleasePage.For(tag)), check.Available);
+    }
+
+    /// <summary>
+    /// The saved file is read up to 4 KB, and one byte more refuses it: at most that and one byte are read, through the
+    /// handle the file is opened with, whatever its size says.
+    /// </summary>
+    [Fact]
+    public void ASavedFileIsReadUpTo4KB()
+    {
+        Directory.CreateDirectory(_paths.CacheDir);
+        string file = Path.Combine(_paths.CacheDir, UpdateCheck.StateName);
+        string release = $$"""{"checked":"2026-10-28T09:00:00Z","result":"Newer","latest":"9.0.0","page":"{{ReleasePage.For("v9.0.0")}}"}""";
+
+        File.WriteAllText(file, release.PadRight(4096));
+        using (var atTheBound = NewCheck(new FakeGitHub(Body(Release("v1.0.0")))))
+        {
+            atTheBound.Start();
+            Assert.Equal("9.0.0", atTheBound.Available?.Version);
+        }
+
+        File.WriteAllText(file, release.PadRight(4097));
+        using var overIt = NewCheck(new FakeGitHub(Body(Release("v1.0.0"))));
+        overIt.Start();
+        Assert.Null(overIt.Available);
+        Assert.Null(overIt.LastResult);
+    }
+
+    /// <summary>
+    /// The saved file's bound is on the bytes read through its handle, never on a length asked first: from a stream
+    /// that has no length (as a pipe in the file's place), or gives one too short (a file that grew after a look at its
+    /// size), 4 KB are read and more is refused, and of a longer one no more than 4 KB and one byte are read.
+    /// </summary>
+    [Theory]
+    [InlineData(4096, -1, true)]
+    [InlineData(5000, -1, false)]
+    [InlineData(64 * 1024, -1, false)]
+    [InlineData(64 * 1024, 10, false)]
+    public void TheSavedFileIsBoundedByWhatIsReadNotByALengthAskedFirst(int holds, int says, bool read)
+    {
+        var bytes = Enumerable.Range(0, holds).Select(i => (byte)('a' + i % 26)).ToArray();
+        using var stream = new ReadThrough(bytes, says < 0 ? null : (long)says);
+
+        byte[]? got = UpdateCheck.ReadState(stream);
+
+        if (read) Assert.Equal(bytes, got);
+        else Assert.Null(got);
+        Assert.InRange(stream.Given, 0, 4097);
+    }
+
+    /// <summary>A stream that can only be read through: no length (or the one it is given, which may be wrong) and no position; it counts the bytes it gives.</summary>
+    private sealed class ReadThrough(byte[] holds, long? says) : Stream
+    {
+        /// <summary>The bytes read from it so far.</summary>
+        public int Given { get; private set; }
+        public override long Length => says ?? throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            int n = Math.Min(count, holds.Length - Given);
+            Array.Copy(holds, Given, buffer, offset, n);
+            Given += n;
+            return n;
+        }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     [Fact]

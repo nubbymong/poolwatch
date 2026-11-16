@@ -9,7 +9,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       test-packages:
-        patterns: [xunit*, Microsoft.NET.Test.Sdk]
+        patterns: [xunit*, Microsoft.NET.Test.Sdk, FsCheck]
   - package-ecosystem: github-actions
     directory: /
     schedule:

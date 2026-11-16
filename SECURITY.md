@@ -216,7 +216,8 @@ PoolWatch run their code, change the wrong thing, or leak data.
   [Known limitations](#known-limitations).
 - **What it reads from places you can write to** is bounded, and links are skipped rather than followed: Startup-folder
   shortcuts (its own parser, not the shell), Claude Code transcripts (size and file budgets, links skipped),
-  `pooltag.txt` (read in one bounded pass of at most 8 MB; a path that is itself a link is skipped), symbol files
+  `pooltag.txt` (read in one bounded pass of at most 8 MB; a path that is a link, or has one on the way, when it is
+  looked at just before the file is opened is skipped), symbol files
   only from admin-only local folders, and an AI agent's answer file (below). Path settings must be plain local drive
   paths. The AI Code Conductor version on the timeline (`cache\versions.txt`) is read only from a running exe that is
   its own: one installed for everyone under Program Files that only administrators can change, or one signed by the

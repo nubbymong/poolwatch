@@ -14,6 +14,20 @@ public class ServiceCatalogueTests
     private static ServiceView V(string name, ServiceStartType start = ServiceStartType.Automatic, bool ms = false, bool running = true, bool win32 = true) =>
         new() { Name = name, DisplayName = name, StartType = start, Running = running, MicrosoftSigned = ms, IsWin32 = win32 };
 
+    /// <summary>
+    /// The catalogue says which services are optional, so an elevated PoolWatch reads only the one built in: nothing can
+    /// hand it a file to read one from instead.
+    /// </summary>
+    [Fact]
+    public void TheOnlyCatalogueLoadedIsTheBuiltInOne()
+    {
+        const System.Reflection.BindingFlags all = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic |
+                                                   System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly;
+        var loads = typeof(DefaultCatalogue).GetMethods(all).Where(m => !m.IsSpecialName).ToList(); // not the getter of Shared
+        Assert.Equal([nameof(DefaultCatalogue.Load)], loads.Select(m => m.Name));
+        Assert.Empty(loads[0].GetParameters());
+    }
+
     [Fact]
     public void ShippedCatalogueCoversTheOwnersServices()
     {

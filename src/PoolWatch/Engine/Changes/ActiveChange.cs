@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using PoolWatch.Core.Changes;
 
 namespace PoolWatch.Engine.Changes;
@@ -62,6 +63,16 @@ internal sealed record ActiveChange(string Id, ChangeKind Kind, DateTime? Change
     /// (<see cref="ChangeLedger.ToJson"/>), where the uninstaller reads it and says it with the changes it puts back.
     /// </summary>
     public string? PutBackCaveat { get; init; }
+
+    /// <summary>
+    /// For a change kept in applied-changes.json, the record the row was drawn from, every field as saved
+    /// (<see cref="ChangeRecordFile.Stamp"/>); null for any other. A put-back acts only while the record under the row's id
+    /// is still this one (<see cref="RecordedSource.Undo"/>, and the window's match of a row to the one it showed), so a
+    /// second record for that target, read once the first is gone, is never acted on from a row drawn from the first. Not
+    /// in the command line's list (<see cref="ChangeLedger.ToJson"/>), whose shape the uninstaller reads.
+    /// </summary>
+    [JsonIgnore]
+    public string? Stamp { get; init; }
 
     /// <summary>A feature PoolWatch turned on (the logon task, its settings, its shortcut), or something it turned off.</summary>
     internal static ChangeGroup GroupOf(ChangeKind kind) =>

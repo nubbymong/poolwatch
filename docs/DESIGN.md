@@ -1627,6 +1627,12 @@ The code builds anywhere the .NET 10 SDK runs (`EnableWindowsTargeting`); it run
 - Unit tests (xUnit, `tests/PoolWatch.Tests`): parsing against byte fixtures, tag lookup, detection on synthetic
   series, ranking, transcript lookup on fixture files, redaction, the recommendation rules, the known-issue packs. They
   also run on Linux.
+- Property tests (FsCheck, in both test projects): the code that reads input PoolWatch does not control, or reads as
+  untrusted although it writes it (the knowledge packs, the services catalogue, version tags and release pages,
+  applied-changes.json, service-changes.json, an AI agent's answer, Startup-folder shortcuts, settings.json, the
+  retention clock's state, the cached scan of the PC, and GitHub's answer to the update check), is given hundreds of
+  random inputs on each run, most of them a good file changed at random. Each reader must never throw but as it
+  documents, never take more than 10 seconds on one input, and read only what is within its bounds.
 - App-layer tests (`tests/PoolWatch.AppTests`, Windows only): every system change goes through an injected fake; no
   test changes a service, task, registry value or ACL, writes a shortcut outside its own TEMP folder, or ends a process.
 - End-to-end on the Windows CI runner (elevated): PoolWatch runs headless while `tools/Leaker` reproduces a pattern
@@ -1803,6 +1809,13 @@ or says why it could not (a change Windows would not let it put back). Its data 
 under `--out`; at most 1 MB and 500 records; written to a temporary file and moved; one thread-safe instance per data
 folder, so every window and the tray write through one object. The list of changes is read, as well as written,
 through the link guard, and read again before every change and every listing, never written over from an old copy.
+A record this build cannot read (damaged, or a newer PoolWatch's) is kept as its text in the file and written back as
+it is after the records it reads, so a save never loses it (it counts toward the 500); the records it can read are
+still recorded, listed and put back, each put-back removing its own record. A second record for a change already
+listed (a newer PoolWatch can save one next to one this build saved) is kept the same way, and read once the first is
+put back. While the list holds such records, Active changes lists one more row, which says how many, what they are
+(a second record, or damaged or a newer PoolWatch's) and that they are kept, and cannot be put back: Put all back
+reports it as not done, the uninstaller's cleanup does not end with 0, and the uninstaller keeps the data folder.
 Every record is read as untrusted (bounded, every field validated) and checked against the live system right before it
 is acted on: a shortcut must be a `.lnk` directly in the user's Desktop or Start-menu Programs folder; a task
 definition must parse with DTDs prohibited, be at most 64 KB, carry no access rules of its own, have only actions that
@@ -2007,10 +2020,18 @@ then as Turn off leaves it (`ServicePlan.IsOff`).
 **Put all back** asks once, listing every change and every caveat (the warning of the profile applied at start once, at
 the end, for all its services); every other change with a warning is then asked about on its own, and only the changes
 the question showed are put back, in a fixed order: the shortcut, startup apps, scheduled tasks, services, the
-automatic clear, a removed clear task, the token-leak guard, the sign-in task. It never stops at a failure, and its
-results list what was not done first. Listing and putting back touch COM, the service manager and the registry, so they
-run off the UI thread; the window reads the list only when it opens and after a change, and each change writes a line
-on the timeline.
+automatic clear, a removed clear task, the token-leak guard, the sign-in task. Put all back and a row's own button put
+a change back only while it is as the window showed it (`ActiveChangesView.AsShown`): its warning, whether it can be
+put back, what it says, when it was made and, for a change kept in `applied-changes.json`, the record its row was drawn
+from, every field as saved (`ActiveChange.Stamp`). One that changed since waits for the next look, as does a second
+record for the same change read since the window was drawn, which has the first one's id, even one that says the same
+and was made at the same moment. That match runs once, as Put all back starts, so the put-back of a recorded change
+reads its record again and acts only on the one its row was drawn from (`RecordedSource.Undo`; a scheduled task or a
+startup app is read, checked and switched in one turn with the Services tab's switch): a record that the Services tab
+takes back while Put all back runs never lets a second one be put back in its place. Put all back never stops at a
+failure, and its results list what was not done first, each change it showed and left because it changed since among
+them. Listing and putting back touch COM, the service manager and the registry, so they run off the UI thread; the
+window reads the list only when it opens and after a change, and each change writes a line on the timeline.
 
 Not listed: cache clears that already ran (the cache refills by itself), programs the user ended, PoolWatch's own data
 folder, the older PoolWatch clear-cache tasks it removes by itself (its own unused leftovers), and task or startup
@@ -2173,7 +2194,8 @@ once per version, also across restarts. The window's footer says "PoolWatch x.y.
 the tray menu "PoolWatch x.y.z is available"; the link and the menu item open the page through the same allow-list as
 every other link. Both read the release each time they are drawn (a release taken back gives the older one, or none)
 and show nothing while the setting is off. Nothing is downloaded or run. The last check and the latest stable release
-seen live in `cache\update-check.json`, at most 4 KB, read back as untrusted. Failures (offline, the rate limit, a
+seen live in `cache\update-check.json`, at most 4 KB, read back as untrusted (its page must be that release's own).
+Failures (offline, the rate limit, a
 refused or malformed answer) are quiet: the first is logged as one line, the next only after a check works again. The
 first check loads the HTTP and TLS libraries once (a few MB); the timer wakes at most four times a day and does no I/O
 then.

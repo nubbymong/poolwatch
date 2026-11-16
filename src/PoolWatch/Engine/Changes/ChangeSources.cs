@@ -228,7 +228,8 @@ internal sealed class ServicesSource(ServicesController services, ProfileStore? 
 /// on it: a removed clear task by <see cref="ClearTaskReplacer.PutBack"/>; a task or startup entry must still be there
 /// (when it is gone the record goes and the message says so); a shortcut must be a .lnk directly in your Desktop or
 /// Start-menu Programs folder, opened without following links, a plain file whose bytes still match what PoolWatch wrote.
-/// Putting a change back removes only the record it acted on, as it was saved: one saved for that target since is kept.
+/// Putting a change back acts only on the record its row was drawn from (<see cref="ActiveChange.Stamp"/>), and removes
+/// only that record, as it was saved: one saved for that target since is kept.
 /// </summary>
 internal sealed class RecordedSource : IChangeSource
 {
@@ -249,12 +250,58 @@ internal sealed class RecordedSource : IChangeSource
             [Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), Environment.GetFolderPath(Environment.SpecialFolder.Programs)];
     }
 
-    public IEnumerable<ActiveChange> List() => _records.All().Select(Row);
+    /// <summary>
+    /// Each record, and, when the list holds entries this build cannot read (damaged, a newer PoolWatch's, or a second
+    /// record for a change already listed), one row for them (<see cref="UnreadEntries"/>): they stay in the list as they
+    /// are and cannot be put back from here, so Put all back and the uninstaller report them as not put back, and the
+    /// uninstaller keeps the data folder that holds them, instead of leaving them out.
+    /// </summary>
+    public IEnumerable<ActiveChange> List()
+    {
+        var rows = _records.All(out int unread, out int duplicates).Select(Row).ToList();
+        if (unread > 0) rows.Add(UnreadEntries(unread, duplicates));
+        return rows;
+    }
 
     /// <summary>Listed with the shortcuts, which an uninstall that keeps your other changes still undoes, so it reports this too.</summary>
     public ActiveChange Unread(string error) =>
         new("unread:applied-changes", ChangeKind.Shortcut, null, ChangeWords.Unread("the clear tasks, scheduled tasks, startup apps and shortcuts it changed"), false,
             ChangeWords.UnreadNote(error));
+
+    /// <summary>
+    /// The row for the <paramref name="count"/> entries of the list this build cannot read, which cannot be put back; with
+    /// the shortcuts, as <see cref="Unread"/> is (the two are never listed together: a list that cannot be read at all
+    /// lists only that row). Its note says what they are (<see cref="UnreadWhy"/>).
+    /// </summary>
+    /// <param name="duplicates">How many of them are a second record for a change already listed.</param>
+    internal static ActiveChange UnreadEntries(int count, int duplicates = 0) =>
+        new("unread:applied-changes", ChangeKind.Shortcut, null,
+            ChangeWords.Unread($"{count} {(count == 1 ? "change" : "changes")} in its list of clear tasks, scheduled tasks, startup apps and shortcuts"), false,
+            ChangeWords.UnreadNote(UnreadWhy(count, duplicates)));
+
+    /// <summary>
+    /// What the entries not read are: a second record of a change already listed is kept and is listed once the first is
+    /// put back; any other is damaged, or a newer PoolWatch made it.
+    /// </summary>
+    internal static string UnreadWhy(int count, int duplicates)
+    {
+        int others = count - duplicates;
+        if (duplicates <= 0)
+            return count == 1
+                ? "That change is damaged, or a newer PoolWatch made it. It is kept in the list as it is: the newest PoolWatch may be able to put it back."
+                : $"Those {count} changes are damaged, or a newer PoolWatch made them. They are kept in the list as they are: the newest PoolWatch may be able to put them back.";
+        if (others <= 0)
+            return count == 1
+                ? "That change is a second record of a change already listed. It is kept in the list as it is, and is listed once the first is put back."
+                : $"Those {count} changes are second records of changes already listed. They are kept in the list as they are, and each is listed once the record before it is put back.";
+        return "They are kept in the list as they are. " +
+            (duplicates == 1
+                ? "One of them is a second record of a change already listed: it is listed once the first is put back. "
+                : $"{duplicates} of them are second records of changes already listed: each is listed once the record before it is put back. ") +
+            (others == 1
+                ? "The other is damaged, or a newer PoolWatch made it: the newest PoolWatch may be able to put it back."
+                : $"The other {others} are damaged, or a newer PoolWatch made them: the newest PoolWatch may be able to put them back.");
+    }
 
     private ActiveChange Row(ChangeRecord r)
     {
@@ -264,12 +311,12 @@ internal sealed class RecordedSource : IChangeSource
         if (r.Kind != RecordKind.RemovedClearTask)
             return new ActiveChange(r.Id, kind, r.ChangedUtc, ChangeWords.Of(r), CanUndo: true, Note: null)
             {
-                Title = ChangeWords.TitleOf(r), Detail = ChangeWords.DetailOf(r), Group = group,
+                Title = ChangeWords.TitleOf(r), Detail = ChangeWords.DetailOf(r), Group = group, Stamp = ChangeRecordFile.Stamp(r),
             };
         var (canUndo, note, warning) = ClearTaskReplacer.Row(r, _records, _clearTasks);
         return new ActiveChange(r.Id, kind, r.ChangedUtc, ChangeWords.Of(r), canUndo, note)
         {
-            Warning = warning, Title = ChangeWords.TitleOf(r), Detail = ChangeWords.DetailOf(r), Group = group,
+            Warning = warning, Title = ChangeWords.TitleOf(r), Detail = ChangeWords.DetailOf(r), Group = group, Stamp = ChangeRecordFile.Stamp(r),
         };
     }
 
@@ -281,26 +328,39 @@ internal sealed class RecordedSource : IChangeSource
         _ => ChangeKind.Shortcut,
     };
 
+    /// <summary>
+    /// Puts back the record the row was drawn from (<see cref="ActiveChange.Stamp"/>), read again here, and no other: the
+    /// window's match of a row to the one it showed runs once, before Put all back starts, and the Services tab can take
+    /// the record back while the run goes on, so that a second record for that target is read under the row's id. Another
+    /// record there is left as it is (<see cref="ChangeWords.ChangedSinceShown"/>). A scheduled task or startup app is read,
+    /// checked and switched back in one turn with that tab's switch (<see cref="ChangeRecords.OneSwitchAtATime{T}"/>), so no
+    /// switch comes between the check and the switch back. The turn is taken by the row's kind: a record with the row's
+    /// stamp is of that kind, and a row with no stamp is never acted on.
+    /// </summary>
     public UndoResult Undo(ActiveChange change, bool confirmed)
     {
+        if (change.Kind is ChangeKind.ScheduledTask or ChangeKind.StartupEntry) return _records.OneSwitchAtATime(() => UndoNow(change, confirmed));
+        return UndoNow(change, confirmed);
+    }
+
+    private UndoResult UndoNow(ActiveChange change, bool confirmed)
+    {
         if (_records.All().FirstOrDefault(r => r.Id == change.Id) is not { } r) return new(true, "This change is already put back.");
+        if (ChangeRecordFile.Stamp(r) != change.Stamp) return new(false, ChangeWords.ChangedSinceShown);
         return r.Kind switch
         {
-            // Your yes holds only for the warning you saw (another PoolWatch may have saved a removal of that name since the
+            // Your yes holds only for the warning you saw (the permissions of what the task runs may have changed since the
             // list was read): PutBack checks it on the record it registers, this one, read again here.
             RecordKind.RemovedClearTask => ClearTaskReplacer.PutBack(r, confirmed, change.Warning, _clearTasks, _records, _live),
-            RecordKind.ScheduledTask => SwitchBack(r, $"the scheduled task {r.Location}", () => _toggles.TaskExists(r.Location!),
+            RecordKind.ScheduledTask => SwitchBackNow(r, $"the scheduled task {r.Location}", () => _toggles.TaskExists(r.Location!),
                 () => _toggles.SetTaskEnabled(r.Location!, r.EnabledBefore!.Value)),
-            RecordKind.StartupEntry => SwitchBack(r, $"the startup app {r.Name}", () => _toggles.StartupExists(r.Location!, r.Name!),
+            RecordKind.StartupEntry => SwitchBackNow(r, $"the startup app {r.Name}", () => _toggles.StartupExists(r.Location!, r.Name!),
                 () => _toggles.SetStartupEnabled(r.Location!, r.Name!, r.EnabledBefore!.Value)),
             _ => DeleteShortcut(r),
         };
     }
 
-    /// <summary>Puts a task or startup entry back as it was and removes its record, one at a time with the Services tab's switch.</summary>
-    private UndoResult SwitchBack(ChangeRecord r, string what, Func<bool> exists, Func<string?> set) =>
-        _records.OneSwitchAtATime(() => SwitchBackNow(r, what, exists, set));
-
+    /// <summary>Puts a task or startup entry back as it was and removes its record (in <see cref="Undo"/>'s turn with the Services tab's switch).</summary>
     private UndoResult SwitchBackNow(ChangeRecord r, string what, Func<bool> exists, Func<string?> set)
     {
         bool there;
