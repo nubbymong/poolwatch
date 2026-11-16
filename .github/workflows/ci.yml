@@ -937,14 +937,15 @@ jobs:
           gh release create "$GITHUB_REF_NAME" $files --repo "$GITHUB_REPOSITORY" --title "PoolWatch $GITHUB_REF_NAME" --generate-notes --verify-tag $prerelease \
             || gh release upload "$GITHUB_REF_NAME" $files --repo "$GITHUB_REPOSITORY" --clobber
 
-  # Release, part 3: provenance (a v* tag only), once the release is published. GitHub's attest action signs SLSA build
-  # provenance for the four files the publish job put on the release, by the hashes the sign job took where it made
-  # them, with a short-lived Sigstore certificate issued for this workflow run (no key is kept; the signature is logged
-  # in Sigstore's public transparency log). GitHub keeps the attestation, where gh attestation verify finds it. This job
-  # checks each file on the release against it, and only then attaches it to the release as PoolWatch-<tag>.intoto.jsonl,
-  # the file OpenSSF Scorecard looks for: one Sigstore bundle on one line, the layout the SLSA project's own generator
-  # writes under that name. Last, it checks that the release's copy is that bundle, byte for byte. This job holds no
-  # signing secret, and runs nothing the build made.
+  # Release, part 3: provenance (a v* tag only), once the release is published. First, the job removes the provenance an
+  # earlier run for the tag attached: after a re-run of every job, it names files the release no longer has. GitHub's
+  # attest action then signs SLSA build provenance for the four files the publish job put on the release, by the hashes
+  # the sign job took where it made them, with a short-lived Sigstore certificate issued for this workflow run (no key is
+  # kept; the signature is logged in Sigstore's public transparency log). GitHub keeps the attestation, where gh
+  # attestation verify finds it. This job checks each file on the release against it, and only then attaches it to the
+  # release as PoolWatch-<tag>.intoto.jsonl, the file OpenSSF Scorecard looks for: one Sigstore bundle on one line, the
+  # layout the SLSA project's own generator writes under that name. Last, it checks that the release's copy is that
+  # bundle, byte for byte. This job holds no signing secret, and runs nothing the build made.
   provenance:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [sign, publish]
@@ -955,6 +956,22 @@ jobs:
       attestations: write   # keeping the attestation with GitHub
       contents: write       # attaching it to the release
     steps:
+      - name: Remove the provenance an earlier run attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          name="PoolWatch-$GITHUB_REF_NAME.intoto.jsonl"
+          # A re-run of every job for the tag signs the files anew, which changes their hashes, and publish has put the
+          # new files on the release in place of the old: a bundle an earlier run attached names the old hashes. This
+          # step comes first and removes it, so a run that fails after this step and before its upload leaves the
+          # release with no bundle, not one that its files fail against. The jq program reads the name from the
+          # environment, so the tag is never part of the program; a failed lookup fails the step.
+          found="$(ASSET="$name" gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == env.ASSET) | .name')"
+          if [ -n "$found" ]; then
+            gh release delete-asset "$GITHUB_REF_NAME" "$name" --repo "$GITHUB_REPOSITORY" --yes
+          fi
+
       - name: Write the release files' hashes
         env:
           HASHES: ${{ needs.sign.outputs.hashes }}
@@ -988,8 +1005,8 @@ jobs:
           cp "$BUNDLE" "$RUNNER_TEMP/$name"
           # First each published file, downloaded from the release as anyone gets it, against the bundle: signed by this
           # workflow on a GitHub-hosted runner, for this tag and its commit (so each passes the check docs/TECHNICAL.md
-          # gives users). A file that fails stops the job before the bundle goes on the release, so the release never
-          # carries provenance that its files do not match.
+          # gives users). A file that fails stops the job before the bundle goes on the release, so the job never
+          # attaches a bundle that a release file fails against.
           mkdir "$RUNNER_TEMP/released" "$RUNNER_TEMP/attached"
           cd "$RUNNER_TEMP/released"
           for f in "PoolWatch-$GITHUB_REF_NAME-setup-win-x64.exe" "PoolWatch-$GITHUB_REF_NAME-win-x64.zip" "PoolWatch-$GITHUB_REF_NAME-win-x64-selfcontained.zip" SHA256SUMS.txt; do
@@ -997,8 +1014,8 @@ jobs:
             gh attestation verify "$f" --bundle "$RUNNER_TEMP/$name" --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml" --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
           done
-          # Then the bundle goes on the release. A re-run for the tag replaces the file, as the publish job's re-run
-          # replaces the others.
+          # Then the bundle goes on the release, where the job's first step left none (--clobber replaces one
+          # regardless).
           gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/$name" --repo "$GITHUB_REPOSITORY" --clobber
           # Last, the release's copy, downloaded as anyone gets it, must be the bundle the files passed against, byte for
           # byte.
