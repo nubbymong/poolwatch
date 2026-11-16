@@ -864,23 +864,16 @@ public class UntrustedInputPropertyTests
     /// <summary>
     /// Every setting that is a floating-point number (a double, a float or a Half, or a Nullable one), not only those
     /// above: set to NaN or an infinity of its own type, alone or all at once, it reads as its default, and the settings
-    /// save. A growth alert's window that is NaN drops the alert, and an infinite one is cut to 60 minutes. The growth
-    /// alerts are the only other setting that holds a floating-point number: one held anywhere else (in a list, an array,
-    /// a dictionary, or a property of a type of its own, at any depth) fails this test. So no setting a later build adds
-    /// can keep a number that is not finite unseen.
+    /// save. A growth alert's window that is NaN drops the alert, and an infinite one is cut to 60 minutes. With the next
+    /// test, which finds no other setting that holds a floating-point number, no setting a later build adds can keep a
+    /// number that is not finite unseen.
     /// </summary>
     [Fact]
     public void NoSettingKeepsANumberThatIsNotFinite()
     {
         var defaults = new Settings();
-        var settings = typeof(Settings).GetProperties(BindingFlags.Public | BindingFlags.Instance);
-        var numbers = settings.Where(p => FloatingPoint.Contains(Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType) && p.CanWrite).ToList();
+        var numbers = FloatingPointSettings();
         Assert.True(numbers.Count >= 30, $"only {numbers.Count} settings are floating-point numbers");
-        var others = settings.Where(p => !numbers.Contains(p) && p.Name != nameof(Settings.GrowthRules) && HoldsFloatingPoint(p.PropertyType)).Select(p => p.Name).ToList();
-        Assert.Empty(others); // each would go unchecked
-        // The look finds one wherever it can be held, and only there.
-        Assert.True(HoldsFloatingPoint(typeof(List<GrowthRule>)) && HoldsFloatingPoint(typeof(Half?[])) && HoldsFloatingPoint(typeof(Dictionary<string, float>)));
-        Assert.False(HoldsFloatingPoint(typeof(ServiceProfileSet)) || HoldsFloatingPoint(typeof(TimeSpan)) || HoldsFloatingPoint(typeof(List<string>)));
         foreach (int which in new[] { 0, 1, 2 }) // NaN, plus infinity, minus infinity
         {
             double window = (double)NotFinite(typeof(double), which);
@@ -902,6 +895,29 @@ public class UntrustedInputPropertyTests
             _ = all.ToJson();
         }
     }
+
+    /// <summary>
+    /// The settings the test above sets are the only ones that are a floating-point number, and the growth alerts the only
+    /// other setting that holds one. One held anywhere else (a setting that cannot be set, or a number in a list, an
+    /// array, a dictionary or a property of a type of its own, at any depth) would go unchecked, so it fails this test.
+    /// </summary>
+    [Fact]
+    public void TheGrowthAlertsAreTheOnlyOtherSettingThatHoldsAFloatingPointNumber()
+    {
+        // The look finds one wherever it can be held, and only there.
+        Assert.True(HoldsFloatingPoint(typeof(List<GrowthRule>)) && HoldsFloatingPoint(typeof(Half?[])) && HoldsFloatingPoint(typeof(Dictionary<string, float>)));
+        Assert.False(HoldsFloatingPoint(typeof(ServiceProfileSet)) || HoldsFloatingPoint(typeof(TimeSpan)) || HoldsFloatingPoint(typeof(List<string>)));
+
+        var numbers = FloatingPointSettings().Select(p => p.Name).ToHashSet();
+        var others = typeof(Settings).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => !numbers.Contains(p.Name) && p.Name != nameof(Settings.GrowthRules) && HoldsFloatingPoint(p.PropertyType)).Select(p => p.Name).ToList();
+        Assert.Empty(others);
+    }
+
+    /// <summary>Every setting that is a floating-point number, or a Nullable one, and can be set.</summary>
+    private static List<PropertyInfo> FloatingPointSettings() =>
+        typeof(Settings).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => FloatingPoint.Contains(Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType) && p.CanWrite).ToList();
 
     /// <summary>The floating-point types: each has NaN and the two infinities.</summary>
     private static readonly Type[] FloatingPoint = [typeof(double), typeof(float), typeof(Half)];
