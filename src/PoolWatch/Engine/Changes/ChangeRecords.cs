@@ -39,6 +39,8 @@ internal sealed class ChangeRecords
     /// them back as they are, after the records it reads, so none is lost.
     /// </summary>
     private IReadOnlyList<string> _unread = [];
+    /// <summary>How many of <see cref="_unread"/> are a second record for a target already read, as last read.</summary>
+    private int _duplicates;
 
     /// <summary>Reads the file once for <see cref="Has"/> (tests use this to read it again, as a restart would).</summary>
     internal ChangeRecords(AppPaths paths, Log log)
@@ -68,12 +70,19 @@ internal sealed class ChangeRecords
     /// <see cref="All()"/>, and, from the same read, how many entries of the file this build cannot read
     /// (<paramref name="unread"/>: damaged, or a newer PoolWatch's), which stay in the file as they are.
     /// </summary>
-    public IReadOnlyList<ChangeRecord> All(out int unread)
+    public IReadOnlyList<ChangeRecord> All(out int unread) => All(out unread, out _);
+
+    /// <summary>
+    /// <see cref="All(out int)"/>, and how many of those entries are a second record for a target already read
+    /// (<paramref name="duplicates"/>), which is read once the first is put back.
+    /// </summary>
+    public IReadOnlyList<ChangeRecord> All(out int unread, out int duplicates)
     {
         lock (_lock)
         {
             var records = Read();
             unread = _unread.Count;
+            duplicates = _duplicates;
             return records;
         }
     }
@@ -395,11 +404,12 @@ internal sealed class ChangeRecords
             json = ReadPlainFile(_paths.DataRoot, _paths.Guard.CheckReal(FilePath), ChangeRecordFile.MaxBytes)
                    ?? throw Unreadable($"it is over {ChangeRecordFile.MaxBytes >> 20} MB");
         }
-        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { _unread = []; return _records = []; }
-        var records = ChangeRecordFile.Parse(json, out IReadOnlyList<string> unread) ?? throw (string.IsNullOrWhiteSpace(json)
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { _unread = []; _duplicates = 0; return _records = []; }
+        var records = ChangeRecordFile.Parse(json, out IReadOnlyList<string> unread, out int duplicates) ?? throw (string.IsNullOrWhiteSpace(json)
             ? Unreadable("it is empty, as a power cut can leave a file", "restore it from a backup")
             : Unreadable("it is damaged, or a newer PoolWatch wrote it"));
         _unread = unread;
+        _duplicates = duplicates;
         return _records = records;
     }
 

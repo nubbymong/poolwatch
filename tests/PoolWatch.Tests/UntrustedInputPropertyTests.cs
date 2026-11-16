@@ -821,6 +821,77 @@ public class UntrustedInputPropertyTests
         Assert.Equal(hi, Read(hi.ToString(CultureInfo.InvariantCulture)));
     }
 
+    /// <summary>
+    /// The settings that kept NaN: the Advanced settings' grid reads typed text with .NET's number converter, which takes
+    /// "NaN", and Math.Clamp gives NaN back as it is, so the setting stayed NaN and the next save failed (JSON holds no
+    /// NaN). Each now reads as its default, and so does an infinity (which the clamp alone sent to the nearer end), and
+    /// the settings save. The probe's interval keeps its own rule that 0 turns it off.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(Settings.SampleIntervalSeconds), 1.0, 300.0)]
+    [InlineData(nameof(Settings.HandleIntervalSeconds), 5.0, 3600.0)]
+    [InlineData(nameof(Settings.ServiceIntervalSeconds), 5.0, 3600.0)]
+    [InlineData(nameof(Settings.SpawnStormWindowSeconds), 5.0, 600.0)]
+    [InlineData(nameof(Settings.ShortLivedSeconds), 0.1, 600.0)]
+    [InlineData(nameof(Settings.StrayGitCheckMinutes), 1.0, 1440.0)]
+    [InlineData(nameof(Settings.TokenBucketSeconds), 1.0, 3600.0)]
+    [InlineData(nameof(Settings.LagProbeSeconds), 2.0, 600.0)]
+    [InlineData(nameof(Settings.LagAlertRatio), 1.5, 1000.0)]
+    [InlineData(nameof(Settings.TokenWindowMinutes), 1.0, 1440.0)]
+    public void ASettingThatIsNotAFiniteNumberReadsAsItsDefault(string name, double lo, double hi)
+    {
+        var property = typeof(Settings).GetProperty(name)!;
+        double expected = (double)property.GetValue(new Settings())!;
+        foreach (double notFinite in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+        {
+            var settings = new Settings();
+            property.SetValue(settings, notFinite);
+            settings.Normalize();
+            double value = (double)property.GetValue(settings)!;
+            Assert.InRange(value, lo, hi);
+            Assert.Equal(expected, value);
+            string saved = settings.ToJson(); // throws on a NaN or an infinity
+            Assert.Equal(expected, (double)property.GetValue(Settings.Parse(saved, explicitConfig: true))!);
+        }
+        if (name == nameof(Settings.LagProbeSeconds))
+        {
+            var off = new Settings { LagProbeSeconds = -1 };
+            off.Normalize();
+            Assert.Equal(0.0, off.LagProbeSeconds); // still off
+        }
+    }
+
+    /// <summary>
+    /// Every number setting with a fraction, not only those above: set to NaN or an infinity, alone or all at once, it
+    /// reads as its default, and the settings save. A growth alert's window that is NaN drops the alert, and an infinite
+    /// one is cut to 60 minutes. So no setting a later build adds can keep a number that is not finite unseen.
+    /// </summary>
+    [Fact]
+    public void NoSettingKeepsANumberThatIsNotFinite()
+    {
+        var defaults = new Settings();
+        var numbers = typeof(Settings).GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(p => p.PropertyType == typeof(double) && p.CanWrite).ToList();
+        Assert.True(numbers.Count >= 30, $"only {numbers.Count} settings are numbers with a fraction");
+        foreach (double notFinite in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+        {
+            var all = new Settings { GrowthRules = [new(double.NaN, 5), new(notFinite, 7)] };
+            foreach (var p in numbers)
+            {
+                var one = new Settings();
+                p.SetValue(one, notFinite);
+                p.SetValue(all, notFinite);
+                one.Normalize();
+                Assert.True(p.GetValue(defaults)!.Equals(p.GetValue(one)), $"{p.Name} set to {notFinite} is {p.GetValue(one)}, not its default {p.GetValue(defaults)}");
+                _ = one.ToJson();
+            }
+            all.Normalize();
+            foreach (var p in numbers) Assert.True(p.GetValue(defaults)!.Equals(p.GetValue(all)), $"{p.Name} with every number set to {notFinite} is {p.GetValue(all)}");
+            (double, long)[] rules = double.IsPositiveInfinity(notFinite) ? [(60.0, 7L)] : [];
+            Assert.Equal(rules, all.GrowthRules.Select(r => (r.WindowMinutes, r.Bytes)));
+            _ = all.ToJson();
+        }
+    }
+
     /// <summary>The bounds the settings' descriptions give, which the overhead budget and the elevated app's reads rely on.</summary>
     private static void WithinBounds(Settings s)
     {

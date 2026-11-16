@@ -99,9 +99,18 @@ public static class ChangeRecordFile
     /// of a removed task's definition, so ChangeRecords writes them back after its records. Empty when the file is not
     /// read at all.
     /// </summary>
-    public static List<ChangeRecord>? Parse(string json, out IReadOnlyList<string> unread)
+    public static List<ChangeRecord>? Parse(string json, out IReadOnlyList<string> unread) => Parse(json, out unread, out _);
+
+    /// <summary>
+    /// <see cref="Parse(string, out IReadOnlyList{string})"/>, and how many of the entries left out are a second record for
+    /// a target already read (<paramref name="duplicates"/>): valid, and read once the first is gone (put back), as a save
+    /// writes the entries left out after the records, so the first stays first. Active changes says so of them, not that
+    /// they are damaged.
+    /// </summary>
+    public static List<ChangeRecord>? Parse(string json, out IReadOnlyList<string> unread, out int duplicates)
     {
         unread = [];
+        duplicates = 0;
         var list = new List<ChangeRecord>();
         if (string.IsNullOrWhiteSpace(json)) return null;
         if (Encoding.UTF8.GetByteCount(json) > MaxBytes) return null;
@@ -117,6 +126,7 @@ public static class ChangeRecordFile
                 changes.ValueKind != JsonValueKind.Array) return null;
             var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var left = new List<string>();
+            int second = 0;
             foreach (var e in changes.EnumerateArray())
             {
                 ChangeRecord? r = null;
@@ -125,14 +135,19 @@ public static class ChangeRecordFile
                     try { r = e.Deserialize<ChangeRecord>(Json); }
                     catch (JsonException) { } // a missing field or an unknown kind: this record only
                 }
-                if (r is not null && Invalid(r) is null && ids.Add(r.Id)) list.Add(r);
-                else left.Add(e.GetRawText());
+                if (r is not null && Invalid(r) is null)
+                {
+                    if (ids.Add(r.Id)) { list.Add(r); continue; }
+                    second++; // a second record for a target already read
+                }
+                left.Add(e.GetRawText());
             }
             unread = left;
+            duplicates = second;
         }
         // InvalidOperationException: a field's name that holds half of a surrogate pair written as an escape ("\ud800")
         // throws when it is compared with the name looked for.
-        catch (Exception ex) when (ex is JsonException or InvalidOperationException) { unread = []; return null; }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException) { unread = []; duplicates = 0; return null; }
         return list;
     }
 

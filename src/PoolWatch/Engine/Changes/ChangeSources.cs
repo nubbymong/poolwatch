@@ -250,15 +250,15 @@ internal sealed class RecordedSource : IChangeSource
     }
 
     /// <summary>
-    /// Each record, and, when the list holds entries this build cannot read (damaged, or a newer PoolWatch's), one row for
-    /// them (<see cref="UnreadEntries"/>): they stay in the list as they are and cannot be put back from here, so Put all
-    /// back and the uninstaller report them as not put back, and the uninstaller keeps the data folder that holds them,
-    /// instead of leaving them out.
+    /// Each record, and, when the list holds entries this build cannot read (damaged, a newer PoolWatch's, or a second
+    /// record for a change already listed), one row for them (<see cref="UnreadEntries"/>): they stay in the list as they
+    /// are and cannot be put back from here, so Put all back and the uninstaller report them as not put back, and the
+    /// uninstaller keeps the data folder that holds them, instead of leaving them out.
     /// </summary>
     public IEnumerable<ActiveChange> List()
     {
-        var rows = _records.All(out int unread).Select(Row).ToList();
-        if (unread > 0) rows.Add(UnreadEntries(unread));
+        var rows = _records.All(out int unread, out int duplicates).Select(Row).ToList();
+        if (unread > 0) rows.Add(UnreadEntries(unread, duplicates));
         return rows;
     }
 
@@ -270,14 +270,37 @@ internal sealed class RecordedSource : IChangeSource
     /// <summary>
     /// The row for the <paramref name="count"/> entries of the list this build cannot read, which cannot be put back; with
     /// the shortcuts, as <see cref="Unread"/> is (the two are never listed together: a list that cannot be read at all
-    /// lists only that row).
+    /// lists only that row). Its note says what they are (<see cref="UnreadWhy"/>).
     /// </summary>
-    internal static ActiveChange UnreadEntries(int count) =>
+    /// <param name="duplicates">How many of them are a second record for a change already listed.</param>
+    internal static ActiveChange UnreadEntries(int count, int duplicates = 0) =>
         new("unread:applied-changes", ChangeKind.Shortcut, null,
             ChangeWords.Unread($"{count} {(count == 1 ? "change" : "changes")} in its list of clear tasks, scheduled tasks, startup apps and shortcuts"), false,
-            ChangeWords.UnreadNote(count == 1
+            ChangeWords.UnreadNote(UnreadWhy(count, duplicates)));
+
+    /// <summary>
+    /// What the entries not read are: a second record of a change already listed is kept and is listed once the first is
+    /// put back; any other is damaged, or a newer PoolWatch made it.
+    /// </summary>
+    internal static string UnreadWhy(int count, int duplicates)
+    {
+        int others = count - duplicates;
+        if (duplicates <= 0)
+            return count == 1
                 ? "That change is damaged, or a newer PoolWatch made it. It is kept in the list as it is: the newest PoolWatch may be able to put it back."
-                : $"Those {count} changes are damaged, or a newer PoolWatch made them. They are kept in the list as they are: the newest PoolWatch may be able to put them back."));
+                : $"Those {count} changes are damaged, or a newer PoolWatch made them. They are kept in the list as they are: the newest PoolWatch may be able to put them back.";
+        if (others <= 0)
+            return count == 1
+                ? "That change is a second record of a change already listed. It is kept in the list as it is, and is listed once the first is put back."
+                : $"Those {count} changes are second records of changes already listed. They are kept in the list as they are, and each is listed once the record before it is put back.";
+        return "They are kept in the list as they are. " +
+            (duplicates == 1
+                ? "One of them is a second record of a change already listed: it is listed once the first is put back. "
+                : $"{duplicates} of them are second records of changes already listed: each is listed once the record before it is put back. ") +
+            (others == 1
+                ? "The other is damaged, or a newer PoolWatch made it: the newest PoolWatch may be able to put it back."
+                : $"The other {others} are damaged, or a newer PoolWatch made them: the newest PoolWatch may be able to put them back.");
+    }
 
     private ActiveChange Row(ChangeRecord r)
     {

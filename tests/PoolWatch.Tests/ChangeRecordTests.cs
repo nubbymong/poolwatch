@@ -124,7 +124,8 @@ public class ChangeRecordTests
     /// Every entry of the list that is not read is counted and kept, whatever the reason, not only one that cannot be
     /// read as a record at all: a record that fails its checks (here its id does not match its target; a removed task's
     /// definition over 64 KB is another), a second record for a target, and a record past the 500 a file is read for.
-    /// A save of the records read alone would lose each of them.
+    /// A save of the records read alone would lose each of them. Only the second record is counted as one, which Active
+    /// changes says is listed once the first is put back, not that it is damaged.
     /// </summary>
     [Theory]
     [InlineData("its id does not match its target")]
@@ -148,6 +149,24 @@ public class ChangeRecordTests
         string entry = Assert.Single(kept);
         Assert.Equal(records[^1], System.Text.Json.JsonSerializer.Deserialize<ChangeRecord>(entry, ReadAsWritten)); // its text, as in the file
         Assert.Contains(entry, json);
+        Assert.Equal(records[..^1], ChangeRecordFile.Parse(json, out IReadOnlyList<string> again, out int duplicates));
+        Assert.Equal(kept, again);
+        Assert.Equal(why == "the same record twice" ? 1 : 0, duplicates);
+    }
+
+    /// <summary>A second record for a target that says another thing (another state before, a later time) is one too.</summary>
+    [Fact]
+    public void ASecondRecordForATargetIsCountedAsOneWhateverItSays()
+    {
+        var first = Task();
+        var second = first with { EnabledBefore = false, ChangedUtc = When.AddMinutes(5) };
+        string json = ChangeRecordFile.ToJson([first, second, Startup(), Task() with { Id = @"task:\Other" }]);
+
+        Assert.Equal([first, Startup()], ChangeRecordFile.Parse(json, out IReadOnlyList<string> kept, out int duplicates));
+        Assert.Equal(2, kept.Count);
+        Assert.Equal(1, duplicates); // the entry whose id does not match its target is not one
+        Assert.Null(ChangeRecordFile.Parse("{}", out _, out int none));
+        Assert.Equal(0, none);
     }
 
     /// <summary>The entries a file could not be read for are written back after its records exactly as they were, so a save loses none of them.</summary>

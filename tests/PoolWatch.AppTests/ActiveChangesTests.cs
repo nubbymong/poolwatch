@@ -170,6 +170,37 @@ public sealed class ActiveChangesTests : IDisposable
         Assert.Equal(["RemovedClearTask confirmed"], calls); // your yes to the warning you saw
     }
 
+    /// <summary>
+    /// A row is put back only while the record behind its id is the one it showed: what it says and when it was made, not
+    /// only its warning. The list can hold a second record for one startup app, kept unread while the window was drawn
+    /// and read once the first is put back (turning the app on in the Services tab does that), and with the same id: the
+    /// stale row "Turned off the startup app Helper" would put back the second, "Turned on", and turn the app off. It is
+    /// left for the next look instead, by Put back and by Put all back, when either of the two differs.
+    /// </summary>
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void AStaleRowNeverPutsBackAnotherRecordWithItsId(bool otherWords, bool otherTime)
+    {
+        var first = new ActiveChange(ChangeIds.StartupEntry("HKCU Run", "Helper"), ChangeKind.StartupEntry, new DateTime(2026, 11, 16, 9, 0, 0, DateTimeKind.Utc),
+            ChangeWords.StartupEntry("Helper", enabledNow: false), CanUndo: true, Note: null);
+        var second = first with
+        {
+            What = otherWords ? ChangeWords.StartupEntry("Helper", enabledNow: true) : first.What,
+            ChangedUtc = otherTime ? first.ChangedUtc?.AddMinutes(5) : first.ChangedUtc,
+        };
+        var calls = new List<string>();
+        var now = Ledger(new Source(calls, second));
+
+        Assert.Equal((ActiveChangesView.ChangedSinceShown, false), ActiveChangesView.PutBackOne(now, first));
+        Assert.Empty(calls);
+        Assert.Equal("There was nothing to put back.", ActiveChangesView.PutAllBack(now, ActiveChangesView.PutAllBackPlan([first], _ => true)).Text);
+        Assert.Empty(calls);
+        Assert.Equal(("back", true), ActiveChangesView.PutBackOne(Ledger(new Source(calls, first)), first)); // as it was shown, it is put back
+        Assert.Equal([first.Id], calls);
+    }
+
     // ---------------------------------------------------------------- what each row says
 
     [Fact]

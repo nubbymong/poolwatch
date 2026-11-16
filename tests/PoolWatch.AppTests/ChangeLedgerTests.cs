@@ -580,6 +580,73 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.Contains(unread, File.ReadAllText(file)); // the entry stays
     }
 
+    /// <summary>
+    /// The list with two records for one startup app: the first, that PoolWatch turned it off, and a second, later, that
+    /// PoolWatch turned it on (a newer PoolWatch can save one next to one this build saved). The app is off, as the first left it.
+    /// </summary>
+    private (ChangeRecord First, ChangeRecord Second) TwoRecordsForOneApp()
+    {
+        var first = ChangeRecordFixtures.Startup();
+        var second = first with { EnabledBefore = false, ChangedUtc = first.ChangedUtc.AddMinutes(5), Via = "a newer PoolWatch" };
+        File.WriteAllText(Path.Combine(_f.Paths.DataRoot, "applied-changes.json"), ChangeRecordFile.ToJson([first, second]));
+        _f.Toggles.Startup[@"HKCU Run\Helper"] = false;
+        return (first, second);
+    }
+
+    /// <summary>
+    /// A second record for a change already listed is kept as every entry not read is, and its row says what it is, not
+    /// that it is damaged or a newer PoolWatch's: it is listed once the first is put back, and then it is. With other
+    /// entries not read, the note says each kind.
+    /// </summary>
+    [Fact]
+    public void ASecondRecordForAChangeAlreadyListedSaysSoAndIsListedOnceTheFirstIsPutBack()
+    {
+        var (first, second) = TwoRecordsForOneApp();
+        var ledger = new ChangeLedger([_f.Recorded(_f.Live())], _f.Records, _f.Log);
+
+        var rows = ledger.List();
+        Assert.Equal(2, rows.Count);
+        var kept = Assert.Single(rows, r => !r.CanUndo);
+        Assert.Contains("That change is a second record of a change already listed. It is kept in the list as it is, and is listed once the first is put back.", kept.Note);
+        Assert.DoesNotContain("damaged", kept.Note);
+        var shown = Assert.Single(rows, r => r.CanUndo);
+        Assert.Equal(ChangeWords.Of(first), shown.What);
+
+        Assert.Equal(("Turned the startup app Helper back on.", true), Ui.ActiveChangesView.PutBackOne(ledger, shown));
+        Assert.True(_f.Toggles.Startup[@"HKCU Run\Helper"]);
+        var now = Assert.Single(ledger.List()); // the second record, read now; no entry is left unread
+        Assert.Equal((second.Id, ChangeWords.Of(second), true), (now.Id, now.What, now.CanUndo));
+
+        string both = RecordedSource.UnreadEntries(3, duplicates: 1).Note!;
+        Assert.Contains("One of them is a second record of a change already listed: it is listed once the first is put back.", both);
+        Assert.Contains("The other 2 are damaged, or a newer PoolWatch made them", both);
+        Assert.Contains("Those 2 changes are second records of changes already listed.", RecordedSource.UnreadEntries(2, duplicates: 2).Note);
+        Assert.DoesNotContain("second record", RecordedSource.UnreadEntries(2).Note);
+    }
+
+    /// <summary>
+    /// Active changes drew its row from the first record; then the app was turned on in the Services tab, which takes the
+    /// first record back, so the second is read under the same id. Put back on the row drawn before finds a record that
+    /// says another thing and was made at another time, and leaves it for the next look: putting the second back would
+    /// turn the app off, the opposite of what the row said.
+    /// </summary>
+    [Fact]
+    public void ARowDrawnBeforeTheFirstRecordWentNeverPutsBackTheSecond()
+    {
+        var (_, second) = TwoRecordsForOneApp();
+        var ledger = new ChangeLedger([_f.Recorded(_f.Live())], _f.Records, _f.Log);
+        var shown = Assert.Single(ledger.List(), r => r.CanUndo);
+
+        string? notSwitched = _f.Records.Toggle(ChangeKind.StartupEntry, "HKCU Run", "Helper", enable: true, "the Services tab",
+            () => { _f.Toggles.Startup[@"HKCU Run\Helper"] = true; return null; });
+        Assert.Null(notSwitched);
+        Assert.Equal([second], _f.Records.All()); // back as it was: the first record went, and the second is read
+
+        Assert.Equal((Ui.ActiveChangesView.ChangedSinceShown, false), Ui.ActiveChangesView.PutBackOne(ledger, shown));
+        Assert.Empty(_f.Toggles.Calls);
+        Assert.True(_f.Toggles.Startup[@"HKCU Run\Helper"]); // still on, as it was turned
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData(" \r\n")]

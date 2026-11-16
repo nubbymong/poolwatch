@@ -521,16 +521,22 @@ internal static class ActiveChangesView
     internal const string ChangedSinceShown = "This change is no longer as the window showed it, so PoolWatch left it as it is. Look at the list again.";
 
     /// <summary>
-    /// The put-back filter: only the changes the window showed, each as it was shown (its warning, and whether it could be
-    /// put back), so one made or changed since (with a warning you never saw, or one Put all back's question listed as
-    /// not possible) waits for the next look. Every warning it lets through was accepted, so the put-back confirms.
+    /// The put-back filter: only the changes the window showed, each as it was shown (its warning, whether it could be put
+    /// back, what it says and when it was made), so one made or changed since waits for the next look: one with a warning
+    /// you never saw, one Put all back's question listed as not possible, and another record for the same thing, such as
+    /// a second record that was kept unread while the window was drawn and is read once the first is put back (from the
+    /// Services tab, say), whose put-back may do the opposite of what the row said. Every warning it lets through was
+    /// accepted, so the put-back confirms.
     /// </summary>
     internal static Func<ActiveChange, bool> AsShown(IEnumerable<ActiveChange> shown)
     {
-        var asShown = new Dictionary<string, (string? Warning, bool CanUndo)>();
-        foreach (var c in shown) asShown.TryAdd(c.Id, (c.Warning, c.CanUndo));
-        return c => asShown.TryGetValue(c.Id, out var was) && was == (c.Warning, c.CanUndo);
+        var asShown = new Dictionary<string, (string? Warning, bool CanUndo, string What, DateTime? ChangedUtc)>();
+        foreach (var c in shown) asShown.TryAdd(c.Id, Seen(c));
+        return c => asShown.TryGetValue(c.Id, out var was) && was == Seen(c);
     }
+
+    /// <summary>What of a row a put-back must find as the window showed it (<see cref="AsShown"/>).</summary>
+    private static (string? Warning, bool CanUndo, string What, DateTime? ChangedUtc) Seen(ActiveChange c) => (c.Warning, c.CanUndo, c.What, c.ChangedUtc);
 
     /// <summary>
     /// Each change Put all back went through, with what happened to it: the ones not done first, so they are the last to

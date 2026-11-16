@@ -1811,9 +1811,11 @@ folder, so every window and the tray write through one object. The list of chang
 through the link guard, and read again before every change and every listing, never written over from an old copy.
 A record this build cannot read (damaged, or a newer PoolWatch's) is kept as its text in the file and written back as
 it is after the records it reads, so a save never loses it (it counts toward the 500); the records it can read are
-still recorded, listed and put back, each put-back removing its own record. While the list holds such records, Active
-changes lists one more row, which says how many and that they are kept, and cannot be put back: Put all back reports
-it as not done, the uninstaller's cleanup does not end with 0, and the uninstaller keeps the data folder.
+still recorded, listed and put back, each put-back removing its own record. A second record for a change already
+listed (a newer PoolWatch can save one next to one this build saved) is kept the same way, and read once the first is
+put back. While the list holds such records, Active changes lists one more row, which says how many, what they are
+(a second record, or damaged or a newer PoolWatch's) and that they are kept, and cannot be put back: Put all back
+reports it as not done, the uninstaller's cleanup does not end with 0, and the uninstaller keeps the data folder.
 Every record is read as untrusted (bounded, every field validated) and checked against the live system right before it
 is acted on: a shortcut must be a `.lnk` directly in the user's Desktop or Start-menu Programs folder; a task
 definition must parse with DTDs prohibited, be at most 64 KB, carry no access rules of its own, have only actions that
@@ -2018,10 +2020,13 @@ then as Turn off leaves it (`ServicePlan.IsOff`).
 **Put all back** asks once, listing every change and every caveat (the warning of the profile applied at start once, at
 the end, for all its services); every other change with a warning is then asked about on its own, and only the changes
 the question showed are put back, in a fixed order: the shortcut, startup apps, scheduled tasks, services, the
-automatic clear, a removed clear task, the token-leak guard, the sign-in task. It never stops at a failure, and its
-results list what was not done first. Listing and putting back touch COM, the service manager and the registry, so they
-run off the UI thread; the window reads the list only when it opens and after a change, and each change writes a line
-on the timeline.
+automatic clear, a removed clear task, the token-leak guard, the sign-in task. Put all back and a row's own button put
+a change back only while it is as the window showed it (`ActiveChangesView.AsShown`): its warning, whether it can be
+put back, what it says and when it was made. One that changed since waits for the next look, as does a second record
+for the same change read since the window was drawn, which has the first one's id. Put all back never stops at a
+failure, and its results list what was not done first. Listing and putting back touch COM, the service manager and the
+registry, so they run off the UI thread; the window reads the list only when it opens and after a change, and each
+change writes a line on the timeline.
 
 Not listed: cache clears that already ran (the cache refills by itself), programs the user ended, PoolWatch's own data
 folder, the older PoolWatch clear-cache tasks it removes by itself (its own unused leftovers), and task or startup
