@@ -153,7 +153,7 @@ public static class ChangeRecordFile
             w.WriteNumber("version", Version);
             w.WriteStartArray("changes");
             foreach (var r in records) JsonSerializer.Serialize(w, r, Json);
-            _ = unread;
+            foreach (string entry in unread) w.WriteRawValue(entry); // checked to be one JSON value, then copied as it is
             w.WriteEndArray();
             w.WriteEndObject();
         }
