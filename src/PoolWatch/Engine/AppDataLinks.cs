@@ -881,7 +881,7 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
         if (r.Kind == RecordKind.PathEntry)
         {
             var scope = EnvScopes.Parse(r.Location)!.Value;
-            string where = ChangeWords.PathOf(r.Location), before = r.Before!.Trim();
+            string where = ChangeWords.PathOf(r.Location), original = r.Before!.Trim();
             EnvValue? now;
             try { now = store.Read(scope, AppDataLinkFinder.PathName); }
             catch (Exception ex) { return new(false, $"PoolWatch could not read {where}: {ex.Message}"); }
@@ -890,8 +890,8 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
             {
                 changes.Remove(r);
                 string nothing = $"{where} no longer holds {r.After}, the folder PoolWatch wrote, so PoolWatch wrote nothing" +
-                                 (now is { } v && PathList.Holds(v.Text, r.Before!) ? $": {before} is on it again"
-                                                                                      : $": you can add {before} again in Windows' Environment Variables window");
+                                 (now is { } v && PathList.Holds(v.Text, r.Before!) ? $": {original} is on it again"
+                                                                                      : $": you can add {original} again in Windows' Environment Variables window");
                 return new(true, Capital(nothing) + ".") { Caveat = nothing };
             }
             if (at == PathList.Twice)
@@ -901,13 +901,13 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
             // entry is there once.
             bool again = PathList.Holds(value.Text, r.Before!);
             string? next = again ? PathList.Remove(value.Text, at, r.After!) : PathList.PutBack(value.Text, at, r.After!, r.Before!);
-            if (next is null) return new(false, $"PoolWatch could not put {before} back on {where}: the PATH would be longer than Windows allows.");
+            if (next is null) return new(false, $"PoolWatch could not put {original} back on {where}: the PATH would be longer than Windows allows.");
             if (store.Write(scope, AppDataLinkFinder.PathName, value, new EnvValue(next, value.Expand)) is { } error)
                 return new(false, $"PoolWatch could not put the entry back on {where}: {error}.");
             try { store.Broadcast(); } catch (Exception) { } // put back either way; programs started later read the registry
             changes.Remove(r);
-            if (!again) return new(true, $"Put {before} back on {where}. " + LinkWords.Restart);
-            string once = $"{before} was on {where} again already, so PoolWatch took out {r.After}, the folder it had written, rather than add the " +
+            if (!again) return new(true, $"Put {original} back on {where}. " + LinkWords.Restart);
+            string once = $"{original} was on {where} again already, so PoolWatch took out {r.After}, the folder it had written, rather than add the " +
                           "entry a second time";
             return new(true, Capital(once) + ". " + LinkWords.Restart) { Caveat = once };
         }
