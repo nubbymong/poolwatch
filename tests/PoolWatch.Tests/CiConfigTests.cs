@@ -30,12 +30,16 @@ public sealed class CiConfigTests
     public void TheUiTestRunsWithTheEndToEndScenariosThresholdsAndTheHourlyClear()
     {
         // ci/m4-ui.ps1: the Simple view's line shows a schedule and Active changes lists a setting; the rest is as in m2-config.json.
+        // The hourly clear comes with its urgent clear, as on a new install: a --config file that does not name it reads
+        // it off, so the file names it (Settings' box and the Active changes row show it on).
         var ui = Config("ui-config.json");
         Assert.True(ui.AutoClearEnabled);
         Assert.Equal(1, ui.AutoClearEveryHours);
+        Assert.True(ui.AutoClearUrgent);
         var m2 = Config("m2-config.json");
         m2.AutoClearEnabled = true;
         m2.AutoClearEveryHours = 1;
+        m2.AutoClearUrgent = true;
         // The UI test is the run at the default record mode (it checks Reports only writes no day's files); the scenarios
         // that read the day's files record them.
         Assert.Equal((RecordMode.ReportsOnly, RecordMode.Detailed), (ui.RecordMode, m2.RecordMode));

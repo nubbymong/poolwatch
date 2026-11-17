@@ -348,25 +348,39 @@ public sealed class OlderSettingsFileTests : IDisposable
     /// <summary>
     /// A file that has the urgent clear (saved by a build that had it, or set in Settings) is read as written and never
     /// asked about, on or off; nor is a new install (no file), whose urgent clear is on to begin with and setup's switch
-    /// decides; nor a --config file, which is read exactly as written (the default, on, when it does not say). Once the
-    /// urgent clear is on, nothing is left to ask. That it is still to be chosen is written only while it is.
+    /// decides. A --config file is never asked either: it is read-only, so no answer could be kept. One that does not name
+    /// the urgent clear reads it off, so pointing --config at a settings.json that 1.0.0 wrote, with automatic clearing on,
+    /// never turns the urgent clear on unasked; one that names it reads it as written; and one that holds the mark that it
+    /// is still to be chosen is not asked for that. Once the urgent clear is on, nothing is left to ask. That it is still
+    /// to be chosen is written only while it is.
     /// </summary>
     [Fact]
     public void AFileWithTheUrgentClearANewInstallAndAConfigFileAreNeverAsked()
     {
+        const string Mode = "  \"autoClearMode\": \"auto\",\n";
         foreach (bool urgent in new[] { true, false })
         {
-            const string Mode = "  \"autoClearMode\": \"auto\",\n";
             string file = ReleaseFile(clearing: true).Replace(Mode, Mode + $"  \"autoClearUrgent\": {(urgent ? "true" : "false")},\n", StringComparison.Ordinal);
             Assert.Contains("\"autoClearUrgent\"", file);
             var s = Settings.Parse(file);
             Assert.Equal((urgent, false, false), (s.AutoClearUrgent, s.AutoClearUrgentAsk, s.UrgentClearToAsk()));
+            var named = Settings.Parse(file, explicitConfig: true);
+            Assert.Equal((urgent, false, false), (named.AutoClearUrgent, named.AutoClearUrgentAsk, named.UrgentClearToAsk()));
         }
         var fresh = Settings.Load(Path.Combine(_dir, "none", "settings.json"));
         Assert.Equal((true, false, false), (fresh.AutoClearUrgent, fresh.AutoClearUrgentAsk, fresh.UrgentClearToAsk()));
         Assert.DoesNotContain("autoClearUrgentAsk", new Settings().ToJson());
         var config = Settings.Parse(ReleaseFile(clearing: true), explicitConfig: true);
-        Assert.Equal((true, false, false), (config.AutoClearUrgent, config.AutoClearUrgentAsk, config.UrgentClearToAsk()));
+        Assert.Equal((false, false, false), (config.AutoClearUrgent, config.AutoClearUrgentAsk, config.UrgentClearToAsk()));
+        string path = Path.Combine(_dir, "config.json");
+        File.WriteAllText(path, ReleaseFile(clearing: true));
+        var loaded = Settings.Load(path, explicitConfig: true); // as --config reads it
+        Assert.Equal((false, false, true), (loaded.AutoClearUrgent, loaded.UrgentClearToAsk(), loaded.AutoClearEnabled));
+        string marked = ReleaseFile(clearing: true).Replace(Mode, Mode + "  \"autoClearUrgentAsk\": true,\n", StringComparison.Ordinal);
+        Assert.Contains("\"autoClearUrgentAsk\"", marked);
+        var markedConfig = Settings.Parse(marked, explicitConfig: true);
+        Assert.Equal((false, false, false), (markedConfig.AutoClearUrgent, markedConfig.AutoClearUrgentAsk, markedConfig.UrgentClearToAsk()));
+        Assert.True(Settings.Parse(marked).UrgentClearToAsk()); // the control: the same file as settings.json is asked
         // Turned on (Settings' box, the Advanced settings), it is chosen.
         var upgraded = Settings.Parse(ReleaseFile(clearing: true));
         upgraded.AutoClearUrgent = true;

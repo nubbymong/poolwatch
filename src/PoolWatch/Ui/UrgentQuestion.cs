@@ -104,7 +104,8 @@ internal sealed class UrgentQuestionWindow : Form
 
     /// <param name="alertBytes">The non-paged alert's level, as setup's switch says it ("over 5 GB").</param>
     /// <param name="answered">The answer, once: null when the window closed without one.</param>
-    public UrgentQuestionWindow(long alertBytes, Action<UrgentAnswer?> answered)
+    /// <param name="clock">The tests: a clock they move on (not read yet).</param>
+    public UrgentQuestionWindow(long alertBytes, Action<UrgentAnswer?> answered, Func<long>? clock = null)
     {
         _answered = answered;
         Icon = TrayIcons.App;
@@ -158,6 +159,15 @@ internal sealed class UrgentQuestionWindow : Form
 
     /// <summary>The button of an answer (the tests).</summary>
     internal Button ButtonFor(UrgentAnswer answer) => _buttons[answer];
+
+    /// <summary>How much longer the buttons are held (none held yet).</summary>
+    internal TimeSpan HeldFor => TimeSpan.Zero;
+
+    /// <summary>Whether the hold's timer runs (none yet).</summary>
+    internal bool HoldRunning => false;
+
+    /// <summary>The hold's timer went off (nothing held yet).</summary>
+    internal void HoldEnds() { }
 
     /// <summary>An answer's button: the answer, once, then the window closes.</summary>
     internal void Press(UrgentAnswer answer)

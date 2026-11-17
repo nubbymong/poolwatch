@@ -200,6 +200,12 @@ public class AdvancedSettingsTests
         var rules = new Settings { GrowthRules = [new(120, 5), new(60, 7), new(0, 5), new(10, 0)] };
         rules.Normalize();
         Assert.Equal([(60.0, 5L), (60.0, 7L)], rules.GrowthRules.Select(r => (r.WindowMinutes, r.Bytes)));
+
+        // The urgent clear's limits, as its tooltip in Settings says them: 10 minutes apart at least, and the wait after one
+        // that freed little; on by default, and off after an upgrade until it is chosen.
+        string urgent = Describe(nameof(Settings.AutoClearUrgent));
+        Assert.Contains("10 minutes or more apart, waiting after one that freed little.", urgent);
+        Assert.Contains("On by default; off after an upgrade until chosen.", urgent);
     }
 
     private static string Describe(string name) => Shown(new Settings()).Single(p => p.Name == name).Description;

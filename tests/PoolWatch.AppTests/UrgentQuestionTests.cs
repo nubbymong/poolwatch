@@ -143,10 +143,11 @@ public sealed class UrgentQuestionTests : IDisposable
     /// <summary>
     /// The question has the title and the words of setup's switch (the switch's row, and the step's line on what a clear
     /// is like), and three answers, left to right: Turn on, in green, the safe choice for the PC; Leave off; Decide later,
-    /// which Esc gives once it has the focus. It is a window as the non-paged pool's notice is: above other windows from
-    /// the start, never taking the focus as it shows (it comes at a start, perhaps at sign-in while you type), with a
-    /// taskbar button, on the screen that holds the tray, in the one shared font. An answer is given once; a close with
-    /// none is Decide later.
+    /// which Esc gives once it has the focus. Tab goes through them left to right, as they are read, and once they can be
+    /// pressed Decide later has the focus, so Enter presses Decide later until the focus is moved. It is a window as the
+    /// non-paged pool's notice is: above other windows from the start, never taking the focus as it shows (it comes at a
+    /// start, perhaps at sign-in while you type), with a taskbar button, on the screen that holds the tray, in the one
+    /// shared font. An answer is given once; a close with none is Decide later.
     /// </summary>
     [Fact]
     public void TheQuestionHasTheSwitchsWordsAndTurnOnIsGreen()
@@ -154,7 +155,8 @@ public sealed class UrgentQuestionTests : IDisposable
         UrgentAnswer? got = UrgentAnswer.LeaveOff;
         int answers = 0;
         void Answered(UrgentAnswer? a) { got = a; answers++; }
-        using var window = new UrgentQuestionWindow(5L << 30, Answered);
+        long now = 0;
+        using var window = new UrgentQuestionWindow(5L << 30, Answered, () => now);
         Assert.Equal("PoolWatch: " + SetupText.UrgentTitle, window.Text);
         Assert.Equal("Clear at once if the non-paged pool is over its limit and still rising", SetupText.UrgentTitle);
         Assert.Equal(SetupText.UrgentRow(5L << 30) + "." + Environment.NewLine + SetupText.Stutter, window.Words);
@@ -163,7 +165,8 @@ public sealed class UrgentQuestionTests : IDisposable
         var turnOn = window.ButtonFor(UrgentAnswer.TurnOn);
         if (!SystemInformation.HighContrast) Assert.Equal((UiColors.Good, Color.White), (turnOn.BackColor, turnOn.ForeColor));
         Assert.Equal(UrgentQuestion.LaterLabel, Assert.IsType<Button>(window.CancelButton).Text);
-        Assert.Null(window.AcceptButton); // Enter answers nothing by itself
+        Assert.Null(window.AcceptButton); // no default button of its own: Enter presses the button with the focus
+        Assert.Equal([0, 1, 2], new[] { UrgentAnswer.TurnOn, UrgentAnswer.LeaveOff, UrgentAnswer.Later }.Select(a => window.ButtonFor(a).TabIndex));
         Assert.Equal(NoticeWindow.TopMostStyle, window.ExtendedStyle & NoticeWindow.TopMostStyle);
         Assert.False(window.TopMost);
         Assert.False(window.TakesFocusAsItShows);
@@ -172,6 +175,11 @@ public sealed class UrgentQuestionTests : IDisposable
         Assert.Same(TrayIcons.App, window.Icon);
         var area = NoticeWindow.Area(TaskbarWatch.FindTaskbar(), h => Screen.FromHandle(h).WorkingArea, Screen.PrimaryScreen?.WorkingArea);
         Assert.Equal(new Point(area.Right - window.Width - 12, area.Bottom - window.Height - 12), window.Location);
+        // Shown, and on screen for its moment: the buttons can be pressed, and Decide later has the focus.
+        OnShown(window);
+        now += NextWaitTicks;
+        window.HoldEnds();
+        Assert.Same(window.ButtonFor(UrgentAnswer.Later), window.ActiveControl);
         // Turn on, then its close: one answer.
         window.Press(UrgentAnswer.TurnOn);
         window.Dismissed();
@@ -181,6 +189,72 @@ public sealed class UrgentQuestionTests : IDisposable
         closed.Dismissed();
         closed.Dismissed();
         Assert.Equal(((UrgentAnswer?)null, 2), (got, answers));
+    }
+
+    /// <summary>Setup's moment (<see cref="SetupSession.NextWait"/>) on the clock the tests move on.</summary>
+    private static long NextWaitTicks => (long)(SetupSession.NextWait.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
+
+    /// <summary>What WinForms calls once a window is first on screen (<c>Form.OnShown</c>), for a window the tests never show.</summary>
+    private static void OnShown(Form form) =>
+        typeof(Form).GetMethod("OnShown", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(form, [EventArgs.Empty]);
+
+    /// <summary>
+    /// The question opens by itself at a start (often at sign-in), above other windows, in the corner of the screen, so a
+    /// click aimed at what was there just before must not answer it: Leave off settles the choice for good, and Turn on
+    /// turns an elevated purge on. So its three buttons are greyed, and a press answers nothing, until its window is first
+    /// shown and for a second from then (setup's moment, as the Records step that opens alone holds its Done), however
+    /// long before that it was made. A timer gives the buttons back once the moment is over; a tick that comes early waits
+    /// the rest. A close is not held: it writes nothing.
+    /// </summary>
+    [Fact]
+    public void ItsButtonsAnswerNothingUntilItHasBeenOnScreenForAMoment()
+    {
+        long now = 0;
+        var answers = new List<UrgentAnswer?>();
+        using var window = new UrgentQuestionWindow(5L << 30, answers.Add, () => now);
+        UrgentAnswer[] all = [UrgentAnswer.TurnOn, UrgentAnswer.LeaveOff, UrgentAnswer.Later];
+        void PressAll()
+        {
+            foreach (var answer in all) window.Press(answer);
+        }
+        Assert.Equal(TimeSpan.FromSeconds(1), SetupSession.NextWait);
+        // Made a minute before it is shown (a slow sign-in): held all that time, greyed, with no timer yet.
+        now += 60 * NextWaitTicks;
+        Assert.Equal(SetupSession.NextWait, window.HeldFor);
+        Assert.All(all, a => Assert.False(window.ButtonFor(a).Enabled, a.ToString()));
+        Assert.False(window.HoldRunning);
+        PressAll();
+        Assert.Empty(answers);
+        // Shown: its whole moment from now, and the timer runs.
+        OnShown(window);
+        Assert.Equal(SetupSession.NextWait, window.HeldFor);
+        Assert.True(window.HoldRunning);
+        now += NextWaitTicks - 1;
+        Assert.True(window.HeldFor > TimeSpan.Zero);
+        PressAll();
+        Assert.Empty(answers);
+        // The timer ticks early: still greyed, and it waits the rest. A window is first shown once: told again, the moment
+        // does not start over.
+        window.HoldEnds();
+        Assert.All(all, a => Assert.False(window.ButtonFor(a).Enabled, a.ToString()));
+        Assert.True(window.HoldRunning);
+        OnShown(window);
+        now += 1;
+        Assert.Equal(TimeSpan.Zero, window.HeldFor);
+        // The moment is over: the buttons can be pressed, and a press answers, once.
+        window.HoldEnds();
+        Assert.All(all, a => Assert.True(window.ButtonFor(a).Enabled, a.ToString()));
+        Assert.False(window.HoldRunning);
+        window.Press(UrgentAnswer.LeaveOff);
+        window.Press(UrgentAnswer.TurnOn);
+        Assert.Equal((UrgentAnswer?)UrgentAnswer.LeaveOff, Assert.Single(answers));
+        // A close inside the moment is given as no answer, which writes nothing (Decide later).
+        var closedAnswers = new List<UrgentAnswer?>();
+        using var closed = new UrgentQuestionWindow(5L << 30, closedAnswers.Add, () => now);
+        OnShown(closed);
+        closed.Press(UrgentAnswer.TurnOn);
+        closed.Dismissed();
+        Assert.Null(Assert.Single(closedAnswers));
     }
 
     /// <summary>
