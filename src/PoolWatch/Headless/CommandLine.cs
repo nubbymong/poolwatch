@@ -71,7 +71,8 @@ internal sealed class CommandLineOptions
           --duration <seconds>   stop after this long (default: until the stop file or Ctrl+C)
           --out <dir>            write CSV / incidents / logs here instead of %ProgramData%\PoolWatch
                                  (give --out only a folder that only administrators can change: see SECURITY.md)
-          --config <file>        settings JSON to use (read-only)
+          --config <file>        settings JSON to use (read-only; the urgent clear is off unless it has
+                                 "autoClearUrgent": true, and PoolWatch never asks about it)
           --interval <seconds>   override the sample interval
           --verbose-csv          with Detailed recording, write every tag and process row every sample
           --experiment <app>     run a guided A/B experiment with this app (prompts in the log, and in findings.jsonl

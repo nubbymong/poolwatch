@@ -59,6 +59,34 @@ public class RecommendationRulesTests
         Assert.Equal(RecommendationState.Done, Row(Quiet(), RecommendationId.HourlyCacheClear).State);
     }
 
+    /// <summary>
+    /// Turn on, on the hourly clear's card, and Replace, on the RAMMap task's, turn automatic clearing on, and with it the
+    /// urgent clear while its setting is on (on by default). The offer carries that, so its card says so before the click
+    /// (the Simple view's card, under its reason), also where a known issue's words or what a clear freed take the place of
+    /// the rules' own reason. With the setting off, neither does; no other offer, and no row without a button, ever does.
+    /// </summary>
+    [Fact]
+    public void TheOffersThatTurnClearingOnCarryTheUrgentClearWhileItsSettingIsOn()
+    {
+        foreach (bool urgent in new[] { true, false })
+        {
+            var off = Quiet() with { AutoClearOn = false, AutoClearUrgent = urgent };
+            var hourly = RecommendationRules.Current(off).Single(r => r.Id == RecommendationId.HourlyCacheClear);
+            Assert.Equal(urgent, hourly.TurnsOnUrgentClear);
+            Assert.Equal(urgent, Row(off, RecommendationId.HourlyCacheClear).TurnsOnUrgentClear);
+            Assert.Equal(urgent, (hourly with { Why = "ReFS file records grew 400 MB in the last hour." }).TurnsOnUrgentClear); // kept with another reason
+            var task = off with { Facts = Facts() with { OwnClearTasks = [@"\RAMMap standby"] } };
+            Assert.Equal(urgent, RecommendationRules.OnEvidence(task).Single(r => r.Id == RecommendationId.ReplaceClearTask).TurnsOnUrgentClear);
+            Assert.Equal(urgent, Row(task, RecommendationId.ReplaceClearTask).TurnsOnUrgentClear);
+            Assert.All(RecommendationRules.OnEvidence(Everything() with { AutoClearUrgent = urgent }, max: 100)
+                    .Where(r => r.Id is not (RecommendationId.HourlyCacheClear or RecommendationId.ReplaceClearTask)),
+                r => Assert.False(r.TurnsOnUrgentClear, r.Title));
+            // Clearing on already: the guide's row is done, with no button, and turns nothing on.
+            Assert.False(Row(Quiet() with { AutoClearUrgent = urgent }, RecommendationId.HourlyCacheClear).TurnsOnUrgentClear);
+        }
+        Assert.False(new RecommendationInputs { NowUtc = Now, NowMs = Clocks.At(Now).Ms }.AutoClearUrgent); // set by the app from the setting
+    }
+
     [Fact]
     public void SignInIsDoneOrOnlyInfoWhenItCannotBeOffered()
     {

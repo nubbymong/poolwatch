@@ -121,17 +121,54 @@ public sealed class Settings
     [Description("Empty the standby cache automatically: on the schedule (AutoClearEveryHours) and at the pool size (AutoClearPoolGb), whichever comes first. Off by default. Applied when you save.")]
     public bool AutoClearEnabled { get; set; }
     /// <summary>Clear when paged + non-paged pool is over this (GB); 0 = no pool rule.</summary>
-    [Description("Empty the cache when the kernel pool (paged plus non-paged) reaches this many GB (0 to 1,024; default 8); 0 turns this rule off. A clear at this size that frees little holds the rule back for 6 hours. Applied when you save.")]
+    [Description("Empty the cache when the kernel pool (paged plus non-paged) reaches this many GB (0 to 1,024; default 8); 0 turns this rule off. A clear at this size that frees little holds it back for up to 6 hours. Applied when you save.")]
     public double AutoClearPoolGb { get; set; } = 8;
     /// <summary>Clear every N hours; 0 = no schedule.</summary>
     [Description("Empty the cache every this many hours, counted from the last clear, or from PoolWatch's start before the first (0 to 168; default 1); 0 turns this rule off. Applied when you save.")]
     public double AutoClearEveryHours { get; set; } = 1;
     /// <summary>Never two automatic clears within this many minutes.</summary>
-    [Description("Never two automatic clears within this many minutes (30 to 1,440; default 30). Applied when you save.")]
+    [Description("Never two automatic clears within this many minutes (30 to 1,440; default 30); the urgent clear (AutoClearUrgent) keeps 10 minutes from any clear instead, and more after several in a row. Applied when you save.")]
     public double AutoClearMinMinutes { get; set; } = 30;
-    /// <summary>"auto" (low-priority first, the full purge when that frees little), "lowpriority" or "standby".</summary>
-    [Description("How an automatic clear empties the cache. auto (default): the light clear (the low-priority part) while it frees about as much as the full one, which it tries once, else the full; lowpriority: only light; standby: only full. Applied when you save.")]
+    /// <summary>"auto" (low-priority first, the full purge when that frees little), "lowpriority" or "standby"; the urgent clear keeps "lowpriority" too.</summary>
+    [Description("How an automatic clear empties the cache. auto (default): light (the low-priority part) while it frees about as much as the full one, tried once, else full; lowpriority: light only, urgent clears too; standby: full only. Applied when you save.")]
     public string AutoClearMode { get; set; } = "auto";
+    /// <summary>
+    /// The urgent clear: while automatic clearing is on, a clear at once when the non-paged pool is over its alert and still
+    /// rising; the full one, or the light one in "lowpriority" mode (<see cref="Cache.ClearPolicy.UrgentNow"/>). On for a
+    /// new install; after an upgrade from a version without it, off until it is chosen (<see cref="AutoClearUrgentAsk"/>);
+    /// off in a --config file that does not name it (<see cref="Parse"/>).
+    /// </summary>
+    [Description("With automatic clearing on, a clear at once when the non-paged pool is over its alert and still rising, 10 minutes or more apart, waiting after one that freed little. On by default; off after an upgrade until chosen. Applied when you save.")]
+    public bool AutoClearUrgent { get; set; } = true;
+    /// <summary>
+    /// The urgent clear is still to be chosen: set after an upgrade from a version without it (a settings.json without
+    /// <c>autoClearUrgent</c>, which <see cref="Parse"/> reads off), until it is chosen: by the question PoolWatch asks at a
+    /// start while automatic clearing is on (<see cref="UrgentClearToAsk"/>; Turn on or Leave off, while Decide later leaves
+    /// it to be chosen), or where automatic clearing is turned on, which offers it (<see cref="UrgentAsOffered"/>: setup's
+    /// switch, Settings' box, the hourly clear's and the RAMMap task's cards). Never set on a new install, nor in a
+    /// --config file, which is read-only, so nothing is asked (one that does not name the urgent clear reads it off).
+    /// Cleared once the urgent clear is on (<see cref="Normalize"/>): nothing is left to ask then. Written only while set,
+    /// so a file without it reads it unset.
+    /// </summary>
+    [Browsable(false)] // not a choice: PoolWatch keeps it
+    [Description("After an upgrade from a version without the urgent clear (AutoClearUrgent): true until it is chosen, so PoolWatch asks about it at a start while automatic clearing is on. PoolWatch keeps it; it is not a choice.")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool AutoClearUrgentAsk { get; set; }
+
+    /// <summary>
+    /// The urgent clear's question after an upgrade is due (<see cref="AutoClearUrgentAsk"/>): the urgent clear is still to
+    /// be chosen, and automatic clearing is on with a schedule or a size set, so it would act if it were on. With automatic
+    /// clearing off it is not asked: the urgent clear acts only while that is on, and each place that turns it on offers it.
+    /// </summary>
+    public bool UrgentClearToAsk() => AutoClearUrgentAsk && !AutoClearUrgent && AutoClearEnabled && (AutoClearEveryHours > 0 || AutoClearPoolGb > 0);
+
+    /// <summary>
+    /// The urgent clear as a place that turns automatic clearing on offers it (setup's switch, Settings' box, the hourly
+    /// clear's and the RAMMap task's cards): as set; and while it is still to be chosen after an upgrade
+    /// (<see cref="AutoClearUrgentAsk"/>) with automatic clearing off, at its default, on, as for a new install. With
+    /// automatic clearing on and its question not answered yet, off, as it is in effect.
+    /// </summary>
+    public bool UrgentAsOffered() => AutoClearUrgent || (AutoClearUrgentAsk && !AutoClearEnabled);
     /// <summary>
     /// Add a CPU trace (sampling with stacks, DPC/ISR, context switches) to Capture now, and (with <see cref="DeeperCapture"/>)
     /// record one when the lag probe trips. Off by default: a 30 s CPU trace with stacks lags a busy PC itself.
@@ -211,11 +248,20 @@ public sealed class Settings
     // Detection.
     [Description("The growth alerts: a pool tag that grows by more than Bytes within WindowMinutes opens an incident. Two by default: 200 MB in 10 minutes and 1 GB in 60 minutes.")]
     public List<GrowthRule> GrowthRules { get; set; } = [new(10, 200 * MB), new(60, 1024 * MB)];
-    [Description("Alert when the non-paged pool is over this many bytes and still rising (NonPagedTotalRiseBytesPer10Min) (default 5,368,709,120, which is 5 GB).")]
+    /// <summary>The non-paged alert's level, which the urgent clear also goes by; never under <see cref="MinNonPagedAlertBytes"/>.</summary>
+    [Description("Alert when the non-paged pool is over this many bytes and still rising (NonPagedTotalRiseBytesPer10Min); the urgent clear uses it too (at least 1,073,741,824, which is 1 GB; default 5,368,709,120, which is 5 GB).")]
     public long NonPagedTotalAlertBytes { get; set; } = 5L * 1024 * MB;
-    /// <summary>"Still rising" for the non-paged total rule: at least this much in 10 minutes.</summary>
-    [Description("What counts as still rising for the non-paged pool alert (NonPagedTotalAlertBytes): at least this many bytes in 10 minutes (default 104,857,600, which is 100 MB).")]
+    /// <summary>"Still rising" for the non-paged total rule and the urgent clear: at least this much in 10 minutes; never under <see cref="MinNonPagedRiseBytes"/>.</summary>
+    [Description("What counts as still rising for the non-paged pool alert and the urgent clear: this many bytes or more in 10 minutes (at least 10,485,760, which is 10 MB; default 104,857,600, which is 100 MB).")]
     public long NonPagedTotalRiseBytesPer10Min { get; set; } = 100 * MB;
+
+    /// <summary>
+    /// The least <see cref="NonPagedTotalAlertBytes"/> and <see cref="NonPagedTotalRiseBytesPer10Min"/> are kept at
+    /// (<see cref="Normalize"/>, and the urgent clear again as it reads them): they gate an elevated purge at a 10-minute
+    /// spacing, so an alert of 0 and a rise of 0 or less, from the Advanced grid or a --config file, must not let it run
+    /// on any non-paged pool, rising or not.
+    /// </summary>
+    public const long MinNonPagedAlertBytes = 1024 * MB, MinNonPagedRiseBytes = 10 * MB;
     [Description("A growth incident whose likeliest cause has been quiet, or has exited, for this many minutes while its pool tag still holds at least half of its rise is marked as held (0.5 to 600; default 15).")]
     public double RetentionMinutes { get; set; } = 15;
     [Description("A pool tag that falls by at least this many bytes from its highest point within ReleaseWindowMinutes is reported as released (default 104,857,600, which is 100 MB).")]
@@ -376,7 +422,9 @@ public sealed class Settings
     /// True for a file given with <c>--config</c>. The version migrations below exist because
     /// PoolWatch's own Save wrote every setting, old defaults included, into the default settings.json, so an old value
     /// there is not a choice. A hand-written --config file without <c>settingsVersion</c> holds only what its author
-    /// chose (a CI config asking for <c>cpuTraceEnabled: true</c>), so it is read exactly as written, never migrated.
+    /// chose (a CI config asking for <c>cpuTraceEnabled: true</c>), so it is read exactly as written, never migrated, but
+    /// for the urgent clear: one that does not name <c>autoClearUrgent</c> reads it off, and it is never still to be
+    /// chosen (the file is read-only, so nothing is asked).
     /// </param>
     public static Settings Load(string path, bool explicitConfig = false) =>
         File.Exists(path) ? Parse(File.ReadAllText(path), explicitConfig) : new Settings();
@@ -395,10 +443,36 @@ public sealed class Settings
             if (s.SettingsVersion < 3) s.CpuTraceEnabled = false;
             // Every saved file before v4 says redactCopies: false (the old default, written out by Save): not a choice.
             if (s.SettingsVersion < 4) s.RedactCopies = true;
+            // A file without the urgent clear is from a version before it (every file up to 1.0.0): an upgrade. It reads
+            // off until its owner chooses, and is still to be chosen (asked about at a start while automatic clearing is
+            // on). By the key, not the format version: a build that had it saved version 4 too.
+            if (!Holds(json, "autoClearUrgent")) (s.AutoClearUrgent, s.AutoClearUrgentAsk) = (false, true);
+        }
+        else
+        {
+            // A --config file is read-only, so the urgent clear is never asked about (no answer could be kept), and one
+            // that does not name it reads it off: pointed at a settings.json that 1.0.0 wrote with automatic clearing on,
+            // it would otherwise turn an elevated purge on that its owner was never asked about.
+            if (!Holds(json, "autoClearUrgent")) s.AutoClearUrgent = false;
+            s.AutoClearUrgentAsk = false;
         }
         s.SettingsVersion = CurrentSettingsVersion;
         s.Normalize();
         return s;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="json"/>'s object holds <paramref name="name"/>, by its exact name, as the serializer matches
+    /// names. Asked only of a text the serializer has read; one that cannot be parsed again counts as not holding it.
+    /// </summary>
+    private static bool Holds(string json, string name)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+            return doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty(name, out _);
+        }
+        catch (JsonException) { return false; }
     }
 
     public void Save(string path)
@@ -423,6 +497,12 @@ public sealed class Settings
         AutoClearEveryHours = double.IsFinite(AutoClearEveryHours) ? Math.Clamp(AutoClearEveryHours, 0, 24 * 7) : 1;
         AutoClearMinMinutes = double.IsFinite(AutoClearMinMinutes) ? Math.Clamp(AutoClearMinMinutes, 30, 24 * 60) : 30; // at most once per 30 min
         AutoClearMode = AutoClearMode is "lowpriority" or "standby" ? AutoClearMode : "auto";
+        // Still to be chosen only while the urgent clear is off: once it is on (chosen, or turned on in the Advanced
+        // settings), nothing is left to ask.
+        if (AutoClearUrgent) AutoClearUrgentAsk = false;
+        // The non-paged alert's two limits also gate the urgent clear (an elevated purge): never at any pool, rising or not.
+        NonPagedTotalAlertBytes = Math.Max(NonPagedTotalAlertBytes, MinNonPagedAlertBytes);
+        NonPagedTotalRiseBytesPer10Min = Math.Max(NonPagedTotalRiseBytesPer10Min, MinNonPagedRiseBytes);
         CpuTraceSeconds = Math.Clamp(CpuTraceSeconds, 5, 120);
         TokenGuardRecheckMinutes = double.IsFinite(TokenGuardRecheckMinutes) ? Math.Clamp(TokenGuardRecheckMinutes, 1, 60) : 3;
         PoolNotices = Enum.IsDefined(PoolNotices) ? PoolNotices : PoolNoticeLevel.EveryGrowth;

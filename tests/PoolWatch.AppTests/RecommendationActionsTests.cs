@@ -67,10 +67,20 @@ public sealed class RecommendationActionsTests : IDisposable
     [Fact]
     public async Task TheHourlyClearAppliesAtOnceUnlessItCannotRun()
     {
-        var (ok, _) = await Run(RecommendationId.HourlyCacheClear);
+        var (ok, said) = await Run(RecommendationId.HourlyCacheClear);
         Assert.True(ok);
         Assert.Equal((true, 1.0), (_live.Running.AutoClearEnabled, _live.Running.AutoClearEveryHours));
         Assert.True(_f.Saved().AutoClearEnabled);
+        // The urgent clear is on by default, so the click turned it on too, and what it says says so.
+        Assert.Equal("PoolWatch clears the cache every hour, and at once while the non-paged pool is over its limit and rising.", said);
+        Assert.Equal("Automatic cache clearing turned on, every hour, and at once while the non-paged pool is over its limit and rising (from the setup guide).",
+            _system.TimelineLines[^1]);
+        // With it turned off, only the hour.
+        _live.Apply("the urgent clear off", s => { s.AutoClearUrgent = false; s.AutoClearEnabled = false; });
+        (ok, said) = await Run(RecommendationId.HourlyCacheClear);
+        Assert.Equal((true, "PoolWatch clears the cache every hour."), (ok, said));
+        Assert.Equal("Automatic cache clearing turned on, every hour (from the setup guide).", _system.TimelineLines[^1]);
+        _live.Apply("the urgent clear on", s => s.AutoClearUrgent = true);
 
         _live.Apply("off", s => s.AutoClearEnabled = false);
         _system.OwnClearTask = true;
@@ -84,13 +94,37 @@ public sealed class RecommendationActionsTests : IDisposable
         Assert.False(_live.Running.AutoClearEnabled);
     }
 
+    /// <summary>
+    /// After an upgrade the urgent clear is off until it is chosen. The hourly clear's card, offered while automatic
+    /// clearing is off, offers it at its default, as for a new install: the card says so before the click, and the click
+    /// turns it on with the hour, and says so. That is its choice: it is never asked about. One its owner turned off stays
+    /// off.
+    /// </summary>
+    [Fact]
+    public async Task AfterAnUpgradeTheHourlyClickTurnsTheUrgentClearOnAsItsCardSays()
+    {
+        _live.Apply("as an upgrade reads it", s => { s.AutoClearEnabled = false; s.AutoClearUrgent = false; s.AutoClearUrgentAsk = true; });
+        var (ok, said) = await Run(RecommendationId.HourlyCacheClear);
+        Assert.True(ok);
+        Assert.Equal("PoolWatch clears the cache every hour, and at once while the non-paged pool is over its limit and rising.", said);
+        Assert.Equal((true, true, false), (_live.Running.AutoClearEnabled, _live.Running.AutoClearUrgent, _live.Running.AutoClearUrgentAsk));
+        Assert.Equal((true, false), (_f.Saved().AutoClearUrgent, _f.Saved().UrgentClearToAsk()));
+        // Turned off by its owner (Leave off, Settings): the click turns on the hour alone.
+        _live.Apply("left off", s => { s.AutoClearEnabled = false; s.AutoClearUrgent = false; s.AutoClearUrgentAsk = false; });
+        (ok, said) = await Run(RecommendationId.HourlyCacheClear);
+        Assert.Equal((true, "PoolWatch clears the cache every hour."), (ok, said));
+        Assert.Equal((true, false), (_live.Running.AutoClearEnabled, _live.Running.AutoClearUrgent));
+    }
+
     [Fact]
     public async Task ReplacingTheClearTaskReadsTheStatusAgainEvenWhenItFails()
     {
         _system.Removed = [new CacheHelper.LegacyTaskInfo(@"\Empty standby list", "SYSTEM", "RAMMap64.exe -Ew", "hourly", true)];
         var (ok, message) = await Run(RecommendationId.ReplaceClearTask);
         Assert.True(ok);
-        Assert.Equal("Replaced your clear task \"Empty standby list\". PoolWatch clears the cache every hour now.", message);
+        Assert.Equal("Replaced your clear task \"Empty standby list\". PoolWatch now clears the cache every hour, and at once while the non-paged pool is over its limit and rising.", message);
+        Assert.Equal("Replaced your own clear task with PoolWatch's hourly cache clear, and at once while the non-paged pool is over its limit and rising (from the setup guide).",
+            _system.TimelineLines[^1]);
         Assert.Equal(["replace clear tasks via the setup guide", "refresh clear status", "rescan"], _system.Calls);
 
         _system.Calls.Clear();
@@ -464,6 +498,47 @@ public sealed class RecommendationActionsTests : IDisposable
         Assert.StartsWith("ReFS file records grew 400 MB in the last hour.", Card(Evidence(null), RecommendationId.HourlyCacheClear).Why);
         // Once a clear here helped, what it freed is the hourly card's reason.
         Assert.StartsWith("On this PC, clearing the cache freed 2.0 GB", Card(Evidence(true, 2, "Reff"), RecommendationId.HourlyCacheClear).Why);
+    }
+
+    /// <summary>
+    /// The hourly card's Turn on turns the urgent clear on with the hour while its setting is on (on by default), so the
+    /// card says so before the click, under its reason, whatever gives that reason: the rules' own words, a known issue's,
+    /// or what a clear freed here (each replaces the rules' reason, so a clause in it would be lost). With the setting off
+    /// it says nothing of it. Its words are the ones said after the click, and where to turn it off; the window's rules
+    /// are given the setting.
+    /// </summary>
+    [Fact]
+    public void TheHourlyCardSaysBeforeTheClickThatTheUrgentClearComesWithIt()
+    {
+        var facts = Facts(Ntfs, DevDrive);
+        var seen = new KnowledgeEvidence
+        {
+            NowUtc = DateTime.UtcNow, WindowsBuild = facts.Build, FileSystems = ["NTFS", "ReFS"], GrowthOver = TimeSpan.FromHours(1),
+            Growth = new Dictionary<PoolTag, TagGrowth> { [PoolTag.Parse("Toke")] = new(300L << 20, 0), [PoolTag.Parse("Reff")] = new(400L << 20, 0) },
+        };
+        IReadOnlyList<KnownIssueMatch> known = KnownIssueMatcher.Match(KnowledgeBase.Embedded(), seen), none = [];
+        foreach (bool urgent in new[] { true, false })
+        {
+            var inputs = new RecommendationInputs { NowUtc = DateTime.UtcNow, NowMs = Moment.Now().Ms, Facts = facts, AutoClearUrgent = urgent };
+            foreach (var (matches, evidence, reason) in new (IReadOnlyList<KnownIssueMatch>, ClearEvidence, string)[]
+                     {
+                         (none, Evidence(null), "Windows keeps details of recently used files in the kernel pool"),
+                         (known, Evidence(null), "ReFS file records grew 400 MB in the last hour."),
+                         (none, Evidence(true, 2, "Reff"), "On this PC, clearing the cache freed 2.0 GB"),
+                     })
+            {
+                var card = CardItem.Of(SetupContext.Suggest(inputs, matches, facts, evidence).Single(r => r.Id == RecommendationId.HourlyCacheClear));
+                Assert.StartsWith(reason, card.Text);
+                Assert.Equal(urgent ? SimpleSettings.UrgentToo + " " + SimpleSettings.ClearStutter : SimpleSettings.ClearStutter, card.Details);
+            }
+        }
+        Assert.Equal("PoolWatch then also clears at once while the non-paged pool is over its limit and rising; Settings can turn that off.",
+            SimpleSettings.UrgentToo);
+        Assert.Contains(Core.Changes.ChangeWords.AutoClearUrgent[", and ".Length..], SimpleSettings.UrgentToo); // as said after the click
+        // Given as a click that turns clearing on offers it: as set, and while it is still to be chosen after an upgrade
+        // with clearing off, at its default (Settings.UrgentAsOffered).
+        Assert.Contains("AutoClearUrgent = engine.Settings.UrgentAsOffered(),",
+            File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "Setup", "RecommendationInputsBuilder.cs")));
     }
 
     [Fact]

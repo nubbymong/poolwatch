@@ -28,6 +28,9 @@ public class ChurnSoakConfigTests
         Assert.True(s.AutoClearEnabled);
         Assert.Equal(0.5, s.AutoClearEveryHours);
         Assert.Equal(30, s.AutoClearMinMinutes); // the fewest minutes between automatic clears the settings allow
+        // With its urgent clear, on as for a new install: a --config file that does not name it reads it off.
+        Assert.True(s.AutoClearUrgent);
+        Assert.Equal(defaults.AutoClearUrgent, s.AutoClearUrgent);
         Assert.False(s.CpuTraceEnabled);
     }
 }

@@ -145,6 +145,36 @@ public sealed class OlderSettingsFileTests : IDisposable
     }
 
     /// <summary>
+    /// The lines a save adds after the automatic clear's mode: the urgent clear, which no file up to 1.0.0 has, off, and
+    /// that it is still to be chosen. An upgrade reads it off until its owner chooses: PoolWatch asks once at a start while
+    /// automatic clearing is on (off in this file, so not here), and setup, Settings and the cards that turn clearing on
+    /// offer it.
+    /// </summary>
+    private const string UrgentLines = "  \"autoClearUrgent\": false,\n  \"autoClearUrgentAsk\": true,\n";
+
+    /// <summary><paramref name="beta"/> with <see cref="UrgentLines"/> where a save writes them, after the automatic clear's mode.</summary>
+    private static string WithUrgent(string beta)
+    {
+        const string Mode = "  \"autoClearMode\": \"auto\",\n";
+        Assert.Contains(Mode, beta);
+        return beta.Replace(Mode, Mode + UrgentLines, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// settings.json as 1.0.0, the current release, saves it with every setting at its default: the beta's file without
+    /// <c>startAtLogon</c>, with the kernel pool notices' choice and what PoolWatch keeps on disk, and no urgent clear;
+    /// with automatic clearing on (every hour, or at 8 GB) when <paramref name="clearing"/>.
+    /// </summary>
+    private static string ReleaseFile(bool clearing)
+    {
+        string file = WithRecords(WithNotices(BetaFile(false).without));
+        Assert.DoesNotContain("autoClearUrgent", file);
+        const string Off = "  \"autoClearEnabled\": false,\n";
+        Assert.Contains(Off, file);
+        return clearing ? file.Replace(Off, "  \"autoClearEnabled\": true,\n", StringComparison.Ordinal) : file;
+    }
+
+    /// <summary>
     /// The other line a save adds: what PoolWatch keeps on disk, which the beta did not have (it always recorded the day), at
     /// its default, Reports only: an upgraded install stops recording the day until its owner chooses Detailed recording.
     /// </summary>
@@ -172,11 +202,14 @@ public sealed class OlderSettingsFileTests : IDisposable
         // Every other line as the beta wrote it, but three: of the watched apps' names that differ only in case ("claude",
         // "Claude"), a load keeps the first (Normalize), in this build as in the beta; the kernel pool notices' choice,
         // which the beta did not have, is written at its default (a notice for every growth, as the beta did); and so is
-        // what PoolWatch keeps on disk, which the beta did not have either: Reports only, the default.
+        // what PoolWatch keeps on disk, which the beta did not have either: Reports only, the default; and the urgent clear,
+        // new after 1.0.0: off after an upgrade, and still to be chosen.
         Assert.Contains("    \"claude\",\n    \"Claude\",\n", without);
-        Assert.Equal(WithRecords(WithNotices(without)).Replace("    \"Claude\",\n", "", StringComparison.Ordinal), Lf(saved));
+        Assert.Equal(WithRecords(WithNotices(WithUrgent(without))).Replace("    \"Claude\",\n", "", StringComparison.Ordinal), Lf(saved));
         Assert.Equal(PoolNoticeLevel.EveryGrowth, s.PoolNotices);
         Assert.Equal(RecordMode.ReportsOnly, s.RecordMode);
+        Assert.Equal((false, true), (s.AutoClearUrgent, s.AutoClearUrgentAsk));
+        Assert.False(s.UrgentClearToAsk()); // automatic clearing is off in this file: nothing to ask
     }
 
     /// <summary>
@@ -265,14 +298,109 @@ public sealed class OlderSettingsFileTests : IDisposable
         // and what PoolWatch keeps on disk, which it did not have either, at its default (Reports only), before the days.
         Assert.Equal("\"EveryGrowth\"", saved["poolNotices"]!.ToJsonString());
         Assert.Equal("\"ReportsOnly\"", saved["recordMode"]!.ToJsonString());
+        // And the urgent clear, new after 1.0.0: off after an upgrade, still to be chosen. Automatic clearing is on in this
+        // file, with its rules, so PoolWatch asks about it at the next start.
+        Assert.Equal("false", saved["autoClearUrgent"]!.ToJsonString());
+        Assert.Equal("true", saved["autoClearUrgentAsk"]!.ToJsonString());
+        Assert.True(s.UrgentClearToAsk());
         var keys = changed.Select(p => p.Key).Where(k => k != "startAtLogon").ToList();
+        keys.Insert(keys.IndexOf("autoClearMode") + 1, "autoClearUrgent");
+        keys.Insert(keys.IndexOf("autoClearUrgent") + 1, "autoClearUrgentAsk");
         keys.Insert(keys.IndexOf("checkForUpdates") + 1, "poolNotices");
         keys.Insert(keys.IndexOf("retentionDays"), "recordMode");
         Assert.Equal(keys, saved.Select(p => p.Key));
-        Assert.All(saved.Where(p => p.Key is not ("poolNotices" or "recordMode")), p => Assert.True(changed[p.Key]!.ToJsonString() == p.Value!.ToJsonString(),
+        Assert.All(saved.Where(p => p.Key is not ("poolNotices" or "recordMode" or "autoClearUrgent" or "autoClearUrgentAsk")), p => Assert.True(changed[p.Key]!.ToJsonString() == p.Value!.ToJsonString(),
             $"{p.Key}: wrote {changed[p.Key]!.ToJsonString()}, read back {p.Value!.ToJsonString()}"));
         // The same settings as the same file without startAtLogon.
         changed.Remove("startAtLogon");
         Assert.Equal(Settings.Parse(changed.ToJsonString()).ToJson(), s.ToJson());
+    }
+
+    /// <summary>
+    /// An upgrade (a settings.json an earlier version wrote, which has no urgent clear) reads it off until its owner
+    /// chooses, and keeps that it is still to be chosen: PoolWatch asks at a start only while automatic clearing is on with
+    /// a schedule or a size set, when the urgent clear would act. Saved and read again, as after Decide later, it is still
+    /// off and still to be chosen.
+    /// </summary>
+    [Fact]
+    public void AnUpgradeReadsTheUrgentClearOffAndAsksAboutItOnlyWhileClearingIsOn()
+    {
+        foreach (bool clearing in new[] { true, false })
+        {
+            var s = Settings.Parse(ReleaseFile(clearing));
+            Assert.Equal((false, true, clearing), (s.AutoClearUrgent, s.AutoClearUrgentAsk, s.UrgentClearToAsk()));
+            string saved = Lf(s.ToJson());
+            Assert.Contains("  \"autoClearUrgent\": false,\n  \"autoClearUrgentAsk\": true,\n", saved);
+            var again = Settings.Parse(saved);
+            Assert.Equal((false, true, clearing), (again.AutoClearUrgent, again.AutoClearUrgentAsk, again.UrgentClearToAsk()));
+        }
+        // Automatic clearing on with neither rule set: the next-clear line says it is off, and the urgent clear never runs.
+        var noRule = Settings.Parse(ReleaseFile(clearing: true));
+        noRule.AutoClearEveryHours = 0;
+        noRule.AutoClearPoolGb = 0;
+        Assert.False(noRule.UrgentClearToAsk());
+        // Read from the file, as PoolWatch starts.
+        string path = Path.Combine(_dir, "settings.json");
+        File.WriteAllText(path, ReleaseFile(clearing: true));
+        Assert.True(Settings.Load(path).UrgentClearToAsk());
+    }
+
+    /// <summary>
+    /// A file that has the urgent clear (saved by a build that had it, or set in Settings) is read as written and never
+    /// asked about, on or off; nor is a new install (no file), whose urgent clear is on to begin with and setup's switch
+    /// decides. A --config file is never asked either: it is read-only, so no answer could be kept. One that does not name
+    /// the urgent clear reads it off, so pointing --config at a settings.json that 1.0.0 wrote, with automatic clearing on,
+    /// never turns the urgent clear on unasked; one that names it reads it as written; and one that holds the mark that it
+    /// is still to be chosen is not asked for that. Once the urgent clear is on, nothing is left to ask. That it is still
+    /// to be chosen is written only while it is.
+    /// </summary>
+    [Fact]
+    public void AFileWithTheUrgentClearANewInstallAndAConfigFileAreNeverAsked()
+    {
+        const string Mode = "  \"autoClearMode\": \"auto\",\n";
+        foreach (bool urgent in new[] { true, false })
+        {
+            string file = ReleaseFile(clearing: true).Replace(Mode, Mode + $"  \"autoClearUrgent\": {(urgent ? "true" : "false")},\n", StringComparison.Ordinal);
+            Assert.Contains("\"autoClearUrgent\"", file);
+            var s = Settings.Parse(file);
+            Assert.Equal((urgent, false, false), (s.AutoClearUrgent, s.AutoClearUrgentAsk, s.UrgentClearToAsk()));
+            var named = Settings.Parse(file, explicitConfig: true);
+            Assert.Equal((urgent, false, false), (named.AutoClearUrgent, named.AutoClearUrgentAsk, named.UrgentClearToAsk()));
+        }
+        var fresh = Settings.Load(Path.Combine(_dir, "none", "settings.json"));
+        Assert.Equal((true, false, false), (fresh.AutoClearUrgent, fresh.AutoClearUrgentAsk, fresh.UrgentClearToAsk()));
+        Assert.DoesNotContain("autoClearUrgentAsk", new Settings().ToJson());
+        var config = Settings.Parse(ReleaseFile(clearing: true), explicitConfig: true);
+        Assert.Equal((false, false, false), (config.AutoClearUrgent, config.AutoClearUrgentAsk, config.UrgentClearToAsk()));
+        string path = Path.Combine(_dir, "config.json");
+        File.WriteAllText(path, ReleaseFile(clearing: true));
+        var loaded = Settings.Load(path, explicitConfig: true); // as --config reads it
+        Assert.Equal((false, false, true), (loaded.AutoClearUrgent, loaded.UrgentClearToAsk(), loaded.AutoClearEnabled));
+        string marked = ReleaseFile(clearing: true).Replace(Mode, Mode + "  \"autoClearUrgentAsk\": true,\n", StringComparison.Ordinal);
+        Assert.Contains("\"autoClearUrgentAsk\"", marked);
+        var markedConfig = Settings.Parse(marked, explicitConfig: true);
+        Assert.Equal((false, false, false), (markedConfig.AutoClearUrgent, markedConfig.AutoClearUrgentAsk, markedConfig.UrgentClearToAsk()));
+        Assert.True(Settings.Parse(marked).UrgentClearToAsk()); // the control: the same file as settings.json is asked
+        // Turned on (Settings' box, the Advanced settings), it is chosen.
+        var upgraded = Settings.Parse(ReleaseFile(clearing: true));
+        upgraded.AutoClearUrgent = true;
+        upgraded.Normalize();
+        Assert.False(upgraded.AutoClearUrgentAsk);
+        Assert.False(Settings.Parse(upgraded.ToJson()).UrgentClearToAsk());
+    }
+
+    /// <summary>
+    /// Where automatic clearing is turned on (setup's switch, Settings' box, the hourly clear's and the RAMMap task's
+    /// cards), the urgent clear is offered as it is set; while it is still to be chosen after an upgrade and automatic
+    /// clearing is off, at its default, on, as for a new install. With automatic clearing on and its question not answered
+    /// yet, it is offered off, as it is in effect.
+    /// </summary>
+    [Fact]
+    public void WhereClearingIsTurnedOnTheUrgentClearIsOfferedAtItsDefaultWhileItIsStillToBeChosen()
+    {
+        Assert.True(new Settings().UrgentAsOffered());
+        Assert.False(new Settings { AutoClearUrgent = false }.UrgentAsOffered());
+        Assert.True(Settings.Parse(ReleaseFile(clearing: false)).UrgentAsOffered());
+        Assert.False(Settings.Parse(ReleaseFile(clearing: true)).UrgentAsOffered());
     }
 }

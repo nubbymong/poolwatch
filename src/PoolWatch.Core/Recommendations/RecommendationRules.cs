@@ -34,9 +34,9 @@ public static class RecommendationRules
                 : f.InstalledInProgramFiles ? SignIn(f.SignIn)
                 : Info(SignIn(f.SignIn), "This needs PoolWatch installed with its installer; it runs from another folder now."),
             // The two must never both run: with a RAMMap task of your own, replacing it IS the hourly clear.
-            f.OwnClearTasks.Count > 0 ? ReplaceTask()
-                : i.AutoClearOn ? Done(Hourly(), "PoolWatch clears the cache automatically.")
-                : Hourly(),
+            f.OwnClearTasks.Count > 0 ? ReplaceTask(i.AutoClearUrgent)
+                : i.AutoClearOn ? Done(Hourly(i.AutoClearUrgent), "PoolWatch clears the cache automatically.")
+                : Hourly(i.AutoClearUrgent),
             TokenGuardRow(i, f),
         };
         if (f.OptionalServicesRunning > 0) rows.Add(ServicesInfo(f));
@@ -87,8 +87,8 @@ public static class RecommendationRules
                   (i.TokenSpawnLast24h ? "in the last day. " : "in the last hour. ") + TradeOff);
         if (f is not null)
         {
-            if (f.OwnClearTasks.Count > 0) yield return ReplaceTask();
-            else if (!i.AutoClearOn) yield return Hourly();
+            if (f.OwnClearTasks.Count > 0) yield return ReplaceTask(i.AutoClearUrgent);
+            else if (!i.AutoClearOn) yield return Hourly(i.AutoClearUrgent);
             if (!i.TokenGuardOn && i.LeakTestNow is null && f.TokenLeak == TokenLeakStatus.NeedsTest && i.SavedVerdictBuild != f.Build)
                 yield return new Recommendation(RecommendationId.CheckTokenLeak, "Check this Windows build for the token leak",
                     (i.SavedVerdictBuild is null ? "Some Windows 11 builds leak a little of the kernel pool each time a program starts another. "
@@ -179,13 +179,19 @@ public static class RecommendationRules
         ReplacedWhy(state) is { } why ? why + " " + Replaces("Turn on") : "So it watches from the moment you sign in, without asking for permission each time.",
         "Turn on", RecommendationAction.Apply, SignInPriority);
 
-    private static Recommendation Hourly() => new(RecommendationId.HourlyCacheClear, "Clear the cache every hour",
+    /// <summary>
+    /// The hourly clear's offer. Its Turn on turns automatic clearing on, and with it the urgent clear while that setting
+    /// is on (<paramref name="urgent"/>, <see cref="RecommendationInputs.AutoClearUrgent"/>): the offer carries that, and
+    /// its card says so under the reason (<see cref="Recommendation.TurnsOnUrgentClear"/>).
+    /// </summary>
+    private static Recommendation Hourly(bool urgent) => new(RecommendationId.HourlyCacheClear, "Clear the cache every hour",
         "Windows keeps details of recently used files in the kernel pool, and on some PCs that grows by gigabytes. An hourly clear " +
-        "frees it; your files are not touched.", "Turn on", RecommendationAction.Apply, HourlyPriority);
+        "frees it; your files are not touched.", "Turn on", RecommendationAction.Apply, HourlyPriority) { TurnsOnUrgentClear = urgent };
 
-    private static Recommendation ReplaceTask() => new(RecommendationId.ReplaceClearTask, "Let PoolWatch replace your RAMMap clear task",
+    /// <summary>Replacing your RAMMap clear task with the hourly clear: as <see cref="Hourly"/>, it turns the urgent clear on too while that setting is on.</summary>
+    private static Recommendation ReplaceTask(bool urgent) => new(RecommendationId.ReplaceClearTask, "Let PoolWatch replace your RAMMap clear task",
         "A task of your own clears the cache with RAMMap. PoolWatch can do it every hour instead and show what each clear freed. " +
-        "Your task is saved, so you can put it back.", "Replace", RecommendationAction.Apply, ReplaceTaskPriority);
+        "Your task is saved, so you can put it back.", "Replace", RecommendationAction.Apply, ReplaceTaskPriority) { TurnsOnUrgentClear = urgent };
 
     private static Recommendation TokenGuardOffer(string why) =>
         new(RecommendationId.TokenLeakGuard, TokenGuardTitle, why, "Turn on", RecommendationAction.Apply, TokenGuardPriority);
@@ -227,9 +233,11 @@ public static class RecommendationRules
             "in Advanced view, Services.", "", RecommendationAction.OpenServices, ServicesPriority) { State = RecommendationState.Info };
     }
 
-    private static Recommendation Done(Recommendation r, string why) => r with { Why = why, Button = "", State = RecommendationState.Done };
+    /// <summary>A row that is already so: no button, so it turns nothing on.</summary>
+    private static Recommendation Done(Recommendation r, string why) => r with { Why = why, Button = "", State = RecommendationState.Done, TurnsOnUrgentClear = false };
 
-    private static Recommendation Info(Recommendation r, string why) => r with { Why = why, Button = "", State = RecommendationState.Info };
+    /// <summary>A plain line: no button, so it turns nothing on.</summary>
+    private static Recommendation Info(Recommendation r, string why) => r with { Why = why, Button = "", State = RecommendationState.Info, TurnsOnUrgentClear = false };
 
     /// <summary>A text cut at a word to at most <paramref name="max"/> characters, marked with "...".</summary>
     private static string Clip(string s, int max)

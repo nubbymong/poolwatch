@@ -62,6 +62,10 @@ internal sealed class SettingsEditor
     internal static Settings StartFrom(Settings saved, Settings running)
     {
         AtOnceSettings.Of(running).ApplyTo(saved);
+        // The urgent clear's box as Settings offers it (Settings.UrgentAsOffered): still to be chosen after an upgrade with
+        // automatic clearing off, ticked, its default, so a Save that turns clearing on chooses it as the box shows. A Save
+        // that leaves the automatic clear alone puts back what is in effect (AtOnceSettings.ToApply): still to be chosen.
+        saved.AutoClearUrgent = saved.UrgentAsOffered();
         saved.Normalize();
         return saved;
     }
@@ -130,10 +134,17 @@ internal sealed class SettingsEditor
     }
 }
 
-/// <summary>The automatic clear's settings, which take effect together.</summary>
-internal sealed record AutoClearSettings(bool Enabled, double EveryHours, double PoolGb, double MinMinutes, string Mode)
+/// <summary>
+/// The automatic clear's settings, which take effect together (the urgent clear's among them, with whether it is still to
+/// be chosen after an upgrade: a Save that changes the automatic clear writes the urgent clear as Settings showed it, and
+/// so chooses it; one that leaves the automatic clear alone leaves both as they are in effect). <paramref name="Urgent"/>
+/// and <paramref name="UrgentAsk"/> have no default: a construction that left one out would turn a clear the owner turned
+/// off on again, or settle a choice the owner never made.
+/// </summary>
+internal sealed record AutoClearSettings(bool Enabled, double EveryHours, double PoolGb, double MinMinutes, string Mode, bool Urgent, bool UrgentAsk)
 {
-    public static AutoClearSettings Of(Settings s) => new(s.AutoClearEnabled, s.AutoClearEveryHours, s.AutoClearPoolGb, s.AutoClearMinMinutes, s.AutoClearMode);
+    public static AutoClearSettings Of(Settings s) =>
+        new(s.AutoClearEnabled, s.AutoClearEveryHours, s.AutoClearPoolGb, s.AutoClearMinMinutes, s.AutoClearMode, s.AutoClearUrgent, s.AutoClearUrgentAsk);
 
     public void ApplyTo(Settings s)
     {
@@ -142,6 +153,8 @@ internal sealed record AutoClearSettings(bool Enabled, double EveryHours, double
         s.AutoClearPoolGb = PoolGb;
         s.AutoClearMinMinutes = MinMinutes;
         s.AutoClearMode = Mode;
+        s.AutoClearUrgent = Urgent;
+        s.AutoClearUrgentAsk = UrgentAsk;
     }
 }
 

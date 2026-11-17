@@ -247,7 +247,8 @@ SECURITY.md's known limitations say what it does not cover in a folder given wit
 [SECURITY.md](SECURITY.md), which also lists the [known limitations](SECURITY.md#known-limitations).
 
 **Signed and checkable.** Every PoolWatch program, the setup and its uninstaller are signed, with a timestamp, and each
-release lists the SHA-256 of the setup and both zips in `SHA256SUMS.txt`
+release lists the SHA-256 of the setup and both zips in `SHA256SUMS.txt`. Releases after 1.0.0 also carry their
+signed build provenance, a record of the commit and the workflow run that built those files
 ([how to verify a release](docs/TECHNICAL.md#verify-a-release)).
 
 ## Privacy

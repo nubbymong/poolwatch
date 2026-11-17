@@ -32,16 +32,24 @@ internal sealed class CacheClearer
     private readonly ClearerSchedule _schedule = new();
 
     private readonly Func<bool> _experimentActive;
+    /// <summary>The non-paged pool's rise over the last 10 minutes as the detector last read it (null: not known), for the urgent clear.</summary>
+    private readonly Func<long?> _nonPagedRise;
     private long _lastEndMs;
     /// <summary>The first status read of this start removes an older build's SYSTEM tasks.</summary>
     private readonly CacheHelper.OldTaskCleanup _status = new(CacheHelper.Query, CacheHelper.RemoveOldTasks);
 
     /// <param name="experimentActive">An A/B experiment is running; no automatic clear then.</param>
-    public CacheClearer(MonitorEngine engine, FindingLog findings, Func<bool>? experimentActive = null)
+    /// <param name="nonPagedRise">
+    /// The detector's <see cref="Core.Detection.Detector.NonPagedRise10Min"/>: the sampler evaluates the detector on a
+    /// sample before this clearer observes it, so the urgent clear reads the rise of the same sample. Required: without
+    /// it the urgent clear would never run (its wiring is held by a test as well).
+    /// </param>
+    public CacheClearer(MonitorEngine engine, FindingLog findings, Func<bool> experimentActive, Func<long?> nonPagedRise)
     {
         _engine = engine;
         _findings = findings;
-        _experimentActive = experimentActive ?? (() => false);
+        _experimentActive = experimentActive;
+        _nonPagedRise = nonPagedRise;
         _stateFile = engine.Paths.Guard.CheckReal(Path.Combine(engine.Paths.EnsureDir(engine.Paths.CacheDir), "clears.json"));
         Load();
     }
@@ -138,11 +146,13 @@ internal sealed class CacheClearer
         }
         // Automatic clear (off by default; never while one runs or is being measured, never while a clear
         // task of your own is still there: the two must not both run; Never during an A/B experiment, whose phases a
-        // clear would skew; the "lag before / after a clear" preset makes its own clear).
+        // clear would skew; the "lag before / after a clear" preset makes its own clear). The urgent clear reads the
+        // non-paged pool's rise the detector read from this same sample.
         if (Busy || due.Count > 0 || !CacheHelper.AutoClearAllowed(HelperStatus)) return;
         bool experimentRunning = _experimentActive();
+        long? rise = _nonPagedRise();
         (ClearMode Mode, ClearTrigger Trigger)? start;
-        lock (_lock) start = ClearPolicy.Automatic(_history, _engine.Settings, s.Totals, at, _poolWatchStartedMs, experimentRunning);
+        lock (_lock) start = ClearPolicy.Automatic(_history, _engine.Settings, s.Totals, at, _poolWatchStartedMs, experimentRunning, rise);
         if (start is { } clear) Request(clear.Mode, clear.Trigger);
     }
 
@@ -164,10 +174,12 @@ internal sealed class CacheClearer
         var pool = _engine.Latest?.Totals ?? default;
         var status = HelperStatus;
         bool experimentRunning = _experimentActive();
+        long? rise = _nonPagedRise();
         lock (_lock)
             return ClearPolicy.Next(_engine.Settings, pool, now, _history.LastOrDefault()?.TickMs, _poolWatchStartedMs,
-                ClearPolicy.LastPoolClear(_history), status?.CanPurge, status?.LegacyTaskPresent,
-                experimentRunning, Busy || _history.Any(r => !r.Done), ClearPolicy.EscalateNow(_history, _engine.Settings, now));
+                ClearPolicy.LastPoolClear(_history, _engine.Settings), status?.CanPurge, status?.LegacyTaskPresent,
+                experimentRunning, Busy || _history.Any(r => !r.Done), ClearPolicy.EscalateNow(_history, _engine.Settings, now),
+                ClearPolicy.UrgentNow(_history, _engine.Settings, pool, rise, now));
     }
 
     /// <summary>Whether clearing frees kernel pool on this PC, from every measured clear so far (they survive restarts).</summary>

@@ -732,6 +732,39 @@ public sealed class ClearTaskReplacerTests : IDisposable
         Assert.Equal((true, 1.0), (_f.Saved().AutoClearEnabled, _f.Saved().AutoClearEveryHours));
     }
 
+    /// <summary>
+    /// Replacing your task turns the hourly clear on, and with it the urgent clear when that is on (it is by default):
+    /// the log's line says both, never less than what runs.
+    /// </summary>
+    [Fact]
+    public void TheLogSaysTheUrgentClearIsTurnedOnWithTheHourlyClear()
+    {
+        Assert.Equal("the hourly automatic cache clear, and at once while the non-paged pool is over its limit and rising, in place of your own clear task",
+            ClearTaskReplacer.What(new Settings()));
+        Assert.Equal("the hourly automatic cache clear, in place of your own clear task", ClearTaskReplacer.What(new Settings { AutoClearUrgent = false }));
+        Assert.Contains("live.Apply(What(live.Running), ", File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "Changes", "ClearTaskReplacer.cs")));
+    }
+
+    /// <summary>
+    /// After an upgrade the urgent clear is off until it is chosen. Replacing your task while automatic clearing is off
+    /// (the RAMMap task's card, which says so before the click) offers it at its default, and turns it on with the hour:
+    /// its choice, never asked about. With automatic clearing on and its question not answered yet, it stays off, and the
+    /// log says the hour alone.
+    /// </summary>
+    [Fact]
+    public void AfterAnUpgradeReplacingYourTaskTurnsTheUrgentClearOnAsTheCardSays()
+    {
+        var live = _f.Live(new Settings { AutoClearEnabled = false, AutoClearUrgent = false, AutoClearUrgentAsk = true });
+        Assert.EndsWith("and rising, in place of your own clear task", ClearTaskReplacer.What(live.Running));
+        _f.ClearTasks.Tasks.Add(Own());
+        var (_, error) = ClearTaskReplacer.Replace(_f.Records, live, "the setup guide", _f.ClearTasks);
+        Assert.Null(error);
+        Assert.Equal((true, true, false), (live.Running.AutoClearEnabled, live.Running.AutoClearUrgent, live.Running.AutoClearUrgentAsk));
+        Assert.Equal((true, false), (_f.Saved().AutoClearUrgent, _f.Saved().AutoClearUrgentAsk));
+        Assert.Equal("the hourly automatic cache clear, in place of your own clear task",
+            ClearTaskReplacer.What(new Settings { AutoClearEnabled = true, AutoClearUrgent = false, AutoClearUrgentAsk = true }));
+    }
+
     [Fact]
     public void WithNoClearTaskTheHourlyClearGoesOnEvenWhenTheListCannotBeRead()
     {

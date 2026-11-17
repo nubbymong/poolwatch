@@ -147,13 +147,16 @@ public class WindowFitTests
 
     /// <summary>
     /// Every line Settings can show under its sign-in box (<see cref="SettingsDialog.LogonTick"/>), with a Windows error
-    /// message as long as Task Scheduler's usual ones, or none (-1), each with and without the Codex offer.
+    /// message as long as Task Scheduler's usual ones, or none (-1), each with and without the Codex offer, and each with
+    /// the spacing of automatic clears at its default (30 minutes) and at its longest (1,440), which the line under
+    /// automatic clearing says ("At most every 1440 minutes"): its longest.
     /// </summary>
     public static IEnumerable<object[]> LogonNotes()
     {
         int count = LogonNoteTexts().Count;
-        foreach (bool shortcut in new[] { true, false })
-            for (int note = -1; note < count; note++) yield return [shortcut, note];
+        foreach (double minMinutes in new[] { 30d, 24 * 60d })
+            foreach (bool shortcut in new[] { true, false })
+                for (int note = -1; note < count; note++) yield return [shortcut, note, minMinutes];
     }
 
     private static List<string> LogonNoteTexts() =>
@@ -163,11 +166,11 @@ public class WindowFitTests
 
     [Theory]
     [MemberData(nameof(LogonNotes))]
-    public void SettingsFitsASmallScreenWhole(bool shortcut, int logonNote)
+    public void SettingsFitsASmallScreenWhole(bool shortcut, int logonNote, double minMinutes)
     {
         var offer = shortcut ? new ShortcutOffer(() => Task.FromResult((true, "made"))) : null;
         string? note = logonNote >= 0 ? LogonNoteTexts()[logonNote] : null;
-        using var settings = new SettingsDialog(new Settings { CaptureOnAlert = false }, offer, note);
+        using var settings = new SettingsDialog(new Settings { CaptureOnAlert = false, AutoClearMinMinutes = minMinutes }, offer, note);
         var size = Laid(settings);
         Assert.True(size.Width <= Area.Width && size.Height <= Area.Height, $"Settings is {size}, the screen's working area {Area}");
         NothingClipped(settings);
@@ -191,6 +194,11 @@ public class WindowFitTests
         Assert.All(choices, c => Assert.True(c.Right <= c.Parent!.ClientSize.Width && c.Parent.Right <= c.Parent.Parent!.ClientSize.Width, $"{c.Text}: {c.Bounds} in {c.Parent!.Bounds}"));
         Assert.True(choices[0].Bottom <= choices[1].Top && choices[1].Bottom <= choices[2].Top, string.Join(", ", choices.Select(c => c.Bounds)));
         Assert.Contains(texts, t => t.StartsWith(SimpleSettings.ClearStutter, StringComparison.Ordinal)); // said where clearing is turned on
+        // And under it, in sight, that turning it on offers to remove any RAMMap task of yours, with the spacing as set.
+        var hint = All(settings).Single(c => c.Text.StartsWith(SimpleSettings.ClearStutter, StringComparison.Ordinal));
+        Assert.Contains("RAMMap", hint.Text);
+        Assert.Contains(FormattableString.Invariant($"At most every {minMinutes:0} minutes"), hint.Text);
+        Assert.True(OwnVisible(hint) && hint.Right <= hint.Parent!.ClientSize.Width, $"{hint.Bounds} in {hint.Parent!.ClientSize}");
         Assert.Equal(shortcut, texts.Contains(ShortcutOffer.Button));
         Assert.Equal(shortcut, texts.Contains(ShortcutOffer.Text));
         // The guard's long label wraps within its column, on two lines.

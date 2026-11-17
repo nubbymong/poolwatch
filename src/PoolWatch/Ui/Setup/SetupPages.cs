@@ -382,15 +382,21 @@ internal sealed class SafetyPage : StepPage
 
 /// <summary>
 /// Step 4: when to empty the standby cache, in four choices: on a schedule, at a pool size, whichever comes first, or
-/// decide later. Where a choice turns clearing on, it says once that video or the mouse may stutter while it runs, and,
-/// when the scan found a RAMMap clear task of your own, that a rule replaces it (Next then does). Until the scan has
-/// ended it says Next waits for it; while Next applies the choice, the cards and fields are held.
+/// decide later. Where a choice turns clearing on, it offers the urgent clear on a switch of its own (on to begin with:
+/// a clear at once (the full one, or the light one in "lowpriority" mode) while the non-paged pool is over its limit and
+/// still rising), says once that video or the mouse may stutter while it runs, and, when the scan found a RAMMap clear
+/// task of your own, that a rule replaces it (Next then does). Until the scan has ended it says Next waits for it; while
+/// Next applies the choice, the cards, fields and switch are held. The switch's row fits the design's size with the
+/// step's gaps a little tighter (the heading's 20 to 12, the chart's 16 to 10), so the step still shows whole without
+/// scrolling.
 /// </summary>
 internal sealed class CachePage : StepPage
 {
     private sealed record Option(CacheChoice Choice, ChoiceCard Card, IconBox Icon, TextBlock Title, TextBlock Rec, List<Control> Field);
 
-    private readonly TextBlock _title, _lead, _waiting, _stutter, _ownTask, _error;
+    private readonly TextBlock _title, _lead, _waiting, _stutter, _ownTask, _error, _urgentText;
+    private readonly IconBox _urgentIcon;
+    private readonly Toggle _urgent;
     private readonly RoundedBox _frame;
     private readonly CacheChart _chart;
     private readonly List<Option> _options = [];
@@ -409,6 +415,12 @@ internal sealed class CachePage : StepPage
         Add(CacheChoice.PoolSize, SetupIcon.Gauge, SetupText.PoolSize, card => [Words(card, SetupText.WhenItReaches, Fonts.Body), Gb(card)]);
         Add(CacheChoice.Either, SetupIcon.Both, SetupText.Either, card => [Hours(card), Words(card, SetupText.Or, Fonts.Body), Gb(card)]);
         Add(CacheChoice.Later, SetupIcon.Later, SetupText.Later, card => [Words(card, SetupText.LaterText, Fonts.Body, SetupTheme.Muted)]);
+        // The urgent clear's row: a safety net, in green as the step's safety words are.
+        _urgentIcon = Icon(this, SetupIcon.ShieldCheck, SetupTheme.Good);
+        _urgentText = Words(SetupText.UrgentRow(Session.Running.NonPagedTotalAlertBytes), Fonts.Body);
+        _urgent = new Toggle(c.Scale, Fonts, SetupText.UrgentTitle) { On = Session.Urgent };
+        _urgent.Changed += on => Session.SetUrgent(on);
+        Controls.Add(_urgent);
         _waiting = Words(SetupText.WaitForScan, Fonts.Small, SetupTheme.Muted);
         _stutter = Words(SetupText.Stutter, Fonts.Small, SetupTheme.Muted);
         _ownTask = Words(SetupText.ReplacesOwnTask, Fonts.Small, SetupTheme.Muted);
@@ -422,6 +434,9 @@ internal sealed class CachePage : StepPage
     internal IReadOnlyList<ComboBox> GbFields => _gb;
     internal CacheChart Chart => _chart;
     internal bool StutterShown => Shown(_stutter);
+    /// <summary>The urgent clear's switch (the tests), and whether its row shows.</summary>
+    internal Toggle UrgentSwitch => _urgent;
+    internal bool UrgentShown => Shown(_urgent);
     /// <summary>The note that a rule replaces your own clear task is shown (the tests: it is what you agree to before Next removes it).</summary>
     internal bool OwnTaskShown => Shown(_ownTask);
     internal bool WaitingShown => Shown(_waiting);
@@ -493,6 +508,9 @@ internal sealed class CachePage : StepPage
         // Held while Next applies the choice, so the step never goes on with one choice while showing another.
         foreach (var o in _options) o.Card.Enabled = !Session.Busy;
         bool clears = Session.Cache != CacheChoice.Later;
+        _urgent.On = Session.Urgent;
+        _urgent.Enabled = !Session.Busy;
+        foreach (var c in new Control[] { _urgentIcon, _urgentText, _urgent }) ShowIf(c, clears);
         ShowIf(_waiting, !Session.Scanned);
         ShowIf(_stutter, clears);
         ShowIf(_ownTask, clears && Session.HasOwnClearTask);
@@ -513,11 +531,11 @@ internal sealed class CachePage : StepPage
 
     protected override int Place(int width, int room)
     {
-        int y = Heading(_title, _lead, S(28), room);
+        int y = Heading(_title, _lead, S(28), room, below: 12);
         int chartH = _chart.ChartHeight;
         _frame.Bounds = new Rectangle(Inset, y, room, chartH + S(8 + 2));
         _chart.Bounds = new Rectangle(S(12), S(8), room - S(24), chartH);
-        y = _frame.Bottom + S(16);
+        y = _frame.Bottom + S(10);
 
         int gap = S(12), cardW = (room - gap) / 2;
         for (int row = 0; row < 2; row++)
@@ -527,7 +545,24 @@ internal sealed class CachePage : StepPage
             for (int i = 0; i < pair.Count; i++) PlaceCard(pair[i], Inset + i * (cardW + gap), y, cardW, h);
             y += h + (row == 0 ? gap : 0);
         }
-        foreach (var t in new[] { _waiting, _stutter, _ownTask, _error }.Where(Shown)) y = Put(t, Inset, y + S(14), room);
+        int below = S(14);
+        if (Shown(_urgent))
+        {
+            // One line: the shield, the words, and the switch at the row's end.
+            var end = _urgent.Needed;
+            int top = y + S(12), textX = Inset + S(20 + 10), textW = room - S(20 + 10) - end.Width - S(14);
+            int line = Math.Max(end.Height, _urgentText.Measure(Math.Max(1, textW)));
+            _urgentIcon.Bounds = new Rectangle(Inset, top + (line - S(20)) / 2, S(20), S(20));
+            Put(_urgentText, textX, top + (line - _urgentText.Measure(Math.Max(1, textW))) / 2, textW);
+            _urgent.Bounds = new Rectangle(Inset + room - end.Width, top + (line - end.Height) / 2, end.Width, end.Height);
+            y = top + line;
+            below = S(8);
+        }
+        foreach (var t in new[] { _waiting, _stutter, _ownTask, _error }.Where(Shown))
+        {
+            y = Put(t, Inset, y + below, room);
+            below = S(14);
+        }
         return y + S(8);
     }
 

@@ -19,8 +19,10 @@ public class AdvancedSettingsTests
 
     /// <summary>
     /// Every setting the grid shows has a description, in plain words (no internal names of code types): the first it opens
-    /// on, every other, and the two values of a growth alert in the list's own editor. Three are hidden: two that other
-    /// controls set (Show RAM on the graph, the service profiles on the Services tab) and the file's format version.
+    /// on, every other, and the two values of a growth alert in the list's own editor. Four are hidden: two that other
+    /// controls set (Show RAM on the graph, the service profiles on the Services tab), the file's format version, and
+    /// whether the urgent clear is still to be chosen after an upgrade (PoolWatch keeps it; its question and the places
+    /// that turn clearing on set it).
     /// </summary>
     [Fact]
     public void EverySettingTheGridShowsHasADescription()
@@ -31,7 +33,7 @@ public class AdvancedSettingsTests
         Assert.True(missing.Count == 0, "no description: " + string.Join(", ", missing));
         Assert.False(string.IsNullOrWhiteSpace(shown[0].Description)); // the grid opens on it
         Assert.All(Shown(new GrowthRule()), p => Assert.False(string.IsNullOrWhiteSpace(p.Description), p.Name));
-        Assert.Equal(["ServiceProfiles", "SettingsVersion", "ShowRam"],
+        Assert.Equal(["AutoClearUrgentAsk", "ServiceProfiles", "SettingsVersion", "ShowRam"],
             TypeDescriptor.GetProperties(typeof(Settings)).Cast<PropertyDescriptor>().Where(p => !p.IsBrowsable).Select(p => p.Name).Order(StringComparer.Ordinal));
         foreach (var p in shown)
         {
@@ -198,6 +200,12 @@ public class AdvancedSettingsTests
         var rules = new Settings { GrowthRules = [new(120, 5), new(60, 7), new(0, 5), new(10, 0)] };
         rules.Normalize();
         Assert.Equal([(60.0, 5L), (60.0, 7L)], rules.GrowthRules.Select(r => (r.WindowMinutes, r.Bytes)));
+
+        // The urgent clear's limits, as its tooltip in Settings says them: 10 minutes apart at least, and the wait after one
+        // that freed little; on by default, and off after an upgrade until it is chosen.
+        string urgent = Describe(nameof(Settings.AutoClearUrgent));
+        Assert.Contains("10 minutes or more apart, waiting after one that freed little.", urgent);
+        Assert.Contains("On by default; off after an upgrade until chosen.", urgent);
     }
 
     private static string Describe(string name) => Shown(new Settings()).Single(p => p.Name == name).Description;
