@@ -314,10 +314,15 @@ public sealed class ActiveChangesTests : IDisposable
     [Fact]
     public void EachSourceGivesItsRowsATitleADetailAndAGroup()
     {
-        var live = _f.Live(new Settings { AutoClearEnabled = true, AutoClearEveryHours = 1, AutoClearPoolGb = 8 });
+        var live = _f.Live(new Settings { AutoClearEnabled = true, AutoClearEveryHours = 1, AutoClearPoolGb = 8, AutoClearUrgent = false });
         var clear = Assert.Single(new SettingsSource(live, _f.Records, null).List());
         Assert.Equal((ChangeWords.AutoClearTitle, "every hour, or at 8 GB", ChangeGroup.Feature), (clear.Title, clear.Detail, clear.Group));
         Assert.Equal("The cache is cleared every hour, or sooner when the kernel pool reaches 8 GB", clear.What); // the uninstaller's line is as before
+        // With the urgent clear on (as it is by default), the row says it too: turning automatic clearing on turned it on.
+        live.Apply("the urgent clear, in Settings", s => s.AutoClearUrgent = true);
+        var urgent = Assert.Single(new SettingsSource(live, _f.Records, null).List());
+        Assert.Equal("every hour, or at 8 GB, and at once while the non-paged pool is over its limit and rising", urgent.Detail);
+        Assert.Equal(clear.What, urgent.What);
 
         var logon = Assert.Single(new LogonTaskSource(new LogonTasks(), _ => Core.Setup.SignInState.Starts).List());
         Assert.Equal((ChangeWords.LogonTaskTitle, ChangeWords.LogonTaskDetail, ChangeGroup.Feature), (logon.Title, logon.Detail, logon.Group));

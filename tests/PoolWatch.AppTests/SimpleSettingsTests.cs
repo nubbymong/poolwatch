@@ -17,9 +17,9 @@ public class SimpleSettingsTests
     {
         var s = new Settings { AutoClearEnabled = true, AutoClearEveryHours = 2.5, AutoClearPoolGb = 12, DeeperCapture = true, TokenGuardEnabled = true, CheckForUpdates = false,
             PoolNotices = PoolNoticeLevel.NeedsAttention };
-        Assert.Equal(new SimpleSettings(true, 2.5m, 12m, true, true, false, PoolNoticeLevel.NeedsAttention, RecordMode.ReportsOnly, 7), SimpleSettings.From(s));
+        Assert.Equal(new SimpleSettings(true, 2.5m, 12m, true, true, false, PoolNoticeLevel.NeedsAttention, RecordMode.ReportsOnly, 7, Urgent: true), SimpleSettings.From(s));
         // The defaults: off, every hour, over 8 GB, no deeper capture, no token-leak guard, update notices on, a notice for every growth.
-        Assert.Equal(new SimpleSettings(false, 1m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7), SimpleSettings.From(new Settings()));
+        Assert.Equal(new SimpleSettings(false, 1m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true), SimpleSettings.From(new Settings()));
     }
 
     /// <summary>
@@ -83,12 +83,12 @@ public class SimpleSettingsTests
         var off = SimpleSettings.From(s) with { TokenGuard = false }; // the box unticked
         Assert.True(off.ApplyTo(s, out _));
         Assert.False(s.TokenGuardEnabled);
-        Assert.True(new SimpleSettings(false, 1m, 8m, false, true, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).ApplyTo(s, out var problems));
+        Assert.True(new SimpleSettings(false, 1m, 8m, false, true, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).ApplyTo(s, out var problems));
         Assert.Empty(problems);
         Assert.True(s.TokenGuardEnabled);
         // A refused form writes nothing, the guard included.
         var t = new Settings();
-        Assert.False(new SimpleSettings(true, 0m, 0m, false, true, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).ApplyTo(t, out _));
+        Assert.False(new SimpleSettings(true, 0m, 0m, false, true, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).ApplyTo(t, out _));
         Assert.False(t.TokenGuardEnabled);
     }
 
@@ -247,7 +247,7 @@ public class SimpleSettingsTests
         var s = new Settings { RecordMode = RecordMode.Detailed };
         Assert.True(v.ApplyTo(s, out _));
         Assert.Equal((RecordMode.ReportsOnly, 3), (s.RecordMode, s.RetentionDays));
-        Assert.Contains(new SimpleSettings(false, 1m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.Detailed, 0).Problems(), p => p.StartsWith("Clean up"));
+        Assert.Contains(new SimpleSettings(false, 1m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.Detailed, 0, Urgent: true).Problems(), p => p.StartsWith("Clean up"));
 
         var shown = AtOnceSettings.Of(new Settings());
         var edited = AtOnceSettings.Of(new Settings { RecordMode = RecordMode.Detailed, RetentionDays = 30 });
@@ -262,12 +262,13 @@ public class SimpleSettingsTests
     }
 
     [Fact]
-    public void SavingWritesExactlyTheNineSettingsAndNothingElse()
+    public void SavingWritesExactlyTheTenSettingsAndNothingElse()
     {
-        // Nine since the Records part (what PoolWatch keeps on disk, and when it is cleaned up) joined the plain form.
+        // Nine since the Records part (what PoolWatch keeps on disk, and when it is cleaned up) joined the plain form, and
+        // ten with the urgent clear's box.
         var s = new Settings();
         string before = s.ToJson();
-        Assert.True(new SimpleSettings(true, 6m, 10.5m, true, true, false, PoolNoticeLevel.Off, RecordMode.Detailed, 30).ApplyTo(s, out var problems));
+        Assert.True(new SimpleSettings(true, 6m, 10.5m, true, true, false, PoolNoticeLevel.Off, RecordMode.Detailed, 30, Urgent: false).ApplyTo(s, out var problems));
         Assert.Empty(problems);
         Assert.True(s.AutoClearEnabled);
         Assert.Equal(6, s.AutoClearEveryHours);
@@ -277,16 +278,39 @@ public class SimpleSettingsTests
         Assert.False(s.CheckForUpdates);
         Assert.Equal(PoolNoticeLevel.Off, s.PoolNotices);
         Assert.Equal((RecordMode.Detailed, 30), (s.RecordMode, s.RetentionDays));
+        Assert.False(s.AutoClearUrgent);
         // Every other setting is as it was.
         var back = new Settings();
         var other = Settings.Parse(s.ToJson());
         Assert.Equal(PoolNoticeLevel.Off, other.PoolNotices); // as settings.json keeps it
         Assert.Equal((RecordMode.Detailed, 30), (other.RecordMode, other.RetentionDays));
+        Assert.False(other.AutoClearUrgent);
         other.AutoClearEnabled = back.AutoClearEnabled; other.AutoClearEveryHours = back.AutoClearEveryHours;
         other.AutoClearPoolGb = back.AutoClearPoolGb; other.DeeperCapture = back.DeeperCapture;
         other.TokenGuardEnabled = back.TokenGuardEnabled; other.CheckForUpdates = back.CheckForUpdates;
         other.PoolNotices = back.PoolNotices; other.RecordMode = back.RecordMode; other.RetentionDays = back.RetentionDays;
+        other.AutoClearUrgent = back.AutoClearUrgent;
         Assert.Equal(Settings.Parse(before).ToJson(), other.ToJson());
+    }
+
+    /// <summary>
+    /// The urgent clear's value has no default in either record the forms build: a construction that left it out would
+    /// turn a clear the owner turned off on again at the next save. Each record carries it through as given.
+    /// </summary>
+    [Fact]
+    public void TheUrgentClearHasNoDefaultInTheFormsRecords()
+    {
+        foreach (var type in new[] { typeof(SimpleSettings), typeof(AutoClearSettings) })
+        {
+            var urgent = type.GetConstructors().Single(c => c.GetParameters().Any(p => p.Name == "Urgent")).GetParameters().Single(p => p.Name == "Urgent");
+            Assert.False(urgent.HasDefaultValue, $"{type.Name}'s Urgent has a default");
+        }
+        var off = new Settings { AutoClearUrgent = false };
+        Assert.False(SimpleSettings.From(off).Urgent);
+        Assert.False(AutoClearSettings.Of(off).Urgent);
+        var on = new Settings { AutoClearUrgent = true };
+        AutoClearSettings.Of(off).ApplyTo(on);
+        Assert.False(on.AutoClearUrgent);
     }
 
     /// <summary>
@@ -407,24 +431,24 @@ public class SimpleSettingsTests
     public void AutomaticClearingNeedsSomethingToGoBy()
     {
         var s = new Settings();
-        Assert.False(new SimpleSettings(true, 0m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).ApplyTo(s, out var problems));
+        Assert.False(new SimpleSettings(true, 0m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).ApplyTo(s, out var problems));
         Assert.Contains(problems, p => p.Contains("nothing to go by"));
         Assert.False(s.AutoClearEnabled); // nothing was written
         // Off, the two zeros are fine; on, either rule alone is fine.
-        Assert.Empty(new SimpleSettings(false, 0m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).Problems());
-        Assert.Empty(new SimpleSettings(true, 0m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).Problems());
-        Assert.Empty(new SimpleSettings(true, 1m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).Problems());
+        Assert.Empty(new SimpleSettings(false, 0m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).Problems());
+        Assert.Empty(new SimpleSettings(true, 0m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).Problems());
+        Assert.Empty(new SimpleSettings(true, 1m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).Problems());
     }
 
     [Fact]
     public void OutOfRangeValuesAreRefusedInPlainWords()
     {
-        Assert.Contains(new SimpleSettings(true, 0.2m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).Problems(), p => p.Contains("half hour"));
-        Assert.Contains(new SimpleSettings(false, 200m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).Problems(), p => p.StartsWith("How often"));
-        Assert.Contains(new SimpleSettings(false, -1m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).Problems(), p => p.StartsWith("How often"));
-        Assert.Contains(new SimpleSettings(false, 1m, 2000m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).Problems(), p => p.StartsWith("Pool size"));
-        Assert.Contains(new SimpleSettings(false, 1m, -0.5m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).Problems(), p => p.StartsWith("Pool size"));
-        Assert.Empty(new SimpleSettings(true, SimpleSettings.MinHours, SimpleSettings.MaxPoolGb, true, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).Problems());
+        Assert.Contains(new SimpleSettings(true, 0.2m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).Problems(), p => p.Contains("half hour"));
+        Assert.Contains(new SimpleSettings(false, 200m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).Problems(), p => p.StartsWith("How often"));
+        Assert.Contains(new SimpleSettings(false, -1m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).Problems(), p => p.StartsWith("How often"));
+        Assert.Contains(new SimpleSettings(false, 1m, 2000m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).Problems(), p => p.StartsWith("Pool size"));
+        Assert.Contains(new SimpleSettings(false, 1m, -0.5m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).Problems(), p => p.StartsWith("Pool size"));
+        Assert.Empty(new SimpleSettings(true, SimpleSettings.MinHours, SimpleSettings.MaxPoolGb, true, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).Problems());
     }
 
     [Fact]
@@ -433,16 +457,30 @@ public class SimpleSettingsTests
         Assert.Contains("no effect yet", SimpleSettings.DeeperCaptureHint(new Settings()));
         Assert.DoesNotContain("no effect", SimpleSettings.DeeperCaptureHint(new Settings { CaptureOnAlert = true }));
         Assert.DoesNotContain("no effect", SimpleSettings.DeeperCaptureHint(new Settings { CpuTraceEnabled = true }));
-        // The spacing as set, and the urgent clear's own 10 minutes (ClearPolicy.UrgentFloor); what turning it on does to
-        // a clear task of your own is the box's tooltip.
-        Assert.Equal(SimpleSettings.ClearStutter + " At most every 45 minutes (10 for an urgent clear).", SimpleSettings.AutoClearHint(new Settings { AutoClearMinMinutes = 45 }));
+        // The spacing as set, the urgent clear's own 10 minutes (ClearPolicy.UrgentFloor), and what turning it on does to
+        // a clear task of your own, in sight: the keyboard and a screen reader never show a tooltip, and that box can lead
+        // to removing your task. The tooltip says why, too.
+        Assert.Equal(SimpleSettings.ClearStutter + " At most every 45 minutes (10 for an urgent clear). Turning it on first offers to remove your own RAMMap clear task.",
+            SimpleSettings.AutoClearHint(new Settings { AutoClearMinMinutes = 45 }));
         Assert.Equal(TimeSpan.FromMinutes(10), Core.Cache.ClearPolicy.UrgentFloor);
         Assert.Contains("RAMMap", SimpleSettings.AutoClearTip);
         Assert.Contains("_tips.SetToolTip(_fields.AutoClear, SimpleSettings.AutoClearTip);",
             File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "SettingsDialog.cs")));
-        // The urgent clear's box: short enough for one line in its column, the rest in its tooltip.
+        // The urgent clear's box: short enough for one line in its column, the rest in its tooltip, which says how it
+        // clears as the settings have it (the light clear where only light ones are chosen), and how much longer several
+        // in a row wait.
         Assert.True(SimpleSettings.UrgentLabel.Length <= 45, SimpleSettings.UrgentLabel);
-        Assert.StartsWith("When the non-paged pool is over 5 GB and still climbing fast", SimpleSettings.UrgentTip(new Settings()));
+        string tip = SimpleSettings.UrgentTip(new Settings());
+        Assert.StartsWith("When the non-paged pool is over 5 GB and still climbing fast", tip);
+        Assert.Contains("the full clear.", tip);
+        Assert.Contains("At least 10 minutes apart; several in a row wait longer, up to 30 minutes.", tip);
+        Assert.Contains("freed little of the non-paged pool", tip);
+        string light = SimpleSettings.UrgentTip(new Settings { AutoClearMode = "lowpriority", AutoClearMinMinutes = 60 });
+        Assert.Contains("the light clear, as the Advanced settings ask for light clears only.", light);
+        Assert.DoesNotContain("full", light);
+        Assert.Contains("up to 60 minutes", light);
+        // An alert set under 1 GB is said as the 1 GB the urgent clear goes by.
+        Assert.StartsWith("When the non-paged pool is over 1 GB", SimpleSettings.UrgentTip(new Settings { NonPagedTotalAlertBytes = 1 }));
     }
 
     [Fact]
@@ -456,10 +494,10 @@ public class SimpleSettingsTests
         Assert.DoesNotContain("0 hours", hint);
         Assert.Equal(["On a schedule", "At a pool size", "Whichever comes first"], new[] { SimpleSettings.ScheduleChoice, SimpleSettings.SizeChoice, SimpleSettings.EitherChoice });
         // And either rule alone can be saved: a schedule with no size rule, a size rule with no schedule.
-        Assert.Empty(new SimpleSettings(true, 1m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).Problems());
-        Assert.Empty(new SimpleSettings(true, 0m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).Problems());
+        Assert.Empty(new SimpleSettings(true, 1m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).Problems());
+        Assert.Empty(new SimpleSettings(true, 0m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).Problems());
         var s = new Settings();
-        Assert.True(new SimpleSettings(true, 0m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7).ApplyTo(s, out _));
+        Assert.True(new SimpleSettings(true, 0m, 8m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true).ApplyTo(s, out _));
         Assert.Equal((true, 0.0, 8.0), (s.AutoClearEnabled, s.AutoClearEveryHours, s.AutoClearPoolGb));
     }
 
@@ -477,7 +515,7 @@ public class SimpleSettingsTests
         var fields = new SimpleSettingsFields();
         Assert.Equal([SimpleSettings.ScheduleChoice, SimpleSettings.SizeChoice, SimpleSettings.EitherChoice], new[] { fields.Schedule.Text, fields.PoolSize.Text, fields.Either.Text });
         // A schedule alone: the size field shows the usual 8 GB, unused, and is saved as no size rule.
-        fields.Fill(new SimpleSettings(true, 2m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7));
+        fields.Fill(new SimpleSettings(true, 2m, 0m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true));
         Assert.Equal((ClearRule.Schedule, 2m, 8m), (fields.Rule, fields.Hours.Value, fields.PoolGb.Value));
         Assert.Equal((2m, 0m), (fields.Values().EveryHours, fields.Values().PoolGb));
         // The owner picks whichever comes first: both numbers count.
@@ -488,7 +526,7 @@ public class SimpleSettingsTests
         Assert.Equal((0m, 8m), (fields.Values().EveryHours, fields.Values().PoolGb));
         Assert.Empty(fields.Values().Problems());
         // A size alone, read back as a size alone (the schedule field shows the usual hour).
-        fields.Fill(new SimpleSettings(true, 0m, 12m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7));
+        fields.Fill(new SimpleSettings(true, 0m, 12m, false, false, true, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true));
         Assert.Equal((ClearRule.PoolSize, 1m, 12m), (fields.Rule, fields.Hours.Value, fields.PoolGb.Value));
     }
 }

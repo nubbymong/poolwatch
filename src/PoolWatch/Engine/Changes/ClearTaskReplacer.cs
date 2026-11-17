@@ -104,6 +104,9 @@ internal static class ClearTaskReplacer
     /// removed, each as read right before its delete, and why any task was left in place (null when none was), including
     /// one still there after a delete that removed nothing.
     /// </summary>
+    // Tests first: a stub with the old behaviour, so the new tests build; the fix replaces it.
+    internal static string What(Core.Settings s) => "the hourly automatic cache clear, in place of your own clear task";
+
     internal static (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) RemoveAll(
         IReadOnlyList<CacheHelper.LegacyTaskInfo> tasks, ChangeRecords records, string via, IClearTaskStore store)
     {

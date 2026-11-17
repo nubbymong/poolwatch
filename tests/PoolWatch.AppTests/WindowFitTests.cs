@@ -191,6 +191,10 @@ public class WindowFitTests
         Assert.All(choices, c => Assert.True(c.Right <= c.Parent!.ClientSize.Width && c.Parent.Right <= c.Parent.Parent!.ClientSize.Width, $"{c.Text}: {c.Bounds} in {c.Parent!.Bounds}"));
         Assert.True(choices[0].Bottom <= choices[1].Top && choices[1].Bottom <= choices[2].Top, string.Join(", ", choices.Select(c => c.Bounds)));
         Assert.Contains(texts, t => t.StartsWith(SimpleSettings.ClearStutter, StringComparison.Ordinal)); // said where clearing is turned on
+        // And under it, in sight, that turning it on first offers to remove a RAMMap clear task of your own.
+        var hint = All(settings).Single(c => c.Text.StartsWith(SimpleSettings.ClearStutter, StringComparison.Ordinal));
+        Assert.Contains("RAMMap", hint.Text);
+        Assert.True(OwnVisible(hint) && hint.Right <= hint.Parent!.ClientSize.Width, $"{hint.Bounds} in {hint.Parent!.ClientSize}");
         Assert.Equal(shortcut, texts.Contains(ShortcutOffer.Button));
         Assert.Equal(shortcut, texts.Contains(ShortcutOffer.Text));
         // The guard's long label wraps within its column, on two lines.

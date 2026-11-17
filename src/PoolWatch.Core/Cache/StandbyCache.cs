@@ -288,6 +288,9 @@ public static class ClearPolicy
     /// after when it freed little; null when there is none, or when a clear measured after it freed real pool (any clear:
     /// scheduled, by hand, urgent), which shows that the pool is cache-held again, so the back-off is over.
     /// </summary>
+    // Tests first: a stub with the old behaviour, so the new tests build; the fix replaces it.
+    public static ClearRecord? LastPoolClear(IReadOnlyList<ClearRecord> history, Settings s) => LastPoolClear(history);
+
     public static ClearRecord? LastPoolClear(IReadOnlyList<ClearRecord> history)
     {
         for (int i = history.Count - 1; i >= 0; i--)

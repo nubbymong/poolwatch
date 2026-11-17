@@ -48,7 +48,7 @@ internal sealed class Diagnostics
         try { EventLog.Start(); }
         catch (Exception ex) { engine.Log.Info("event log feed not started: " + ex.Message); }
         analysis.Incidents.Opened += (_, _) => _instancesRequested = true;
-        Cache = new CacheClearer(engine, Findings, () => AnyExperimentActive, () => analysis.Detector.NonPagedRise10Min);
+        Cache = new CacheClearer(engine, Findings, () => AnyExperimentActive, () => null); // tests first: the wiring dropped, as the wiring test must see it
         // Made whatever the guard setting; it hooks its exit failsafe as it is made (TokenLeakGuard.HookProcessExit).
         Guard = new TokenLeakGuard(engine.Paths, engine.Log, f => _guardFindings.Enqueue(f));
         // Service changes are made on a worker thread (the page's Apply / Restore): their findings are queued and recorded on

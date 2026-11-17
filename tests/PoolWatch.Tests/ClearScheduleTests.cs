@@ -99,6 +99,18 @@ public class ClearScheduleTests
         // Inside the spacing after a clear, that size counts only once it is over.
         Assert.Equal(new NextClear(NextClearKind.AtPoolSize, PoolBytes: 9 * GB, PoolRuleAfterUtc: Now.AddHours(4), EarlyPoolBytes: 25 * GB / 2, EarlyAfterUtc: Now.AddMinutes(20)),
             Next(sizeOnly, Pool(3.1, 3.1), Now, Now.AddMinutes(-10), weak));
+        // The limit raised since to 16 GB, past the 12.5 GB that ends the back-off: a pool at the limit has grown past it
+        // already, so the size rule is not backed off at all. The line says the limit alone, with no second size and no
+        // wait that does not exist ("when the kernel pool reaches 16 GB (now 6.2 GB)"), and the spacing after a clear as
+        // the only wait.
+        var raised = Auto(everyHours: 0, poolGb: 16);
+        Assert.Equal(new NextClear(NextClearKind.AtPoolSize, PoolBytes: 16 * GB), Next(raised, Pool(3.1, 3.1), Now, Now.AddHours(-2), weak));
+        Assert.Equal(new NextClear(NextClearKind.AtPoolSize, PoolBytes: 16 * GB, PoolRuleAfterUtc: Now.AddMinutes(20)), Next(raised, Pool(3.1, 3.1), Now, Now.AddMinutes(-10), weak));
+        Assert.Equal(new NextClear(NextClearKind.Scheduled, Now), Next(raised, Pool(8, 8), Now, Now.AddHours(-2), weak));
+        Assert.Equal("Next cache clear when the kernel pool reaches 16 GB (now 6.2 GB). No cache clear yet.",
+            ClearScheduleText.Line(Next(raised, Pool(3.1, 3.1), Now, Now.AddHours(-2), weak), [], Pool(3.1, 3.1), Now));
+        // At exactly 12.5 GB the limit is where the back-off ends: not backed off either.
+        Assert.Equal(new NextClear(NextClearKind.AtPoolSize, PoolBytes: 25 * GB / 2), Next(Auto(everyHours: 0, poolGb: 12.5), Pool(3.1, 3.1), Now, Now.AddHours(-2), weak));
     }
 
     [Fact]
@@ -126,11 +138,12 @@ public class ClearScheduleTests
         // and at the time it names, the rule fires.
         var start = Now.AddHours(-3);
         var weak = new ClearRecord { TimeUtc = Now.AddHours(-1), TickMs = Clocks.At(Now.AddHours(-1)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.PoolOverLimit, Before = Pool(5, 5), After = Pool(4.9, 4.9) };
-        // Pools under the limit, over it, and past what the weak clear saw by its margin (12.5 GB: the back-off is over).
-        foreach (var s in new[] { Auto(1, 0), Auto(0, 8), Auto(1, 8), Auto(2.5, 8), Auto(0.5, 6) })
+        // Pools under the limit, over it, and past what the weak clear saw by its margin (12.5 GB: the back-off is over);
+        // and a limit raised past that margin (16 GB), with a pool over it.
+        foreach (var s in new[] { Auto(1, 0), Auto(0, 8), Auto(1, 8), Auto(2.5, 8), Auto(0.5, 6), Auto(0, 16), Auto(1, 16) })
         foreach (DateTime? last in new DateTime?[] { null, Now.AddMinutes(-10), Now.AddMinutes(-45), Now.AddHours(-1) })
         foreach (var lastPool in new[] { null, weak })
-        foreach (var pool in new[] { Pool(2, 2), Pool(5, 4), Pool(7, 6) })
+        foreach (var pool in new[] { Pool(2, 2), Pool(5, 4), Pool(7, 6), Pool(9, 8) })
             for (int m = 0; m <= 400; m += 7)
             {
                 var t = Now.AddMinutes(m);
@@ -151,6 +164,13 @@ public class ClearScheduleTests
                     Assert.NotNull(ClearPolicy.Due(s, grown, At(from), Ms(last), At(start).Ms, lastPool));
                     if (next.EarlyAfterUtc is { } later) Assert.Null(ClearPolicy.Due(s, grown, At(later.AddMinutes(-1)), Ms(last), At(start).Ms, lastPool));
                     Assert.NotEqual(ClearTrigger.PoolOverLimit, ClearPolicy.Due(s, new PoolTotals((ulong)early - (1UL << 20), 0, 0, 0), At(from), Ms(last), At(start).Ms, lastPool));
+                }
+                // A limit at or past the size that ends the back-off: never backed off, so no second size, and no wait
+                // for the size rule but the spacing after the last clear.
+                if (lastPool is { } lp && s.AutoClearPoolGb > 0 && lp.PoolBefore + ClearPolicy.GrowOnBy(lp.PoolBefore) <= (long)(s.AutoClearPoolGb * GB))
+                {
+                    Assert.Null(next.EarlyPoolBytes);
+                    if (next.PoolRuleAfterUtc is { } after) Assert.True(last is { } l && after <= l.AddMinutes(30), at);
                 }
             }
     }
@@ -336,7 +356,7 @@ public class ClearScheduleTests
         var weak = new ClearRecord { TimeUtc = Now.AddMinutes(-40), TickMs = Clocks.At(Now.AddMinutes(-40)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.PoolOverLimit, Before = Pool(6, 6), After = Pool(5.95, 5.95) };
         Assert.Null(ClearPolicy.Automatic([weak], sizeOnly, Pool(6, 6), At(Now), At(since).Ms, false));
         Assert.Equal((ClearMode.LowPriority, ClearTrigger.PoolOverLimit), ClearPolicy.Automatic([weak], sizeOnly, Pool(6, 6), At(Now.AddHours(6)), At(since).Ms, false));
-        Assert.Same(weak, ClearPolicy.LastPoolClear([weak, Light(Now.AddMinutes(-5))]));
+        Assert.Same(weak, ClearPolicy.LastPoolClear([weak, Light(Now.AddMinutes(-5))], sizeOnly));
     }
 
     // ------------------------------------------------------------------ does clearing help on this PC

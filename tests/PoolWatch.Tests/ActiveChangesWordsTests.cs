@@ -23,6 +23,19 @@ public class ActiveChangesWordsTests
     public void TheStandbyCacheRowSaysWhenItIsEmptied(double hours, double gb, string expected) =>
         Assert.Equal(expected, ChangeWords.AutoClearWhen(hours, gb));
 
+    /// <summary>
+    /// The urgent clear is on by default, so turning automatic clearing on turns it on too: the row says so after the
+    /// rules, and says nothing of it when it is off, or when no rule is set (then it does not run either).
+    /// </summary>
+    [Theory]
+    [InlineData(1, 8, true, "every hour, or at 8 GB, and at once while the non-paged pool is over its limit and rising")]
+    [InlineData(1, 0, true, "every hour, and at once while the non-paged pool is over its limit and rising")]
+    [InlineData(0, 8, true, "when the kernel pool reaches 8 GB, and at once while the non-paged pool is over its limit and rising")]
+    [InlineData(1, 8, false, "every hour, or at 8 GB")]
+    [InlineData(0, 0, true, "on, but with no schedule and no size rule")]
+    public void TheStandbyCacheRowSaysTheUrgentClearWhenItIsOn(double hours, double gb, bool urgent, string expected) =>
+        Assert.Equal(expected, ChangeWords.AutoClearWhen(hours, gb, urgent));
+
     [Fact]
     public void AServiceRowSaysHowItWasBeforePoolWatchChangedIt()
     {
@@ -189,7 +202,7 @@ public class ActiveChangesWordsTests
             ChangeWords.LogonTaskNoTrigger, ChangeWords.LogonTaskNoTriggerDetail, ChangeWords.LogonTaskNotHighest, ChangeWords.LogonTaskNotHighestDetail,
             ChangeWords.LogonTaskRemoved,
             ChangeWords.LogonTaskTitle, ChangeWords.LogonTaskDetail, ChangeWords.AutoClearTitle, ChangeWords.TokenGuardTitle, ChangeWords.ShortcutDetail,
-            ChangeWords.AutoClearWhen(1, 8), ChangeWords.AutoClearWhen(0, 0), ChangeWords.ServiceDetail(ServiceStartType.Automatic, true, true, "profile Build box, at start"),
+            ChangeWords.AutoClearWhen(1, 8), ChangeWords.AutoClearWhen(1, 8, urgent: true), ChangeWords.AutoClearWhen(0, 0), ChangeWords.ServiceDetail(ServiceStartType.Automatic, true, true, "profile Build box, at start"),
             ChangeWords.ServiceDetail(ServiceStartType.Manual, false, false), ChangeWords.KeptOffAtStart("Build box", "maps"), ChangeWords.UnreadNote(""),
             ChangeWords.TitleOf(ChangeRecordTests.ClearTask()), ChangeWords.DetailOf(ChangeRecordTests.ClearTask()),
             ChangeWords.TitleOf(ChangeRecordTests.Shortcut()), ChangeWords.DetailOf(ChangeRecordTests.Task()), ChangeWords.DetailOf(ChangeRecordTests.Startup()),

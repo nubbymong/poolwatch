@@ -184,6 +184,9 @@ public static class ChangeWords
     public static string StartupTitle(string name) => name + " at sign-in";
 
     /// <summary>"every hour, or at 8 GB", "every 30 minutes", "when the kernel pool reaches 8 GB".</summary>
+    // Tests first: a stub with the old behaviour, so the new tests build; the fix replaces it.
+    public static string AutoClearWhen(double everyHours, double poolGb, bool urgent) => AutoClearWhen(everyHours, poolGb);
+
     public static string AutoClearWhen(double everyHours, double poolGb)
     {
         string? every = everyHours > 0 ? Every(everyHours) : null;

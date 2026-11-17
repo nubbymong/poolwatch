@@ -67,10 +67,20 @@ public sealed class RecommendationActionsTests : IDisposable
     [Fact]
     public async Task TheHourlyClearAppliesAtOnceUnlessItCannotRun()
     {
-        var (ok, _) = await Run(RecommendationId.HourlyCacheClear);
+        var (ok, said) = await Run(RecommendationId.HourlyCacheClear);
         Assert.True(ok);
         Assert.Equal((true, 1.0), (_live.Running.AutoClearEnabled, _live.Running.AutoClearEveryHours));
         Assert.True(_f.Saved().AutoClearEnabled);
+        // The urgent clear is on by default, so the click turned it on too, and what it says says so.
+        Assert.Equal("PoolWatch clears the cache every hour, and at once while the non-paged pool is over its limit and rising.", said);
+        Assert.Equal("Automatic cache clearing turned on, every hour, and at once while the non-paged pool is over its limit and rising (from the setup guide).",
+            _system.TimelineLines[^1]);
+        // With it turned off, only the hour.
+        _live.Apply("the urgent clear off", s => { s.AutoClearUrgent = false; s.AutoClearEnabled = false; });
+        (ok, said) = await Run(RecommendationId.HourlyCacheClear);
+        Assert.Equal((true, "PoolWatch clears the cache every hour."), (ok, said));
+        Assert.Equal("Automatic cache clearing turned on, every hour (from the setup guide).", _system.TimelineLines[^1]);
+        _live.Apply("the urgent clear on", s => s.AutoClearUrgent = true);
 
         _live.Apply("off", s => s.AutoClearEnabled = false);
         _system.OwnClearTask = true;
@@ -90,7 +100,9 @@ public sealed class RecommendationActionsTests : IDisposable
         _system.Removed = [new CacheHelper.LegacyTaskInfo(@"\Empty standby list", "SYSTEM", "RAMMap64.exe -Ew", "hourly", true)];
         var (ok, message) = await Run(RecommendationId.ReplaceClearTask);
         Assert.True(ok);
-        Assert.Equal("Replaced your clear task \"Empty standby list\". PoolWatch clears the cache every hour now.", message);
+        Assert.Equal("Replaced your clear task \"Empty standby list\". PoolWatch now clears the cache every hour, and at once while the non-paged pool is over its limit and rising.", message);
+        Assert.Equal("Replaced your own clear task with PoolWatch's hourly cache clear, and at once while the non-paged pool is over its limit and rising (from the setup guide).",
+            _system.TimelineLines[^1]);
         Assert.Equal(["replace clear tasks via the setup guide", "refresh clear status", "rescan"], _system.Calls);
 
         _system.Calls.Clear();

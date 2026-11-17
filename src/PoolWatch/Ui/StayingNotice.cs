@@ -13,8 +13,13 @@ namespace PoolWatch.Ui;
 /// </summary>
 /// <param name="openWindow">What Open PoolWatch opens (the main window, or setup while it was never completed).</param>
 /// <param name="log">The engine log.</param>
-internal sealed class StayingNotice(Action openWindow, Action<string> log)
+internal sealed class StayingNotice(Action openWindow, Action<string> log, Func<bool>? presenting = null)
 {
+    // Tests first: a stub with the old behaviour, so the new tests build; the fix replaces it.
+    internal bool Hold(NoticeText notice) => presenting is null && notice is null;
+    internal NoticeText? Release() => null;
+    internal NoticeText? Held => null;
+
     private NoticeWindow? _open;
 
     /// <summary>The window open now; null when none (the tests).</summary>
@@ -95,6 +100,11 @@ internal sealed class NoticeWindow : Form
     }
 
     public const string OpenLabel = "Open PoolWatch", CloseLabel = "Close";
+
+    // Tests first: a stub with the old behaviour, so the new tests build; the fix replaces it.
+    internal static readonly Font NoticeFont = new("Segoe UI", 9f);
+    internal static Rectangle Area(IntPtr taskbar, Func<IntPtr, Rectangle> areaOf, Rectangle? primary) => primary ?? new Rectangle(0, 0, 1280, 800);
+    internal static string Cut(string text) => text;
 
     /// <summary>The notice's title, as the title bar shows it after "PoolWatch: ".</summary>
     internal string Title { get; private set; } = "";

@@ -732,6 +732,19 @@ public sealed class ClearTaskReplacerTests : IDisposable
         Assert.Equal((true, 1.0), (_f.Saved().AutoClearEnabled, _f.Saved().AutoClearEveryHours));
     }
 
+    /// <summary>
+    /// Replacing your task turns the hourly clear on, and with it the urgent clear when that is on (it is by default):
+    /// the log's line says both, never less than what runs.
+    /// </summary>
+    [Fact]
+    public void TheLogSaysTheUrgentClearIsTurnedOnWithTheHourlyClear()
+    {
+        Assert.Equal("the hourly automatic cache clear, and at once while the non-paged pool is over its limit and rising, in place of your own clear task",
+            ClearTaskReplacer.What(new Settings()));
+        Assert.Equal("the hourly automatic cache clear, in place of your own clear task", ClearTaskReplacer.What(new Settings { AutoClearUrgent = false }));
+        Assert.Contains("live.Apply(What(live.Running), ", File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "Changes", "ClearTaskReplacer.cs")));
+    }
+
     [Fact]
     public void WithNoClearTaskTheHourlyClearGoesOnEvenWhenTheListCannotBeRead()
     {
