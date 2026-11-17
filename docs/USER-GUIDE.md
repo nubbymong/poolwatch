@@ -203,7 +203,9 @@ time the pool grows) or **Detailed recording** (the reports, plus a record of ev
 one chosen under them and more on each in its tooltip, and **Clean up reports and records after** (1 to 90 days, 7 to
 begin with). Turning Detailed recording on starts the day's files at the next sample; turning it off stops them at once
 (a handle scan being written then is finished first, on its own thread, and its two files closed after it).
-Under automatic clearing it says that clearing takes a few seconds, and video or the mouse may stutter while it runs.
+Under automatic clearing it says that clearing takes a few seconds, and video or the mouse may stutter while it runs,
+and how often at most; pointing at the box says that turning it on first offers to remove a RAMMap clear task of your
+own, so the two never both run.
 When the Codex app is installed, PoolWatch was installed with its setup and its Codex shortcut is not on your desktop,
 Settings offers **Create shortcut**. **Advanced...** opens the settings in a grid, with a short description of
 the one selected in the box under it: what it does and its default, its unit, and the limits PoolWatch keeps
@@ -234,8 +236,8 @@ kernel pool reaches its size (8 GB to begin with), whichever comes first, and ne
   (on the schedule, by hand or urgent) frees more than that, or the pool grows past what that clear saw by 2 GB or a
   quarter, whichever is more. The Simple view's line says both ("Next cache clear when the kernel pool reaches
   10.3 GB, or 8 GB after 03:19").
-- **The urgent clear** (on to begin with; **Also clear at once if the non-paged pool is over its limit and still
-  rising** in Settings, and setup's switch): while the non-paged pool is over its alert level (5 GB to begin with) and
+- **The urgent clear** (on to begin with; **Clear at once if the non-paged pool climbs** in Settings, and setup's
+  switch): while the non-paged pool is over its alert level (5 GB to begin with) and
   rose at least 100 MB in the last 10 minutes, the same as what turns the tray icon red, PoolWatch empties the whole
   standby cache at once, without waiting for the schedule, the size or the 30 minutes. Never within 10 minutes of a
   clear, and never while an experiment runs. When an urgent clear frees little, the non-paged pool's growth is not the

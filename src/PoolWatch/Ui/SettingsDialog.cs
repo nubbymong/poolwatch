@@ -173,6 +173,7 @@ internal sealed class SettingsDialog : Form
         Row(second, _fields.Urgent, indent, top: 2);
         Row(second, _clearHint, indent, bottom: 10);
         _clearFields.AddRange([rules, _every, _over, _fields.Urgent]);
+        _tips.SetToolTip(_fields.AutoClear, SimpleSettings.AutoClearTip);
         _tips.SetToolTip(_fields.Schedule, "Clears every so many hours, whatever the size of the kernel pool.");
         _tips.SetToolTip(_fields.PoolSize, "Clears when the kernel pool reaches the size you set, however long that takes.");
         _tips.SetToolTip(_fields.Either, "Clears on the schedule, or sooner when the kernel pool reaches the size you set. Recommended.");

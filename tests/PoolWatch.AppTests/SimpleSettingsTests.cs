@@ -433,9 +433,16 @@ public class SimpleSettingsTests
         Assert.Contains("no effect yet", SimpleSettings.DeeperCaptureHint(new Settings()));
         Assert.DoesNotContain("no effect", SimpleSettings.DeeperCaptureHint(new Settings { CaptureOnAlert = true }));
         Assert.DoesNotContain("no effect", SimpleSettings.DeeperCaptureHint(new Settings { CpuTraceEnabled = true }));
-        // The spacing as set, and the urgent clear's own 10 minutes (ClearPolicy.UrgentFloor).
-        Assert.StartsWith(SimpleSettings.ClearStutter + " Never more than once every 45 minutes, or 10 for an urgent clear.", SimpleSettings.AutoClearHint(new Settings { AutoClearMinMinutes = 45 }));
+        // The spacing as set, and the urgent clear's own 10 minutes (ClearPolicy.UrgentFloor); what turning it on does to
+        // a clear task of your own is the box's tooltip.
+        Assert.Equal(SimpleSettings.ClearStutter + " At most every 45 minutes (10 for an urgent clear).", SimpleSettings.AutoClearHint(new Settings { AutoClearMinMinutes = 45 }));
         Assert.Equal(TimeSpan.FromMinutes(10), Core.Cache.ClearPolicy.UrgentFloor);
+        Assert.Contains("RAMMap", SimpleSettings.AutoClearTip);
+        Assert.Contains("_tips.SetToolTip(_fields.AutoClear, SimpleSettings.AutoClearTip);",
+            File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "SettingsDialog.cs")));
+        // The urgent clear's box: short enough for one line in its column, the rest in its tooltip.
+        Assert.True(SimpleSettings.UrgentLabel.Length <= 45, SimpleSettings.UrgentLabel);
+        Assert.StartsWith("When the non-paged pool is over 5 GB and still climbing fast", SimpleSettings.UrgentTip(new Settings()));
     }
 
     [Fact]

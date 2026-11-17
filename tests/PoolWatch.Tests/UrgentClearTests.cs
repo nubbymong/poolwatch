@@ -121,7 +121,7 @@ public class UrgentClearTests
 
     private static readonly DateTime T0 = new(2026, 11, 20, 9, 0, 0, DateTimeKind.Utc);
 
-    /// <summary>A size-rule clear at <see cref="T0"/> that freed 100 MB of an 8.2 GB pool: little, so the size rule backs off.</summary>
+    /// <summary>A size-rule clear at the tests' start that freed 100 MB of an 8.2 GB pool: little, so the size rule backs off.</summary>
     private static ClearRecord Weak() => Clear(T0, ClearTrigger.PoolOverLimit, (4.2, 4.0), (4.15, 3.95));
 
     [Fact]

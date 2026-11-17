@@ -161,15 +161,22 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
 
     /// <summary>
     /// The line under automatic clearing: first what a clear is like while it runs, then the spacing rule from
-    /// <see cref="Settings.AutoClearMinMinutes"/>, and what turning it on does to a clear task of your own. The three rules
-    /// are named by the choices above it (<see cref="ClearRule"/>).
+    /// <see cref="Settings.AutoClearMinMinutes"/> and the urgent clear's own 10 minutes. The three rules are named by the
+    /// choices above it (<see cref="ClearRule"/>). What turning it on does to a clear task of your own is the box's
+    /// tooltip (<see cref="AutoClearTip"/>), and the question it asks then: the form fits a 1024 x 600 screen with the
+    /// urgent clear's box in this column only so.
     /// </summary>
     public static string AutoClearHint(Settings s) =>
-        ClearStutter + $" Never more than once every {Math.Max(30, s.AutoClearMinMinutes):0} minutes, or 10 for an urgent clear. " +
-        "Turning it on first offers to remove a clear task of your own (RAMMap), so the two never both run.";
+        ClearStutter + $" At most every {Math.Max(30, s.AutoClearMinMinutes):0} minutes (10 for an urgent clear).";
 
-    /// <summary>The urgent clear's box, under the rules (<see cref="Settings.AutoClearUrgent"/>), as setup's step says it.</summary>
-    public const string UrgentLabel = Setup.SetupText.UrgentTitle;
+    /// <summary>The automatic clear's box's tooltip: what turning it on does to a clear task of your own.</summary>
+    public const string AutoClearTip = "Turning it on first offers to remove a clear task of your own (RAMMap), so the two never both run.";
+
+    /// <summary>
+    /// The urgent clear's box, under the rules (<see cref="Settings.AutoClearUrgent"/>): short, on one line in its column;
+    /// its tooltip says the rest (<see cref="UrgentTip"/>).
+    /// </summary>
+    public const string UrgentLabel = "Clear at once if the non-paged pool climbs";
 
     /// <summary>
     /// The box's tooltip, a line each (a tooltip wraps only at the screen's edge): when it clears, how often at most, and

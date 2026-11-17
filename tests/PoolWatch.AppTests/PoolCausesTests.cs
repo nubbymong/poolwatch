@@ -430,7 +430,9 @@ public class PoolCausesTests
         {
             Assert.True(PoolCauses.NoticeWanted(PoolNoticeLevel.NeedsAttention, IncidentKind.Growth, cause, partOfNonPagedRise: true));
             Assert.False(PoolCauses.NoticeWanted(PoolNoticeLevel.Off, IncidentKind.Growth, cause, partOfNonPagedRise: true));
-            Assert.False(PoolCauses.NoticeWanted(PoolNoticeLevel.NeedsAttention, IncidentKind.Release, cause, partOfNonPagedRise: true));
+            // It adds nothing for any other kind: those follow the icon's own rule alone.
+            foreach (var kind in Enum.GetValues<IncidentKind>().Where(k => k != IncidentKind.Growth))
+                Assert.Equal(PoolCauses.NoticeWanted(PoolNoticeLevel.NeedsAttention, kind, cause), PoolCauses.NoticeWanted(PoolNoticeLevel.NeedsAttention, kind, cause, partOfNonPagedRise: true));
         }
         log.Clear();
         Assert.True(PoolCauses.TrayNotice(growth, PoolNoticeLevel.NeedsAttention, _ => info, Running, log.Add, tag => tag == growth.Tag) is not null);
