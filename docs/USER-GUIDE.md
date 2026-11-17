@@ -490,8 +490,9 @@ with Detailed recording, `findings.jsonl` in that day's folder under it (`data\<
 
 Point at the icon for the paged and non-paged pool; double-click it to open the window. Right-click it for the
 token-leak guard's line while it is not protected (above), **Open PoolWatch**, **Settings...** (in either view; the
-Simple view's header has no Settings button), **Run setup again...**, **Active changes...**, a line when a newer
-version is out, and the tools for
+Simple view's header has no Settings button), **Run setup again...**, **Active changes...**, **Links under
+AppData...** (only with the Claude or Codex desktop app installed, below), a line when a newer version is out, and the
+tools for
 technical users: **Capture now** (a short trace that shows which program allocates the memory), **Since boot
 report**, **Open incident folder**, **Export vendor bundle...**, **Copy latest incident summary**, **Mark...** and the
 experiments; then **Report an issue...** and **About PoolWatch**. **Exit**, at the bottom, stops PoolWatch until you
@@ -524,9 +525,11 @@ the tray menu. It has up to three groups (a group with nothing in it is left out
   `C:\ProgramData\PoolWatch\removed-tasks` for you to import in Task Scheduler. One whose RAMMap you could change
   without administrator rights, or whose RAMMap is no longer there, is put back only after a warning you accept.
 - **Other changes PoolWatch made**: a service you set to its Windows default with **Put back...** on the Services tab
-  ("service · set to its Windows default"), and a scheduled task or startup app that was off until you turned it on in
-  PoolWatch ("scheduled task · was off", "startup app · was off"). Each has **Put back**, which sets it back to how it
-  was before.
+  ("service · set to its Windows default"), a scheduled task or startup app that was off until you turned it on in
+  PoolWatch ("scheduled task · was off", "startup app · was off"), and a PATH entry or an environment variable the
+  [Links under AppData](#links-under-appdata) window changed. Each has **Put back**, which sets it back to how it was
+  before: a PATH entry goes back only where PoolWatch's folder still is on that PATH, and a variable only while it is
+  still what PoolWatch set it to (one you changed since is yours, and stays).
 
 **Put all back**, at the bottom, asks once and then does them all. Some rows carry a note. The token-leak guard's row
 says that Turn off also puts back the Windows setting it changed when Windows allows it, and that one it found already
@@ -538,6 +541,48 @@ and **Put all back** says so once for all of them (see [Profiles](#profiles)). W
 "Uninstalling puts each of these back, or says why it could not.", or, when a row says the uninstaller leaves it,
 "Uninstalling puts each of these back, except where marked, or says why it could not." Not listed: cache clears that
 already ran (the cache refills by itself) and programs you ended (start them again).
+
+## Links under AppData
+
+With the Claude desktop app or the Codex desktop app installed (both Microsoft Store apps), a bug in Windows' filter
+for Store apps (`bindflt.sys`) makes every open through a junction or link located under `%APPDATA%` or
+`%LOCALAPPDATA%` keep a small block of the kernel pool (NTFS file records, pool tag `NtFC`) until Windows restarts:
+from the app itself, and from every terminal, tool and hook it starts. The same open by the real folder, through a
+link elsewhere, or from a program outside the app keeps nothing. [peterlau03 traced
+it](https://github.com/anthropics/claude-code/issues/96870), and the people who measured each case are named in the
+window and credited in the known issue's note.
+
+PoolWatch looks for such links while it runs, at most once an hour, only when one of the two apps is installed for
+your account (it reads your Store app list), and reads only: your PATH and the machine's, uv's Pythons
+(`%APPDATA%\uv\python`), pnpm's global packages (`%LOCALAPPDATA%\pnpm`), the Codex command-line tool's installer link
+(`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`) and winget's Links folder. When it finds one it can fix, the Simple view
+shows **Stop the leak through links under AppData**; its **Review**, and **Links under AppData...** in the tray menu,
+open the window. Each row says what it is, what it costs (as measured), and what fixes it:
+
+- **A PATH entry that goes through a link under AppData** (such as `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`, or
+  nvm-windows' `.nodejs`): one such entry anywhere on PATH costs about one block for every program a Git Bash inside
+  the app starts. **Replace on PATH** puts the folder its link leads to in its place, after a question that names
+  both. Only that entry changes; every other entry, and whether the value fills in `%NAME%` variables, stay as they
+  were. An entry on your PATH changes for your account, one on the machine's for everyone. If the tool later changes
+  where its link leads (to switch versions, say), your PATH keeps the folder it leads to now: **Put back** in Active
+  changes puts the entry back. If a tool puts its link back on PATH later (`codex update` does), PoolWatch notices,
+  says so once in a notice, and offers the fix again. PoolWatch does not replace an entry whose link leads nowhere (a
+  tool removed without its PATH entry: remove it yourself), or whose folder is reached through another link under
+  AppData: the row says why.
+- **uv, pnpm and the Codex command-line tool kept under AppData**: **Set the variables...** sets, for your account,
+  `UV_PYTHON_INSTALL_DIR` and `UV_CACHE_DIR` (to `.uv\python` and `.uv\cache` in your profile), `PNPM_HOME` (`.pnpm`)
+  or `CODEX_INSTALL_DIR` (`.codex\bin`), after a question that lists them. That is all PoolWatch does: it never
+  reinstalls, moves or deletes your tools or files. A window then shows the steps left (reinstall the Pythons, rebuild
+  the venvs and tools, reinstall pnpm's global packages, run `codex update` again), and **Copy prompt for your AI
+  agent** copies them as a prompt your agent can follow with you. The prompt names no user or folder of yours: the
+  folders are written as `%USERPROFILE%\...`.
+- **winget's Links folder** and **your projects** (a `node_modules` that is a junction, a venv on one of uv's links, a
+  `.python-version` without an exact patch): advice only. PoolWatch does not look inside your projects.
+
+Quit the Claude and Codex apps fully and start them again after a change: a program sees a new PATH or variable only
+when it starts. Both kinds of change are listed in [Active changes](#active-changes), where **Put back** undoes them,
+and uninstalling puts them back too. PoolWatch changes the PATH and the variables of the account it runs as: when you
+elevated it with another administrator's password, that administrator's.
 
 ## Report an issue
 

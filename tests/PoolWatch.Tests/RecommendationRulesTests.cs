@@ -370,6 +370,8 @@ public class RecommendationRulesTests
                  }, max: 100)) yield return r;
         foreach (var r in RecommendationRules.OnEvidence(Everything() with { TokenSpawnLast24h = false, LeakTestNow = LeakVerdict.Leak, FileSystemMetadataGrewLast24h = false, DefenderCoresAvg30Min = 1, CostlyOptionalServices = [], SaturationOfferedTurnOffLast24h = true }, max: 100)) yield return r;
         foreach (var r in RecommendationRules.OnEvidence(Quiet(Facts() with { OwnClearTasks = ["t"], TokenLeak = TokenLeakStatus.NeedsTest }) with { SavedVerdictBuild = "1" }, max: 100)) yield return r;
+        foreach (int links in new[] { 1, 2, 1000 })
+            foreach (var r in RecommendationRules.OnEvidence(Quiet() with { AppDataLinksToFix = links }, max: 100)) yield return r;
         foreach (var status in Enum.GetValues<TokenLeakStatus>())
             foreach (var r in RecommendationRules.FirstRun(Quiet(Facts() with
                      {
@@ -427,7 +429,8 @@ public class RecommendationRulesTests
         // starting at sign-in, the check, the services, Defender and the Codex shortcut belong to setup (and its Services tab).
         Assert.Equal([RecommendationId.TokenLeakGuard, RecommendationId.HourlyCacheClear, RecommendationId.ReportIncident],
             RecommendationRules.Current(Everything()).Select(r => r.Id));
-        Assert.Equal(RecommendationRules.ShownLater, new HashSet<RecommendationId> { RecommendationId.TokenLeakGuard, RecommendationId.HourlyCacheClear, RecommendationId.ReportIncident });
+        Assert.Equal(RecommendationRules.ShownLater, new HashSet<RecommendationId>
+            { RecommendationId.TokenLeakGuard, RecommendationId.HourlyCacheClear, RecommendationId.ReportIncident, RecommendationId.FixAppDataLinks });
         // Your own clear task is setup's to replace: then no hourly clear is offered either (the two never both run).
         Assert.Empty(RecommendationRules.Current(Quiet(Facts() with { OwnClearTasks = [@"\Empty standby"] }) with { AutoClearOn = false }));
         // A hidden one stays hidden for 30 days here too.

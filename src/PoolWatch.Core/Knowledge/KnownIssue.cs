@@ -127,6 +127,9 @@ public static class KnownActions
             Notice: "With it on, any app may bring its window to the front."),
         new("chatgpt-shortcut", RecommendationId.ChatGptShortcut, "create a desktop shortcut that starts the app without its GPU shader disk cache",
             "made a desktop shortcut that starts the app without its GPU shader disk cache; use it instead of the usual one"),
+        // A link fixed does not stop the issue: another can be there, or come back with a tool's update.
+        new("appdata-links", RecommendationId.FixAppDataLinks, "show the links under AppData it finds on this PC, and replace each one on your PATH with the folder it leads to",
+            "changed links under AppData on your PATH or in your tools' settings; Active changes lists each one"),
     ];
 
     public static KnownAction? Find(string id) => All.FirstOrDefault(a => a.Id == id);
@@ -134,7 +137,7 @@ public static class KnownActions
     /// <summary>
     /// The ids of the actions already in effect on this PC: the hourly clear is on; the Windows setting that stops the
     /// token leak is on now (a foreground lock timeout of 0), whether the guard or something else set it; the shortcut is
-    /// made. The guard's own setting does not count: it can be on while Windows is not protected (Windows refused the
+    /// made; a link under AppData was changed (a PATH entry or an environment variable is in the change list). The guard's own setting does not count: it can be on while Windows is not protected (Windows refused the
     /// change, or the guard leaves Windows alone on a build that tested clean twice).
     /// </summary>
     /// <param name="liveForegroundLockTimeout">Windows' foreground lock timeout as read now; null when it could not be read.</param>
@@ -144,6 +147,7 @@ public static class KnownActions
         if (i.AutoClearOn) on.Add("auto-clear");
         if (liveForegroundLockTimeout == 0) on.Add("token-guard");
         if (i.ChatGptShortcutMade) on.Add("chatgpt-shortcut");
+        if (i.AppDataLinksFixed) on.Add("appdata-links");
         return on;
     }
 }

@@ -41,6 +41,7 @@ a click or a setting you turned on:
 | Sets Windows' focus setting that stops the token leak, at most until you sign out: turning the guard off puts it back when Windows allows it (if Windows does not, or the guard found it already changed, it can stay until you sign out) | the token-leak guard, when you turn it on |
 | Creates the desktop shortcut "ChatGPT (no shader cache)", the Codex shortcut | your Yes in setup, or **Create shortcut** in Settings |
 | Writes the AI agent's prompt, `poolwatch-services.md` | **Save the prompt...**, only where you pick |
+| Replaces a PATH entry that goes through a junction or link under AppData with the folder it leads to (yours, or the machine's for an entry there), or sets `UV_PYTHON_INSTALL_DIR` and `UV_CACHE_DIR`, `PNPM_HOME` or `CODEX_INSTALL_DIR` for your account to a folder in your profile; it never reinstalls, moves or deletes a tool | **Replace on PATH** or **Set the variables...** in the Links under AppData window, after a question that names the change, or **Put back** |
 
 Because it runs as administrator, it runs only from inside Program Files, and refuses a copy there whose folders or
 file you could change without administrator rights (anywhere else, such as Downloads or the Desktop, it refuses

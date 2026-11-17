@@ -5,14 +5,17 @@ namespace PoolWatch.Ui;
 /// <summary>
 /// Steps to follow yourself (the Microsoft Defender advice), as read-only text: [Copy commands] copies only its command
 /// lines, the ones indented with <see cref="DefenderAdvice.CommandIndent"/>, ready to paste into PowerShell. PoolWatch runs
-/// none of them. Created when opened, disposed when closed.
+/// none of them. The AppData links window's steps give the button their own words and text instead (a prompt for the
+/// user's AI agent). Created when opened, disposed when closed.
 /// </summary>
 internal sealed class InstructionsDialog : Form
 {
     private readonly Font _textFont = new("Segoe UI", 9.5f); // the box never disposes the font it is given: the window does
 
-    public InstructionsDialog(string title, string text)
+    /// <param name="copyButton">The copy button's words, with <paramref name="copyText"/> what it copies; null: Copy commands, the text's command lines.</param>
+    public InstructionsDialog(string title, string text, string? copyButton = null, string? copyText = null)
     {
+        string copies = copyButton is not null && copyText is not null ? copyText : Commands(text);
         Text = title;
         Icon = TrayIcons.App;
         Font = new Font("Segoe UI", 9f);
@@ -29,10 +32,10 @@ internal sealed class InstructionsDialog : Form
             Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, BackColor = SystemColors.Window, Font = _textFont, TabStop = false,
         };
         var copied = new Label { AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(0, S(7), S(8), 0) };
-        var copy = new Button { Text = "Copy commands", AutoSize = true, Padding = new Padding(S(6), S(2), S(6), S(2)), Enabled = Commands(text).Length > 0 };
+        var copy = new Button { Text = copyButton is not null && copyText is not null ? copyButton : "Copy commands", AutoSize = true, Padding = new Padding(S(6), S(2), S(6), S(2)), Enabled = copies.Length > 0 };
         copy.Click += (_, _) =>
         {
-            try { Clipboard.SetDataObject(Commands(text), copy: true, retryTimes: 5, retryDelay: 100); copied.Text = "Copied."; }
+            try { Clipboard.SetDataObject(copies.ReplaceLineEndings("\r\n"), copy: true, retryTimes: 5, retryDelay: 100); copied.Text = "Copied."; }
             catch (Exception) { copied.Text = "Another program is using the clipboard. Try again."; }
         };
         var close = new Button { Text = "Close", AutoSize = true, Padding = new Padding(S(6), S(2), S(6), S(2)), Margin = new Padding(S(8), 0, 0, 0) };

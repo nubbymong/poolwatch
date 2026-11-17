@@ -1,4 +1,5 @@
 using System.Globalization;
+using PoolWatch.Core.Links;
 using PoolWatch.Core.Services;
 
 namespace PoolWatch.Core.Changes;
@@ -237,6 +238,8 @@ public static class ChangeWords
         RecordKind.ScheduledTask => r.Location!.TrimStart('\\'),
         RecordKind.StartupEntry => StartupTitle(r.Name!),
         RecordKind.Shortcut => ShortcutTitle,
+        RecordKind.PathEntry => "PATH entry " + r.Before!.Trim(),
+        RecordKind.EnvironmentVariable => r.Name!,
         _ => Of(r),
     };
 
@@ -247,6 +250,8 @@ public static class ChangeWords
         RecordKind.ScheduledTask => $"scheduled task · was {OnOff(r.EnabledBefore == true)}",
         RecordKind.StartupEntry => $"startup app · was {OnOff(r.EnabledBefore == true)}",
         RecordKind.Shortcut => ShortcutDetail,
+        RecordKind.PathEntry => $"entry on {PathOf(r.Location)} · now {r.After}",
+        RecordKind.EnvironmentVariable => r.Before is { } was ? $"environment variable · was {was}" : $"environment variable · was not set · now {r.After}",
         _ => "",
     };
 
@@ -313,8 +318,20 @@ public static class ChangeWords
         RecordKind.ScheduledTask => ScheduledTask(r.Location!, !r.EnabledBefore!.Value),
         RecordKind.StartupEntry => StartupEntry(r.Name!, !r.EnabledBefore!.Value),
         RecordKind.Shortcut => Shortcut(r.Path!),
+        RecordKind.PathEntry => PathEntry(r.Location!, r.Before!, r.After!),
+        RecordKind.EnvironmentVariable => EnvironmentVariable(r.Name!, r.After!),
         _ => "A change this PoolWatch does not know",
     };
+
+    /// <summary>"Replaced %LOCALAPPDATA%\Programs\Example\bin on your PATH with the folder its link leads to, D:\Example\bin".</summary>
+    public static string PathEntry(string scope, string before, string after) =>
+        $"Replaced {before.Trim()} on {PathOf(scope)} with the folder its link leads to, {after}";
+
+    /// <summary>"Set UV_PYTHON_INSTALL_DIR to C:\Users\someone\.uv\python".</summary>
+    public static string EnvironmentVariable(string name, string after) => $"Set {name} to {after}";
+
+    /// <summary>"your PATH" for the account's own, "the machine's PATH" for the machine's.</summary>
+    public static string PathOf(string? scope) => scope == EnvScopes.Machine ? "the machine's PATH" : "your PATH";
 
     private static string OnOff(bool on) => on ? "on" : "off";
 

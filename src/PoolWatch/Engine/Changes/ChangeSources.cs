@@ -227,7 +227,9 @@ internal sealed class ServicesSource(ServicesController services, ProfileStore? 
 /// The changes kept in applied-changes.json. Each record is checked again against the live system right before Undo acts
 /// on it: a removed clear task by <see cref="ClearTaskReplacer.PutBack"/>; a task or startup entry must still be there
 /// (when it is gone the record goes and the message says so); a shortcut must be a .lnk directly in your Desktop or
-/// Start-menu Programs folder, opened without following links, a plain file whose bytes still match what PoolWatch wrote.
+/// Start-menu Programs folder, opened without following links, a plain file whose bytes still match what PoolWatch wrote;
+/// a PATH entry or an environment variable the AppData links window changed must still be as PoolWatch wrote it
+/// (<see cref="AppDataLinkFixes.PutBack"/>).
 /// Putting a change back acts only on the record its row was drawn from (<see cref="ActiveChange.Stamp"/>), and removes
 /// only that record, as it was saved: one saved for that target since is kept.
 /// </summary>
@@ -238,10 +240,15 @@ internal sealed class RecordedSource : IChangeSource
     private readonly IClearTaskStore _clearTasks;
     private readonly LiveSettings _live;
     private readonly IReadOnlyList<string> _shortcutFolders;
+    private readonly IEnvironmentStore? _environment;
 
     /// <param name="shortcutFolders">Where PoolWatch's shortcuts may be (null: your Desktop and Start-menu Programs folders; tests pass a TEMP folder).</param>
-    public RecordedSource(ChangeRecords records, ITaskToggles toggles, IClearTaskStore clearTasks, LiveSettings live, IReadOnlyList<string>? shortcutFolders = null)
+    /// <param name="environment">Where the PATH entries and environment variables are put back (the app and the command line: the
+    /// registry; tests: a fake). Null: they are listed, and not put back.</param>
+    public RecordedSource(ChangeRecords records, ITaskToggles toggles, IClearTaskStore clearTasks, LiveSettings live, IReadOnlyList<string>? shortcutFolders = null,
+        IEnvironmentStore? environment = null)
     {
+        _environment = environment;
         _records = records;
         _toggles = toggles;
         _clearTasks = clearTasks;
@@ -265,7 +272,7 @@ internal sealed class RecordedSource : IChangeSource
 
     /// <summary>Listed with the shortcuts, which an uninstall that keeps your other changes still undoes, so it reports this too.</summary>
     public ActiveChange Unread(string error) =>
-        new("unread:applied-changes", ChangeKind.Shortcut, null, ChangeWords.Unread("the clear tasks, scheduled tasks, startup apps and shortcuts it changed"), false,
+        new("unread:applied-changes", ChangeKind.Shortcut, null, ChangeWords.Unread("the clear tasks, scheduled tasks, startup apps, shortcuts, PATH entries and variables it changed"), false,
             ChangeWords.UnreadNote(error));
 
     /// <summary>
@@ -276,7 +283,7 @@ internal sealed class RecordedSource : IChangeSource
     /// <param name="duplicates">How many of them are a second record for a change already listed.</param>
     internal static ActiveChange UnreadEntries(int count, int duplicates = 0) =>
         new("unread:applied-changes", ChangeKind.Shortcut, null,
-            ChangeWords.Unread($"{count} {(count == 1 ? "change" : "changes")} in its list of clear tasks, scheduled tasks, startup apps and shortcuts"), false,
+            ChangeWords.Unread($"{count} {(count == 1 ? "change" : "changes")} in its list of clear tasks, scheduled tasks, startup apps, shortcuts, PATH entries and variables"), false,
             ChangeWords.UnreadNote(UnreadWhy(count, duplicates)));
 
     /// <summary>
@@ -325,6 +332,8 @@ internal sealed class RecordedSource : IChangeSource
         RecordKind.RemovedClearTask => ChangeKind.RemovedClearTask,
         RecordKind.ScheduledTask => ChangeKind.ScheduledTask,
         RecordKind.StartupEntry => ChangeKind.StartupEntry,
+        RecordKind.PathEntry => ChangeKind.PathEntry,
+        RecordKind.EnvironmentVariable => ChangeKind.EnvironmentVariable,
         _ => ChangeKind.Shortcut,
     };
 
@@ -356,6 +365,7 @@ internal sealed class RecordedSource : IChangeSource
                 () => _toggles.SetTaskEnabled(r.Location!, r.EnabledBefore!.Value)),
             RecordKind.StartupEntry => SwitchBackNow(r, $"the startup app {r.Name}", () => _toggles.StartupExists(r.Location!, r.Name!),
                 () => _toggles.SetStartupEnabled(r.Location!, r.Name!, r.EnabledBefore!.Value)),
+            RecordKind.PathEntry or RecordKind.EnvironmentVariable => AppDataLinkFixes.PutBack(r, _environment, _records),
             _ => DeleteShortcut(r),
         };
     }

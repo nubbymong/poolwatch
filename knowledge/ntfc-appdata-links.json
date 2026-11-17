@@ -1,0 +1,80 @@
+{
+  "$schema": "./schema.json",
+  "format": 1,
+  "id": "ntfc-appdata-links",
+  "title": "Links under AppData leak inside the Claude and Codex apps",
+  "explanation": "One cause of NTFS file records (pool tag NtFC) piling up while the Claude or Codex desktop app runs: a bug in bindflt.sys, the filter behind the AppData of Microsoft Store apps. Inside the app's package, every open through a junction or symbolic link located under AppData leaves one record behind until a restart, from its terminals, tools and hooks too. The same open by the real folder, through a link elsewhere, or from a program outside the app leaves nothing.",
+  "workaround": "Reach the files without such a link: replace each PATH entry that goes through one with the folder it leads to, and move uv, pnpm and the Codex command-line tool out of AppData with their own variables, then reinstall what they hold. These measured 0 new records. A restart frees what has built up.",
+  "actions": ["appdata-links"],
+  "suggestion": "Opens through links under AppData leave these behind (traced by peterlau03 on GitHub). PoolWatch shows each link it finds and how to fix it.",
+  "evidence": [
+    {
+      "tagGrowth": { "tags": ["NtFC"], "name": "NTFS file records", "pool": "nonPaged", "minMBPerHour": 100 },
+      "running": [
+        { "name": "Claude desktop", "storePackage": "Claude" },
+        { "name": "Claude desktop", "storePackage": "Anthropic" },
+        { "name": "Codex desktop", "storePackage": "OpenAI.Codex" }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "title": "The bindflt.sys leak through links under AppData, anthropics/claude-code issue 96870",
+      "url": "https://github.com/anthropics/claude-code/issues/96870"
+    },
+    {
+      "title": "Where a link must be to leak, and moving uv out of AppData",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6450742359"
+    },
+    {
+      "title": "PATH entries left by uninstalls, and winget's Links folder",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6604756392"
+    },
+    {
+      "title": "One such entry anywhere on PATH costs a record for each program started",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6829825523"
+    }
+  ],
+  "credits": [
+    {
+      "name": "peterlau03",
+      "what": "traced the leak to bindflt.sys, measured what each kind of link costs and the workarounds that measured 0",
+      "url": "https://github.com/anthropics/claude-code/issues/96870"
+    },
+    {
+      "name": "konrad-rzonca",
+      "what": "showed that the leak follows the app's package and reaches the processes it starts",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-5854033138"
+    },
+    {
+      "name": "thyhellcat",
+      "what": "found the PATH entries uninstalls leave behind and the cost of winget's links",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6604756392"
+    },
+    {
+      "name": "bronze1man",
+      "what": "found the junctioned node_modules in worktrees under TEMP",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6206136583"
+    },
+    {
+      "name": "estoll37",
+      "what": "measured the cost of hooks that run Python, and the uv fix",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6264627896"
+    },
+    {
+      "name": "0uternet",
+      "what": "showed that only a link under AppData leaks, and moved uv's Pythons and cache out of it",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6450742359"
+    },
+    {
+      "name": "fsfxing2023-wq",
+      "what": "found that an exact Python version in .python-version keeps a project off uv's link",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6523339301"
+    },
+    {
+      "name": "DraftingDreamer",
+      "what": "measured one record for each open, and the cost of one such entry anywhere on PATH",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6829825523"
+    }
+  ]
+}

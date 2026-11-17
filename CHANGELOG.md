@@ -4,6 +4,14 @@ What changed in each PoolWatch release, newest first, in plain words.
 
 ## Unreleased
 
+- **Links under AppData.** With the Claude or Codex desktop app installed, PoolWatch finds the junctions and links
+  under AppData that keep a little of the kernel pool on every use inside those apps (a Windows bug traced by
+  peterlau03 in anthropics/claude-code issue 96870). On your click it replaces each such PATH entry with the folder it
+  leads to, and sets uv's, pnpm's and the Codex command-line tool's own variables so they install outside AppData,
+  then shows the steps left with a prompt for your AI agent; it never reinstalls, moves or deletes your tools. Every
+  change is listed in Active changes, where it can be put back, and a tool that puts its link back is offered the fix
+  again. A new known issue explains it.
+
 ## 1.0.0 - 2026-11-13
 
 The first public release. PoolWatch keeps a Windows 11 PC fast and stable through long days of agentic coding: it

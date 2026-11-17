@@ -61,6 +61,10 @@ internal sealed class TrayApp : ApplicationContext, IShell
     /// <summary>Where each way into the app leads: setup until it was completed once (never in the CI UI test).</summary>
     private readonly FirstRunGate _gate;
     private ActiveChangesForm? _activeChanges;
+    /// <summary>The AppData links window, one at a time (<see cref="ShowAppDataLinks"/>).</summary>
+    private AppDataLinksForm? _appDataLinks;
+    /// <summary>The PATH entries the tray has told about once in this run, back on the PATH after PoolWatch replaced them (<see cref="WatchAppDataLinks"/>).</summary>
+    private readonly HashSet<string> _linksTold = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Settings, one at a time, from the tray menu and the Advanced view's Settings button (<see cref="ShowSettings"/>).</summary>
     private readonly SettingsWindow _settings;
     /// <summary>What a click on the latest notice opens: the main window, or Active changes or the token-leak guard where that notice offers it.</summary>
@@ -120,6 +124,9 @@ internal sealed class TrayApp : ApplicationContext, IShell
         menu.Items.Add(SettingsMenuItem, null, (_, _) => _actions.Guarded(null, "Settings", ShowSettings));
         menu.Items.Add(FirstRunGate.MenuItem, null, (_, _) => OpenGuide());
         menu.Items.Add("Active changes...", null, (_, _) => OpenActiveChanges());
+        // Shown only once a look found the Claude or Codex desktop app installed: the links under AppData that leak inside them.
+        var appDataLinks = new ToolStripMenuItem(AppDataLinksMenuItem, null, (_, _) => _actions.Guarded(null, "Links under AppData", ShowAppDataLinks)) { Visible = false };
+        menu.Items.Add(appDataLinks);
         // "PoolWatch 1.2.0 is available": shown only while a newer release is out; it opens that release's page.
         var update = new ToolStripMenuItem("", null, (_, _) => _actions.Guarded(null, "Open the release page", () =>
         {
@@ -162,6 +169,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
             clearLag.Enabled = !active;
             removeLegacy.Visible = _actions.LegacyTaskPresent;
             removeOld.Visible = _actions.OldTasksPresent;
+            appDataLinks.Visible = Setup.AppDataLinks.Last?.Applies == true;
             var newer = UpdateToShow;
             update.Visible = newer is not null;
             update.Text = newer?.Text ?? "";
@@ -225,7 +233,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
             recordsChosen: () => Setup.Store.RecordsChosen, openRecords: OpenRecords);
         _gate.Start(showWindow);
         // The token-leak watch also runs while the window is hidden (never in the CI UI test, where it refuses anyway).
-        _watchTimer = WatchTimer(smoke, WatchTokenLeak);
+        _watchTimer = WatchTimer(smoke, () => { WatchTokenLeak(); WatchAppDataLinks(); });
+        if (!smoke) WatchAppDataLinks();
     }
 
     /// <summary>How often the tray's token-leak watch looks in (the main window looks in as well while it shows).</summary>
@@ -442,6 +451,36 @@ internal sealed class TrayApp : ApplicationContext, IShell
         }
     }
 
+    /// <summary>The tray menu's item that opens the AppData links window.</summary>
+    internal const string AppDataLinksMenuItem = "Links under AppData...";
+
+    /// <summary>The tray's notice when a PATH entry PoolWatch replaced is back (a tool put its link back), and its title.</summary>
+    internal const string LinksBackTitle = "A link under AppData is back on your PATH";
+
+    internal static string LinksBackNotice(int count) => (count == 1 ? "A tool put back a PATH entry" : $"Tools put back {count} PATH entries") +
+        " that PoolWatch had replaced (codex update does this). Click here to see it and fix it again.";
+
+    /// <summary>
+    /// The look for links under AppData from the tray: at most once an hour (<see cref="Engine.AppDataLinkWatch.ScanIfOld"/>), once
+    /// setup was completed. A PATH entry PoolWatch replaced before that is back gets one notice in this run; a click opens
+    /// the window, which offers the fix again. Anything that goes wrong is logged, never shown.
+    /// </summary>
+    private async void WatchAppDataLinks()
+    {
+        try
+        {
+            if (!Setup.Store.GuideCompleted || Setup.AppDataLinks.ScanIfOld() is not { } look) return;
+            var scan = await look;
+            var back = Engine.AppDataLinkFinder.Back(scan, Setup.Ledger.Records.All())
+                .Where(f => _linksTold.Add(Core.Links.EnvScopes.Word(f.Scope) + ":" + f.Entry)).ToList();
+            if (back.Count > 0) Balloon(LinksBackTitle, LinksBackNotice(back.Count), 10_000, ShowAppDataLinks);
+        }
+        catch (Exception ex)
+        {
+            try { _engine.Log.Info("the look for links under AppData did not finish: " + ex.Message); } catch { }
+        }
+    }
+
     // ---------------------------------------------------------------- IShell
 
     /// <summary>The main window in Advanced view on a tab; before the first setup is done, setup (the view is not switched behind its back).</summary>
@@ -457,6 +496,17 @@ internal sealed class TrayApp : ApplicationContext, IShell
     }
 
     public void ShowReport(string? incidentDir) => _actions.ReportIssue(MainWindowIfShown, incidentDir);
+
+    /// <summary>The AppData links window, one at a time (modeless: it looks for the links off the UI thread).</summary>
+    public void ShowAppDataLinks()
+    {
+        if (_appDataLinks is { IsDisposed: false } open) { Bring(open); return; }
+        var view = new AppDataLinksView(Setup.AppDataLinks, Setup.LinkFixes, Setup.Smoke, line => _analysis.Diagnostics.RecordOwnerChange(line, null),
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        _appDataLinks = new AppDataLinksForm(view);
+        _appDataLinks.FormClosed += (_, _) => _appDataLinks = null;
+        Open(_appDataLinks);
+    }
 
     /// <summary>The tray menu's item that opens Settings, in both views (in the menu's style: "..." for a window to fill in).</summary>
     internal const string SettingsMenuItem = "Settings...";

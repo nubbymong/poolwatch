@@ -373,7 +373,7 @@ internal sealed class ActiveChangesForm : Form
             ChangeKind.LogonTask or ChangeKind.StartupEntry => Power,
             ChangeKind.AutoClear => Sweep,
             ChangeKind.TokenGuard => Key,
-            ChangeKind.Shortcut => Link,
+            ChangeKind.Shortcut or ChangeKind.PathEntry or ChangeKind.EnvironmentVariable => Link,
             ChangeKind.Service => Gear,
             _ => Clock,
         };
@@ -419,6 +419,8 @@ internal static class ActiveChangesView
             ChangeKind.ScheduledTask => "Turns the scheduled task back to how it was before PoolWatch changed it.",
             ChangeKind.StartupEntry => "Turns the startup app back to how it was before PoolWatch changed it.",
             ChangeKind.RemovedClearTask => "Puts your clear task back in Task Scheduler, and turns PoolWatch's automatic clear off so the two never both run.",
+            ChangeKind.PathEntry => "Puts the link back on the PATH in place of the folder PoolWatch wrote, if that folder is still there. The Claude and Codex apps see it once you start them again.",
+            ChangeKind.EnvironmentVariable => "Sets the variable back as it was (or removes it, if it was not set), if it is still as PoolWatch set it. What you reinstalled stays where it is.",
             _ => "Puts it back to how it was.",
         };
     }

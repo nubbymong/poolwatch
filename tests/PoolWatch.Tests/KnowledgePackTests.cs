@@ -55,7 +55,7 @@ public class KnowledgePackTests
     {
         var shipped = KnowledgeBase.Embedded();
         Assert.Empty(shipped.Problems);
-        Assert.Equal(["codex-gpu-shader-cache", "ntfc-ai-desktop-apps", "refs-standby-metadata", "windows-token-leak"], shipped.Entries.Select(e => e.Id));
+        Assert.Equal(["codex-gpu-shader-cache", "ntfc-ai-desktop-apps", "ntfc-appdata-links", "refs-standby-metadata", "windows-token-leak"], shipped.Entries.Select(e => e.Id));
         // Every pack file in the repository is built in: one added without the build picking it up fails here.
         Assert.Equal(PackFiles().Select(Path.GetFileNameWithoutExtension), shipped.Entries.Select(e => e.Id));
         Assert.Equal(["MSPi", "MSb+", "MSeb", "NtFC", "RLin", "RefF", "Reff", "Toke"], shipped.GrowthTags.Select(t => t.ToDisplay()).Order(StringComparer.Ordinal));
