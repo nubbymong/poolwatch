@@ -140,8 +140,9 @@ internal sealed class WindowsLinkSystem : ILinkSystem
         try
         {
             using var h = LinkNative.OpenToRead(path);
-            // A link at the path itself, a folder, a pipe or a device is never read.
-            if (h.IsInvalid || !LinkNative.OnDisk(h) || NoFollow.ReparseTag(h) != 0) return null;
+            // RED, this commit only: the reparse-tag check, the whole-or-nothing bound and the byte-order mark are taken out,
+            // to show that the new tests of the real read catch each. The next commit puts them back.
+            if (h.IsInvalid || !LinkNative.OnDisk(h)) return null;
             var buffer = new byte[maxBytes + 1];
             int total = 0;
             while (total < buffer.Length)
@@ -150,9 +151,7 @@ internal sealed class WindowsLinkSystem : ILinkSystem
                 if (n <= 0) break;
                 total += n;
             }
-            if (total > maxBytes) return null; // longer than PoolWatch reads: not read at all
-            // Bytes that are not UTF-8 are read as U+FFFD; a byte-order mark at the start is left out.
-            return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false).GetString(buffer, 0, total).TrimStart('\uFEFF');
+            return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false).GetString(buffer, 0, total);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException or Win32Exception)
         {
@@ -193,7 +192,7 @@ internal sealed class WindowsLinkSystem : ILinkSystem
                     // Query rights only: its path and when it started, nothing else of it.
                     using var h = SafeProcess.Open(p.Id, NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION);
                     if (h is null || !NativeMethods.GetProcessTimes(h.Handle, out long created, out _, out _, out _)) continue;
-                    if (Collectors.ProcessDetails.GetImagePath(h.Handle) is not { } path || LinkApps.AppOfProgram(path, AppData) is not { } app) continue;
+                    if (Collectors.ProcessDetails.GetImagePath(h.Handle) is not { } path || LinkApps.AppOfProgram(path, AppData, LocalFolder) is not { } app) continue;
                     found.Add(new AppProcess(Path.GetFileName(path), app, DateTime.FromFileTimeUtc(created)));
                 }
                 catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception) { }

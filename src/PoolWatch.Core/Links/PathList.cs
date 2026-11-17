@@ -215,7 +215,7 @@ public static class LinkApps
     /// folder (WindowsApps\Claude_..., WindowsApps\OpenAI.Codex_...), or a Claude Code engine the Claude app keeps in
     /// %APPDATA%\Claude\claude-code (<paramref name="appData"/>: the account's %APPDATA%). Null for any other program.
     /// </summary>
-    public static string? AppOfProgram(string path, string appData)
+    public static string? AppOfProgram(string path, string appData, string localFolder = "")
     {
         string p = path.Replace('/', '\\');
         const string Apps = @"\WindowsApps\";

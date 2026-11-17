@@ -113,6 +113,9 @@ public sealed class OldDataFolderTests
             "pnpm's default home, looked at for its global packages, reading only"),
         ("src/PoolWatch/Engine/AppDataLinks.cs", "string bin = dir ?? Path.Join(roots.LocalFolder, @\"Programs\\OpenAI\\Codex\\bin\");",
             "the Codex command-line tool's default bin link, looked at, reading only"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs",
+            "if (Collectors.ProcessDetails.GetImagePath(h.Handle) is not { } path || LinkApps.AppOfProgram(path, AppData, LocalFolder) is not { } app) continue;",
+            "the Claude app's own Claude Code engines run from Claude-Data below the folder: their programs are named after a change, reading only"),
         ("src/PoolWatch.Core/Links/LinkWords.cs", "public const string LocalVariable = \"%LOCALAPPDATA%\";",
             "the folder's variable as the AppData links window and its prompt write it: words, never a path the code opens"),
     ];

@@ -30,6 +30,10 @@ internal sealed class FakeLinkSystem : ILinkSystem
     /// <summary>Real files and folders, by their real paths: every folder above one is there too.</summary>
     public HashSet<string> Real { get; } = new(StringComparer.OrdinalIgnoreCase);
     public List<string> Looked { get; } = new();
+    /// <summary>Drive letters ("E:") that are not there for PoolWatch: one mapped or subst'ed only in your own sign-in, or not connected now.</summary>
+    public HashSet<string> AbsentDrives { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Folders PoolWatch may not open: a look at one throws, as Windows' "access is denied" does, and nothing through one resolves.</summary>
+    public HashSet<string> Denied { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public FakeLinkSystem()
     {
@@ -50,6 +54,7 @@ internal sealed class FakeLinkSystem : ILinkSystem
         int cut = p.LastIndexOf('\\');
         if (Resolved(p[..cut]) is not { } parent) return new(AtPath.NotThere);
         string at = parent + p[cut..];
+        if (Denied.Contains(at)) throw new IOException(at + ": Access is denied.");
         if (Links.TryGetValue(at, out var target)) return new(AtPath.Link, target);
         return Exists(at) ? new(AtPath.Plain) : new(AtPath.NotThere);
     }
@@ -57,10 +62,12 @@ internal sealed class FakeLinkSystem : ILinkSystem
     public string? Resolved(string path)
     {
         var parts = path.TrimEnd('\\').Split('\\');
+        if (AbsentDrives.Contains(parts[0])) return null;
         string at = parts[0];
         for (int i = 1; i < parts.Length; i++)
         {
             at += "\\" + parts[i];
+            if (Denied.Contains(at)) return null;
             if (Links.TryGetValue(at, out var target))
             {
                 if (target is null) return null;
@@ -868,5 +875,314 @@ public sealed class AppDataLinksAppTests : IDisposable
         string ledger = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "Changes", "ChangeLedger.cs"));
         Assert.Contains("new RecordedSource(records, new TasksAndStartup(engine.Log), new WindowsClearTaskStore(), live, environment: WindowsEnvironmentStore.Instance),", ledger);
         Assert.Contains("new RecordedSource(records, new TasksAndStartup(log), new WindowsClearTaskStore(), live, environment: WindowsEnvironmentStore.Instance),", ledger);
+    }
+
+    // ------------------------------------------------------------------ the review of this round: the machine's PATH, put back, gone, twice
+
+    private RecordedSource Source() => new(_f.Records, _f.Toggles, _f.ClearTasks, _f.Live(), environment: _pc.Store);
+
+    private static string[] Lines(string text) => text.Split(Environment.NewLine);
+
+    /// <summary>
+    /// An entry of the machine's PATH (REG_EXPAND_SZ) written with %LOCALAPPDATA% is filled in from this account's own
+    /// environment, so it leads into this account's AppData, where a program running as the account, not elevated, can put
+    /// a link to a folder it writes. The machine's PATH is read by every account, SYSTEM and services: PoolWatch shows such
+    /// an entry as advice and never writes the folder its link leads to there, whatever row it is given.
+    /// </summary>
+    [Fact]
+    public void TheMachinesPathIsAdviceOnlyAndNeverWritten()
+    {
+        _pc.Values.Set(EnvScope.User, "Path", @"C:\Tools", expand: true);
+        _pc.Values.Set(EnvScope.Machine, "Path", @"%SystemRoot%\system32;" + Codex, expand: true);
+        var row = Row(LinkKind.PathEntry);
+        Assert.Equal((EnvScope.Machine, 1, Codex), (row.Scope, row.Index, row.Entry));
+        Assert.False(row.CanFix);
+        Assert.False((row with { Target = CodexTarget }).CanFix);
+        Assert.Equal("Change it yourself", LinkWords.Fix(row));
+        Assert.Equal((false, "PoolWatch does not replace this entry."), Fixes().Replace(row with { Target = CodexTarget }, "a test"));
+        Assert.Equal((false, "PoolWatch does not replace this entry."), Fixes().Replace(row, "a test"));
+        Assert.Empty(_pc.Values.Writes);
+        Assert.Empty(_f.Records.All());
+        Assert.Equal(@"%SystemRoot%\system32;" + Codex, _pc.Values.Text(EnvScope.Machine, "Path"));
+    }
+
+    /// <summary>
+    /// A removed entry is never lost: when your PATH changed after PoolWatch removed it, Put back puts it back at its old
+    /// place among the entries there now, or, when it is on your PATH again already, writes nothing. The uninstaller's
+    /// summary then says the change was put back only in part, never a plain "Put back:" for an entry PoolWatch did not
+    /// write. The same for a replaced entry whose folder is no longer on the PATH.
+    /// </summary>
+    [Fact]
+    public void ARemovedEntryGoesBackAfterThePathChangedAndTheSummaryNeverSaysPutBackForWhatWasNotWritten()
+    {
+        _pc.Links[CodexLink] = @"C:\Users\someone\.codex\gone\bin";
+        const string left = @"%USERPROFILE%\.local\bin;C:\Tools";
+        var source = Source();
+
+        Assert.True(Fixes().Remove(Row(LinkKind.PathEntryGone), "a test").Ok);
+        _pc.Values.Set(EnvScope.User, "Path", @"C:\New;" + left, expand: true); // an installer put an entry in front since
+        var row = source.List().Single(c => c.Kind == ChangeKind.PathEntry);
+        var result = source.Undo(row, confirmed: false);
+        Assert.True(result.Done, result.Message);
+        Assert.Equal(new EnvValue(@"C:\New;" + Codex + ";" + left, Expand: true), _pc.Values.Read(EnvScope.User, "Path"));
+        Assert.NotNull(result.Caveat);
+        Assert.Empty(_f.Records.All());
+        var lines = Lines(Program.UninstallSummary([row], null, [(row, result)], DateTime.Now));
+        Assert.Contains(lines, l => l.StartsWith("Partly put back: " + row.What, StringComparison.Ordinal));
+        Assert.DoesNotContain(lines, l => l.StartsWith("Put back: ", StringComparison.Ordinal));
+
+        // On your PATH again already (the tool's installer put it back): nothing is written, and it is not "Put back" either.
+        Assert.True(Fixes().Remove(Row(LinkKind.PathEntryGone), "a test").Ok);
+        _pc.Values.Set(EnvScope.User, "Path", @"C:\New;" + left + ";" + Codex, expand: true);
+        int writes = _pc.Values.Writes.Count;
+        row = source.List().Single(c => c.Kind == ChangeKind.PathEntry);
+        result = source.Undo(row, confirmed: false);
+        Assert.True(result.Done, result.Message);
+        Assert.NotNull(result.Caveat);
+        Assert.Equal(writes, _pc.Values.Writes.Count);
+        Assert.Empty(_f.Records.All());
+        Assert.DoesNotContain(Lines(Program.UninstallSummary([row], null, [(row, result)], DateTime.Now)), l => l.StartsWith("Put back: ", StringComparison.Ordinal));
+
+        // A replaced entry whose folder is no longer on the PATH: nothing is written, and the summary does not say "Put back".
+        _pc.Links[CodexLink] = CodexTarget;
+        _pc.Values.Set(EnvScope.User, "Path", UserPath, expand: true);
+        Assert.True(Fixes().Replace(Row(LinkKind.PathEntry), "a test").Ok);
+        _pc.Values.Set(EnvScope.User, "Path", @"C:\Tools", expand: true);
+        writes = _pc.Values.Writes.Count;
+        row = source.List().Single(c => c.Kind == ChangeKind.PathEntry);
+        result = source.Undo(row, confirmed: false);
+        Assert.True(result.Done, result.Message);
+        Assert.NotNull(result.Caveat);
+        Assert.Equal(writes, _pc.Values.Writes.Count);
+        Assert.Equal(@"C:\Tools", _pc.Values.Text(EnvScope.User, "Path"));
+        Assert.DoesNotContain(Lines(Program.UninstallSummary([row], null, [(row, result)], DateTime.Now)), l => l.StartsWith("Put back: ", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// "Leads nowhere" is judged as PoolWatch sees it, as administrator. A drive it does not see (one mapped or subst'ed only
+    /// in your own sign-in, or not connected now), or a folder on the way it may not open, is "could not tell": no row, and
+    /// no removal. Only a drive that is there with the folder not on it is gone, and the question names that folder.
+    /// </summary>
+    [Fact]
+    public void AnEntryIsGoneOnlyWhenItsDriveIsThereAndTheFolderIsNot()
+    {
+        _pc.Links[CodexLink] = @"E:\Tools\codex\bin";
+        _pc.AbsentDrives.Add("E:");
+        Assert.DoesNotContain(Scan().Findings, f => f.Kind is LinkKind.PathEntry or LinkKind.PathEntryGone);
+        var gone = new LinkFinding { Kind = LinkKind.PathEntryGone, Scope = EnvScope.User, Index = 1, Entry = Codex, Link = Codex };
+        Assert.Equal((false, AppDataLinkFixes.ChangedSince), Fixes().Remove(gone, "a test"));
+
+        _pc.AbsentDrives.Clear();
+        _pc.Real.Add(@"E:\Tools\readme.txt");
+        _pc.Denied.Add(@"E:\Tools");
+        Assert.DoesNotContain(Scan().Findings, f => f.Kind is LinkKind.PathEntry or LinkKind.PathEntryGone);
+        Assert.Equal((false, AppDataLinkFixes.ChangedSince), Fixes().Remove(gone, "a test"));
+        Assert.Empty(_pc.Values.Writes);
+        Assert.Empty(_f.Records.All());
+
+        _pc.Denied.Clear();
+        var row = Row(LinkKind.PathEntryGone);
+        Assert.True(row.CanFix);
+        Assert.Contains(@"E:\Tools\codex\bin", LinkWords.RemoveQuestion(row));
+    }
+
+    /// <summary>
+    /// codex update puts its link back in front after each fix. Fixed again, the entry is removed rather than its folder
+    /// written a second time, as that folder is on the PATH already; and the two changes put back in either order leave the
+    /// entry on the PATH once and PoolWatch's folder not at all.
+    /// </summary>
+    [Fact]
+    public void AFolderAlreadyOnThePathIsNeverWrittenTwiceAndTwoFixesPutBackInEitherOrder()
+    {
+        const string fixedPath = @"%USERPROFILE%\.local\bin;" + CodexTarget + @";C:\Tools";
+        for (int order = 0; order < 2; order++)
+        {
+            _pc.Values.Set(EnvScope.User, "Path", UserPath, expand: true);
+            Assert.True(Fixes().Replace(Row(LinkKind.PathEntry), "a test").Ok);
+            _pc.Values.Set(EnvScope.User, "Path", Codex + ";" + fixedPath, expand: true);
+            var again = Row(LinkKind.PathEntry);
+            Assert.Equal(0, again.Index);
+            Assert.Contains("on your PATH already", LinkWords.ReplaceQuestion(again));
+            var (ok, message) = Fixes().Replace(again, "a test");
+            Assert.True(ok, message);
+            Assert.Equal(fixedPath, _pc.Values.Text(EnvScope.User, "Path")); // the folder once, never twice
+            Assert.Equal(2, _f.Records.All().Count);
+
+            var source = Source();
+            var rows = source.List().Where(c => c.Kind == ChangeKind.PathEntry).ToList();
+            var replaced = rows.Single(c => c.Id.StartsWith("path:", StringComparison.Ordinal));
+            var removed = rows.Single(c => c.Id.StartsWith("path-removed:", StringComparison.Ordinal));
+            foreach (var c in order == 0 ? new[] { replaced, removed } : new[] { removed, replaced })
+            {
+                var result = source.Undo(c, confirmed: false);
+                Assert.True(result.Done, result.Message);
+            }
+            var entries = PathList.Split(_pc.Values.Text(EnvScope.User, "Path")!);
+            Assert.Equal(1, entries.Count(e => e == Codex));
+            Assert.DoesNotContain(CodexTarget, entries);
+            if (order == 0) Assert.Equal(UserPath, _pc.Values.Text(EnvScope.User, "Path")); // the older first: exactly as it was
+            Assert.Empty(_f.Records.All());
+        }
+    }
+
+    /// <summary>
+    /// A variable set to something that is not a plain local folder (a share, or a %NAME% not filled in) already points
+    /// away from AppData as far as PoolWatch can tell: it is left alone, offered no fix, and never told about as come back.
+    /// </summary>
+    [Fact]
+    public void AVariableSetToAShareOrAnUnfilledNameIsLeftAlone()
+    {
+        string python = _pc.AppData + @"\uv\python";
+        _pc.Link(python + @"\cpython-3.12-windows-x86_64-none", "cpython-3.12.13-windows-x86_64-none", targetThere: false);
+        _pc.Real.Add(python + @"\cpython-3.12.13-windows-x86_64-none\python.exe");
+        _pc.Env[LinkFinder.UvPythons] = @"\\nas\uv\python";
+        var uv = Row(LinkKind.Uv);
+        Assert.True(uv.Moved);
+        Assert.Equal([LinkFinder.UvCache], uv.EnvSettings.Select(s => s.Name));
+
+        _pc.Real.Add(_pc.LocalFolder + @"\pnpm\global\5\node_modules\x");
+        _pc.Env[LinkFinder.PnpmHome] = @"%PNPM_ROOT%\pnpm";
+        _pc.Env[LinkFinder.CodexInstall] = @"\\nas\codex\bin";
+        Assert.DoesNotContain(Scan().Findings, f => f.Kind is LinkKind.Pnpm or LinkKind.Codex);
+
+        _pc.Env.Remove(LinkFinder.PnpmHome);
+        Assert.True(Fixes().SetVariables(Row(LinkKind.Pnpm), "a test").Ok);
+        _pc.Env[LinkFinder.PnpmHome] = @"\\nas\pnpm";
+        Assert.Empty(AppDataLinkFinder.Back(Scan(), _f.Records.All()));
+    }
+
+    [Fact]
+    public void ACodexBinFolderThatIsNotALinkIsNotOffered()
+    {
+        _pc.Links.Remove(CodexLink);
+        _pc.Real.Add(CodexLink + @"\codex.exe");
+        Assert.DoesNotContain(Scan().Findings, f => f.Kind == LinkKind.Codex);
+    }
+
+    /// <summary>Claude Code's temp folder under a TEMP moved off AppData: nobody measured that case, so it is not offered.</summary>
+    [Fact]
+    public void ClaudeCodesTempFolderOutsideAppDataIsNotOffered()
+    {
+        _pc.Env["TEMP"] = @"D:\Temp";
+        _pc.Link(@"D:\Temp\claude", @"D:\Scratch");
+        Assert.DoesNotContain(Scan().Findings, f => f.Kind == LinkKind.ClaudeTemp);
+    }
+
+    /// <summary>The prompt names no folder of the PC outside your profile and AppData: a venv elsewhere is not named in it.</summary>
+    [Fact]
+    public void AVenvOutsideYourProfileIsNotNamedInThePrompt()
+    {
+        string python = _pc.AppData + @"\uv\python";
+        _pc.Link(python + @"\cpython-3.13-windows-x86_64-none", python + @"\cpython-3.13.5-windows-x86_64-none");
+        const string venv = @"D:\clients\acme\.venv";
+        _pc.AddFile(venv + @"\pyvenv.cfg", "home = " + python + "\\cpython-3.13-windows-x86_64-none\r\n");
+        _pc.Values.Set(EnvScope.User, "Path", venv + @"\Scripts;" + UserPath, expand: true);
+        string prompt = LinkWords.GuidePrompt(Row(LinkKind.Venv), _pc.Profile);
+        Assert.DoesNotContain("acme", prompt);
+        Assert.DoesNotContain(@"D:\", prompt);
+        Assert.Contains(@"%APPDATA%\uv\python\cpython-3.13-windows-x86_64-none", prompt);
+    }
+
+    /// <summary>With CLAUDE_CONFIG_DIR set, the hooks are read from its settings.json: the row and the prompt name that file (outside the profile, the prompt does not).</summary>
+    [Fact]
+    public void TheHooksRowNamesTheSettingsFileItRead()
+    {
+        _pc.Link(_pc.AppData + @"\uv\python\cpython-3.12-windows-x86_64-none", "cpython-3.12.13-windows-x86_64-none", targetThere: false);
+        _pc.Real.Add(_pc.AppData + @"\uv\python\cpython-3.12.13-windows-x86_64-none\python.exe");
+        const string settings = """{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "python3 stop.py" } ] } ] } }""";
+        string config = _pc.Profile + @"\cc-config";
+        _pc.Env["CLAUDE_CONFIG_DIR"] = config;
+        _pc.AddFile(config + @"\settings.json", settings);
+        var hook = Row(LinkKind.Hook);
+        Assert.Contains(@"%USERPROFILE%\cc-config\settings.json", LinkWords.Details(hook));
+        Assert.Contains(@"%USERPROFILE%\cc-config\settings.json", LinkWords.GuidePrompt(hook, _pc.Profile));
+
+        _pc.Env["CLAUDE_CONFIG_DIR"] = @"D:\clients\acme\cc";
+        _pc.AddFile(@"D:\clients\acme\cc\settings.json", settings);
+        Assert.DoesNotContain("acme", LinkWords.GuidePrompt(Row(LinkKind.Hook), _pc.Profile));
+    }
+
+    // ------------------------------------------------------------------ the real read of a small file, in the test's own TEMP folder
+
+    private static string ReadRoot()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "pw-read-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        return root;
+    }
+
+    /// <summary>A plain file is read, its byte-order mark left out and bytes that are not UTF-8 read as U+FFFD; a folder, or nothing there, is not read.</summary>
+    [Fact]
+    public void TheRealReadReadsAPlainFileWithoutItsByteOrderMark()
+    {
+        string root = ReadRoot();
+        try
+        {
+            string file = Path.Combine(root, "pyvenv.cfg");
+            byte[] bom = [0xEF, 0xBB, 0xBF];
+            File.WriteAllBytes(file, bom.Concat(System.Text.Encoding.UTF8.GetBytes("home = C:\\Python\r\n")).ToArray());
+            var pc = new WindowsLinkSystem();
+            Assert.Equal("home = C:\\Python\r\n", pc.ReadText(file, 64));
+            File.WriteAllBytes(file, new byte[] { (byte)'a', 0xFF, (byte)'b' });
+            Assert.Equal("a\uFFFDb", pc.ReadText(file, 64));
+            Assert.Null(pc.ReadText(Path.Combine(root, "none.cfg"), 64));
+            Assert.Null(pc.ReadText(root, 64)); // a folder
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>A file is read whole, or, when it is longer than PoolWatch reads, not at all.</summary>
+    [Fact]
+    public void TheRealReadReadsAFileWholeOrNotAtAll()
+    {
+        string root = ReadRoot();
+        try
+        {
+            string file = Path.Combine(root, "settings.json");
+            var pc = new WindowsLinkSystem();
+            File.WriteAllText(file, new string('a', 64));
+            Assert.Equal(new string('a', 64), pc.ReadText(file, 64));
+            File.WriteAllText(file, new string('a', 65));
+            Assert.Null(pc.ReadText(file, 64));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// A link at the path itself is never read, whatever it holds: a file marked as a reparse point (with data of its own),
+    /// and a symbolic link to a plain file where Windows lets the test make one (it needs a privilege or Developer Mode).
+    /// </summary>
+    [Fact]
+    public void TheRealReadNeverReadsThroughALinkAtThePath()
+    {
+        string root = ReadRoot();
+        try
+        {
+            string real = Path.Combine(root, "real.cfg"), marked = Path.Combine(root, "marked.cfg"), link = Path.Combine(root, "link.cfg");
+            File.WriteAllText(real, "home = C:\\Python\n");
+            File.WriteAllText(marked, "home = C:\\Elsewhere\n");
+            Links.MarkAsReparsePoint(marked);
+            var pc = new WindowsLinkSystem();
+            Assert.Equal("home = C:\\Python\n", pc.ReadText(real, 64));
+            Assert.Null(pc.ReadText(marked, 64));
+            bool made;
+            try
+            {
+                File.CreateSymbolicLink(link, real);
+                made = true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { made = false; }
+            if (made) Assert.Null(pc.ReadText(link, 64));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
     }
 }
