@@ -94,6 +94,28 @@ public sealed class RecommendationActionsTests : IDisposable
         Assert.False(_live.Running.AutoClearEnabled);
     }
 
+    /// <summary>
+    /// After an upgrade the urgent clear is off until it is chosen. The hourly clear's card, offered while automatic
+    /// clearing is off, offers it at its default, as for a new install: the card says so before the click, and the click
+    /// turns it on with the hour, and says so. That is its choice: it is never asked about. One its owner turned off stays
+    /// off.
+    /// </summary>
+    [Fact]
+    public async Task AfterAnUpgradeTheHourlyClickTurnsTheUrgentClearOnAsItsCardSays()
+    {
+        _live.Apply("as an upgrade reads it", s => { s.AutoClearEnabled = false; s.AutoClearUrgent = false; s.AutoClearUrgentAsk = true; });
+        var (ok, said) = await Run(RecommendationId.HourlyCacheClear);
+        Assert.True(ok);
+        Assert.Equal("PoolWatch clears the cache every hour, and at once while the non-paged pool is over its limit and rising.", said);
+        Assert.Equal((true, true, false), (_live.Running.AutoClearEnabled, _live.Running.AutoClearUrgent, _live.Running.AutoClearUrgentAsk));
+        Assert.Equal((true, false), (_f.Saved().AutoClearUrgent, _f.Saved().UrgentClearToAsk()));
+        // Turned off by its owner (Leave off, Settings): the click turns on the hour alone.
+        _live.Apply("left off", s => { s.AutoClearEnabled = false; s.AutoClearUrgent = false; s.AutoClearUrgentAsk = false; });
+        (ok, said) = await Run(RecommendationId.HourlyCacheClear);
+        Assert.Equal((true, "PoolWatch clears the cache every hour."), (ok, said));
+        Assert.Equal((true, false), (_live.Running.AutoClearEnabled, _live.Running.AutoClearUrgent));
+    }
+
     [Fact]
     public async Task ReplacingTheClearTaskReadsTheStatusAgainEvenWhenItFails()
     {
@@ -513,7 +535,9 @@ public sealed class RecommendationActionsTests : IDisposable
         Assert.Equal("PoolWatch then also clears at once while the non-paged pool is over its limit and rising; Settings can turn that off.",
             SimpleSettings.UrgentToo);
         Assert.Contains(Core.Changes.ChangeWords.AutoClearUrgent[", and ".Length..], SimpleSettings.UrgentToo); // as said after the click
-        Assert.Contains("AutoClearUrgent = engine.Settings.AutoClearUrgent,",
+        // Given as a click that turns clearing on offers it: as set, and while it is still to be chosen after an upgrade
+        // with clearing off, at its default (Settings.UrgentAsOffered).
+        Assert.Contains("AutoClearUrgent = engine.Settings.UrgentAsOffered(),",
             File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "Setup", "RecommendationInputsBuilder.cs")));
     }
 

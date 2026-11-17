@@ -138,6 +138,17 @@ public sealed class Settings
     /// </summary>
     [Description("While automatic clearing is on, a clear at once when the non-paged pool is over its alert and still rising: full (light in lowpriority mode), 10 minutes or more apart, waiting after one that freed little. On by default. Applied when you save.")]
     public bool AutoClearUrgent { get; set; } = true;
+    /// <summary>The urgent clear was never chosen, after an upgrade from a version without it.</summary>
+    [Browsable(false)] // not a choice: PoolWatch keeps it
+    [Description("After an upgrade from a version without the urgent clear (AutoClearUrgent): true until it is chosen. PoolWatch keeps it; it is not a choice.")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool AutoClearUrgentAsk { get; set; }
+
+    /// <summary>The urgent clear's question after an upgrade is due at this start.</summary>
+    public bool UrgentClearToAsk() => false;
+
+    /// <summary>The urgent clear as a place that turns automatic clearing on offers it.</summary>
+    public bool UrgentAsOffered() => AutoClearUrgent;
     /// <summary>
     /// Add a CPU trace (sampling with stacks, DPC/ISR, context switches) to Capture now, and (with <see cref="DeeperCapture"/>)
     /// record one when the lag probe trips. Off by default: a 30 s CPU trace with stacks lags a busy PC itself.

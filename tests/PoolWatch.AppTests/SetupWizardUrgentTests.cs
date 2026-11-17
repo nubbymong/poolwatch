@@ -84,4 +84,50 @@ public sealed partial class SetupWizardTests
         s.AutoClearEnabled = false;
         Assert.True(CacheChoices.InEffect(s, CacheChoice.Later, 1, 8, urgent: false));
     }
+
+    /// <summary>
+    /// A new install goes through setup, whose switch decides: it is never asked about the urgent clear after. After an
+    /// upgrade the urgent clear is off until it is chosen; with automatic clearing off, the switch offers it at its
+    /// default, on, as for a new install, and with automatic clearing on and its question not answered yet, off, as it is.
+    /// Next with a choice that clears writes the switch as shown, and that is its choice: it is not asked about again.
+    /// </summary>
+    [Fact]
+    public async Task ANewInstallThroughSetupIsNeverAskedAndSetupsSwitchIsAnUpgradesChoice()
+    {
+        foreach (bool urgent in new[] { true, false })
+        {
+            // A new install.
+            using (var f = new ChangeFixture())
+            {
+                var live = f.Live();
+                Assert.True((await Cache(new FakeSystem(), live).Apply(CacheChoice.Either, 1, 8, replaceOwnTask: false, urgent: urgent)).Ok);
+                Assert.Equal((urgent, false), (live.Running.AutoClearUrgent, live.Running.UrgentClearToAsk()));
+                Assert.Equal((urgent, false), (f.Saved().AutoClearUrgent, f.Saved().UrgentClearToAsk()));
+            }
+            // An upgrade whose urgent clear is still to be chosen, with automatic clearing off, then on.
+            foreach (bool clearing in new[] { false, true })
+            {
+                using var f = new ChangeFixture();
+                Directory.CreateDirectory(f.Paths.DataRoot);
+                var upgraded = new Settings { AutoClearEnabled = clearing, AutoClearUrgent = false, AutoClearUrgentAsk = true };
+                upgraded.Save(f.Paths.SettingsFile);
+                var live = f.Live(f.Saved());
+                Assert.Equal((false, true), (live.Running.AutoClearUrgent, live.Running.AutoClearUrgentAsk));
+                Assert.True((await Cache(new FakeSystem(), live).Apply(CacheChoice.Schedule, 2, 8, replaceOwnTask: false, urgent: urgent)).Ok);
+                Assert.Equal((true, urgent, false), (live.Running.AutoClearEnabled, live.Running.AutoClearUrgent, live.Running.AutoClearUrgentAsk));
+                Assert.Equal((urgent, false), (f.Saved().AutoClearUrgent, f.Saved().AutoClearUrgentAsk));
+            }
+        }
+        // The switch as the step first shows it.
+        foreach (bool clearing in new[] { false, true })
+        {
+            var host = new FakeHost(Busy());
+            (host.Running.AutoClearEnabled, host.Running.AutoClearUrgent, host.Running.AutoClearUrgentAsk) = (clearing, false, true);
+            Assert.Equal(!clearing, (await Session(Busy(), host)).Urgent);
+        }
+        var chosenOff = new FakeHost(Busy());
+        chosenOff.Running.AutoClearUrgent = false; // turned off by its owner: as set
+        Assert.False((await Session(Busy(), chosenOff)).Urgent);
+        Assert.True((await Session(Busy(), new FakeHost(Busy()))).Urgent); // a new install: on
+    }
 }

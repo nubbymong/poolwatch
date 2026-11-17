@@ -316,6 +316,52 @@ public class SimpleSettingsTests
     }
 
     /// <summary>
+    /// After an upgrade the urgent clear is off until it is chosen. With automatic clearing off, Settings' box offers it
+    /// at its default, ticked, as for a new install; a Save that turns automatic clearing on writes it as the box shows,
+    /// ticked or not, and that is its choice: it is never asked about. A Save that leaves automatic clearing alone leaves
+    /// the urgent clear as it was, still to be chosen. With automatic clearing on and its question not answered yet, the
+    /// box shows it off, as it is, and a Save that leaves it so chooses nothing.
+    /// </summary>
+    [Fact]
+    public void AfterAnUpgradeSettingsOffersTheUrgentClearAndASaveThatTurnsClearingOnChoosesIt()
+    {
+        foreach (bool ticked in new[] { true, false })
+        {
+            using var f = new ChangeFixture();
+            Directory.CreateDirectory(f.Paths.DataRoot);
+            new Settings { AutoClearUrgent = false, AutoClearUrgentAsk = true }.Save(f.Paths.SettingsFile); // as an upgrade reads, clearing off
+            var live = f.Live(f.Saved());
+            SettingsEditor Opened() => new(analysis: null!, actions: null!, live, shell: null!);
+            var editor = Opened();
+            Assert.True(SimpleSettings.From(editor.Edit).Urgent);
+            // A Save of another setting: as it was.
+            editor.Edit.CheckForUpdates = false;
+            Assert.True(editor.Commit(editor.ToApply()));
+            Assert.Equal((false, false, true), (live.Running.CheckForUpdates, live.Running.AutoClearUrgent, live.Running.AutoClearUrgentAsk));
+            Assert.Equal((false, true), (f.Saved().AutoClearUrgent, f.Saved().AutoClearUrgentAsk));
+            // A Save that turns automatic clearing on, with the box as it shows or unticked.
+            editor = Opened();
+            editor.Edit.AutoClearEnabled = true;
+            editor.Edit.AutoClearUrgent = ticked;
+            Assert.True(editor.Commit(editor.ToApply()));
+            Assert.Equal((true, ticked, false), (live.Running.AutoClearEnabled, live.Running.AutoClearUrgent, live.Running.AutoClearUrgentAsk));
+            Assert.Equal((ticked, false), (f.Saved().AutoClearUrgent, f.Saved().AutoClearUrgentAsk));
+            Assert.False(f.Saved().UrgentClearToAsk());
+        }
+        // Automatic clearing on, its question not answered yet: the box shows it off, and a Save of the hours chooses nothing.
+        using var g = new ChangeFixture();
+        Directory.CreateDirectory(g.Paths.DataRoot);
+        new Settings { AutoClearEnabled = true, AutoClearUrgent = false, AutoClearUrgentAsk = true }.Save(g.Paths.SettingsFile);
+        var waiting = g.Live(g.Saved());
+        var shown = new SettingsEditor(analysis: null!, actions: null!, waiting, shell: null!);
+        Assert.False(SimpleSettings.From(shown.Edit).Urgent);
+        shown.Edit.AutoClearEveryHours = 2;
+        Assert.True(shown.Commit(shown.ToApply()));
+        Assert.Equal((2.0, false, true), (waiting.Running.AutoClearEveryHours, waiting.Running.AutoClearUrgent, waiting.Running.AutoClearUrgentAsk));
+        Assert.True(g.Saved().UrgentClearToAsk());
+    }
+
+    /// <summary>
     /// The notifications take effect at once, as the other at-once settings: Save puts the form's choice into the running
     /// settings and settings.json (LiveSettings.Apply), and the tray reads the running value at each notice, so the next
     /// incident's notice follows it with no restart. A choice the form left alone never undoes one made elsewhere.
