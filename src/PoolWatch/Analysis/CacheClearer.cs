@@ -41,14 +41,15 @@ internal sealed class CacheClearer
     /// <param name="experimentActive">An A/B experiment is running; no automatic clear then.</param>
     /// <param name="nonPagedRise">
     /// The detector's <see cref="Core.Detection.Detector.NonPagedRise10Min"/>: the sampler evaluates the detector on a
-    /// sample before this clearer observes it, so the urgent clear reads the rise of the same sample.
+    /// sample before this clearer observes it, so the urgent clear reads the rise of the same sample. Required: without
+    /// it the urgent clear would never run (its wiring is held by a test as well).
     /// </param>
-    public CacheClearer(MonitorEngine engine, FindingLog findings, Func<bool>? experimentActive = null, Func<long?>? nonPagedRise = null)
+    public CacheClearer(MonitorEngine engine, FindingLog findings, Func<bool> experimentActive, Func<long?> nonPagedRise)
     {
         _engine = engine;
         _findings = findings;
-        _experimentActive = experimentActive ?? (() => false);
-        _nonPagedRise = nonPagedRise ?? (() => null);
+        _experimentActive = experimentActive;
+        _nonPagedRise = nonPagedRise;
         _stateFile = engine.Paths.Guard.CheckReal(Path.Combine(engine.Paths.EnsureDir(engine.Paths.CacheDir), "clears.json"));
         Load();
     }

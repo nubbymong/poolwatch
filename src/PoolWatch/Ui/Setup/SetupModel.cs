@@ -593,7 +593,7 @@ internal static class CacheChoices
     }
 
     /// <summary>The timeline's words for the urgent clear as a choice that clears writes it: ", and at once while the non-paged pool is over its limit and rising", or ", without the urgent clear".</summary>
-    public static string UrgentWords(bool urgent) => urgent ? ", and at once while the non-paged pool is over its limit and rising" : ", without the urgent clear";
+    public static string UrgentWords(bool urgent) => urgent ? Core.Changes.ChangeWords.AutoClearUrgent : ", without the urgent clear";
 
     /// <summary>The Ready step's line: "Emptied every hour, or at 8 GB", "Emptied every 2 hours", "Emptied at 8 GB", "PoolWatch suggests when".</summary>
     public static string Summary(Settings s)

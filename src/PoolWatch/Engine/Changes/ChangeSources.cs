@@ -103,7 +103,7 @@ internal sealed class SettingsSource(LiveSettings live, ChangeRecords records, F
             yield return new ActiveChange(ChangeIds.AutoClear, ChangeKind.AutoClear, null, ChangeWords.AutoClear(s.AutoClearEveryHours, s.AutoClearPoolGb), true,
                 records.Has(RecordKind.RemovedClearTask) ? ChangeWords.AutoClearKeepsTaskNote : null)
             {
-                Title = ChangeWords.AutoClearTitle, Detail = ChangeWords.AutoClearWhen(s.AutoClearEveryHours, s.AutoClearPoolGb),
+                Title = ChangeWords.AutoClearTitle, Detail = ChangeWords.AutoClearWhen(s.AutoClearEveryHours, s.AutoClearPoolGb, s.AutoClearUrgent),
             };
         if (s.TokenGuardEnabled)
             yield return new ActiveChange(ChangeIds.TokenGuard, ChangeKind.TokenGuard, null, ChangeWords.TokenGuard, true, ChangeWords.TokenGuardNote)

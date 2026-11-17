@@ -6,19 +6,28 @@ What changed in each PoolWatch release, newest first, in plain words.
 
 - **The size rule clears again once the cache holds the pool again.** After a clear at the pool size that frees
   little, the size rule waits up to 6 hours, so it does not clear every 30 minutes for nothing. That wait now ends as
-  soon as a later clear frees more than that, or the pool grows past what that clear saw by 2 GB or a quarter,
-  whichever is more; the Simple view's line says at what size. On a PC that hung, the size rule had waited through two
-  clears that freed 1.99 GB and 5.75 GB.
+  soon as a later clear frees more than little (a tenth of the pool or 512 MB, whichever is more) and takes the pool
+  from over the size to under it, or the pool grows past what that clear saw by 2 GB or a quarter, whichever is more;
+  the Simple view's line says at what size. On a PC that hung, the size rule had waited through two clears that freed
+  1.99 GB and 5.75 GB.
 - **An urgent clear when the non-paged pool climbs fast.** While the non-paged pool is over its alert level (5 GB) and
-  still rising (100 MB in 10 minutes), PoolWatch empties the whole standby cache at once, without waiting for the
-  schedule or the 30 minutes: never within 10 minutes of a clear, never during an experiment, and not again after one
-  that freed little until a clear frees more or the pool grows on. It runs only with automatic clearing on, and it is
-  on to begin with, after an upgrade too. Setup's Standby cache step has a switch for it, and Settings a box.
+  still rising (100 MB in 10 minutes), PoolWatch empties the standby cache at once, without waiting for the schedule or
+  the 30 minutes: the whole cache, or its light part if you chose light clears only. Never within 10 minutes of a clear
+  (30 after one that failed), longer for several in a row (20, then 30 minutes), never during an experiment, and not
+  again after one that freed little of the non-paged pool until a clear frees more of it or it grows on. It runs only
+  with automatic clearing on and a schedule or a size set, and it is on to begin with, after an upgrade too. Setup's
+  Standby cache step has a switch for it, and Settings a box. Turning automatic clearing on from the hourly clear's
+  card, or by replacing a RAMMap task, says that it turns this on too, and so does Active changes.
 - **The non-paged pool's notice stays until you close it.** "Non-paged pool over the limit" left the screen after a
-  few seconds, as every notice by the clock does; it is now a small window that stays above other windows, with
-  **Open PoolWatch** and **Close**, and never takes the keyboard from the program you type in.
+  few seconds, as every notice by the clock does; it is now a small window on the taskbar's screen that stays above
+  other windows, with **Open PoolWatch** and **Close**, and never takes the keyboard from the program you type in. It
+  waits while a presentation or a full-screen program runs.
 - **"Only when it needs attention" tells of the growth behind a non-paged pool over its limit.** A growth that is part
   of the rise of a non-paged pool over its limit and still rising is told too, as it opens or once it is.
+- **The non-paged alert keeps sensible limits.** Its level is never under 1 GB, and its rise never under 10 MB in 10
+  minutes, whatever the Advanced settings or a settings file say.
+- **Settings says again, in sight, that turning automatic clearing on first offers to remove your own RAMMap clear
+  task.**
 
 ## 1.0.0 - 2026-11-13
 

@@ -1214,7 +1214,15 @@ non-paged pool was over its limit). The non-paged pool's notice stays until it i
 7 seconds after each such one that night. It is a window as the token-leak guard's are (bottom right, above other
 windows, a taskbar button, Open PoolWatch and Close), made with the top-most style rather than `TopMost`, and shown
 without taking the focus (`ShowWithoutActivation`), so a key meant for another program never presses its button; one at
-a time, a newer one putting its words in it. The token-leak guard's notices are not these, and always
+a time, a newer one putting its words in it. It opens on the screen that holds the taskbar with the tray
+(`NoticeWindow.Area`, the `Shell_TrayWnd` window `TaskbarWatch.FindTaskbar` finds), shares one font
+(`NoticeWindow.NoticeFont`: a form does not dispose a font it is given), closes on Esc once it has the focus (its Close
+is the cancel button), and cuts its words to what a notice holds (`NoticeWindow.Cut`, `ProfileAtStart.MaxNotice`, at a
+word's end), as its size is fixed and its text box has no scroll bar. As Windows holds its own toasts back, it waits
+while `SHQueryUserNotificationState` (`Native.NotificationState`) says busy, a full-screen Direct3D program or
+presentation mode, logged as held, and shows when that ends (asked every 5 seconds); a window above all others with a
+tag's and a program's names would otherwise show over a screen share. Focus Assist's do-not-disturb has no documented
+call to read, so it is not known. The token-leak guard's notices are not these, and always
 show. A click on any notice opens the main window in the view last
 used and brings it to the front, unless that notice offers a place of its own (Active changes for the service profile's,
 the guard's offer for the token-leak watch's). Windows says only that a notice of the icon was clicked, never which, and
@@ -1572,7 +1580,10 @@ each known cause with its impact level from `ImpactRules.FromFacts`, section 16,
 tell, and "Fix in step N", "Trim in the app" or "Still watching"; listed by level, the highest first, with Not known and
 a check still running just above None, `ImpactRows.ByLevel`), Safety (three promises, in green), Standby cache (On a
 schedule, At a pool size, Whichever comes first (recommended, preselected on every PC at a first run), Decide later; a
-small chart of the kernel pool; the stutter line; and, with a RAMMap clear task of the user's own, the note that
+small chart of the kernel pool; under the four choices, the urgent clear's switch (`Settings.AutoClearUrgent`, "Also
+clear at once if the non-paged pool is over 5 GB and still rising", with a green shield as the step's safety words
+have), shown only with a choice that clears, on to begin with (the setting's default, else as set), and hidden by
+Decide later, which is still offered; the stutter line; and, with a RAMMap clear task of the user's own, the note that
 choosing a rule replaces it), Fixes (start when you sign in, Defender performance mode with its instructions, the Codex
 shortcut as a Yes/No, and the token-leak guard when the check found the leak, its "Why?" open with what you will notice
 and how to undo it, with the pages it cites), Services (for later, in the app: setup changes no services), Records
@@ -1587,7 +1598,8 @@ checked state to screen readers. Setup reads the PC as it opens ("Looking at you
 needs it, runs the token-leak check (usually about 20 seconds) once; the CI UI test never runs it. Steps 4 and 5 wait
 for the read before Next ("Next is ready in a moment."), at most a minute in all (`EnvironmentProbe.HungAfter`): after
 that setup goes on with the facts PoolWatch had and shows the read when it ends. Nothing is changed until Next on the
-step that shows it: the Standby cache step writes the chosen rule (`LiveSettings.Apply`) and, exactly when the step
+step that shows it: the Standby cache step writes the chosen rule and the urgent clear's switch as shown, in one change
+(`LiveSettings.Apply`; Decide later turns clearing off and leaves the switch as it is) and, exactly when the step
 shows the note, replaces the user's task first (from the same scan; the rule is written right after); the Fixes step's
 Next registers the sign-in task, creates the shortcut and turns the guard on through the same code as the cards. A Fixes
 row that appears while the step shows (the read or the leak check ended) holds Next for a second (`NextWait`), so a
@@ -2078,26 +2090,51 @@ Save then puts only the four at-once settings into effect and says that nothing 
 - **The size rule's back-off.** A clear the size rule started that freed little (less than max(512 MB, 10% of the
   pool before it), `ClearPolicy.FreedLittle`) says the pool over the limit is not cache-held, so the size rule waits
   `PoolRuleBackOff` (6 hours) instead of purging every 30 minutes for nothing; the schedule goes on. The back-off ends
-  early when the pool is cache-held again: a clear measured after it (any trigger) did not free little
-  (`ClearPolicy.LastPoolClear` returns none), or the pool now is at least max(2 GB, a quarter of what that clear saw)
-  above what it saw (`ClearPolicy.GrewOn`, `GrowOnBy`). 2 GB is four times the least a clear must free not to count as
-  freeing little, well clear of a busy pool's wobble; a quarter keeps it in proportion for a large limit. A pool that
-  holds still is never cleared again for it, and one that keeps climbing is cleared once for each such step. `Next`
-  gives that size too (`NextClear.EarlyPoolBytes`), so the line says it ("when the kernel pool reaches 10.3 GB, or 8 GB
-  after 03:19"), and the minute-by-minute walk holds it to `Due`. Seen on a ReFS Dev Drive PC that hung: a size-rule
-  clear freed 462 MB of 8.23 GB, the scheduled clears after it freed 1.99 GB and 5.75 GB, and the size rule still waited
-  while the pool went from 9.3 GB to 21.4 GB (`UrgentClearTests` replays that night from its numbers).
-- **The urgent clear** (`Settings.AutoClearUrgent`, on by default, only while automatic clearing is on;
-  `ClearPolicy.UrgentNow`): the committed non-paged pool over `NonPagedTotalAlertBytes` and its rise over the last 10
-  minutes at least `NonPagedTotalRiseBytesPer10Min`, read by the detector on the stitch of section 6
-  (`Detector.NonPagedRise10Min`, the non-paged alert's own reading; none while a clear is measured). A full standby
-  purge (`ClearTrigger.Urgent`), inside `AutoClearMinMinutes` but never within `UrgentFloor` (10 minutes, the window the
-  rise is read over) of any clear, never while a clear waits for its measurement or an experiment runs. It stands down
-  after an urgent clear that freed little (`UrgentStandsDown`) until a clear measured after it frees real pool or the
-  pool grows on past what it saw (`GrewOn`), so a leak that is not cache-held is not purged every 10 minutes. Its
-  trigger is kept with the clear: the log, the finding and the Simple view's line say "urgent". `Next` says "now" when
-  it is due. On by default for new installs and upgrades (a file without it reads it on): it acts only on top of a rule
-  the owner turned on, and it is the clear that night needed.
+  early when the pool over the limit is cache-held again: a clear measured after it (any trigger) did not free little
+  and took the pool from at or over the limit to under it (`ClearPolicy.LastPoolClear` returns none; a clear that freed
+  real pool but left the pool over the limit says nothing of the part over it, and on a pool just over the limit it
+  used to let the size rule purge 30 minutes later for little, a purge every 30 minutes, half of them for nothing), or
+  the pool now is at least max(2 GB, a quarter of what that clear saw) above what it saw (`ClearPolicy.GrewOn`,
+  `GrowOnBy`). 2 GB is four times the least a clear must free not to count as freeing little, well clear of a busy
+  pool's wobble; a quarter keeps it in proportion for a large limit. So while backed off, the size rule clears a pool
+  that holds still over the limit at most once after each clear that takes it under the limit, and a pool that keeps
+  climbing once for each such step (on a pool that climbs 2 GB or more in 30 minutes, at first as often as the spacing
+  allows, then further apart as each step grows with the pool). A limit at or past the size that ends the back-off
+  (raised since that clear) is not backed off at all (`BackOffEndsMs`): a pool at the limit has grown past it already.
+  `Next` gives that size too (`NextClear.EarlyPoolBytes`), so the line says it ("when the kernel pool reaches 10.3 GB, or
+  8 GB after 03:19"), and the minute-by-minute walk holds it to `Due`. Seen on a ReFS Dev Drive PC that hung: a
+  size-rule clear freed 462 MB of 8.23 GB, the scheduled clears after it freed 1.99 GB (taking the pool from 9.38 to
+  7.38 GB) and 5.75 GB, and the size rule still waited while the pool went from 9.3 GB to 21.4 GB (`UrgentClearTests`
+  replays that night from its numbers, each moment asked against the night's own clears as they had happened by then).
+- **The urgent clear** (`Settings.AutoClearUrgent`, on by default, only while automatic clearing is on with a schedule
+  or a size set, so it never runs while the line says automatic clearing is off; `ClearPolicy.UrgentNow`): the
+  committed non-paged pool over `NonPagedTotalAlertBytes` and its rise over the last 10 minutes at least
+  `NonPagedTotalRiseBytesPer10Min` (the non-paged alert's two limits, which `Settings.Normalize` keeps at 1 GB and
+  10 MB at least, and the rule reads so again: they gate an elevated purge), read by the detector on the stitch of
+  section 6 (`Detector.NonPagedRise10Min`, the non-paged alert's own reading; none while a clear is measured). The red
+  icon's incident also needs one tag to carry a quarter of the rise, and stays red until it goes quiet; the urgent
+  clear goes by the two limits alone. A standby purge (`ClearTrigger.Urgent`), the full one, or the light one in
+  "lowpriority" mode, the owner's choice of light clears only (`ClearPolicy.UrgentMode`, as escalation keeps to the
+  mode); inside `AutoClearMinMinutes` but never within `UrgentFloor` (10 minutes, the window the rise is read over) of
+  any clear, nor within `AutoClearMinMinutes` of a clear that failed (a purge call that keeps failing is not tried every
+  10 minutes), never while a clear waits for its measurement or an experiment runs. Urgent clears in a row wait longer
+  (`ClearPolicy.UrgentRow`): 10 minutes after the first, doubled for each one more, up to `AutoClearMinMinutes`, until a
+  clear finds the non-paged pool at or under its alert (just before it or 2 minutes after it): that night the non-paged
+  pool stayed over 5 GB right after the big clears (5.13 GB after 23:20, 5.27 GB after 01:20) and refilled 100 MB in
+  10 minutes and more, so a full purge and a cold file cache could otherwise have followed every 10 minutes for hours.
+  It is judged on the non-paged pool alone: it stands down after an urgent clear that freed little of it
+  (`FreedLittleNonPaged`: less than max(256 MB, 10% of the non-paged pool before it); that night's clears freed 0.79 of
+  4.62 GB, 2.0 of 7.13 GB and 6.0 of 11.31 GB of it) until a clear measured after it frees real non-paged pool or the
+  non-paged pool grows on past what it saw by `GrowOnBy` (`NonPagedGrewOn`). Judged on the whole pool, a driver's
+  non-paged leak on a PC whose paged pool the cache holds (that night's paged pool refilled about 1 GB in 10 minutes)
+  would have freed gigabytes of paged pool at each purge and never stood down, and paged growth would have ended a
+  stand-down. Urgent clears are left out of "auto" mode's comparison of the light and full purges (`ModeFor`,
+  `IsExperiment`, `LowPriorityVerdict`): taken while the non-paged pool climbs, their frees are not like the others'.
+  Its trigger is kept with the clear: the log, the finding and the Simple view's line say "urgent". `Next` says "now"
+  when it is due. On by default for new installs and upgrades (a file without it reads it on): it acts only on top of a
+  rule the owner turned on, and it is the clear that night needed. The words that turn automatic clearing on (the
+  hourly clear's card and its result, replacing a RAMMap task, setup's timeline line) and Active changes' row say it
+  is turned on with the rule while it is on (`ChangeWords.AutoClearUrgent`).
 - **Escalation.** In "auto" mode, an automatic light (low-priority standby) clear that, measured 2 minutes later,
   freed less than max(512 MB, 10% of the pool before it) is followed right away by the full standby purge: once, inside
   the 30-minute spacing, never twice in a row, and not at all when the last measured full purge freed little too. The

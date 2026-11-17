@@ -18,9 +18,12 @@ namespace PoolWatch.Ui;
 /// <param name="PoolNotices"><see cref="Settings.PoolNotices"/>: which kernel pool notices the tray shows (Notifications).</param>
 /// <param name="Records"><see cref="Settings.RecordMode"/>: Reports only or Detailed recording (Records).</param>
 /// <param name="RetentionDays"><see cref="Settings.RetentionDays"/>: reports, records and exports are cleaned up after this many days.</param>
-/// <param name="Urgent"><see cref="Settings.AutoClearUrgent"/>: the urgent clear, while automatic clearing is on.</param>
+/// <param name="Urgent">
+/// <see cref="Settings.AutoClearUrgent"/>: the urgent clear, while automatic clearing is on. No default: a form or a test
+/// that left it out would turn a clear the owner turned off on again at the next save.
+/// </param>
 internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decimal PoolGb, bool DeeperCapture, bool TokenGuard, bool CheckForUpdates,
-    PoolNoticeLevel PoolNotices, RecordMode Records, int RetentionDays, bool Urgent = true)
+    PoolNoticeLevel PoolNotices, RecordMode Records, int RetentionDays, bool Urgent)
 {
     /// <summary>The ranges <see cref="Settings.Normalize"/> keeps them in (a week; a terabyte).</summary>
     public const decimal MaxHours = 168, MaxPoolGb = 1024;
@@ -161,15 +164,18 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
 
     /// <summary>
     /// The line under automatic clearing: first what a clear is like while it runs, then the spacing rule from
-    /// <see cref="Settings.AutoClearMinMinutes"/> and the urgent clear's own 10 minutes. The three rules are named by the
-    /// choices above it (<see cref="ClearRule"/>). What turning it on does to a clear task of your own is the box's
-    /// tooltip (<see cref="AutoClearTip"/>), and the question it asks then: the form fits a 1024 x 600 screen with the
-    /// urgent clear's box in this column only so.
+    /// <see cref="Settings.AutoClearMinMinutes"/> and the urgent clear's own 10 minutes, then what turning it on does to a
+    /// clear task of your own (<see cref="OwnTaskLine"/>), in sight, as the box that may lead to removing that task is
+    /// read with the keyboard or a screen reader too, which never show a tooltip. The three rules are named by the
+    /// choices above it (<see cref="ClearRule"/>).
     /// </summary>
     public static string AutoClearHint(Settings s) =>
-        ClearStutter + $" At most every {Math.Max(30, s.AutoClearMinMinutes):0} minutes (10 for an urgent clear).";
+        ClearStutter + $" At most every {Math.Max(30, s.AutoClearMinMinutes):0} minutes (10 for an urgent clear). " + OwnTaskLine;
 
-    /// <summary>The automatic clear's box's tooltip: what turning it on does to a clear task of your own.</summary>
+    /// <summary>What turning automatic clearing on does to a clear task of your own, as the line under it says it.</summary>
+    public const string OwnTaskLine = "Turning it on first offers to remove your own RAMMap clear task.";
+
+    /// <summary>The automatic clear's box's tooltip: what turning it on does to a clear task of your own, and why.</summary>
     public const string AutoClearTip = "Turning it on first offers to remove a clear task of your own (RAMMap), so the two never both run.";
 
     /// <summary>
@@ -179,13 +185,17 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
     public const string UrgentLabel = "Clear at once if the non-paged pool climbs";
 
     /// <summary>
-    /// The box's tooltip, a line each (a tooltip wraps only at the screen's edge): when it clears, how often at most, and
-    /// when it waits, true to <see cref="Core.Cache.ClearPolicy.UrgentNow"/>.
+    /// The box's tooltip, a line each (a tooltip wraps only at the screen's edge): when it clears and how (the full clear,
+    /// or the light one where the Advanced settings ask for light clears only, <see cref="Core.Cache.ClearPolicy.UrgentMode"/>),
+    /// how often at most (<see cref="Core.Cache.ClearPolicy.UrgentRow"/>), and when it waits, true to
+    /// <see cref="Core.Cache.ClearPolicy.UrgentNow"/>.
     /// </summary>
     public static string UrgentTip(Settings s) =>
-        $"When the non-paged pool is over {Setup.SetupText.Gb(s.NonPagedTotalAlertBytes / (double)(1L << 30))} and still climbing fast, PoolWatch empties the cache at once,\n" +
-        "without waiting for the next clear: the full clear, at most once every 10 minutes.\n" +
-        "After an urgent clear that freed little, it waits until a clear frees more or the pool grows on.";
+        $"When the non-paged pool is over {Setup.SetupText.Gb(Math.Max(s.NonPagedTotalAlertBytes, Settings.MinNonPagedAlertBytes) / (double)(1L << 30))} and still climbing fast, PoolWatch empties the cache at once,\n" +
+        "without waiting for the next clear: " +
+        (Core.Cache.ClearPolicy.UrgentMode(s) == Core.Cache.ClearMode.LowPriority ? "the light clear, as the Advanced settings ask for light clears only.\n" : "the full clear.\n") +
+        $"At least 10 minutes apart; several in a row wait longer, up to {Math.Max(30, s.AutoClearMinMinutes):0} minutes.\n" +
+        "After an urgent clear that freed little of the non-paged pool, it waits until a clear frees more of it or it grows on.";
 
     /// <summary>The choices' words, as the setup guide names them.</summary>
     public const string ScheduleChoice = "On a schedule", SizeChoice = "At a pool size", EitherChoice = "Whichever comes first";

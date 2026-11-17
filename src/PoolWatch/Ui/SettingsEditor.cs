@@ -130,8 +130,11 @@ internal sealed class SettingsEditor
     }
 }
 
-/// <summary>The automatic clear's settings, which take effect together (the urgent clear's among them).</summary>
-internal sealed record AutoClearSettings(bool Enabled, double EveryHours, double PoolGb, double MinMinutes, string Mode, bool Urgent = true)
+/// <summary>
+/// The automatic clear's settings, which take effect together (the urgent clear's among them). <paramref name="Urgent"/>
+/// has no default: a construction that left it out would turn a clear the owner turned off on again.
+/// </summary>
+internal sealed record AutoClearSettings(bool Enabled, double EveryHours, double PoolGb, double MinMinutes, string Mode, bool Urgent)
 {
     public static AutoClearSettings Of(Settings s) => new(s.AutoClearEnabled, s.AutoClearEveryHours, s.AutoClearPoolGb, s.AutoClearMinMinutes, s.AutoClearMode, s.AutoClearUrgent);
 
