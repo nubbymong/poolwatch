@@ -246,6 +246,7 @@ public class AppDataLinksTests
         { "a removed entry that would be two", RemovedRecord(before: @"C:\a;C:\b") },
         { "a removed entry with no place", RemovedRecord() with { Index = null } },
         { "a removed entry with an id of another time", RemovedRecord() with { ChangedUtc = When.AddTicks(1) } },
+        { "a removed entry whose folder on the PATH is not a plain one", RemovedRecord() with { After = @"C:\a;b" } },
     };
 
     [Theory]
@@ -420,6 +421,81 @@ public class AppDataLinksTests
         Assert.DoesNotContain("remove the entry", details, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// "Codex keeps my projects in OneDrive Documents: does that matter?" Only what was measured: a link on another drive or
+    /// under the profile kept nothing (0uternet); a link inside OneDrive, and OneDrive's cloud files inside the apps, were
+    /// not measured. Nothing says projects there are not affected: a venv on uv's link leaks wherever the project is.
+    /// </summary>
+    [Fact]
+    public void TheOneDriveAnswerSaysOnlyWhatWasMeasured()
+    {
+        string projects = LinkWords.Details(new LinkFinding { Kind = LinkKind.Projects });
+        Assert.DoesNotContain("not affected", projects);
+        Assert.Contains("on another drive or under your profile", projects);
+        Assert.Contains("a link inside OneDrive, and OneDrive's cloud files inside the apps, were not measured", projects);
+        var pack = KnowledgeBase.Embedded().Entries.Single(e => e.Id == LinkFinder.KnownIssueId);
+        Assert.DoesNotContain("Documents and OneDrive included", pack.Explanation);
+        Assert.Contains("A link inside OneDrive, and OneDrive's cloud files inside the apps, were not measured.", pack.Explanation);
+    }
+
+    /// <summary>
+    /// An entry of the machine's PATH is advice only, whatever the row holds: every account, SYSTEM and services read that
+    /// PATH, and its %NAME% are filled in from this account's own environment.
+    /// </summary>
+    [Fact]
+    public void AnEntryOnTheMachinesPathIsAdviceOnly()
+    {
+        var machine = Entry() with { Scope = EnvScope.Machine };
+        Assert.False(machine.CanFix);
+        Assert.Equal("Fix", LinkWords.Button(machine));
+        Assert.Equal("Change it yourself", LinkWords.Fix(machine));
+        Assert.Contains("that only administrators can change", LinkWords.Details(machine with { Target = null, WhyNot = null }));
+    }
+
+    [Fact]
+    public void AnEntryRemovedBecauseItsFolderIsOnThePathAlreadySaysSo()
+    {
+        ChangeRecord[] one = [RemovedRecord() with { After = @"C:\Users\someone\.example\current\bin" }];
+        Assert.Null(ChangeRecordFile.Invalid(one[0]));
+        Assert.Equal(one, ChangeRecordFile.Parse(ChangeRecordFile.ToJson(one)));
+        Assert.Equal(@"Removed %LOCALAPPDATA%\Programs\Gone\bin from your PATH: the folder its link leads to, C:\Users\someone\.example\current\bin, is on it already",
+            ChangeWords.Of(one[0]));
+        Assert.Equal(@"removed from your PATH · the folder its link leads to, C:\Users\someone\.example\current\bin, is on it already", ChangeWords.DetailOf(one[0]));
+    }
+
+    /// <summary>
+    /// The AI agent's prompt names a folder only from %USERPROFILE%, %APPDATA% or %LOCALAPPDATA%: a venv, a settings folder
+    /// or an app's data folder anywhere else (a client's name in a project's path, say) is not named. The hooks row names
+    /// the settings file it read (CLAUDE_CONFIG_DIR's, when set).
+    /// </summary>
+    [Fact]
+    public void APromptNamesAFolderOnlyFromYourProfileOrAppData()
+    {
+        var venv = new LinkFinding
+        {
+            Kind = LinkKind.Venv, Scope = EnvScope.User, Index = 0, Entry = @"D:\clients\acme\.venv\Scripts", Link = @"D:\clients\acme\.venv",
+            Home = @"%APPDATA%\uv\python\cpython-3.13-windows-x86_64-none",
+        };
+        string prompt = LinkWords.GuidePrompt(venv, Profile);
+        Assert.DoesNotContain("acme", prompt);
+        Assert.Contains(@"%APPDATA%\uv\python\cpython-3.13-windows-x86_64-none", prompt);
+        Assert.Contains(@"%USERPROFILE%\.platformio\penv", LinkWords.GuidePrompt(venv with { Link = @"C:\Users\someone\.platformio\penv" }, Profile));
+        var hook = new LinkFinding { Kind = LinkKind.Hook, Count = 1, Names = ["python3 x.py"], Link = @"%USERPROFILE%\cc-config" };
+        Assert.Contains(@"%USERPROFILE%\cc-config\settings.json", LinkWords.GuidePrompt(hook, Profile));
+        Assert.Contains(@"%USERPROFILE%\cc-config\settings.json", LinkWords.Details(hook));
+        Assert.DoesNotContain("acme", LinkWords.GuidePrompt(hook with { Link = @"D:\clients\acme\cc" }, Profile));
+        Assert.DoesNotContain("elsewhere", LinkWords.GuidePrompt(new LinkFinding { Kind = LinkKind.AppFolder, Tool = LinkApps.Claude, Link = @"D:\elsewhere\Claude" }, Profile));
+    }
+
+    /// <summary>The question before removing an entry whose link leads nowhere names the folder that is not there, and warns about a drive connected only some of the time.</summary>
+    [Fact]
+    public void TheQuestionBeforeARemovalNamesTheMissingFolder()
+    {
+        string question = LinkWords.RemoveQuestion(Entry() with { Kind = LinkKind.PathEntryGone, Target = @"E:\Tools\codex\bin" });
+        Assert.Contains(@"E:\Tools\codex\bin", question);
+        Assert.Contains("a drive you connect only some of the time", question);
+    }
+
     // ------------------------------------------------------------------ a PATH entry whose link leads nowhere, removed
 
     [Fact]
@@ -498,10 +574,13 @@ public class AppDataLinksTests
     [InlineData(@"C:\Program Files\WindowsApps\Claude_5.11492.5.0_x64__pzs8sxrjxfjjc\app\claude.exe", "Claude")]
     [InlineData(@"C:\Program Files\WindowsApps\OpenAI.Codex_26.1.0.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe", "Codex")]
     [InlineData(@"C:\Users\someone\AppData\Roaming\Claude\claude-code\2.1.309\claude.exe", "Claude")]
+    // The Claude app's newer engines (DraftingDreamer's Desktop 4.23118): the ones still running after Quit.
+    [InlineData(@"C:\Users\someone\AppData\Local\Claude-Data\claude_pzs8sxrjxfjjc\claude-code\2.1.317\bin\claude.exe", "Claude")]
+    [InlineData(@"C:\Users\someone\AppData\Local\Claude-Data-Other\claude.exe", null)]
     [InlineData(@"C:\Users\someone\.local\bin\claude.exe", null)]
     [InlineData(@"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal_1.0.0.0_x64__8wekyb3d8bbwe\wt.exe", null)]
     public void TheAppsProgramsAreKnownByWhereTheyAre(string path, string? app) =>
-        Assert.Equal(app, LinkApps.AppOfProgram(path, @"C:\Users\someone\AppData\Roaming"));
+        Assert.Equal(app, LinkApps.AppOfProgram(path, @"C:\Users\someone\AppData\Roaming", @"C:\Users\someone\AppData\Local"));
 
     [Fact]
     public void TheToolThatMadeAVenvIsNamedWhenItsFolderShowsIt()
