@@ -227,13 +227,14 @@ internal static class AppDataLinkFinder
     internal static string? Absolute(string? target, string folder)
     {
         if (string.IsNullOrEmpty(target)) return null;
-        string t = target.StartsWith(@"\??\", StringComparison.Ordinal) ? target[4..]
-            : target.StartsWith(@"\\?\", StringComparison.Ordinal) && !target.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase) ? target[4..]
-            : target;
+        // With the NT prefix the target is a full path: a drive's, or one PoolWatch does not write (a volume, a share);
+        // it is never read as a path from the link's folder.
+        bool full = target.StartsWith(@"\??\", StringComparison.Ordinal) || target.StartsWith(@"\\?\", StringComparison.Ordinal);
+        string t = full ? target[4..] : target;
         try
         {
             if (t.Length >= 3 && char.IsAsciiLetter(t[0]) && t[1] == ':' && t[2] == '\\') return Path.GetFullPath(t);
-            if (t.Contains(':') || t.StartsWith('\\') || t.StartsWith('/')) return null;
+            if (full || t.Contains(':') || t.StartsWith('\\') || t.StartsWith('/')) return null;
             return Path.GetFullPath(Path.Combine(folder, t));
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return null; }
