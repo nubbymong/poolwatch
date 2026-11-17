@@ -203,8 +203,9 @@ internal static class HeadlessRunner
 
     internal static Settings LoadSettings(CommandLineOptions opt, AppPaths paths)
     {
-        // An explicit --config is read as written; only the default settings.json of an older format is migrated
-        // (Settings.Load).
+        // An explicit --config is read as written (never migrated), but for the urgent clear: off unless the file names
+        // autoClearUrgent, and never asked (Settings.Parse); only the default settings.json of an older format is
+        // migrated.
         var settings = opt.ConfigFile is not null ? Settings.Load(opt.ConfigFile, explicitConfig: true) : Settings.Load(paths.SettingsFile);
         if (opt.IntervalSeconds is { } i) settings.SampleIntervalSeconds = i;
         settings.Normalize();

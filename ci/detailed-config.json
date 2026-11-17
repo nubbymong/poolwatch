@@ -3,6 +3,9 @@
   // (ci/overhead.ps1): every setting at its default but Detailed recording, the worst case (the default, Reports only,
   // writes none of the day's files), so its CSV files are there to read and its writes are judged against the 5 MB an hour.
   "recordMode": "Detailed",
+  // The urgent clear at its default, on: a --config file that does not name it reads it off. Automatic clearing is
+  // off here, at its default, so it never runs.
+  "autoClearUrgent": true,
   // CI never asks GitHub for a new version (shared runner addresses; the numbers stay comparable).
   "checkForUpdates": false
 }

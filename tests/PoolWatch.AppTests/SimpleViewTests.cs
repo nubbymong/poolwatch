@@ -343,6 +343,10 @@ public class SimpleViewTests
         Assert.Empty(view.LayoutProblems());
     }
 
+    /// <summary>
+    /// The card that turns clearing on says once that a clear can stutter; while the urgent clear comes with it, it says
+    /// that first, in the same lines under its words, and the row still lays out whole at every height.
+    /// </summary>
     [Fact]
     public void TheCardThatTurnsClearingOnSaysOnceThatAClearCanStutter()
     {
@@ -351,7 +355,18 @@ public class SimpleViewTests
         view.ShowCards([Hourly], Features);
         var texts = All<WrapLabel>(view).Select(l => l.Text).ToList();
         Assert.Equal(1, texts.Count(t => t == SimpleSettings.ClearStutter));
+        Assert.DoesNotContain(texts, t => t.Contains(SimpleSettings.UrgentToo, StringComparison.Ordinal));
         Assert.Empty(view.LayoutProblems());
+        for (int height = 300; height <= 760; height += 20)
+        {
+            var (urgentHost, urgentView) = View(1068, height);
+            using var __ = urgentHost;
+            urgentView.ShowCards([Hourly with { TurnsOnUrgentClear = true }, Guard], Features);
+            Assert.Empty(urgentView.LayoutProblems());
+            if (urgentView.ShownCards.Count == 0) continue;
+            var said = All<WrapLabel>(urgentView).Select(l => l.Text).ToList();
+            Assert.Equal(1, said.Count(t => t == SimpleSettings.UrgentToo + " " + SimpleSettings.ClearStutter));
+        }
     }
 
     [Fact]

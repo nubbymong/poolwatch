@@ -108,6 +108,16 @@ internal static class SetupText
     public const string LaterText = "PoolWatch watches the pool and suggests when.";
     /// <summary>What a clear is like while it runs, said where clearing is turned on.</summary>
     public const string Stutter = "Video or the mouse may stutter for a few seconds while it empties.";
+    /// <summary>
+    /// The urgent clear's switch, under the choices that clear (<see cref="Settings.AutoClearUrgent"/>): a clear at once
+    /// (the full one, or the light one in "lowpriority" mode) while the non-paged pool is over its alert and still rising,
+    /// between the rule's own clears. Its name, as Settings' box says it too.
+    /// </summary>
+    public const string UrgentTitle = "Clear at once if the non-paged pool is over its limit and still rising";
+
+    /// <summary>The switch's row on the step, with the limit as set: "Also clear at once if the non-paged pool is over 5 GB and still rising".</summary>
+    public static string UrgentRow(long alertBytes) => $"Also clear at once if the non-paged pool is over {Gb(alertBytes / (double)(1L << 30))} and still rising";
+
     /// <summary>With a RAMMap clear task of your own: a rule here replaces it, so the two never both run.</summary>
     public const string ReplacesOwnTask =
         "A task of your own clears the cache with RAMMap. Choosing a rule here replaces it, so the two never both run; your task is saved, so you can put it back.";
@@ -570,12 +580,20 @@ internal static class CacheChoices
         _ => (false, null, null),
     };
 
-    /// <summary>The settings already hold what the choice would write.</summary>
-    public static bool InEffect(Settings s, CacheChoice choice, double hours, double gb)
+    /// <summary>
+    /// The settings already hold what the choice would write, with the urgent clear as <paramref name="urgent"/> says
+    /// (null: as it is). "Decide later" writes no urgent clear: it leaves the switch as it is.
+    /// </summary>
+    public static bool InEffect(Settings s, CacheChoice choice, double hours, double gb, bool? urgent = null)
     {
         var (enabled, every, size) = Writes(choice, hours, gb);
-        return enabled ? s.AutoClearEnabled && s.AutoClearEveryHours == every && s.AutoClearPoolGb == size : !s.AutoClearEnabled;
+        return enabled
+            ? s.AutoClearEnabled && s.AutoClearEveryHours == every && s.AutoClearPoolGb == size && (urgent is not { } u || s.AutoClearUrgent == u)
+            : !s.AutoClearEnabled;
     }
+
+    /// <summary>The timeline's words for the urgent clear as a choice that clears writes it: ", and at once while the non-paged pool is over its limit and rising", or ", without the urgent clear".</summary>
+    public static string UrgentWords(bool urgent) => urgent ? Core.Changes.ChangeWords.AutoClearUrgent : ", without the urgent clear";
 
     /// <summary>The Ready step's line: "Emptied every hour, or at 8 GB", "Emptied every 2 hours", "Emptied at 8 GB", "PoolWatch suggests when".</summary>
     public static string Summary(Settings s)

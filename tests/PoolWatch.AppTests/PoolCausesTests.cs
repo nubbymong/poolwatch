@@ -325,7 +325,7 @@ public class PoolCausesTests
         Assert.Equal(details, PoolCauses.IncidentNotice(system, info, Running));
 
         var total = PoolCauses.IncidentNotice(Open(IncidentKind.NonPagedTotal, traced: [new TraceOwner { Owner = new Owner(OwnerKind.App, "app:codex", "Codex") }]), info, Running);
-        Assert.Equal(new NoticeText("Non-paged pool over the limit", "Kernel pool: Open files (File) is growing. PoolWatch is keeping an eye on Codex."), total);
+        Assert.Equal(new NoticeText("Non-paged pool over the limit", "Kernel pool: Open files (File) is growing. PoolWatch is keeping an eye on Codex.", Stays: true), total);
 
         // A tag whose words are too long for a title: the title says what happens, and the text what grows.
         var wordy = new TagInfo("examplenetworkdriver.sys", "Receive buffers of the example network", "pooltag.txt");
@@ -360,9 +360,13 @@ public class PoolCausesTests
         var row = PoolCauses.ForIncident(Incident(IncidentKind.NonPagedTotal, 300 * MB, open: true), "Open files (File)", Now);
         Assert.Equal("Open files (File), with " + Words, row.What);
         Assert.StartsWith(row.What + ": ", row.Title);
-        // The notice says it as its title, the headline (in capitals: it starts the title).
-        Assert.Equal(new NoticeText("Non-paged pool over the limit", "Kernel pool: Open files (File) is growing. Click here to open PoolWatch for details."),
+        // The notice says it as its title, the headline (in capitals: it starts the title). It stays until it is closed, and
+        // its way to the details is its Open PoolWatch button, not a click on it.
+        Assert.Equal(new NoticeText("Non-paged pool over the limit", "Kernel pool: Open files (File) is growing. Open PoolWatch for details.", Stays: true),
             PoolCauses.IncidentNotice(Open(IncidentKind.NonPagedTotal), new TagInfo("<unknown>", "File objects", "pooltag.txt"), Running));
+        Assert.Equal(NoticeWindow.OpenLabel + " for details.", PoolCauses.OpenForDetails);
+        // Every other notice is one by the clock.
+        Assert.All(new[] { IncidentKind.Growth }, k => Assert.False(PoolCauses.IncidentNotice(Open(k), new TagInfo("<unknown>", "File objects", "pooltag.txt"), Running)!.Stays));
         Assert.Equal(Words, PoolCauses.NonPagedTitle.ToLowerInvariant());
         Assert.Equal($"h\r\nIncident x ({Words}), tag File\r\n",
             PoolWatch.Core.Util.CopyText.IncidentDetails("""{ "id": "x", "kind": "NonPagedTotal", "tag": "File", "headline": "h" }"""));
@@ -421,6 +425,60 @@ public class PoolCausesTests
                 Assert.Equal(UiData.State([(kind, cause)], retained: false) == TrayState.Red, PoolCauses.NoticeWanted(PoolNoticeLevel.NeedsAttention, kind, cause));
         Assert.True(PoolCauses.NoticeWanted(PoolNoticeLevel.EveryGrowth, IncidentKind.Growth, null));
         Assert.False(PoolCauses.NoticeWanted(PoolNoticeLevel.Off, IncidentKind.NonPagedTotal, Confidence.ConfirmedByTrace));
+        // And a growth that is part of the rise of a non-paged pool over its limit: that is what the red is about.
+        foreach (Confidence? cause in Enum.GetValues<Confidence>().Cast<Confidence?>().Append(null))
+        {
+            Assert.True(PoolCauses.NoticeWanted(PoolNoticeLevel.NeedsAttention, IncidentKind.Growth, cause, partOfNonPagedRise: true));
+            Assert.False(PoolCauses.NoticeWanted(PoolNoticeLevel.Off, IncidentKind.Growth, cause, partOfNonPagedRise: true));
+            // It adds nothing for any other kind: those follow the icon's own rule alone.
+            foreach (var kind in Enum.GetValues<IncidentKind>().Where(k => k != IncidentKind.Growth))
+                Assert.Equal(PoolCauses.NoticeWanted(PoolNoticeLevel.NeedsAttention, kind, cause), PoolCauses.NoticeWanted(PoolNoticeLevel.NeedsAttention, kind, cause, partOfNonPagedRise: true));
+        }
+        log.Clear();
+        Assert.True(PoolCauses.TrayNotice(growth, PoolNoticeLevel.NeedsAttention, _ => info, Running, log.Add, tag => tag == growth.Tag) is not null);
+        Assert.False(PoolCauses.TrayNotice(growth, PoolNoticeLevel.NeedsAttention, _ => info, Running, log.Add, tag => tag != growth.Tag) is not null);
+        Assert.Equal(["notice not shown (NeedsAttention): Kernel pool: Open files (File) is growing"], log);
+    }
+
+    /// <summary>
+    /// Under "Only when it needs attention", a growth whose tag is part of the rise of a non-paged pool over its limit is
+    /// told: as it opens when it already is, else at the tray's refresh once it is (the non-paged total went over its limit
+    /// after the growth opened), once for the episode. On a night that ended in a hang, 55 growth notices (most of them a
+    /// ReFS metadata store growing) were held back while the non-paged pool was over its limit, because only red ones were
+    /// shown. A growth whose tag is not part of it stays held back, and every growth is still told under Every growth.
+    /// </summary>
+    [Fact]
+    public void OnlyWhenItNeedsAttentionTellsOfAGrowthThatIsPartOfTheNonPagedPoolsRise()
+    {
+        var info = new TagInfo("<unknown>", "File objects", "pooltag.txt");
+        var log = new List<string>();
+        var rising = new HashSet<PoolTag>();
+        var notices = new IncidentNotices(_ => info, () => Running, log.Add, rising.Contains);
+        const PoolNoticeLevel attention = PoolNoticeLevel.NeedsAttention;
+        static Incident New(string id) => new() { Id = id, Dir = @"C:\data\incidents\" + id, Tag = PoolTag.Parse("File"), Kind = IncidentKind.Growth };
+
+        // It opens while the non-paged pool is under its limit: held back, as before.
+        var growth = New("growth");
+        var open = new List<Incident> { growth };
+        Assert.Null(notices.Opened(growth, attention));
+        Assert.Empty(notices.TurnedRed(open, attention));
+        // The non-paged pool goes over its limit and keeps rising, and this tag's non-paged part rises with it: told at the
+        // next refresh, once.
+        rising.Add(growth.Tag);
+        Assert.Equal(new[] { new NoticeText("Kernel pool: Open files (File) is growing", "Click here to open PoolWatch for details.") }, notices.TurnedRed(open, attention));
+        Assert.Empty(notices.TurnedRed(open, attention));
+        // Opened while it is part of that rise: told as it opens.
+        var second = New("second");
+        Assert.NotNull(notices.Opened(second, attention));
+        // A growth of another tag is not told.
+        rising.Clear();
+        var other = New("other");
+        Assert.Null(notices.Opened(other, attention));
+        Assert.Empty(notices.TurnedRed([growth, second, other], attention));
+        Assert.Equal(["notice not shown (NeedsAttention): Kernel pool: Open files (File) is growing", "notice not shown (NeedsAttention): Kernel pool: Open files (File) is growing"], log);
+        // Without the detector's word (none given), nothing changes.
+        var plain = new IncidentNotices(_ => info, () => Running, _ => { });
+        Assert.Null(plain.Opened(New("plain"), attention));
     }
 
     /// <summary>

@@ -394,7 +394,11 @@ internal enum CardIcon { Causes, Services, Mark, Shield, Clear, Report }
 /// <summary>One card in "Get more from PoolWatch": an offer (a <see cref="Recommendation"/>) or a feature (a <see cref="DiscoveryCard"/>).</summary>
 internal sealed record CardItem(string Key, string Title, string Text, string Action, bool IsButton, CardIcon Icon)
 {
-    /// <summary>Under the words: what the token-leak guard does to you and how to undo it, or that a clear can stutter.</summary>
+    /// <summary>
+    /// Under the words: what the token-leak guard does to you and how to undo it, or that a clear can stutter, after what
+    /// else the button turns on (the urgent clear, while its setting is on: <see cref="Recommendation.TurnsOnUrgentClear"/>).
+    /// Said here, not in the reason, as a known issue's words or what a clear freed can take the reason's place.
+    /// </summary>
     public string Details { get; init; } = "";
     public Recommendation? Offer { get; init; }
     public DiscoveryCard? Feature { get; init; }
@@ -412,7 +416,9 @@ internal sealed record CardItem(string Key, string Title, string Text, string Ac
         };
         return new CardItem(r.Key, r.Title, guard ? TokenGuardWords.CardWhy(r.Why) : r.Why, r.Button, IsButton: true, icon)
         {
-            Details = guard ? TokenGuardWords.Details : SimpleSettings.RunsAClear(r) ? SimpleSettings.ClearStutter : "",
+            Details = guard ? TokenGuardWords.Details
+                : SimpleSettings.RunsAClear(r) ? (r.TurnsOnUrgentClear ? SimpleSettings.UrgentToo + " " : "") + SimpleSettings.ClearStutter
+                : "",
             Offer = r,
         };
     }

@@ -156,10 +156,23 @@ internal sealed class RecommendationActions
     {
         if (!_system.Elevated) return (false, "Clearing the cache needs PoolWatch to run as administrator.");
         if (_system.OwnClearTask) return (false, "Your own clear task (RAMMap) clears the cache. Replace it instead, so the two never both run.");
-        await Task.Run(() => _live.Apply($"the hourly automatic cache clear ({via})", s => { s.AutoClearEveryHours = 1; s.AutoClearEnabled = true; }));
-        _system.Timeline($"Automatic cache clearing turned on, every hour (from {via}).");
-        return (true, "PoolWatch clears the cache every hour.");
+        await Task.Run(() => _live.Apply($"the hourly automatic cache clear{Urgent()} ({via})", s =>
+        {
+            s.AutoClearUrgent = s.UrgentAsOffered(); // as the card said before the click: a choice once made
+            s.AutoClearEveryHours = 1;
+            s.AutoClearEnabled = true;
+        }));
+        _system.Timeline($"Automatic cache clearing turned on, every hour{Urgent()} (from {via}).");
+        return (true, $"PoolWatch clears the cache every hour{Urgent()}.");
     }
+
+    /// <summary>
+    /// What the hourly clear turns on besides the hour: the urgent clear when it comes with it (its setting, on by default,
+    /// or still to be chosen after an upgrade with automatic clearing off: <see cref="Core.Settings.UrgentAsOffered"/>, the
+    /// same before the click and after), said after "every hour" (<see cref="Core.Changes.ChangeWords.AutoClearUrgent"/>),
+    /// else nothing.
+    /// </summary>
+    private string Urgent() => _live.Running.UrgentAsOffered() ? Core.Changes.ChangeWords.AutoClearUrgent : "";
 
     private async Task<(bool, string)> ReplaceClearTask(string via)
     {
@@ -168,12 +181,12 @@ internal sealed class RecommendationActions
         _system.RefreshClearStatus();
         await Rescan();
         if (error is not null) return (false, error);
-        _system.Timeline($"Replaced your own clear task with PoolWatch's hourly cache clear (from {via}).");
+        _system.Timeline($"Replaced your own clear task with PoolWatch's hourly cache clear{Urgent()} (from {via}).");
         return (true, removed.Count switch
         {
-            0 => "PoolWatch clears the cache every hour.",
-            1 => $"Replaced your clear task \"{removed[0].Path.TrimStart('\\')}\". PoolWatch clears the cache every hour now.",
-            _ => $"Replaced your {removed.Count} clear tasks. PoolWatch clears the cache every hour now.",
+            0 => $"PoolWatch clears the cache every hour{Urgent()}.",
+            1 => $"Replaced your clear task \"{removed[0].Path.TrimStart('\\')}\". PoolWatch now clears the cache every hour{Urgent()}.",
+            _ => $"Replaced your {removed.Count} clear tasks. PoolWatch now clears the cache every hour{Urgent()}.",
         });
     }
 

@@ -25,6 +25,14 @@ public sealed record Recommendation(RecommendationId Id, string Title, string Wh
     public string? Instructions { get; init; }
     /// <summary>ReportIncident: the incident's id, which is also its folder name under incidents\.</summary>
     public string? Subject { get; init; }
+    /// <summary>
+    /// Its button turns the urgent clear on too: an offer that turns automatic clearing on (the hourly clear, or replacing
+    /// a RAMMap task with it) while the urgent clear comes with it (<see cref="RecommendationInputs.AutoClearUrgent"/>,
+    /// on by default). The card says so under its reason, before the click, whatever gives that reason (the rules' words,
+    /// a known issue's, what a clear freed here), so it stays when another reason takes the place of the rules' own. False
+    /// for a row with no button.
+    /// </summary>
+    public bool TurnsOnUrgentClear { get; init; }
     /// <summary>What "Hide" dismisses, for <see cref="RecommendationRules.DismissFor"/>: the id, or "id:subject".</summary>
     public string Key => KeyOf(Id, Subject);
 
@@ -42,6 +50,13 @@ public sealed record RecommendationInputs
     public required long NowMs { get; init; }
     public EnvironmentFacts? Facts { get; init; }
     public bool AutoClearOn { get; init; }
+    /// <summary>
+    /// The urgent clear as a click that turns automatic clearing on offers it (<see cref="Settings.UrgentAsOffered"/>: its
+    /// setting, on by default, and on too while it is still to be chosen after an upgrade with automatic clearing off):
+    /// such a click turns the urgent clear on with it, and the offer says so before the click
+    /// (<see cref="Recommendation.TurnsOnUrgentClear"/>).
+    /// </summary>
+    public bool AutoClearUrgent { get; init; }
     public bool TokenGuardOn { get; init; }
     /// <summary>This session's token-leak check, when one ran.</summary>
     public LeakVerdict? LeakTestNow { get; init; }

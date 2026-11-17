@@ -31,8 +31,9 @@ internal interface ISetupHost
     Task<(bool Ok, string Message)> Run(Recommendation r, IWin32Window owner);
     Task<(bool Ok, string Message)> CheckTokenLeak(CancellationToken stop);
     /// <summary>The Standby cache step's choice (<see cref="StandbyCacheSetup"/>).</summary>
+    /// <param name="urgent">The urgent clear's switch, written with a choice that clears.</param>
     /// <param name="replaceOwnTask">The step showed that a rule replaces your own RAMMap clear task (the scan found one).</param>
-    Task<(bool Ok, string Message)> ApplyCache(CacheChoice choice, double hours, double gb, bool replaceOwnTask);
+    Task<(bool Ok, string Message)> ApplyCache(CacheChoice choice, double hours, double gb, bool urgent, bool replaceOwnTask);
     /// <summary>The Records step's choice: what PoolWatch keeps on disk and after how many days it is cleaned up (<see cref="RecordsSetup"/>).</summary>
     Task<(bool Ok, string Message)> ApplyRecords(RecordMode mode, int days);
     /// <summary>Every change Active changes lists, and how many of them can be put back (worker thread); null when the list cannot be read.</summary>
@@ -80,7 +81,8 @@ internal sealed class SetupHost : ISetupHost
     public IUpdateCheck? Updates => _c.Updates;
     public Task<(bool Ok, string Message)> Run(Recommendation r, IWin32Window owner) => _c.Recommendations.Run(r, owner, SetupSession.Via);
     public Task<(bool Ok, string Message)> CheckTokenLeak(CancellationToken stop) => _c.Recommendations.CheckTokenLeak(stop);
-    public Task<(bool Ok, string Message)> ApplyCache(CacheChoice choice, double hours, double gb, bool replaceOwnTask) => _cache.Apply(choice, hours, gb, replaceOwnTask);
+    public Task<(bool Ok, string Message)> ApplyCache(CacheChoice choice, double hours, double gb, bool urgent, bool replaceOwnTask) =>
+        _cache.Apply(choice, hours, gb, replaceOwnTask, urgent);
     public Task<(bool Ok, string Message)> ApplyRecords(RecordMode mode, int days) => _records.Apply(mode, days);
     public void MarkRecordsChosen() => _c.Store.MarkRecordsChosen(DateTime.UtcNow);
 
@@ -118,7 +120,8 @@ internal sealed class SetupHost : ISetupHost
 
 /// <summary>
 /// The Standby cache step's choice, applied through the running settings as Settings' Save and the suggestions apply it
-/// (at once, and in settings.json): a schedule, a pool size, both, or off. Where the step said that a rule replaces your
+/// (at once, and in settings.json): a schedule, a pool size, both, or off; with a choice that clears, the urgent clear's
+/// switch as the step showed it (Decide later leaves it as it is). Where the step said that a rule replaces your
 /// own RAMMap clear task, a rule removes that task first, through the code the suggestions' Replace uses
 /// (<see cref="ISetupSystem.ReplaceClearTasks"/>: your task is saved for putting back), so the two never both run.
 /// Clearing needs PoolWatch to run as administrator. Nothing happens in the CI UI test.
@@ -129,7 +132,8 @@ internal sealed class StandbyCacheSetup(ISetupSystem system, LiveSettings live, 
     /// The step showed that a rule replaces your own clear task. Decided from what the step showed (the scan), so Next never
     /// does other than the step said: a rule already in effect still replaces the task.
     /// </param>
-    public async Task<(bool Ok, string Message)> Apply(CacheChoice choice, double hours, double gb, bool replaceOwnTask)
+    /// <param name="urgent">The urgent clear's switch as the step showed it; null leaves it as it is.</param>
+    public async Task<(bool Ok, string Message)> Apply(CacheChoice choice, double hours, double gb, bool replaceOwnTask, bool? urgent = null)
     {
         if (smoke) return (false, RecommendationActions.Refused);
         try
@@ -141,20 +145,23 @@ internal sealed class StandbyCacheSetup(ISetupSystem system, LiveSettings live, 
                 system.Timeline($"Automatic cache clearing turned off (from {SetupSession.Via}).");
                 return (true, "Automatic cache clearing is off. PoolWatch suggests it when it helps.");
             }
-            if (!replaceOwnTask && CacheChoices.InEffect(live.Running, choice, hours, gb)) return (true, "");
+            if (!replaceOwnTask && CacheChoices.InEffect(live.Running, choice, hours, gb, urgent)) return (true, "");
             if (!system.Elevated) return (false, "Clearing the cache needs PoolWatch to run as administrator.");
             var (_, every, size) = CacheChoices.Writes(choice, hours, gb);
             string words = CacheChoices.Words(choice, hours, gb);
-            // The rules and the switch in one change, so the sampler never sees the clear on with the old rules.
-            Task WriteRule() => Task.Run(() => live.Apply($"automatic cache clearing {words} ({SetupSession.Via})", s =>
+            string urgentWords = urgent is { } u ? CacheChoices.UrgentWords(u) : "";
+            // The rules, the urgent clear and the switch in one change, so the sampler never sees the clear on with the old rules.
+            Task WriteRule() => Task.Run(() => live.Apply($"automatic cache clearing {words}{urgentWords} ({SetupSession.Via})", s =>
             {
                 s.AutoClearEveryHours = every!.Value;
                 s.AutoClearPoolGb = size!.Value;
+                // The step showed the switch: its choice, so an upgrade's question about it is not asked.
+                if (urgent is { } on) (s.AutoClearUrgent, s.AutoClearUrgentAsk) = (on, false);
                 s.AutoClearEnabled = true;
             }));
             if (!replaceOwnTask) await WriteRule();
             else if (await ReplaceOwnTask(WriteRule) is { } why) return (false, why);
-            system.Timeline($"Automatic cache clearing turned on, {words} (from {SetupSession.Via}).");
+            system.Timeline($"Automatic cache clearing turned on, {words}{urgentWords} (from {SetupSession.Via}).");
             return (true, $"PoolWatch empties the standby cache {words}.");
         }
         catch (Exception ex) { return (false, "That did not work: " + ex.Message); }
@@ -314,6 +321,9 @@ internal sealed class SetupSession
         var running = host.Running;
         (_, Hours, PoolGb) = CacheChoices.Read(running);
         Cache = CacheChoices.Initial(running, firstRun);
+        // On to begin with (the setting's default, and while it is still to be chosen after an upgrade with automatic
+        // clearing off), else as set: Settings.UrgentAsOffered.
+        Urgent = running.UrgentAsOffered();
         // The first run starts on the recommended Reports only; opened again (or alone after an upgrade), on what is in effect.
         Records = Flow.FirstRun ? RecordChoices.Recommended : running.RecordMode;
         Days = _daysInEffect = running.RetentionDays;
@@ -348,6 +358,8 @@ internal sealed class SetupSession
     public CacheChoice Cache { get; private set; }
     public double Hours { get; private set; }
     public double PoolGb { get; private set; }
+    /// <summary>The Standby cache step's switch for the urgent clear, shown with every choice that clears (<see cref="Settings.AutoClearUrgent"/>).</summary>
+    public bool Urgent { get; private set; }
     /// <summary>The Records step's choice: what PoolWatch keeps on disk.</summary>
     public RecordMode Records { get; private set; }
     /// <summary>The Records step's cleanup: reports, records and exports are cleaned up after this many days.</summary>
@@ -652,6 +664,15 @@ internal sealed class SetupSession
         Tell(SetupPart.Cache);
     }
 
+    /// <summary>The urgent clear's switch on the Standby cache step. Held while a change runs, like every choice.</summary>
+    public void SetUrgent(bool on)
+    {
+        if (Busy || on == Urgent) return;
+        Urgent = on;
+        Forget(CacheKey);
+        Tell(SetupPart.Cache);
+    }
+
     /// <summary>A Records card: Reports only or Detailed recording. Held while a change runs, like every choice.</summary>
     public void ChooseRecords(RecordMode mode)
     {
@@ -808,15 +829,16 @@ internal sealed class SetupSession
     }
 
     /// <summary>
-    /// The Standby cache step's choice. A rule replaces your own clear task exactly when the step says so: the note shows
-    /// for a rule while the scan found such a task (<see cref="HasOwnClearTask"/>), and that same read decides here.
+    /// The Standby cache step's choice, with the urgent clear's switch as it shows. A rule replaces your own clear task
+    /// exactly when the step says so: the note shows for a rule while the scan found such a task
+    /// (<see cref="HasOwnClearTask"/>), and that same read decides here.
     /// </summary>
     private async Task<bool> ApplyCache()
     {
-        string choice = $"{Cache} {Hours} {PoolGb}";
+        string choice = $"{Cache} {Hours} {PoolGb} {Urgent}";
         if (_failedWith.GetValueOrDefault(CacheKey) == choice) return true; // Next again: on without it
         bool replace = Cache != CacheChoice.Later && HasOwnClearTask;
-        var (ok, message) = await _host.ApplyCache(Cache, Hours, PoolGb, replace);
+        var (ok, message) = await _host.ApplyCache(Cache, Hours, PoolGb, Urgent, replace);
         if (replace) Facts = _host.Facts ?? Facts; // Replace read the PC again: the task may be gone now
         return Outcome(CacheKey, choice, ok, message);
     }
