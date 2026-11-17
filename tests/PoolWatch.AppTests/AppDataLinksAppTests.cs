@@ -48,10 +48,10 @@ internal sealed class FakeLinkSystem : ILinkSystem
         Looked.Add(path);
         string p = path.TrimEnd('\\');
         int cut = p.LastIndexOf('\\');
-        if (Resolved(p[..cut]) is not { } parent) return new(LinkState.NotThere);
+        if (Resolved(p[..cut]) is not { } parent) return new(AtPath.NotThere);
         string at = parent + p[cut..];
-        if (Links.TryGetValue(at, out var target)) return new(LinkState.Link, target);
-        return Exists(at) ? new(LinkState.Plain) : new(LinkState.NotThere);
+        if (Links.TryGetValue(at, out var target)) return new(AtPath.Link, target);
+        return Exists(at) ? new(AtPath.Plain) : new(AtPath.NotThere);
     }
 
     public string? Resolved(string path)
@@ -506,14 +506,14 @@ public sealed class AppDataLinksAppTests : IDisposable
             Links.Junction(link, target);
             var pc = new WindowsLinkSystem();
             var look = pc.Look(link);
-            Assert.Equal(LinkState.Link, look.State);
+            Assert.Equal(AtPath.Link, look.State);
             string? leads = AppDataLinkFinder.Absolute(look.Target, root);
             Assert.NotNull(leads);
             Assert.True(NoFollow.SamePath(NoFollow.ResolvedPath(leads, dir: true), NoFollow.ResolvedPath(target, dir: true)!), $"{look.Target} is not {target}");
-            Assert.Equal(LinkState.Plain, pc.Look(target).State);
-            Assert.Equal(LinkState.Plain, pc.Look(Path.Combine(link, "bin")).State); // the folder in it, through the link
-            Assert.Equal(LinkState.NotThere, pc.Look(Path.Combine(root, "none")).State);
-            Assert.Equal(LinkState.NotThere, pc.Look(Path.Combine(root, "none", "deeper")).State);
+            Assert.Equal(AtPath.Plain, pc.Look(target).State);
+            Assert.Equal(AtPath.Plain, pc.Look(Path.Combine(link, "bin")).State); // the folder in it, through the link
+            Assert.Equal(AtPath.NotThere, pc.Look(Path.Combine(root, "none")).State);
+            Assert.Equal(AtPath.NotThere, pc.Look(Path.Combine(root, "none", "deeper")).State);
             Assert.True(NoFollow.SamePath(pc.Resolved(link), NoFollow.ResolvedPath(target, dir: true)!));
             Assert.Null(pc.Resolved(Path.Combine(root, "none")));
             Assert.Equal(["bin"], pc.Folders(link, 10).Select(f => Path.GetFileName(f)));

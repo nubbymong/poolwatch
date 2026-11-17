@@ -9,10 +9,10 @@ using PoolWatch.Native;
 namespace PoolWatch.Engine;
 
 /// <summary>What is at a path, the entry itself, never followed: nothing, a plain file or folder, or a junction or symbolic link.</summary>
-internal enum LinkState { NotThere, Plain, Link }
+internal enum AtPath { NotThere, Plain, Link }
 
-/// <summary>A look at one path: its <see cref="LinkState"/> and, for a link, the target it holds (one step, as written in it).</summary>
-internal sealed record LinkLook(LinkState State, string? Target = null);
+/// <summary>A look at one path: its <see cref="AtPath"/> and, for a link, the target it holds (one step, as written in it).</summary>
+internal sealed record LinkLook(AtPath State, string? Target = null);
 
 /// <summary>
 /// Everything the AppData link finder reads and its fixes write, so the tests stand in for Windows: no test reads a real
@@ -68,13 +68,13 @@ internal sealed class WindowsLinkSystem : ILinkSystem
         if (h.IsInvalid)
         {
             int error = Marshal.GetLastWin32Error();
-            if (error is NoFollow.ERROR_FILE_NOT_FOUND or NoFollow.ERROR_PATH_NOT_FOUND) return new(LinkState.NotThere);
+            if (error is NoFollow.ERROR_FILE_NOT_FOUND or NoFollow.ERROR_PATH_NOT_FOUND) return new(AtPath.NotThere);
             throw new IOException($"{path}: {new Win32Exception(error).Message}");
         }
         if (!LinkNative.OnDisk(h)) throw new IOException($"{path} is not a file or folder on a disk");
-        if (NoFollow.ReparseTag(h) is not (ReparseData.MountPoint or ReparseData.SymbolicLink)) return new(LinkState.Plain);
+        if (NoFollow.ReparseTag(h) is not (ReparseData.MountPoint or ReparseData.SymbolicLink)) return new(AtPath.Plain);
         // The target as the link holds it, one step, read through this handle (never by the path again).
-        return new(LinkState.Link, LinkNative.ReparseData(h) is { } data ? ReparseData.Target(data)?.Target : null);
+        return new(AtPath.Link, LinkNative.ReparseData(h) is { } data ? ReparseData.Target(data)?.Target : null);
     }
 
     public string? Resolved(string path)
@@ -187,8 +187,8 @@ internal static class AppDataLinkFinder
         foreach (string level in LinkPaths.Levels(path, root))
         {
             var look = s.Look(level);
-            if (look.State == LinkState.NotThere) break;
-            if (look.State == LinkState.Link) { (link, found) = (level, look); break; }
+            if (look.State == AtPath.NotThere) break;
+            if (look.State == AtPath.Link) { (link, found) = (level, look); break; }
         }
         if (link is null || found is null) return null;
         row = row with { Link = roots.Shown(link) };
@@ -197,7 +197,7 @@ internal static class AppDataLinkFinder
         string target = (leads.TrimEnd('\\') + path[link.Length..]).TrimEnd('\\');
         if (target.Length == 2) target += "\\"; // a drive's root: "D:\"
         if (!LinkPaths.Writable(target)) return row with { WhyNot = "the folder it leads to has a name PoolWatch does not write on a PATH (a ; or a %, say)." };
-        if (roots.Holding(target) is { } again && LinkPaths.Levels(target, again).Any(level => s.Look(level).State == LinkState.Link))
+        if (roots.Holding(target) is { } again && LinkPaths.Levels(target, again).Any(level => s.Look(level).State == AtPath.Link))
             return row with { WhyNot = "the folder it leads to is reached through another link under AppData." };
         if (!NoFollow.SamePath(s.Resolved(target), really)) return row with { WhyNot = "PoolWatch could not confirm that the folder is where the link leads." };
         return row with { Target = target };
@@ -260,7 +260,7 @@ internal static class AppDataLinkFinder
         // Moved: the links left are in the folder uv used before, its default.
         string folder = !moved && set is not null ? set : Path.Join(roots.AppData, @"uv\python");
         if (roots.Holding(folder) is null) return null;
-        var links = s.Folders(folder, LinkFinder.MaxFolders).Where(f => s.Look(f).State == LinkState.Link).Select(f => Path.GetFileName(f.TrimEnd('\\'))).ToList();
+        var links = s.Folders(folder, LinkFinder.MaxFolders).Where(f => s.Look(f).State == AtPath.Link).Select(f => Path.GetFileName(f.TrimEnd('\\'))).ToList();
         if (links.Count == 0) return null;
         return new LinkFinding
         {
@@ -275,7 +275,7 @@ internal static class AppDataLinkFinder
         string? home = Effective(env, LinkFinder.PnpmHome);
         if (Outside(roots, home)) return null;
         string folder = home ?? Path.Join(roots.LocalFolder, "pnpm");
-        if (s.Look(Path.Join(folder, "global")).State == LinkState.NotThere) return null;
+        if (s.Look(Path.Join(folder, "global")).State == AtPath.NotThere) return null;
         return new LinkFinding { Kind = LinkKind.Pnpm, Link = roots.Shown(folder), EnvSettings = ToSet(s, roots, env, LinkFinder.PnpmHome) };
     }
 
@@ -285,7 +285,7 @@ internal static class AppDataLinkFinder
         string? dir = Effective(env, LinkFinder.CodexInstall);
         if (Outside(roots, dir)) return null;
         string bin = dir ?? Path.Join(roots.LocalFolder, @"Programs\OpenAI\Codex\bin");
-        if (s.Look(bin).State == LinkState.NotThere) return null;
+        if (s.Look(bin).State == AtPath.NotThere) return null;
         return new LinkFinding { Kind = LinkKind.Codex, Link = roots.Shown(bin), EnvSettings = ToSet(s, roots, env, LinkFinder.CodexInstall) };
     }
 
@@ -413,8 +413,8 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
             foreach (string level in LinkPaths.Levels(s.Value, roots.Profile))
             {
                 var look = system.Look(level);
-                if (look.State == LinkState.NotThere) break;
-                if (look.State == LinkState.Link) return $"{level} is a link to another place";
+                if (look.State == AtPath.NotThere) break;
+                if (look.State == AtPath.Link) return $"{level} is a link to another place";
             }
         }
         catch (Exception ex) { return "PoolWatch could not look at the folder: " + ex.Message; }
