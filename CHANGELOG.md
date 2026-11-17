@@ -35,25 +35,28 @@ What changed in each PoolWatch release, newest first, in plain words.
 - **Settings says again, in sight, that turning automatic clearing on offers to remove any RAMMap task of yours.**
 - **Links under AppData.** With the Claude or Codex desktop app installed, PoolWatch finds the junctions and links
   under AppData that keep a little of the kernel pool on every use inside those apps (a Windows bug traced by
-  peterlau03 in anthropics/claude-code issue 96870). On your click it replaces each such PATH entry with the folder it
-  leads to, and sets uv's, pnpm's and the Codex command-line tool's own variables so they install outside AppData,
+  peterlau03 in anthropics/claude-code issue 96870). On your click it replaces each such entry of your own PATH with
+  the folder it leads to (or removes it, when that folder is on your PATH already; an entry on the machine's PATH is
+  advice only), and sets uv's, pnpm's and the Codex command-line tool's own variables so they install outside AppData,
   then shows the steps left with a prompt for your AI agent; it never reinstalls, moves or deletes your tools. Every
   change is listed in Active changes, where it can be put back, and a tool that puts its link back is offered the fix
   again. A new known issue explains it.
 - **More of the links that leak inside the Claude and Codex apps, from the rest of issue 96870.** The window now also
   finds Claude Code's temp folder made a junction (a retry loop measured at about 230 MB a minute) and offers
   `CLAUDE_CODE_TMPDIR`, outside AppData, through the same Set the variables; removes, from your own PATH and on your
-  click, an entry whose link leads nowhere (Put back gives your PATH back exactly while it is as PoolWatch left it); and
+  click, an entry whose link leads to a folder that is gone from a drive that is there (Put back gives your PATH back
+  exactly while it is as PoolWatch left it, and otherwise puts the entry back at its old place); and
   shows, with steps and a prompt for your AI agent and without changing anything, an app's data folder made a junction,
   a venv on your PATH whose Python is behind uv's link (PlatformIO, Hermes Agent) and Claude Code hooks that start
   Python. It looks in each app's own copy of AppData too, where the app's programs make their folders. Above the list
   it says when the size of the leaked blocks matches a link it found, when Fast Startup kept what leaked before the
   last Shut down, and, after a change, which of the apps' programs still run from before it (PoolWatch never ends
   them). A variable a tool puts back into AppData is told about again, like a PATH entry.
-- **The NtFC notes say what was measured.** It is any Code-tab session of the Claude app, with Cowork idle, not
-  Cowork; each open through a link under AppData keeps one reparse-point record; no cache clear frees them, and only a
-  Restart does, as a Shut down with Fast Startup on keeps them. Links elsewhere, Documents and OneDrive included, kept
-  nothing; OneDrive's cloud files inside the apps were not measured. The links cause is now named from 20 MB an hour
+- **The NtFC notes say what was measured.** It is any Code-tab session of the Claude app: it leaked with Cowork idle,
+  so Cowork is not needed for it; each open through a link under AppData keeps one reparse-point record; no cache clear
+  frees them, and only a Restart does, as a Shut down with Fast Startup on keeps them. A link outside AppData, on
+  another drive or under your profile, kept nothing; a link inside OneDrive, and OneDrive's cloud files inside the
+  apps, were not measured. The links cause is now named from 20 MB an hour
   with the Claude app, where it often grows slower than the 100 MB an hour the note waited for. The built-in name of
   the NtFC tag says it also holds reparse-point data a filter driver did not free, and the window no longer suggests
   taking winget's Links folder off PATH. The people who measured each case are credited in the notes and the user

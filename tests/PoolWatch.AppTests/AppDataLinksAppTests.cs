@@ -238,14 +238,15 @@ public sealed class AppDataLinksAppTests : IDisposable
     /// <summary>
     /// An entry whose link leads nowhere (an uninstall left it) is removed from your own PATH on your yes, never replaced:
     /// recorded first with the SHA-256 of the PATH it leaves, every other entry and the value's kind kept, the link itself
-    /// left alone. Put back gives the PATH back exactly while it is still as PoolWatch left it, and otherwise leaves it.
+    /// left alone. Put back gives the PATH back exactly while it is still as PoolWatch left it (on a PATH that changed
+    /// since: <see cref="ARemovedEntryGoesBackAfterThePathChangedAndTheSummaryNeverSaysPutBackForWhatWasNotWritten"/>).
     /// </summary>
     [Fact]
     public void AnEntryWhoseLinkLeadsNowhereIsRemovedNotReplacedAndPutBackExactly()
     {
         _pc.Links[CodexLink] = @"C:\Users\someone\.codex\gone\bin";
         var gone = Row(LinkKind.PathEntryGone);
-        Assert.Null(gone.Target);
+        Assert.Equal(@"C:\Users\someone\.codex\gone\bin", gone.Target); // the folder it leads to, which is not there
         Assert.True(gone.CanFix);
         Assert.Equal((false, "PoolWatch does not replace this entry."), Fixes().Replace(gone, "a test"));
         Assert.Empty(_pc.Values.Writes);
@@ -271,18 +272,8 @@ public sealed class AppDataLinksAppTests : IDisposable
         Assert.Equal(ChangeGroup.Other, row.Group);
         var result = source.Undo(row, confirmed: false);
         Assert.True(result.Done, result.Message);
+        Assert.Null(result.Caveat);
         Assert.Equal(new EnvValue(UserPath, Expand: true), _pc.Values.Read(EnvScope.User, "Path"));
-        Assert.Empty(_f.Records.All());
-
-        // A PATH that changed since: nothing is put back, the record goes, and the message names the entry.
-        Assert.True(Fixes().Remove(Row(LinkKind.PathEntryGone), "a test").Ok);
-        _pc.Values.Set(EnvScope.User, "Path", @"C:\New;" + left, expand: true);
-        int writes = _pc.Values.Writes.Count;
-        result = source.Undo(source.List().Single(c => c.Kind == ChangeKind.PathEntry), confirmed: false);
-        Assert.True(result.Done);
-        Assert.Contains("changed after PoolWatch removed " + Codex, result.Message);
-        Assert.Equal(writes, _pc.Values.Writes.Count);
-        Assert.Equal(@"C:\New;" + left, _pc.Values.Text(EnvScope.User, "Path"));
         Assert.Empty(_f.Records.All());
     }
 
@@ -328,7 +319,10 @@ public sealed class AppDataLinksAppTests : IDisposable
         _pc.Values.Set(EnvScope.Machine, "Path", @"C:\Windows;" + CodexLink);
         var machine = Row(LinkKind.PathEntry);
         Assert.Equal((EnvScope.Machine, 1, CodexLink), (machine.Scope, machine.Index, machine.Entry));
-        Assert.Equal(CodexTarget, machine.Target);
+        // Shown, as advice only: PoolWatch never writes the machine's PATH.
+        Assert.Null(machine.Target);
+        Assert.Equal(LinkWords.MachinePath, machine.WhyNot);
+        Assert.False(machine.CanFix);
     }
 
     [Fact]
@@ -470,16 +464,19 @@ public sealed class AppDataLinksAppTests : IDisposable
         Assert.Equal(ChangeGroup.Other, row.Group);
         Assert.Equal(ChangeWords.PutBack, ActiveChange.ButtonOf(row));
 
-        // codex update put its link in front since: PoolWatch's folder is found one place on, and only it goes back.
+        // codex update put its link in front since: PoolWatch's folder is found one place on.
         string updated = Codex + ";" + _pc.Values.Text(EnvScope.User, "Path");
         _pc.Values.Set(EnvScope.User, "Path", updated, expand: true);
-        // ... and the tray tells about the entry that is back, which can be replaced again.
+        // ... and the tray tells about the entry that is back, which can be fixed again.
         var back = AppDataLinkFinder.Back(Scan(), _f.Records.All());
         Assert.Equal([(0, Codex)], back.Select(f => (f.Index, f.Entry)));
 
+        // The entry is on the PATH again already: PoolWatch's folder is taken out, so the entry is there once, and Put back
+        // says it did not write the entry a second time.
         var result = source.Undo(row, confirmed: false);
         Assert.True(result.Done, result.Message);
-        Assert.Equal(new EnvValue(Codex + ";" + UserPath, Expand: true), _pc.Values.Read(EnvScope.User, "Path"));
+        Assert.NotNull(result.Caveat);
+        Assert.Equal(new EnvValue(Codex + @";%USERPROFILE%\.local\bin;C:\Tools", Expand: true), _pc.Values.Read(EnvScope.User, "Path"));
         Assert.Empty(_f.Records.All());
 
         // A PATH that no longer holds the folder: the record goes, and the PATH is left as it is.
@@ -490,7 +487,7 @@ public sealed class AppDataLinksAppTests : IDisposable
         int writes = _pc.Values.Writes.Count;
         result = source.Undo(row, confirmed: false);
         Assert.True(result.Done);
-        Assert.Contains("nothing to put back", result.Message);
+        Assert.Contains("so PoolWatch wrote nothing", result.Message);
         Assert.Equal(writes, _pc.Values.Writes.Count);
         Assert.Equal(@"C:\Tools", _pc.Values.Text(EnvScope.User, "Path"));
         Assert.Empty(_f.Records.All());
@@ -884,10 +881,8 @@ public sealed class AppDataLinksAppTests : IDisposable
     private static string[] Lines(string text) => text.Split(Environment.NewLine);
 
     /// <summary>
-    /// An entry of the machine's PATH (REG_EXPAND_SZ) written with %LOCALAPPDATA% is filled in from this account's own
-    /// environment, so it leads into this account's AppData, where a program running as the account, not elevated, can put
-    /// a link to a folder it writes. The machine's PATH is read by every account, SYSTEM and services: PoolWatch shows such
-    /// an entry as advice and never writes the folder its link leads to there, whatever row it is given.
+    /// The machine's PATH, which every account and Windows' own services read, is advice only: an entry there through a link
+    /// under AppData is shown, and PoolWatch never writes the machine's PATH, whatever row it is given.
     /// </summary>
     [Fact]
     public void TheMachinesPathIsAdviceOnlyAndNeverWritten()

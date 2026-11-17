@@ -33,7 +33,7 @@ public static class LinkWords
     public static string Button(LinkFinding f) =>
         !f.Actionable ? "Fix"
         : f.HasSteps ? "Show the steps..."
-        : f.Kind == LinkKind.PathEntry ? "Replace on PATH"
+        : f.Kind == LinkKind.PathEntry ? (f.OnPathAlready ? "Remove from PATH" : "Replace on PATH")
         : f.Kind == LinkKind.PathEntryGone ? "Remove from PATH"
         : "Set the variables...";
 
@@ -66,7 +66,7 @@ public static class LinkWords
     /// <summary>The row's third column.</summary>
     public static string Fix(LinkFinding f) => f.InApp is not null ? "Advice only" : f.Kind switch
     {
-        LinkKind.PathEntry => f.Target is not null ? "Replace it with the folder it leads to" : "Change it yourself",
+        LinkKind.PathEntry => !f.CanFix ? "Change it yourself" : f.OnPathAlready ? "Remove it: its folder is on PATH already" : "Replace it with the folder it leads to",
         LinkKind.PathEntryGone => f.Scope == EnvScope.User ? "Remove it from your PATH" : "Remove it yourself",
         LinkKind.Uv => f.EnvSettings.Count > 0 ? "Move uv out of AppData" : "Rebuild what still uses them",
         LinkKind.Pnpm => f.EnvSettings.Count > 0 ? "Move pnpm out of AppData" : "Reinstall its global packages",
@@ -114,9 +114,9 @@ public static class LinkWords
         LinkKind.Hook => $"{Count(f.Count, "hook")} in your Claude Code settings start Python ({string.Join("; ", f.Names)}), and Python here is likely " +
                          "reached through a link under AppData (uv's Pythons are).",
         _ => "a node_modules that is a junction, a venv whose home in pyvenv.cfg is one of uv's links, or a .python-version without an exact patch " +
-             "(3.12 rather than 3.12.13) go through a link under AppData the same way. PoolWatch does not look inside your projects. Links outside " +
-             "AppData kept nothing in the measurements (0uternet), so projects in Documents or OneDrive are not affected by this cause; OneDrive's " +
-             "cloud files inside the apps were not measured.",
+             "(3.12 rather than 3.12.13) go through a link under AppData the same way, wherever the project is. PoolWatch does not look inside your " +
+             "projects. A link outside AppData, on another drive or under your profile (where Documents and OneDrive usually are), kept nothing " +
+             "(0uternet); a link inside OneDrive, and OneDrive's cloud files inside the apps, were not measured.",
     };
 
     private static string Costs(LinkFinding f) => f.Kind switch
@@ -153,17 +153,23 @@ public static class LinkWords
 
     private static string Fixes(LinkFinding f) => f.InApp is not null ? InAppFix : f.Kind switch
     {
-        LinkKind.PathEntry when f.Target is { } target =>
+        LinkKind.PathEntry when f is { CanFix: true, OnPathAlready: true, Target: { } already } =>
+            $"the folder the link leads to, {already}, is on {Where(f)} already, so this entry adds nothing but the leak: remove it. Replacing such " +
+            "entries with their targets measured 0 (peterlau03, thyhellcat, DraftingDreamer), and PoolWatch does not write the folder a second time. " +
+            "It removes only this entry when you say so, keeps every other one, and the value's kind, as they are, and never deletes the link " +
+            "itself; Put back in Active changes puts the entry back. " + Restart,
+        LinkKind.PathEntry when f is { CanFix: true, Target: { } target } =>
             $"put the folder the link leads to, {target}, in the entry's place: replacing such entries with their targets measured 0 (peterlau03, " +
             "thyhellcat, DraftingDreamer). PoolWatch changes only this entry and keeps every other one, and the value's kind, as they are. " +
             "If the tool later changes where its link leads (to switch versions, say), your PATH keeps the folder it leads to now: " +
             "Put back in Active changes puts the entry back. " + Restart,
-        LinkKind.PathEntry => $"PoolWatch does not replace this entry: {f.WhyNot} You can change it yourself in Windows' Environment Variables window, " +
-                              "to a folder that is not reached through a link under AppData.",
+        LinkKind.PathEntry => $"PoolWatch does not replace this entry: {f.WhyNot ?? (f.Scope == EnvScope.Machine ? MachinePath : "it could not tell where its link leads.")} " +
+                              "You can change it yourself in Windows' Environment Variables window, to a folder that is not reached through a link " +
+                              (f.Scope == EnvScope.Machine ? "under AppData and that only administrators can change." : "under AppData."),
         LinkKind.PathEntryGone when f.Scope == EnvScope.User =>
             "remove the entry from your PATH: removed, it kept about nothing (DraftingDreamer). PoolWatch removes only this entry when you say so, " +
-            "and keeps every other one, and the value's kind, as they are; Put back in Active changes puts it back while your PATH is still as " +
-            "PoolWatch left it. It never deletes the link itself. " + Restart,
+            "and keeps every other one, and the value's kind, as they are. Put back in Active changes puts it back: exactly as it was while your " +
+            "PATH is still as PoolWatch left it, or else at its old place among the entries there then. It never deletes the link itself. " + Restart,
         LinkKind.PathEntryGone => "if the tool is gone, remove the entry from the machine's PATH in Windows' Environment Variables window. PoolWatch " +
                                   "removes entries only from your own PATH.",
         LinkKind.WinGetLinks => "no change that measured 0 is known for the folder itself. Leave the folder on your PATH: every portable app winget " +
@@ -194,7 +200,7 @@ public static class LinkWords
                          "path (0uternet, SynoSoftware). PoolWatch never changes another tool's venv: the steps come with a prompt for your AI agent.",
         LinkKind.Hook => "once uv's Pythons are outside AppData, have each hook start Python by its full path in the new folder: then 3 MB in 75 " +
                          "hours (estoll37). PoolWatch never changes your Claude Code settings: the steps come with a prompt for your AI agent. It " +
-                         "reads only the settings file in your profile, not the hooks of plugins.",
+                         $"reads only {SettingsFile(f.Link)}, not the hooks of plugins.",
         _ => "pin an exact Python version (3.12.13, not 3.12) in .python-version and rebuild each venv once: new venvs then point at the real folder " +
              "and kept 0 (fsfxing2023-wq). Keep worktrees whose node_modules is a junction out of TEMP and AppData, or run big test suites from a " +
              "terminal outside the app (bronze1man); CLAUDE_CODE_TMPDIR outside AppData moves Claude Code's scratchpads, and the worktrees in them, " +
@@ -214,20 +220,33 @@ public static class LinkWords
 
     private static string Names(LinkFinding f) => string.Join(" and ", f.EnvSettings.Select(s => s.Name));
 
+    /// <summary>Why an entry of the machine's PATH is advice only: every account and Windows' own services read that PATH.</summary>
+    public const string MachinePath = "it is on the machine's PATH, which every account and Windows' own services read, and PoolWatch changes " +
+                                      "only your own PATH.";
+
+    /// <summary>The Claude Code settings file the hooks row was read from ("%USERPROFILE%\.claude\settings.json"), as the window shows it.</summary>
+    private static string SettingsFile(string folder) => folder.Length > 0 ? folder.TrimEnd('\\') + @"\settings.json" : "your Claude Code settings file";
+
     // ---------------------------------------------------------------- the questions before a change
 
     public const string ReplaceTitle = "Replace a PATH entry";
 
-    public static string ReplaceQuestion(LinkFinding f) =>
-        $"Replace this entry on {Where(f)}:\r\n\r\n    {f.Entry.Trim()}\r\n\r\nwith the folder its link leads to:\r\n\r\n    {f.Target}\r\n\r\n" +
-        "Every other entry stays as it is. Active changes can put it back. " + Restart;
+    /// <summary>The question before the button of a PATH entry: replace it with its folder, or, when that folder is on the PATH already, remove it.</summary>
+    public static string ReplaceQuestion(LinkFinding f) => f.OnPathAlready
+        ? $"Remove this entry from {Where(f)}:\r\n\r\n    {f.Entry.Trim()}\r\n\r\nThe folder its link leads to is on {Where(f)} already:\r\n\r\n    {f.Target}\r\n\r\n" +
+          "so PoolWatch removes this entry rather than add that folder a second time. Every other entry stays as it is, and the link itself is " +
+          "not deleted. Active changes can put the entry back. " + Restart
+        : $"Replace this entry on {Where(f)}:\r\n\r\n    {f.Entry.Trim()}\r\n\r\nwith the folder its link leads to:\r\n\r\n    {f.Target}\r\n\r\n" +
+          "Every other entry stays as it is. Active changes can put it back. " + Restart;
 
     public const string RemoveTitle = "Remove a PATH entry";
 
     public static string RemoveQuestion(LinkFinding f) =>
-        $"Remove this entry from {Where(f)}:\r\n\r\n    {f.Entry.Trim()}\r\n\r\nIts link under AppData leads to a folder that is gone. Every other " +
-        "entry stays as it is, and the link itself is not deleted. Active changes can put the entry back while your PATH is still as " +
-        "PoolWatch left it. " + Restart;
+        $"Remove this entry from {Where(f)}:\r\n\r\n    {f.Entry.Trim()}\r\n\r\n" +
+        (f.Target is { } gone ? $"Its link under AppData leads to {gone}, which is not there: " : "Its link under AppData leads to a folder that is not there: ") +
+        "PoolWatch, as administrator, sees that drive but not the folder. If the folder is on a drive you connect only some of the time, or one " +
+        "that only your own sign-in maps, choose No. Every other entry stays as it is, and the link itself is not deleted. Active changes can " +
+        "put the entry back. " + Restart;
 
     public const string SetTitle = "Set environment variables";
 
@@ -360,9 +379,9 @@ public static class LinkWords
     }
 
     /// <summary>
-    /// The prompt for a row PoolWatch changes nothing for: what the leak is, what was found (its folders in the words of
-    /// %APPDATA%, %LOCALAPPDATA% and %USERPROFILE%; a hook's command is never in it), and the steps, asking before each
-    /// change.
+    /// The prompt for a row PoolWatch changes nothing for: what the leak is, what was found (its folders only in the words of
+    /// %APPDATA%, %LOCALAPPDATA% and %USERPROFILE%, and a folder anywhere else not at all; a hook's command is never in it),
+    /// and the steps, asking before each change.
     /// </summary>
     public static string GuidePrompt(LinkFinding f, string profile)
     {
@@ -370,18 +389,33 @@ public static class LinkWords
         sb.Append("Please help me stop a kernel memory leak on this Windows PC.\n\n").Append(Problem);
         sb.Append("What PoolWatch found: ").Append(f.Kind switch
         {
-            LinkKind.AppFolder => $"the {f.Tool} app's data folder, {LinkPaths.InProfileWords(f.Link, profile)}, is a junction or link to another place. " +
-                                  "I want it to be an ordinary folder again, with its data kept.",
-            LinkKind.Venv => $"a venv's Scripts folder is on my PATH ({LinkPaths.InProfileWords(f.Link, profile)})" + (f.Tool is { } tool ? $", made by {tool}," : "") +
-                             $" and the Python it runs is reached through {LinkPaths.InProfileWords(f.Home ?? "", profile)}, one of uv's links under AppData. " +
+            LinkKind.AppFolder => $"the {f.Tool} app's data folder" + (PromptPath(f.Link, profile) is { } data ? $", {data}," : "") +
+                                  " is a junction or link to another place. I want it to be an ordinary folder again, with its data kept.",
+            LinkKind.Venv => "a venv's Scripts folder is on my PATH" +
+                             (PromptPath(f.Link, profile) is { } venv ? $" ({venv})" : " (a venv outside my user folder: I will tell you which)") +
+                             (f.Tool is { } tool ? $", made by {tool}," : "") + " and the Python it runs is reached through " +
+                             (PromptPath(f.Home ?? "", profile) is { } home ? $"{home}, one of uv's links under AppData. " : "one of uv's links under AppData. ") +
                              "I want the venv rebuilt on a Python outside AppData, with its packages kept.",
-            _ => "hooks in my Claude Code settings (%USERPROFILE%\\.claude\\settings.json) start python, py or uv, and Python here is reached through " +
-                 "uv's links under AppData. I want each hook to start Python by its full path outside AppData.",
+            _ => "hooks in my Claude Code settings (" + (PromptPath(f.Link, profile) is { } settings ? settings + @"\settings.json" : "its settings.json") +
+                 ") start python, py or uv, and Python here is reached through uv's links under AppData. I want each hook to start Python by its " +
+                 "full path outside AppData.",
         }).Append("\n\n");
         sb.Append("Step by step. Ask me before you change, copy, move or delete anything, and tell me when to quit and restart the apps. ")
           .Append("Run the commands from a terminal outside the Claude and Codex apps if you can: programs outside them do not leak.\n");
         AppendSteps(sb, f.Kind, "\n");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// A folder as a prompt may name it: from %USERPROFILE%, %APPDATA% or %LOCALAPPDATA% (the window's words for the account's
+    /// folders); null for a folder anywhere else, which a prompt never names (a client's name in a project's path, say).
+    /// </summary>
+    private static string? PromptPath(string shown, string profile)
+    {
+        string p = LinkPaths.InProfileWords(shown, profile);
+        foreach (string variable in new[] { "%USERPROFILE%", "%APPDATA%", LocalVariable })
+            if (p.Equals(variable, StringComparison.OrdinalIgnoreCase) || p.StartsWith(variable + "\\", StringComparison.OrdinalIgnoreCase)) return p;
+        return null;
     }
 
     // ---------------------------------------------------------------- the hints above the list

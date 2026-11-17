@@ -264,7 +264,8 @@ public static class ChangeWords
         RecordKind.StartupEntry => $"startup app · was {OnOff(r.EnabledBefore == true)}",
         RecordKind.Shortcut => ShortcutDetail,
         RecordKind.PathEntry => $"entry on {PathOf(r.Location)} · now {r.After}",
-        RecordKind.RemovedPathEntry => $"removed from {PathOf(r.Location)} · its link led to a folder that is gone",
+        RecordKind.RemovedPathEntry => r.After is { } already ? $"removed from {PathOf(r.Location)} · the folder its link leads to, {already}, is on it already"
+            : $"removed from {PathOf(r.Location)} · its link led to a folder that is gone",
         RecordKind.EnvironmentVariable => r.Before is { } was ? $"environment variable · was {was}" : $"environment variable · was not set · now {r.After}",
         _ => "",
     };
@@ -334,13 +335,18 @@ public static class ChangeWords
         RecordKind.Shortcut => Shortcut(r.Path!),
         RecordKind.PathEntry => PathEntry(r.Location!, r.Before!, r.After!),
         RecordKind.EnvironmentVariable => EnvironmentVariable(r.Name!, r.After!),
-        RecordKind.RemovedPathEntry => RemovedPathEntry(r.Location!, r.Before!),
+        RecordKind.RemovedPathEntry => RemovedPathEntry(r.Location!, r.Before!, r.After),
         _ => "A change this PoolWatch does not know",
     };
 
-    /// <summary>"Removed %LOCALAPPDATA%\Programs\Example\bin from your PATH: its link led to a folder that is gone".</summary>
-    public static string RemovedPathEntry(string scope, string before) =>
-        $"Removed {before.Trim()} from {PathOf(scope)}: its link led to a folder that is gone";
+    /// <summary>
+    /// "Removed %LOCALAPPDATA%\Programs\Example\bin from your PATH: its link led to a folder that is gone", or, when PoolWatch
+    /// removed it because the folder its link leads to (<paramref name="already"/>) was on that PATH already, "... from your
+    /// PATH: the folder its link leads to, D:\Example\bin, is on it already".
+    /// </summary>
+    public static string RemovedPathEntry(string scope, string before, string? already = null) => already is null
+        ? $"Removed {before.Trim()} from {PathOf(scope)}: its link led to a folder that is gone"
+        : $"Removed {before.Trim()} from {PathOf(scope)}: the folder its link leads to, {already}, is on it already";
 
     /// <summary>"Replaced %LOCALAPPDATA%\Programs\Example\bin on your PATH with the folder its link leads to, D:\Example\bin".</summary>
     public static string PathEntry(string scope, string before, string after) =>

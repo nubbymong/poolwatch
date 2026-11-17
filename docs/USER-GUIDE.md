@@ -634,7 +634,8 @@ your account (it reads your Store app list), and reads only:
 - the same tools and folders in each app's own copy of AppData (`%LOCALAPPDATA%\Packages\<the app>\LocalCache`), where
   a program the app starts writes when it makes a folder in AppData, out of sight of programs outside the app;
 - the `pyvenv.cfg` of each venv whose `Scripts` folder is on your PATH, and the hooks in your Claude Code settings
-  (`%USERPROFILE%\.claude\settings.json`).
+  (`%USERPROFILE%\.claude\settings.json`, or the `settings.json` in the folder `CLAUDE_CONFIG_DIR` names when it is
+  set; the row names the one it read).
 
 When it finds something, the Simple view shows **Stop the leak through links under AppData**; its **Review**, and
 **Links under AppData...** in the tray menu, open the window. Each row says what it is, what it costs (as measured),
@@ -644,16 +645,23 @@ and what fixes it:
   nvm-windows' `.nodejs`): one such entry anywhere on PATH costs about one block for every program a Git Bash inside
   the app starts. **Replace on PATH** puts the folder its link leads to in its place, after a question that names
   both. Only that entry changes; every other entry, and whether the value fills in `%NAME%` variables, stay as they
-  were. An entry on your PATH changes for your account, one on the machine's for everyone. If the tool later changes
-  where its link leads (to switch versions, say), your PATH keeps the folder it leads to now: **Put back** in Active
-  changes puts the entry back. PoolWatch does not replace an entry whose folder is reached through another link under
-  AppData: the row says why.
+  were. When that folder is on your PATH already (`codex update` puts its link back in front after each fix), the
+  button is **Remove from PATH**: PoolWatch removes the entry rather than add the folder a second time. If the tool
+  later changes where its link leads (to switch versions, say), your PATH keeps the folder it leads to now: **Put back**
+  in Active changes puts the entry back. PoolWatch does not replace an entry whose folder is reached through another
+  link under AppData: the row says why.
+- **An entry on the machine's PATH**: advice only. Every account and Windows' own services read the machine's PATH,
+  so PoolWatch changes only your own: change such an entry yourself in Windows' Environment Variables window, to a
+  folder only administrators can change.
 - **A PATH entry whose link leads nowhere** (an uninstall left the link and the entry): every command lookup that
   reaches it still keeps blocks, and a command that is not found looks in every entry, wherever this one is on PATH.
-  **Remove from PATH** removes it from your own PATH, after a question that names it; the link itself is not deleted.
-  **Put back** in Active changes puts it back exactly, while your PATH is still as PoolWatch left it; if your PATH
-  changed since, it says which entry it was so you can add it back yourself. An entry on the machine's PATH is yours
-  to remove: PoolWatch removes entries only from your own PATH, and never the only one.
+  PoolWatch shows it only when, as administrator, it sees the drive and not the folder: a drive it does not see (one
+  mapped or `subst`'ed only in your own sign-in, or not connected now) or a folder it may not open is left out.
+  **Remove from PATH** removes it from your own PATH, after a question that names it and the folder it leads to (say
+  No if that folder is on a drive you connect only some of the time); the link itself is not deleted. **Put back** in
+  Active changes puts it back: exactly while your PATH is still as PoolWatch left it, or else at its old place among
+  the entries there then, and not a second time when it is on your PATH again already. An entry on the machine's PATH
+  is yours to remove: PoolWatch removes entries only from your own PATH, and never the only one.
 - **uv, pnpm and the Codex command-line tool kept under AppData**: **Set the variables...** sets, for your account,
   `UV_PYTHON_INSTALL_DIR` and `UV_CACHE_DIR` (to `.uv\python` and `.uv\cache` in your profile), `PNPM_HOME` (`.pnpm`)
   or `CODEX_INSTALL_DIR` (`.codex\bin`), after a question that lists them. That is all PoolWatch does: it never
@@ -675,8 +683,8 @@ and what fixes it:
   to rebuild it on a Python outside AppData while keeping its packages. PoolWatch never changes another tool's venv.
 - **Claude Code hooks that start Python** while uv's Pythons are behind its links: hooks run on every tool call, so
   they are often the largest part. **Show the steps...** shows how to have each hook start Python by its full path
-  outside AppData. PoolWatch reads only the settings file in your profile (not plugins' hooks), never changes it, and
-  never puts a hook's command in the prompt.
+  outside AppData. PoolWatch reads only that one settings file (not plugins' hooks), names it in the row, never changes
+  it, and never puts a hook's command in the prompt.
 - **What is in an app's own copy of AppData**: shown with where it is, as advice only. PoolWatch changes nothing there.
   A variable it sets for another row reaches the app's programs too, but what they already made there stays until you
   rebuild or remove it from a terminal in the app.
@@ -688,10 +696,12 @@ and what fixes it:
   while two others kept nothing; `CLAUDE_CODE_TMPDIR` moves Claude Code's scratchpads and their worktrees out of
   AppData. Running big test suites from a normal terminal keeps nothing.
 
-**Codex keeps my projects in OneDrive Documents: does that matter?** Not for this cause, as far as it was measured:
-links outside AppData, in your Documents or OneDrive folders included, kept nothing
-([0uternet](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6450742359)). OneDrive's cloud files
-(files that are online only until opened) inside the apps were not measured.
+**Codex keeps my projects in OneDrive Documents: does that matter?** Only what was measured: a link outside AppData,
+on another drive or under your profile (where Documents and OneDrive usually are), kept nothing
+([0uternet](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6450742359)). A link inside the OneDrive
+folder, and OneDrive's cloud files (files that are online only until opened) inside the apps, were not measured. What
+does count is where a project's links lead: a venv whose Python is one of uv's links under AppData goes through that
+link wherever the project is.
 
 Above the list, the window adds what else it can tell, as hints rather than proof: the average size of NtFC's blocks
 since Windows started, when it matches the size an open through one of the links found keeps (the size follows the

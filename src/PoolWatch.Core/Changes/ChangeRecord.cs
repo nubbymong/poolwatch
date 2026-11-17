@@ -52,7 +52,11 @@ public sealed record ChangeRecord
     /// PoolWatch set it, as written (null: it was not set).
     /// </summary>
     public string? Before { get; init; }
-    /// <summary>PathEntry: the folder PoolWatch wrote in the entry's place; EnvironmentVariable: the folder PoolWatch set it to.</summary>
+    /// <summary>
+    /// PathEntry: the folder PoolWatch wrote in the entry's place; EnvironmentVariable: the folder PoolWatch set it to;
+    /// RemovedPathEntry: the folder the entry's link leads to, when PoolWatch removed it because that folder was on the PATH
+    /// already (null: its link led to a folder that is gone).
+    /// </summary>
     public string? After { get; init; }
     /// <summary>EnvironmentVariable: the registry kind of the value before ("String" or "ExpandString"); null when it was not set.</summary>
     public string? ValueKind { get; init; }
@@ -261,6 +265,7 @@ public static class ChangeRecordFile
                 if (r.Location != EnvScopes.User) return "not a PATH PoolWatch removes entries from";
                 if (!PlainEntry(r.Before)) return "no PATH entry to put back";
                 if (r.Sha256 is not { Length: 64 } sum || !sum.All(char.IsAsciiHexDigit)) return "no SHA-256 of the PATH PoolWatch left";
+                if (r.After is not null && !LinkPaths.Writable(r.After)) return "not a folder PoolWatch writes on a PATH";
                 if (r.Index is not (>= 0 and < PathList.MaxEntries)) return "no place in the PATH";
                 return r.Id == ChangeIds.RemovedPathEntry(r.Location!, r.Before!, r.ChangedUtc) ? null : "its id does not match its entry";
             default:

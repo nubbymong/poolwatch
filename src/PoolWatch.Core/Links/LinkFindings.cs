@@ -2,7 +2,8 @@ namespace PoolWatch.Core.Links;
 
 /// <summary>
 /// What the AppData link finder found: a PATH entry reached through a junction or symbolic link located under AppData
-/// (with the folder it leads to, when PoolWatch may put that in its place), one whose link leads nowhere, winget's Links
+/// (with the folder it leads to, when PoolWatch may put that in its place), one whose link leads to a folder that is not
+/// there (on a drive that is), winget's Links
 /// folder on PATH, uv's Pythons, pnpm's global packages and the Codex command-line tool kept under AppData, Claude Code's
 /// temp folder as a junction, an app's own data folder as a junction, a venv on PATH whose Python is reached through such
 /// a link, Claude Code hooks that start Python, and the advice about projects, which PoolWatch does not look inside.
@@ -25,12 +26,18 @@ public sealed record LinkFinding
     /// <summary>The link found (a full path, %NAME% filled in), or the folder the row is about.</summary>
     public string Link { get; init; } = "";
     /// <summary>
-    /// A PATH entry PoolWatch may replace: the folder the link leads to, written in its place. Claude Code's temp folder or
-    /// an app's data folder: where its link leads, when that could be read.
+    /// A PATH entry PoolWatch may replace: the folder the link leads to, written in its place. A PATH entry whose link leads
+    /// nowhere: the folder it leads to, which is not there. Claude Code's temp folder or an app's data folder: where its
+    /// link leads, when that could be read.
     /// </summary>
     public string? Target { get; init; }
     /// <summary>A PATH entry PoolWatch does not replace: why, in plain words.</summary>
     public string? WhyNot { get; init; }
+    /// <summary>
+    /// A PATH entry PoolWatch may replace: the folder its link leads to is on that PATH already, as another entry, so the fix
+    /// removes this entry rather than write the folder a second time (codex update puts its link back after each fix).
+    /// </summary>
+    public bool OnPathAlready { get; init; }
     /// <summary>uv's minor-version links, winget's links, the hooks that start Python: how many were found.</summary>
     public int Count { get; init; }
     /// <summary>uv's minor-version links: their folder names; the hooks: their commands (at most <see cref="LinkFinder.MaxNames"/>).</summary>
@@ -56,12 +63,14 @@ public sealed record LinkFinding
     public string Key => $"{Kind}:{EnvScopes.Word(Scope)}:{Index}:{Entry}:{Link}:{InApp}";
 
     /// <summary>
-    /// The window's button changes something for this row: replaces the entry, removes an entry of the account's own PATH
-    /// whose link leads nowhere, or sets the variables. Never for a row in an app's own copy of AppData.
+    /// The window's button changes something for this row: replaces an entry of the account's own PATH (or removes it, when
+    /// its folder is on that PATH already), removes one whose link leads nowhere, or sets the variables. Never for an entry
+    /// of the machine's PATH, which every account and Windows' own services read: that one is the user's to change. Never
+    /// for a row in an app's own copy of AppData.
     /// </summary>
     public bool CanFix => InApp is null && Kind switch
     {
-        LinkKind.PathEntry => Target is not null,
+        LinkKind.PathEntry => Scope == EnvScope.User && Target is not null,
         LinkKind.PathEntryGone => Scope == EnvScope.User,
         LinkKind.Uv or LinkKind.Pnpm or LinkKind.Codex or LinkKind.ClaudeTemp => EnvSettings.Count > 0,
         _ => false,

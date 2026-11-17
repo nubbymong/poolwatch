@@ -61,14 +61,49 @@ public static class PathList
     public static string? PutBack(string value, int index, string written, string original)
     {
         var parts = Split(value);
-        int at = index >= 0 && index < parts.Length && parts[index] == written ? index : -1;
-        if (at < 0)
-        {
-            var found = Enumerable.Range(0, parts.Length).Where(i => parts[i] == written).Take(2).ToList();
-            if (found.Count != 1) return null;
-            at = found[0];
-        }
+        int at = Find(parts, index, written);
+        if (at < 0) return null;
         parts[at] = original;
+        string next = Join(parts);
+        return next.Length <= MaxChars ? next : null;
+    }
+
+    /// <summary>What <see cref="Find"/> gives when the entry is there more than once, none of them at its place.</summary>
+    public const int Twice = -2;
+
+    /// <summary>
+    /// Where the entry PoolWatch wrote (<paramref name="written"/>, exactly) is in <paramref name="parts"/>: at
+    /// <paramref name="index"/>, where it was written, when it is there; else its one place elsewhere. -1 when it is not
+    /// there; <see cref="Twice"/> when it is there more than once elsewhere, so PoolWatch cannot tell which is its own.
+    /// </summary>
+    public static int Find(IReadOnlyList<string> parts, int index, string written)
+    {
+        if (index >= 0 && index < parts.Count && parts[index] == written) return index;
+        var found = Enumerable.Range(0, parts.Count).Where(i => parts[i] == written).Take(2).ToList();
+        return found.Count switch { 0 => -1, 1 => found[0], _ => Twice };
+    }
+
+    /// <summary>
+    /// Whether <paramref name="value"/> holds an entry a program reads as the same folder as <paramref name="entry"/>: the
+    /// same text once the quotes and spaces around it and a closing "\" are taken off, without regard to case.
+    /// </summary>
+    public static bool Holds(string value, string entry)
+    {
+        string wanted = Plain(entry);
+        return wanted.Length > 0 && Split(value).Any(p => Plain(p).Equals(wanted, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string Plain(string entry) => LinkPaths.Unquote(entry).TrimEnd('\\');
+
+    /// <summary>
+    /// <paramref name="value"/> with <paramref name="entry"/> put in at <paramref name="index"/> (at the end when the value
+    /// has fewer entries now), every other character as it was: Put back of a removed entry on a PATH that changed since.
+    /// Null when the new value would be longer than <see cref="MaxChars"/>.
+    /// </summary>
+    public static string? InsertAt(string value, int index, string entry)
+    {
+        var parts = Split(value).ToList();
+        parts.Insert(Math.Clamp(index, 0, parts.Count), entry);
         string next = Join(parts);
         return next.Length <= MaxChars ? next : null;
     }
@@ -213,7 +248,9 @@ public static class LinkApps
     /// <summary>
     /// "Claude" or "Codex" for a program of the Claude or Codex desktop app, by where its file is: in the app's package
     /// folder (WindowsApps\Claude_..., WindowsApps\OpenAI.Codex_...), or a Claude Code engine the Claude app keeps in
-    /// %APPDATA%\Claude\claude-code (<paramref name="appData"/>: the account's %APPDATA%). Null for any other program.
+    /// %APPDATA%\Claude\claude-code (<paramref name="appData"/>: the account's %APPDATA%) or, in newer versions, in
+    /// %LOCALAPPDATA%\Claude-Data (<paramref name="localFolder"/>: the account's %LOCALAPPDATA%; its claude_&lt;id&gt;\claude-code
+    /// folders, DraftingDreamer). Null for any other program.
     /// </summary>
     public static string? AppOfProgram(string path, string appData, string localFolder = "")
     {
@@ -226,7 +263,8 @@ public static class LinkApps
             int cut = rest.IndexOf('\\');
             return cut > 0 ? AppOf(rest[..cut]) : null;
         }
-        return appData.Length > 0 && LinkPaths.Under(p, appData.TrimEnd('\\') + @"\Claude\claude-code") ? Claude : null;
+        if (appData.Length > 0 && LinkPaths.Under(p, appData.TrimEnd('\\') + @"\Claude\claude-code")) return Claude;
+        return localFolder.Length > 0 && LinkPaths.Under(p, localFolder.TrimEnd('\\') + @"\Claude-Data") ? Claude : null;
     }
 
     /// <summary>The tool that made a venv, when its folder shows it: PlatformIO's (.platformio\penv), Hermes Agent's; else null.</summary>

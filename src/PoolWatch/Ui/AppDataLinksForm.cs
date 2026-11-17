@@ -105,10 +105,11 @@ internal sealed class AppDataLinksView(AppDataLinkWatch watch, AppDataLinkFixes 
         string said;
         if (f.Kind is LinkKind.PathEntry or LinkKind.PathEntryGone)
         {
-            bool remove = f.Kind == LinkKind.PathEntryGone;
-            if (!dialogs.Confirm(remove ? LinkWords.RemoveTitle : LinkWords.ReplaceTitle, remove ? LinkWords.RemoveQuestion(f) : LinkWords.ReplaceQuestion(f)))
+            // An entry whose folder is on the PATH already is removed too, through Replace, which judges it again.
+            bool gone = f.Kind == LinkKind.PathEntryGone;
+            if (!dialogs.Confirm(gone || f.OnPathAlready ? LinkWords.RemoveTitle : LinkWords.ReplaceTitle, gone ? LinkWords.RemoveQuestion(f) : LinkWords.ReplaceQuestion(f)))
                 return NothingChanged;
-            var (ok, message) = await Task.Run(() => remove ? fixes.Remove(f, Via) : fixes.Replace(f, Via));
+            var (ok, message) = await Task.Run(() => gone ? fixes.Remove(f, Via) : fixes.Replace(f, Via));
             if (!ok) return message;
             timeline(message);
             said = message;

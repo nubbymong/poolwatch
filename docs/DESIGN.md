@@ -2281,20 +2281,33 @@ never per sample. It reads the account's and the machine's PATH as written (neve
 `%NAME%` are filled in from the account's environment, and only in a `REG_EXPAND_SZ` value), and for each entry below
 an AppData folder looks from the top down for the first folder that is a link (`LinkPaths.Levels`). An entry through
 one is a row: the folder to put in its place is the link's own target, one step, with the rest of the entry (never the
-fully resolved path, which would pin a tool's `current` link to one version), offered only when it is there, both
-ways reach it as the same folder, it is a plain local folder with no `;` or `%`, and it is not reached through another
-link under AppData; otherwise the row says why. One whose link leads nowhere (an uninstall left it) is offered for
-removal from the account's own PATH (`PathList.Remove`: never from the machine's, never the only entry), recorded with
-the SHA-256 of the PATH it leaves so Put back acts only on exactly that PATH (`PathList.Insert`). winget's `Links`
+fully resolved path, which would pin a tool's `current` link to one version), offered only on the account's own PATH,
+when it is there, both ways reach it as the same folder, it is a plain local folder with no `;` or `%`, and it is not
+reached through another link under AppData; otherwise the row says why. The machine's PATH, which every account and
+Windows' own services read, is advice only: PoolWatch never writes it. When the folder is on the PATH already as another
+entry (codex update puts its link back in front after
+each fix), the fix removes the entry instead (`LinkFinding.OnPathAlready`), so the folder is never there twice. One
+whose link leads to a folder that is gone (an uninstall left it) is offered for removal from the account's own PATH
+(`PathList.Remove`: never from the machine's, never the only entry), only when PoolWatch, as administrator, sees the
+folder's drive and plain folders from its root down to one that is not there: a drive it does not see (a letter mapped
+or subst'ed only in the user's own sign-in, a removable, locked or detached drive), a folder it may not open or another
+link on the way is "could not tell", and no row. A removal is recorded with the SHA-256 of the PATH it leaves, so Put
+back restores exactly that PATH (`PathList.Insert`); on a PATH that changed since, it puts the entry back at its old
+place (`PathList.InsertAt`), or writes nothing when the entry is there again, and never drops it unwritten. Put back
+of a replaced entry takes out PoolWatch's folder instead when the original is on the PATH again, and a put-back that
+wrote less than the whole change carries a caveat, so the uninstaller's summary says "Partly put back". winget's `Links`
 folder on PATH (advice only: taking it off PATH would break every portable app winget installed), uv's minor-version
 links in its Python folder, pnpm's and the Codex command-line tool's folders under AppData, and Claude Code's temp
 folder (`TEMP\claude`) as a junction (its retry loop, anthropics/claude-code issue 95489) are rows too, the last four
 with the variables that move them out (`UV_PYTHON_INSTALL_DIR` and `UV_CACHE_DIR`, `PNPM_HOME`, `CODEX_INSTALL_DIR`,
 `CLAUDE_CODE_TMPDIR`, to fixed folders in the profile), unless the account's environment already points them outside
-AppData. Rows PoolWatch changes nothing for, with steps and a prompt for the user's AI agent: an app's own data folder
+AppData, or to a value that is not a plain local folder (a share, an unfilled `%NAME%`), which is left alone. The Codex
+bin folder is a row only when it is a link, and Claude Code's temp folder only when it is under AppData. Rows PoolWatch
+changes nothing for, with steps and a prompt for the user's AI agent: an app's own data folder
 as a junction (`%APPDATA%\Claude`; the Codex app's four), a venv on PATH whose Python (its `pyvenv.cfg` home) is reached
 through a link under AppData (`VenvConfig`), and Claude Code hooks that start Python while uv's Pythons are behind its
-links (`ClaudeHooks`, from `settings.json`). The same tools and data folders are looked for in each app's own copy of
+links (`ClaudeHooks`, from the `settings.json` in `CLAUDE_CONFIG_DIR` or the profile's `.claude`, which the row and the
+prompt name). The same tools and data folders are looked for in each app's own copy of
 AppData, its package's `LocalCache` (the Claude app's manifest keeps file-system write virtualisation on, so a folder a
 session makes in AppData lands there, out of sight of programs outside it), under a folder named from the package's
 full name only when that is a plain name (`LinkApps.Family`); those rows are advice only. Every open of a path the
@@ -2306,13 +2319,16 @@ the block an open keeps follows the link's reparse data, round_up_16(8 + length)
 matches konrad-rzonca's readings; shown as a hint once NtFC holds 256 MB, never as proof), Fast Startup
 (`HiberbootEnabled`) and the last start's boot type (Kernel-Boot event 27: after a Shut down with Fast Startup on, what
 NtFC holds may be from before it, and only a Restart frees it), and the Claude and Codex apps' programs that started
-before the last change and still run (their path and start time, query rights only; never ended). Each change runs on the user's yes,
-judged again right before the write, recorded first (section 13), through the account's or the machine's
-`Environment` key checked by its kernel name (`WindowsEnvironmentStore`), and broadcast (`WM_SETTINGCHANGE`). What a
+before the last change and still run (from the package folder, or the Claude app's own Claude Code folders under
+`%APPDATA%\Claude\claude-code` and `%LOCALAPPDATA%\Claude-Data`; their path and start time, query rights only; never
+ended). Each change runs on the user's yes, judged again right before the write, recorded first (section 13), through
+the account's own `Environment` key checked by its kernel name (`WindowsEnvironmentStore`), and broadcast
+(`WM_SETTINGCHANGE`). What a
 tool puts back after PoolWatch fixed it (an entry PoolWatch replaced or removed, back on the PATH; a variable it set,
 pointing into AppData again) is offered the fix again: the Simple view's suggestion, and one tray notice per row and run
 that names it (`AppDataLinkFinder.Back`). The guided fix sets the variables only; the steps left, and a prompt for
-the user's AI agent with every folder written from `%USERPROFILE%`, are shown for the user to follow.
+the user's AI agent that names a folder only from `%USERPROFILE%`, `%APPDATA%` or `%LOCALAPPDATA%` (a folder anywhere
+else, a venv in a client's project say, is not named), are shown for the user to follow.
 
 ## 17. Known issues (knowledge packs)
 

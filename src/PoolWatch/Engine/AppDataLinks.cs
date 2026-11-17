@@ -140,9 +140,8 @@ internal sealed class WindowsLinkSystem : ILinkSystem
         try
         {
             using var h = LinkNative.OpenToRead(path);
-            // RED, this commit only: the reparse-tag check, the whole-or-nothing bound and the byte-order mark are taken out,
-            // to show that the new tests of the real read catch each. The next commit puts them back.
-            if (h.IsInvalid || !LinkNative.OnDisk(h)) return null;
+            // A link at the path itself, a folder, a pipe or a device is never read.
+            if (h.IsInvalid || !LinkNative.OnDisk(h) || NoFollow.ReparseTag(h) != 0) return null;
             var buffer = new byte[maxBytes + 1];
             int total = 0;
             while (total < buffer.Length)
@@ -151,7 +150,9 @@ internal sealed class WindowsLinkSystem : ILinkSystem
                 if (n <= 0) break;
                 total += n;
             }
-            return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false).GetString(buffer, 0, total);
+            if (total > maxBytes) return null; // longer than PoolWatch reads: not read at all
+            // Bytes that are not UTF-8 are read as U+FFFD; a byte-order mark at the start is left out.
+            return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false).GetString(buffer, 0, total).TrimStart('\uFEFF');
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException or Win32Exception)
         {
@@ -289,8 +290,10 @@ internal static class AppDataLinkFinder
 
     /// <summary>
     /// The PATH entry at <paramref name="index"/> of <paramref name="value"/>, judged as it is now: a row when it goes
-    /// through a link under AppData (with the folder to put in its place, or why there is none), or is winget's Links
-    /// folder with links in it; null for any other entry. Used by the scan and again by the fix, right before it writes.
+    /// through a link under AppData (with the folder to put in its place, or why there is none; whether that folder is on
+    /// the PATH already), or is winget's Links folder with links in it; null for any other entry, and for one whose link
+    /// PoolWatch cannot tell leads nowhere (<see cref="Gone"/>). An entry of the machine's PATH, which every account and
+    /// Windows' own services read, is advice only. Used by the scan and again by the fix, right before it writes.
     /// </summary>
     internal static LinkFinding? Judge(ILinkSystem s, Roots roots, IReadOnlyDictionary<string, string> env, EnvScope scope, EnvValue value, int index)
     {
@@ -316,15 +319,51 @@ internal static class AppDataLinkFinder
         }
         if (link is null || found is null) return null;
         row = row with { Link = roots.Shown(link), Block = Block(found) };
-        if (s.Resolved(path) is not { } really) return row with { Kind = LinkKind.PathEntryGone };
-        if (Absolute(found.Target, Path.GetDirectoryName(link)!) is not { } leads) return row with { WhyNot = "its link leads to a place that is not a plain folder on a local drive." };
-        string target = (leads.TrimEnd('\\') + path[link.Length..]).TrimEnd('\\');
-        if (target.Length == 2) target += "\\"; // a drive's root: "D:\"
+        // The folder the entry is in: the link's own target, one step, with the rest of the entry.
+        string? target = Absolute(found.Target, Path.GetDirectoryName(link)!) is { } leads ? Joined(leads, path[link.Length..]) : null;
+        if (s.Resolved(path) is not { } really) return target is not null && Gone(s, target) ? row with { Kind = LinkKind.PathEntryGone, Target = target } : null;
+        if (scope != EnvScope.User) return row with { WhyNot = LinkWords.MachinePath };
+        if (target is null) return row with { WhyNot = "its link leads to a place that is not a plain folder on a local drive." };
         if (!LinkPaths.Writable(target)) return row with { WhyNot = "the folder it leads to has a name PoolWatch does not write on a PATH (a ; or a %, say)." };
         if (roots.Holding(target) is { } again && LinkPaths.Levels(target, again).Any(level => s.Look(level).State == AtPath.Link))
             return row with { WhyNot = "the folder it leads to is reached through another link under AppData." };
         if (!NoFollow.SamePath(s.Resolved(target), really)) return row with { WhyNot = "PoolWatch could not confirm that the folder is where the link leads." };
-        return row with { Target = target };
+        // Already on the PATH as another entry (codex update puts its link back in front after each fix): the fix removes this
+        // entry rather than write the folder a second time.
+        string wanted = target.TrimEnd('\\');
+        bool already = entries.Where((other, i) => i != index && i < PathList.MaxEntries)
+            .Any(other => Expanded(other, value.Expand, env) is { } there && there.TrimEnd('\\').Equals(wanted, StringComparison.OrdinalIgnoreCase));
+        return row with { Target = target, OnPathAlready = already };
+    }
+
+    /// <summary>A folder and the rest of a path below it, as one full path ("D:\" for a drive's root).</summary>
+    private static string Joined(string folder, string rest)
+    {
+        string full = (folder.TrimEnd('\\') + rest).TrimEnd('\\');
+        return full.Length == 2 ? full + "\\" : full;
+    }
+
+    /// <summary>
+    /// Whether the folder a link leads to is gone as far as PoolWatch can tell, as administrator: its drive is there, and from
+    /// the drive's root down each folder is a plain one until one that is not there. False when it cannot tell: the drive is
+    /// not there for PoolWatch (a drive letter mapped or subst'ed only in your own sign-in, a removable, locked or detached
+    /// drive), a folder on the way is another link, or a look fails (access is denied, say).
+    /// </summary>
+    private static bool Gone(ILinkSystem s, string target)
+    {
+        string? root = Path.GetPathRoot(target);
+        if (string.IsNullOrEmpty(root) || s.Resolved(root) is null) return false;
+        try
+        {
+            foreach (string level in LinkPaths.Levels(target, root))
+            {
+                var look = s.Look(level);
+                if (look.State == AtPath.NotThere) return true;
+                if (look.State == AtPath.Link) return false;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Win32Exception) { }
+        return false;
     }
 
     /// <summary>
@@ -390,11 +429,17 @@ internal static class AppDataLinkFinder
     /// <summary>The account's own value as written (what a fix replaces and Put back restores); null when it has none.</summary>
     private static string? Seen(ILinkSystem s, string name) => s.Store.Read(EnvScope.User, name)?.Text;
 
-    private static bool Outside(Roots roots, string? path) => path is not null && roots.Holding(path) is null;
+    /// <summary>
+    /// The account's programs get <paramref name="name"/> set to something PoolWatch leaves alone: a folder outside AppData,
+    /// or a value that is not a plain path on a local drive (a share, or a %NAME% not filled in), which points away from
+    /// AppData as far as PoolWatch can tell. Such a variable is offered no fix, and never told about as come back.
+    /// </summary>
+    private static bool LeftAlone(Roots roots, IReadOnlyDictionary<string, string> env, string name) =>
+        env.TryGetValue(name, out var v) && !string.IsNullOrWhiteSpace(v) && (Expanded(v, expand: false, env) is not { } path || roots.Holding(path) is null);
 
     /// <summary>The variables of <paramref name="names"/> that still point into AppData (or are not set), each with the folder it is set to.</summary>
     private static List<EnvSetting> ToSet(ILinkSystem s, Roots roots, IReadOnlyDictionary<string, string> env, params string[] names) =>
-        names.Where(n => !Outside(roots, Effective(env, n))).Select(n => new EnvSetting(n, LinkFinder.FolderFor(n, roots.Profile), Seen(s, n))).ToList();
+        names.Where(n => !LeftAlone(roots, env, n)).Select(n => new EnvSetting(n, LinkFinder.FolderFor(n, roots.Profile), Seen(s, n))).ToList();
 
     /// <summary>The links among the folders directly in <paramref name="folder"/> (uv's minor-version links), each with its look.</summary>
     private static List<(string Name, LinkLook Look)> LinkedFolders(ILinkSystem s, string folder) =>
@@ -404,7 +449,7 @@ internal static class AppDataLinkFinder
     private static LinkFinding? Uv(ILinkSystem s, Roots roots, IReadOnlyDictionary<string, string> env)
     {
         string? set = Effective(env, LinkFinder.UvPythons);
-        bool moved = Outside(roots, set);
+        bool moved = LeftAlone(roots, env, LinkFinder.UvPythons);
         // Moved: the links left are in the folder uv used before, its default.
         string folder = !moved && set is not null ? set : Path.Join(roots.AppData, @"uv\python");
         if (roots.Holding(folder) is null) return null;
@@ -421,34 +466,39 @@ internal static class AppDataLinkFinder
     /// <summary>pnpm's global packages kept under AppData (%LOCALAPPDATA%\pnpm by default), while PNPM_HOME does not point elsewhere.</summary>
     private static LinkFinding? Pnpm(ILinkSystem s, Roots roots, IReadOnlyDictionary<string, string> env)
     {
+        if (LeftAlone(roots, env, LinkFinder.PnpmHome)) return null;
         string? home = Effective(env, LinkFinder.PnpmHome);
-        if (Outside(roots, home)) return null;
         string folder = home ?? Path.Join(roots.LocalFolder, "pnpm");
         if (s.Look(Path.Join(folder, "global")).State == AtPath.NotThere) return null;
         return new LinkFinding { Kind = LinkKind.Pnpm, Link = roots.Shown(folder), EnvSettings = ToSet(s, roots, env, LinkFinder.PnpmHome) };
     }
 
-    /// <summary>The Codex command-line tool's bin link under AppData, made by its standalone installer, while CODEX_INSTALL_DIR does not point elsewhere.</summary>
+    /// <summary>
+    /// The Codex command-line tool's bin link under AppData, made by its standalone installer, while CODEX_INSTALL_DIR does
+    /// not point elsewhere. Only a link: a plain folder there is reached through none.
+    /// </summary>
     private static LinkFinding? Codex(ILinkSystem s, Roots roots, IReadOnlyDictionary<string, string> env)
     {
+        if (LeftAlone(roots, env, LinkFinder.CodexInstall)) return null;
         string? dir = Effective(env, LinkFinder.CodexInstall);
-        if (Outside(roots, dir)) return null;
         string bin = dir ?? Path.Join(roots.LocalFolder, @"Programs\OpenAI\Codex\bin");
         var look = s.Look(bin);
-        if (look.State == AtPath.NotThere) return null;
+        if (look.State != AtPath.Link) return null;
         return new LinkFinding { Kind = LinkKind.Codex, Link = roots.Shown(bin), Block = Block(look), EnvSettings = ToSet(s, roots, env, LinkFinder.CodexInstall) };
     }
 
     /// <summary>
-    /// Claude Code's temp folder (TEMP\claude) as a junction or link, with the Claude app installed and CLAUDE_CODE_TMPDIR
-    /// not set outside AppData: the Claude app's Claude Code then retries a failing open thousands of times a second
-    /// (anthropics/claude-code issue 95489). Its fix sets CLAUDE_CODE_TMPDIR.
+    /// Claude Code's temp folder (TEMP\claude) as a junction or link under AppData, with the Claude app installed and
+    /// CLAUDE_CODE_TMPDIR not set outside AppData: the Claude app's Claude Code then retries a failing open thousands of
+    /// times a second (anthropics/claude-code issue 95489). Its fix sets CLAUDE_CODE_TMPDIR. A TEMP moved off AppData is
+    /// left alone: that case was not measured.
     /// </summary>
     private static LinkFinding? ClaudeTemp(ILinkSystem s, Roots roots, IReadOnlyDictionary<string, string> env, bool claude)
     {
-        if (!claude || Outside(roots, Effective(env, LinkFinder.ClaudeTemp))) return null;
+        if (!claude || LeftAlone(roots, env, LinkFinder.ClaudeTemp)) return null;
         string temp = Effective(env, "TEMP") ?? roots.Local("Temp");
         string folder = Path.Join(temp, "claude");
+        if (roots.Holding(folder) is null) return null;
         var look = s.Look(folder);
         if (look.State != AtPath.Link) return null;
         return new LinkFinding
@@ -594,12 +644,12 @@ internal static class AppDataLinkFinder
     public static IReadOnlyList<LinkFinding> Back(LinkScan scan, IEnumerable<ChangeRecord> records)
     {
         var all = records.ToList();
-        var replaced = all.Where(r => r.Kind == RecordKind.PathEntry).Select(r => (r.Location, r.Before)).ToHashSet();
+        var fixedEntries = all.Where(r => r.Kind is RecordKind.PathEntry or RecordKind.RemovedPathEntry).Select(r => (r.Location, r.Before)).ToHashSet();
         var removed = all.Where(r => r.Kind == RecordKind.RemovedPathEntry).Select(r => (r.Location, r.Before)).ToHashSet();
         var set = all.Where(r => r.Kind == RecordKind.EnvironmentVariable && r.Name is not null).Select(r => r.Name!).ToHashSet(StringComparer.Ordinal);
         return scan.Findings.Where(f =>
-            f is { Kind: LinkKind.PathEntry, Target: not null } && replaced.Contains((EnvScopes.Word(f.Scope), f.Entry))
-            || f.Kind == LinkKind.PathEntryGone && removed.Contains((EnvScopes.Word(f.Scope), f.Entry))
+            f is { Kind: LinkKind.PathEntry, CanFix: true } && fixedEntries.Contains((EnvScopes.Word(f.Scope), f.Entry))
+            || f is { Kind: LinkKind.PathEntryGone, CanFix: true } && removed.Contains((EnvScopes.Word(f.Scope), f.Entry))
             || f.InApp is null && f.EnvSettings.Any(e => set.Contains(e.Name))).ToList();
     }
 }
@@ -621,31 +671,48 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
     /// <summary>What the window reads besides the changes: the boot, the apps' programs.</summary>
     internal ILinkSystem System => system;
 
-    /// <summary>Replaces the row's PATH entry with the folder its link leads to, and nothing else.</summary>
+    /// <summary>
+    /// Replaces the row's entry of the account's own PATH with the folder its link leads to, and nothing else; or, when that
+    /// folder is on the PATH already, removes the entry rather than write the folder a second time (recorded as a removal,
+    /// with the SHA-256 of the PATH it leaves, as <see cref="Remove"/> does). Never the machine's PATH, which every account and
+    /// Windows' own services read.
+    /// </summary>
     public (bool Ok, string Message) Replace(LinkFinding shown, string via)
     {
-        if (shown is not { Kind: LinkKind.PathEntry, Target: { } target }) return (false, "PoolWatch does not replace this entry.");
+        if (shown is not { Kind: LinkKind.PathEntry, Scope: EnvScope.User, InApp: null, Target: { } target }) return (false, "PoolWatch does not replace this entry.");
         var store = system.Store;
-        string scope = EnvScopes.Word(shown.Scope), where = ChangeWords.PathOf(scope);
+        string scope = EnvScopes.User, where = ChangeWords.PathOf(scope);
         EnvValue value;
         LinkFinding? now;
         try
         {
-            if (store.Read(shown.Scope, AppDataLinkFinder.PathName) is not { } read) return (false, ChangedSince);
+            if (store.Read(EnvScope.User, AppDataLinkFinder.PathName) is not { } read) return (false, ChangedSince);
             value = read;
-            now = AppDataLinkFinder.Judge(system, AppDataLinkFinder.Roots.Of(system), system.Environment(), shown.Scope, value, shown.Index);
+            now = AppDataLinkFinder.Judge(system, AppDataLinkFinder.Roots.Of(system), system.Environment(), EnvScope.User, value, shown.Index);
         }
         catch (Exception ex) { return (false, $"PoolWatch could not read {where}: {ex.Message}"); }
-        if (now is not { Kind: LinkKind.PathEntry } || now.Entry != shown.Entry || now.Target != target)
+        if (now is not { Kind: LinkKind.PathEntry } || now.Entry != shown.Entry || now.Target != target || now.OnPathAlready != shown.OnPathAlready)
             return (false, now?.WhyNot is { } why && now.Entry == shown.Entry ? "PoolWatch did not replace the entry: " + why : ChangedSince);
-        if (PathList.Replace(value.Text, shown.Index, shown.Entry, target) is not { } next) return (false, ChangedSince);
         var changed = DateTime.UtcNow;
+        if (now.OnPathAlready)
+        {
+            if (PathList.Remove(value.Text, shown.Index, shown.Entry) is not { } left) return (false, ChangedSince);
+            var removal = new ChangeRecord
+            {
+                Id = ChangeIds.RemovedPathEntry(scope, shown.Entry, changed), Kind = RecordKind.RemovedPathEntry, ChangedUtc = changed, Via = via,
+                Location = scope, Before = shown.Entry, After = target, Index = shown.Index, Sha256 = PathList.Hash(left),
+            };
+            if (Write(removal, EnvScope.User, value, left, where) is { } notRemoved) return (false, notRemoved);
+            log.Info($"appdata links: {ChangeWords.RemovedPathEntry(scope, shown.Entry, target)} (from {via})");
+            return (true, ChangeWords.RemovedPathEntry(scope, shown.Entry, target) + ". " + LinkWords.Restart);
+        }
+        if (PathList.Replace(value.Text, shown.Index, shown.Entry, target) is not { } next) return (false, ChangedSince);
         var record = new ChangeRecord
         {
             Id = ChangeIds.PathEntry(scope, shown.Entry, changed), Kind = RecordKind.PathEntry, ChangedUtc = changed, Via = via,
             Location = scope, Before = shown.Entry, After = target, Index = shown.Index,
         };
-        if (Write(record, shown.Scope, value, next, where) is { } failed) return (false, failed);
+        if (Write(record, EnvScope.User, value, next, where) is { } failed) return (false, failed);
         log.Info($"appdata links: {ChangeWords.PathEntry(scope, shown.Entry, target)} (from {via})");
         return (true, ChangeWords.PathEntry(scope, shown.Entry, target) + ". " + LinkWords.Restart);
     }
@@ -797,11 +864,16 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
     }
 
     /// <summary>
-    /// Put back (Active changes, Put all back, the uninstaller), checked against the registry as it is now: a PATH entry
-    /// goes back only where the folder PoolWatch wrote is still on that PATH (<see cref="PathList.PutBack"/>), a removed
-    /// entry only while the account's PATH is still exactly what PoolWatch left (<see cref="PathList.Insert"/>), a variable
-    /// only while it is still what PoolWatch set it to. Otherwise the record goes and the PC is left as it is. With no
-    /// store (a test's ledger, or none given), nothing is put back.
+    /// Put back (Active changes, Put all back, the uninstaller), checked against the registry as it is now, and never
+    /// claiming more than it wrote: a result that wrote less than the whole change carries a <see cref="UndoResult.Caveat"/>,
+    /// so the uninstaller's summary says "Partly put back", never a plain "Put back". A replaced entry goes back where the
+    /// folder PoolWatch wrote still is on that PATH (<see cref="PathList.PutBack"/>); when the original entry is on the PATH
+    /// again already, the folder PoolWatch wrote is taken out instead, so the entry is not there twice; when the folder is
+    /// no longer on the PATH, nothing is written and the record goes; when it is there more than once, none of them where
+    /// PoolWatch wrote it, nothing is written and the record stays. A removed entry goes back exactly while the account's
+    /// PATH is still what PoolWatch left (<see cref="PathList.Insert"/>), else at its old place among the entries there now
+    /// (<see cref="PathList.InsertAt"/>), or not at all when it is on the PATH again already. A variable goes back only while
+    /// it is still what PoolWatch set it to. With no store (a test's ledger, or none given), nothing is put back.
     /// </summary>
     internal static UndoResult PutBack(ChangeRecord r, IEnvironmentStore? store, ChangeRecords changes)
     {
@@ -809,38 +881,66 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
         if (r.Kind == RecordKind.PathEntry)
         {
             var scope = EnvScopes.Parse(r.Location)!.Value;
-            string where = ChangeWords.PathOf(r.Location);
+            string where = ChangeWords.PathOf(r.Location), before = r.Before!.Trim();
             EnvValue? now;
             try { now = store.Read(scope, AppDataLinkFinder.PathName); }
             catch (Exception ex) { return new(false, $"PoolWatch could not read {where}: {ex.Message}"); }
-            if (now is not { } value || PathList.PutBack(value.Text, r.Index!.Value, r.After!, r.Before!) is not { } next)
+            int at = now is { } held ? PathList.Find(PathList.Split(held.Text), r.Index!.Value, r.After!) : -1;
+            if (now is not { } value || at == -1)
             {
                 changes.Remove(r);
-                return new(true, $"{Capital(where)} no longer holds {r.After} as PoolWatch wrote it, so there is nothing to put back.");
+                string nothing = $"{where} no longer holds {r.After}, the folder PoolWatch wrote, so PoolWatch wrote nothing" +
+                                 (now is { } v && PathList.Holds(v.Text, r.Before!) ? $": {before} is on it again"
+                                                                                      : $": you can add {before} again in Windows' Environment Variables window");
+                return new(true, Capital(nothing) + ".") { Caveat = nothing };
             }
+            if (at == PathList.Twice)
+                return new(false, $"{Capital(where)} holds {r.After} more than once, none of them where PoolWatch wrote it, so PoolWatch cannot tell " +
+                                  "which is its own. Remove the extra one in Windows' Environment Variables window, then put this back again.");
+            // The original entry on the PATH again (codex update puts its link back): take out the folder PoolWatch wrote, so the
+            // entry is there once.
+            bool again = PathList.Holds(value.Text, r.Before!);
+            string? next = again ? PathList.Remove(value.Text, at, r.After!) : PathList.PutBack(value.Text, at, r.After!, r.Before!);
+            if (next is null) return new(false, $"PoolWatch could not put {before} back on {where}: the PATH would be longer than Windows allows.");
             if (store.Write(scope, AppDataLinkFinder.PathName, value, new EnvValue(next, value.Expand)) is { } error)
                 return new(false, $"PoolWatch could not put the entry back on {where}: {error}.");
             try { store.Broadcast(); } catch (Exception) { } // put back either way; programs started later read the registry
             changes.Remove(r);
-            return new(true, $"Put {r.Before!.Trim()} back on {where}. " + LinkWords.Restart);
+            if (!again) return new(true, $"Put {before} back on {where}. " + LinkWords.Restart);
+            string once = $"{before} was on {where} again already, so PoolWatch took out {r.After}, the folder it had written, rather than add the " +
+                          "entry a second time";
+            return new(true, Capital(once) + ". " + LinkWords.Restart) { Caveat = once };
         }
         if (r.Kind == RecordKind.RemovedPathEntry)
         {
-            string where = ChangeWords.PathOf(EnvScopes.User);
+            string where = ChangeWords.PathOf(EnvScopes.User), entry = r.Before!.Trim();
             EnvValue? now;
             try { now = store.Read(EnvScope.User, AppDataLinkFinder.PathName); }
             catch (Exception ex) { return new(false, $"PoolWatch could not read {where}: {ex.Message}"); }
-            if (now is not { } value || PathList.Insert(value.Text, r.Index!.Value, r.Before!, r.Sha256!) is not { } next)
+            if (now is not { } value)
+                return new(false, $"{Capital(where)} is not there any more, so PoolWatch did not put {entry} back: add it in Windows' Environment Variables window.");
+            string? caveat = null;
+            if (PathList.Insert(value.Text, r.Index!.Value, r.Before!, r.Sha256!) is not { } next)
             {
-                changes.Remove(r);
-                return new(true, $"{Capital(where)} changed after PoolWatch removed {r.Before!.Trim()}, so PoolWatch left it as it is. You can add the " +
-                                 "entry again in Windows' Environment Variables window.");
+                // The PATH changed since PoolWatch removed the entry: never lose it. Back at its old place among the entries
+                // there now, unless it is on the PATH again already.
+                if (PathList.Holds(value.Text, r.Before!))
+                {
+                    changes.Remove(r);
+                    string there = $"{entry} was on {where} again already, so PoolWatch did not add it a second time";
+                    return new(true, Capital(there) + ".") { Caveat = there };
+                }
+                if (PathList.InsertAt(value.Text, r.Index!.Value, r.Before!) is not { } placed)
+                    return new(false, $"PoolWatch could not put {entry} back on {where}: the PATH would be longer than Windows allows.");
+                next = placed;
+                caveat = $"{where} changed after PoolWatch removed {entry}, so it went back at its old place among the entries there now, not " +
+                         "exactly as it was";
             }
             if (store.Write(EnvScope.User, AppDataLinkFinder.PathName, value, new EnvValue(next, value.Expand)) is { } error)
                 return new(false, $"PoolWatch could not put the entry back on {where}: {error}.");
             try { store.Broadcast(); } catch (Exception) { }
             changes.Remove(r);
-            return new(true, $"Put {r.Before!.Trim()} back on {where}. " + LinkWords.Restart);
+            return new(true, (caveat is null ? $"Put {entry} back on {where}. " : Capital(caveat) + ". ") + LinkWords.Restart) { Caveat = caveat };
         }
         EnvValue? was;
         try { was = store.Read(EnvScope.User, r.Name!); }

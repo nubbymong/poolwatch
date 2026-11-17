@@ -379,8 +379,8 @@ public class AppDataLinksTests
     /// What the two NtFC notes say matches what was measured in issue 96870: any program a Code-tab session starts leaks,
     /// with Cowork idle (DraftingDreamer), one reparse-point record for each open through a link under AppData; no cache
     /// clear frees it, and only a Restart does: 2,726.8 MB stayed through a Shut down with Fast Startup on (DraftingDreamer).
-    /// Links elsewhere, Documents and OneDrive included, leaked nothing; OneDrive's cloud files inside the apps were not
-    /// measured, and the note says just that.
+    /// A link on another drive or under the profile leaked nothing; a link inside OneDrive, and OneDrive's cloud files
+    /// inside the apps, were not measured, and the note says just that.
     /// </summary>
     [Fact]
     public void TheNtfcNotesSayWhatWasMeasuredAndThatOnlyARestartFreesIt()
@@ -438,10 +438,7 @@ public class AppDataLinksTests
         Assert.Contains("A link inside OneDrive, and OneDrive's cloud files inside the apps, were not measured.", pack.Explanation);
     }
 
-    /// <summary>
-    /// An entry of the machine's PATH is advice only, whatever the row holds: every account, SYSTEM and services read that
-    /// PATH, and its %NAME% are filled in from this account's own environment.
-    /// </summary>
+    /// <summary>An entry of the machine's PATH, which every account and Windows' own services read, is advice only, whatever the row holds.</summary>
     [Fact]
     public void AnEntryOnTheMachinesPathIsAdviceOnly()
     {
@@ -494,6 +491,38 @@ public class AppDataLinksTests
         string question = LinkWords.RemoveQuestion(Entry() with { Kind = LinkKind.PathEntryGone, Target = @"E:\Tools\codex\bin" });
         Assert.Contains(@"E:\Tools\codex\bin", question);
         Assert.Contains("a drive you connect only some of the time", question);
+    }
+
+    /// <summary>An entry whose folder is on the PATH already is removed, not replaced: the button, the column, the details and the question say so.</summary>
+    [Fact]
+    public void AnEntryWhoseFolderIsOnThePathAlreadyIsRemovedNotWrittenTwice()
+    {
+        var already = Entry() with { OnPathAlready = true };
+        Assert.True(already.CanFix);
+        Assert.Equal("Remove from PATH", LinkWords.Button(already));
+        Assert.Equal("Remove it: its folder is on PATH already", LinkWords.Fix(already));
+        Assert.Contains(@"is on your PATH already, so this entry adds nothing but the leak", LinkWords.Details(already));
+        string question = LinkWords.ReplaceQuestion(already);
+        Assert.StartsWith(@"Remove this entry from your PATH:", question);
+        Assert.Contains(@"C:\Users\someone\.codex\packages\standalone\current\bin", question);
+        Assert.Contains("rather than add that folder a second time", question);
+        Assert.StartsWith("Replace this entry on your PATH:", LinkWords.ReplaceQuestion(Entry()));
+    }
+
+    [Fact]
+    public void APathIsSearchedForTheFolderPoolWatchWroteAndForAnEntryAsAProgramReadsIt()
+    {
+        string[] parts = [@"C:\A", @"D:\x", @"C:\B", @"D:\x"];
+        Assert.Equal(1, PathList.Find(parts, 1, @"D:\x"));            // where it was written
+        Assert.Equal(PathList.Twice, PathList.Find(parts, 0, @"D:\x")); // twice, neither where it was written
+        Assert.Equal(2, PathList.Find(parts, 5, @"C:\B"));            // once, elsewhere
+        Assert.Equal(-1, PathList.Find(parts, 0, @"D:\y"));
+        Assert.True(PathList.Holds(@"C:\A; ""d:\X\"" ;C:\B", @"D:\x"));  // quotes, spaces, a closing "\" and case aside
+        Assert.False(PathList.Holds(@"C:\A;C:\B", @"D:\x"));
+        Assert.False(PathList.Holds(@"C:\A;;C:\B", ""));                 // an empty entry is never "the same folder"
+        Assert.Equal(@"C:\A;D:\x;C:\B", PathList.InsertAt(@"C:\A;C:\B", 1, @"D:\x"));
+        Assert.Equal(@"C:\A;C:\B;D:\x", PathList.InsertAt(@"C:\A;C:\B", 9, @"D:\x")); // fewer entries now: at the end
+        Assert.Null(PathList.InsertAt(new string('a', PathList.MaxChars), 0, @"D:\x"));
     }
 
     // ------------------------------------------------------------------ a PATH entry whose link leads nowhere, removed
