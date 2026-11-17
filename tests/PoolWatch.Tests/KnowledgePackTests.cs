@@ -55,7 +55,7 @@ public class KnowledgePackTests
     {
         var shipped = KnowledgeBase.Embedded();
         Assert.Empty(shipped.Problems);
-        Assert.Equal(["codex-gpu-shader-cache", "ntfc-ai-desktop-apps", "refs-standby-metadata", "windows-token-leak"], shipped.Entries.Select(e => e.Id));
+        Assert.Equal(["codex-gpu-shader-cache", "ntfc-ai-desktop-apps", "ntfc-appdata-links", "refs-standby-metadata", "windows-token-leak"], shipped.Entries.Select(e => e.Id));
         // Every pack file in the repository is built in: one added without the build picking it up fails here.
         Assert.Equal(PackFiles().Select(Path.GetFileNameWithoutExtension), shipped.Entries.Select(e => e.Id));
         Assert.Equal(["MSPi", "MSb+", "MSeb", "NtFC", "RLin", "RefF", "Reff", "Toke"], shipped.GrowthTags.Select(t => t.ToDisplay()).Order(StringComparer.Ordinal));
@@ -101,7 +101,9 @@ public class KnowledgePackTests
         Assert.DoesNotContain("sign-in", token.Suggestion);
 
         var ntfc = byId["ntfc-ai-desktop-apps"];
-        Assert.Equal(["https://github.com/openai/codex/issues/56160", "https://github.com/anthropics/claude-code/issues/55361",
+        Assert.Equal(["https://github.com/anthropics/claude-code/issues/96870", "https://github.com/anthropics/claude-code/issues/95489",
+            "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6732419760", "https://github.com/openai/codex/issues/56160",
+            "https://github.com/openai/codex/issues/58641", "https://github.com/anthropics/claude-code/issues/55361",
             "https://github.com/openai/codex/issues/31212"], Urls(ntfc));
         Assert.Empty(ntfc.Actions);
         // Shown beside the shader-cache note for the Codex app, which offers something worth trying: not "cannot".

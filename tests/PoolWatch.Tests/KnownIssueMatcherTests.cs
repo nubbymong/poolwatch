@@ -70,14 +70,16 @@ public class KnownIssueMatcherTests
         var claude = Grew(Quiet() with { Running = [ClaudeDesktop] }, ("NtFC", 0, 2048));
         var m = Single(claude, "ntfc-ai-desktop-apps");
         Assert.Equal(["NTFS file records grew 2.0 GB in the last hour.", "Claude desktop is running."], m.Seen);
-        Assert.Equal(["ntfc-ai-desktop-apps"], Ids(claude)); // the shader cache is the Codex app's
+        // The shader cache is the Codex app's; the links under AppData leak inside both apps.
+        Assert.Equal(["ntfc-ai-desktop-apps", "ntfc-appdata-links"], Ids(claude));
+        Assert.Equal(m.Seen, Single(claude, "ntfc-appdata-links").Seen);
 
         // With the Codex desktop app both are named: the shader cache as what may help, the reports as what is known.
-        Assert.Equal(["codex-gpu-shader-cache", "ntfc-ai-desktop-apps"], Ids(Grew(Quiet() with { Running = [CodexDesktop] }, ("NtFC", 0, 2048))));
+        Assert.Equal(["codex-gpu-shader-cache", "ntfc-ai-desktop-apps", "ntfc-appdata-links"], Ids(Grew(Quiet() with { Running = [CodexDesktop] }, ("NtFC", 0, 2048))));
         Assert.Equal(["NTFS file records grew 2.0 GB in the last hour.", "Codex desktop is running."],
             Single(Grew(Quiet() with { Running = [CodexDesktop] }, ("NtFC", 0, 2048)), "codex-gpu-shader-cache").Seen);
         // A newer Claude package name counts too. No report names the ChatGPT desktop app, so it names neither.
-        Assert.Equal(["ntfc-ai-desktop-apps"], Ids(Grew(Quiet() with { Running = [new("claude.exe", "AnthropicPBC.Claude")] }, ("NtFC", 0, 2048))));
+        Assert.Equal(["ntfc-ai-desktop-apps", "ntfc-appdata-links"], Ids(Grew(Quiet() with { Running = [new("claude.exe", "AnthropicPBC.Claude")] }, ("NtFC", 0, 2048))));
         Assert.Empty(Ids(Grew(Quiet() with { Running = [new("ChatGPT.exe", "OpenAI.ChatGPT-Desktop")] }, ("NtFC", 0, 2048))));
     }
 
@@ -90,6 +92,25 @@ public class KnownIssueMatcherTests
         Assert.Empty(Ids(Quiet() with { Running = [CodexDesktop, ClaudeDesktop] }));                     // the apps, but no growth
         Assert.Empty(Ids(Grew(Quiet() with { Running = [CodexDesktop] }, ("NtFC", 0, 90))));           // under 100 MB an hour
         Assert.Empty(Ids(Grew(Quiet() with { Running = [CodexDesktop] }, ("NtFC", 2048, 0))));         // paged, not the reported leak
+    }
+
+    /// <summary>
+    /// With the Claude app, the links under AppData leak far slower than the reports of gigabytes an hour: 7.6 MB an hour
+    /// over 15 hours (konrad-rzonca), about 26 MB an hour over 12 (DraftingDreamer), against a baseline of 3 MB in 75 hours
+    /// once fixed (estoll37). So that cause is named from 20 MB an hour with the Claude app; the Codex app and the general
+    /// note keep 100 MB an hour.
+    /// </summary>
+    [Fact]
+    public void TheLinksUnderAppDataAreNamedFromTwentyMbAnHourWithTheClaudeApp()
+    {
+        var m = Single(Grew(Quiet() with { Running = [ClaudeDesktop] }, ("NtFC", 0, 21)), "ntfc-appdata-links");
+        Assert.Equal(["NTFS file records grew 21 MB in the last hour.", "Claude desktop is running."], m.Seen);
+        Assert.Equal(["ntfc-appdata-links"], Ids(Grew(Quiet() with { Running = [ClaudeDesktop] }, ("NtFC", 0, 21))));
+        Assert.Equal(["ntfc-appdata-links"], Ids(Grew(Quiet() with { Running = [new("claude.exe", "AnthropicPBC.Claude")] }, ("NtFC", 0, 21))));
+        Assert.Empty(Ids(Grew(Quiet() with { Running = [ClaudeDesktop] }, ("NtFC", 0, 19))));   // under 20 MB an hour
+        Assert.Empty(Ids(Grew(Quiet() with { Running = [CodexDesktop] }, ("NtFC", 0, 21))));    // the Codex app: 100 MB an hour
+        Assert.Empty(Ids(Grew(Quiet() with { Running = [ClaudeCode] }, ("NtFC", 0, 21))));      // not the packaged app
+        Assert.Empty(Ids(Grew(Quiet() with { Running = [ClaudeDesktop] }, ("NtFC", 21, 0))));   // paged
     }
 
     [Fact]
@@ -331,7 +352,7 @@ public class KnownIssueMatcherTests
         var everything = Cleared(Grew(Quiet() with { FileSystems = ["ReFS"], Running = [CodexDesktop] }, ("Toke", 120, 0), ("NtFC", 0, 6144)),
             Now.AddHours(-1), ("Reff", 3072));
         var matches = KnownIssueMatcher.Match(KnowledgeBase.Embedded(), everything);
-        Assert.Equal(4, matches.Count);
+        Assert.Equal(5, matches.Count);
 
         // Everything already done: the rules offer nothing, and the known issues add nothing.
         var done = ThreeOffers() with { AutoClearOn = true, TokenGuardOn = true, ChatGptShortcutMade = true };

@@ -3,8 +3,8 @@
   "format": 1,
   "id": "ntfc-ai-desktop-apps",
   "title": "NTFS file records pile up while an AI desktop app runs",
-  "explanation": "Several people report the non-paged kernel pool growing by gigabytes an hour, most of it NTFS file records (pool tag NtFC), while the Codex desktop app runs, or the Claude desktop app with its Cowork feature on. Both install as Windows app packages, and the file redirection Windows uses for those appears to leave a record behind for many files the app opens, for example when its data folder is a junction to another drive. The memory comes back only after a restart.",
-  "workaround": "PoolWatch has no sure fix for this, and its cache clear is not known to free these records. What helped others: making the app's data folders under AppData ordinary folders instead of junctions to another drive, using the Codex command-line tool instead of the desktop app, or closing the desktop app when it is not in use. A restart frees the memory.",
+  "explanation": "Several people measured the non-paged kernel pool growing, from a few MB to gigabytes an hour, most of it NTFS records (pool tag NtFC), while the Codex desktop app or a Code-tab session of the Claude desktop app runs, with Cowork idle. The cause traced so far is a bug in bindflt.sys, the filter behind a Store app's AppData: an open through a junction or link under AppData, from the app or any program it starts, leaves a reparse-point record behind. Programs started from a normal terminal leave none.",
+  "workaround": "PoolWatch has no sure fix for this, and no cache clear frees these records. What helped others: making the app's data folders ordinary folders instead of junctions to another drive, the steps in the note on links under AppData, and running big jobs from a normal terminal. Only a Restart frees what has built up: a Shut down with Fast Startup on keeps it.",
   "evidence": [
     {
       "tagGrowth": { "tags": ["NtFC"], "name": "NTFS file records", "pool": "nonPaged", "minMBPerHour": 100 },
@@ -17,8 +17,24 @@
   ],
   "links": [
     {
+      "title": "The bindflt.sys leak through links under AppData, anthropics/claude-code issue 96870",
+      "url": "https://github.com/anthropics/claude-code/issues/96870"
+    },
+    {
+      "title": "Claude Code's temp folder as a junction, and a retry loop, anthropics/claude-code issue 95489",
+      "url": "https://github.com/anthropics/claude-code/issues/95489"
+    },
+    {
+      "title": "Only a Restart frees it: a Shut down with Fast Startup on keeps it",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6732419760"
+    },
+    {
       "title": "Codex desktop leaks non-paged kernel memory (NtFC), openai/codex issue 56160",
       "url": "https://github.com/openai/codex/issues/56160"
+    },
+    {
+      "title": "Codex data folders as junctions, openai/codex issue 58641",
+      "url": "https://github.com/openai/codex/issues/58641"
     },
     {
       "title": "Claude desktop: non-paged kernel memory leak on the NtFC tag, anthropics/claude-code issue 55361",
@@ -27,6 +43,48 @@
     {
       "title": "Codex desktop and sustained kernel memory growth, openai/codex issue 31212",
       "url": "https://github.com/openai/codex/issues/31212"
+    }
+  ],
+  "credits": [
+    {
+      "name": "DraftingDreamer",
+      "what": "measured the leak in a Code-tab session with Cowork idle, and that only a Restart frees it with Fast Startup on",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6732419760"
+    },
+    {
+      "name": "Aviv5374",
+      "what": "found that the Claude app's data folder as a junction grew it by about 2.2 GB an hour, and an ordinary folder stopped it",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6777636553"
+    },
+    {
+      "name": "jallers",
+      "what": "traced a retry loop when Claude Code's temp folder is a junction, and the variable that stops it",
+      "url": "https://github.com/anthropics/claude-code/issues/95489"
+    },
+    {
+      "name": "S4kuzy0",
+      "what": "measured the Codex app's data folders as junctions, and the leak stopping once they were ordinary folders",
+      "url": "https://github.com/openai/codex/issues/56160"
+    },
+    {
+      "name": "zjr-cyber",
+      "what": "measured a record kept for each open through the Codex data folder's junction, and a way to undo it safely",
+      "url": "https://github.com/openai/codex/issues/58641"
+    },
+    {
+      "name": "lingbai-i",
+      "what": "found that every one of the Codex app's data junctions had to go before it stopped",
+      "url": "https://github.com/openai/codex/issues/58641#issuecomment-6571358612"
+    },
+    {
+      "name": "morenogironadr",
+      "what": "reproduced it on Windows build 26200.9974",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6919806410"
+    },
+    {
+      "name": "raimondasl",
+      "what": "reproduced it on Windows build 26300.9550",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6070736821"
     }
   ]
 }

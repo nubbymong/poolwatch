@@ -191,11 +191,12 @@ public sealed class ChangeLedgerTests : IDisposable
         };
         var results = Ledger(failing).UndoAll();
 
-        // What depends on PoolWatch first; the automatic clear off before your own clear task comes back; the logon task last.
+        // What depends on PoolWatch first, then the PATH entries and variables; the automatic clear off before your own clear
+        // task comes back; the logon task last.
         ChangeKind[] order =
         [
-            ChangeKind.Shortcut, ChangeKind.StartupEntry, ChangeKind.ScheduledTask, ChangeKind.Service, ChangeKind.AutoClear,
-            ChangeKind.RemovedClearTask, ChangeKind.TokenGuard, ChangeKind.LogonTask,
+            ChangeKind.Shortcut, ChangeKind.PathEntry, ChangeKind.EnvironmentVariable, ChangeKind.StartupEntry, ChangeKind.ScheduledTask,
+            ChangeKind.Service, ChangeKind.AutoClear, ChangeKind.RemovedClearTask, ChangeKind.TokenGuard, ChangeKind.LogonTask,
         ];
         Assert.Equal(order, ChangeLedger.UndoOrder);
         Assert.Equal(Enum.GetValues<ChangeKind>().Order(), order.Order()); // every kind has its one place
@@ -205,7 +206,7 @@ public sealed class ChangeLedgerTests : IDisposable
         Assert.False(service.Done);
         Assert.Contains("the service control manager said no", service.Message);
         Assert.False(results.Single(r => r.Change.Kind == ChangeKind.StartupEntry).Result.Done);
-        Assert.Equal(6, results.Count(r => r.Result.Done));
+        Assert.Equal(8, results.Count(r => r.Result.Done));
     }
 
     [Fact]

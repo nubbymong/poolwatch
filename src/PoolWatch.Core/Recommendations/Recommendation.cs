@@ -3,7 +3,7 @@ using PoolWatch.Core.TokenGuard;
 
 namespace PoolWatch.Core.Recommendations;
 
-public enum RecommendationId { StartAtSignIn, HourlyCacheClear, ReplaceClearTask, TokenLeakGuard, CheckTokenLeak, ReviewServices, DefenderDevDrive, ChatGptShortcut, ReportIncident }
+public enum RecommendationId { StartAtSignIn, HourlyCacheClear, ReplaceClearTask, TokenLeakGuard, CheckTokenLeak, ReviewServices, DefenderDevDrive, ChatGptShortcut, ReportIncident, FixAppDataLinks }
 
 /// <summary>What a recommendation's button does (the window that shows it runs it).</summary>
 public enum RecommendationAction { Apply, CheckTokenLeak, OpenServices, ShowInstructions, ReportIssue }
@@ -84,6 +84,13 @@ public sealed record RecommendationInputs
     public bool ChatGptNamedInGrowth { get; init; }
     public bool ChatGptLauncherInstalled { get; init; }
     public bool ChatGptShortcutMade { get; init; }
+    /// <summary>
+    /// The AppData links window's last look (Engine/AppDataLinks.cs) found this many links it can fix: PATH entries through a link under
+    /// AppData, and uv, pnpm or the Codex command-line tool kept there, with the Claude or Codex desktop app installed.
+    /// </summary>
+    public int AppDataLinksToFix { get; init; }
+    /// <summary>The change list holds a PATH entry or an environment variable that the AppData links window changed.</summary>
+    public bool AppDataLinksFixed { get; init; }
     /// <summary>Dismissed keys and when each was hidden, on both clocks (its age is timed on <see cref="Model.Moment.Ms"/>).</summary>
     public IReadOnlyDictionary<string, Model.Moment> Dismissed { get; init; } = new Dictionary<string, Model.Moment>();
 }

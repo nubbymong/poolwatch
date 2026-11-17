@@ -83,6 +83,41 @@ public sealed class OldDataFolderTests
             "where Windows puts the folder when that setting is not there"),
         ("src/PoolWatch.Launcher/WindowsPaths.cs", "LocalAppData: UserFolder(Raw(shell, LocalSetting), LocalStandard, profile, drive, windows),",
             "the launcher reads the folder from that setting"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs",
+            "private const string PackagesKey = @\"Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppModel\\Repository\\Packages\";",
+            "the registry key of the Store packages (HKCU\\Software\\Classes\\Local Settings), not a folder: whether the Claude or Codex app is installed"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs", "string LocalFolder { get; }",
+            "the AppData link finder's folder, which it looks under for junctions and links, reading only"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs",
+            "public string LocalFolder { get; } = System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData);",
+            "the AppData link finder looks under the folder for junctions and links that leak inside the Claude and Codex apps, reading only"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs", "internal sealed record Roots(string AppData, string LocalFolder, string Profile)",
+            "the AppData folders the link finder looks under"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs", "public static Roots Of(ILinkSystem s) => new(Full(s.AppData), Full(s.LocalFolder), Full(s.Profile));",
+            "the folder made a full path, to tell what is below it"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs",
+            "public string? Holding(string path) => LinkPaths.Under(path, AppData) ? AppData : LinkPaths.Under(path, LocalFolder) ? LocalFolder : null;",
+            "whether a path the finder found is below the folder: compared as text"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs", ": LinkPaths.Under(path, LocalFolder) ? LinkWords.LocalVariable + path[LocalFolder.Length..]",
+            "a path below the folder shown with its variable in the window"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs", "public string Local(string below) => Path.Join(LocalFolder, below);",
+            "a folder below the folder that the link finder looks at, reading only: TEMP's default, and the apps' own copies under Packages"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs", "public AppDataView Own => new(null, AppData, LocalFolder);",
+            "the account's own AppData, as the link finder looks at it for the apps' data folders, reading only"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs", "if (roots.AppData.Length == 0 || roots.LocalFolder.Length == 0) return new LinkScan(now, claude, codex, []);",
+            "with no folder known, the finder looks for nothing"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs",
+            "if (path.Equals(Path.Join(roots.LocalFolder, @\"Microsoft\\WinGet\\Links\"), StringComparison.OrdinalIgnoreCase))",
+            "winget's Links folder, recognised on the PATH and its links counted, reading only"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs", "string folder = home ?? Path.Join(roots.LocalFolder, \"pnpm\");",
+            "pnpm's default home, looked at for its global packages, reading only"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs", "string bin = dir ?? Path.Join(roots.LocalFolder, @\"Programs\\OpenAI\\Codex\\bin\");",
+            "the Codex command-line tool's default bin link, looked at, reading only"),
+        ("src/PoolWatch/Engine/AppDataLinks.cs",
+            "if (Collectors.ProcessDetails.GetImagePath(h.Handle) is not { } path || LinkApps.AppOfProgram(path, AppData, LocalFolder) is not { } app) continue;",
+            "the Claude app's own Claude Code engines run from Claude-Data below the folder: their programs are named after a change, reading only"),
+        ("src/PoolWatch.Core/Links/LinkWords.cs", "public const string LocalVariable = \"%LOCALAPPDATA%\";",
+            "the folder's variable as the AppData links window and its prompt write it: words, never a path the code opens"),
     ];
 
     /// <summary>
@@ -94,6 +129,7 @@ public sealed class OldDataFolderTests
         ("src/PoolWatch/Engine/Setup/EnvironmentProbe.cs", "local"), // the folder, in AiTools
         (null, "LocalStandard"),                                     // WindowsPaths' constant: the folder's path
         (null, "LocalSetting"),                                      // WindowsPaths' constant: the setting that holds it
+        ("src/PoolWatch/Engine/AppDataLinks.cs", "LocalFolder"),     // the folder the AppData link finder looks under
     ];
 
     private static string Relative(string root, string file) => Path.GetRelativePath(root, file).Replace('\\', '/');

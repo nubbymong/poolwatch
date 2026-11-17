@@ -17,6 +17,8 @@ internal interface IShell
 {
     /// <summary>Shows the main window in Advanced view on a tab: 0 Pool causes, 1 Services, 2 Tasks and startup apps.</summary>
     void ShowAdvanced(int tab);
+    /// <summary>Opens the AppData links window (the tray app's; a shell without it, as the tests' are, does nothing).</summary>
+    void ShowAppDataLinks() { }
     void ShowActiveChanges();
     /// <summary>Opens Report an issue, with that incident's summary offered when a folder is given.</summary>
     void ShowReport(string? incidentDir);
@@ -63,6 +65,9 @@ internal sealed class SetupContext
         Probe = new EnvironmentProbe(engine, analysis);
         Store = new RecommendationStore(engine.Paths, engine.Log);
         Recommendations = new RecommendationActions(new WindowsSetupSystem(this), live, shell, Store, smoke);
+        var links = new WindowsLinkSystem();
+        LinkFixes = new AppDataLinkFixes(links, ledger.Records, engine.Log);
+        AppDataLinks = new AppDataLinkWatch(() => AppDataLinkFinder.Scan(links, engine.Log.Info), engine.Log);
     }
 
     public MonitorEngine Engine { get; }
@@ -76,6 +81,10 @@ internal sealed class SetupContext
     public EnvironmentProbe Probe { get; }
     public RecommendationStore Store { get; }
     public RecommendationActions Recommendations { get; }
+    /// <summary>The last look for links under AppData that leak inside the Claude and Codex apps, and the look itself.</summary>
+    public AppDataLinkWatch AppDataLinks { get; }
+    /// <summary>The AppData links window's changes (recorded for Active changes).</summary>
+    public AppDataLinkFixes LinkFixes { get; }
 
     /// <summary>The installer put the ChatGPT shortcut's launcher next to PoolWatch (read once).</summary>
     public bool LauncherInstalled => _launcherInstalled.Value;
@@ -94,9 +103,22 @@ internal sealed class SetupContext
         return new(Engine, Analysis, Actions, Live, Shell, offer, Store);
     }
 
-    /// <summary>The rules' inputs, from memory and the cached facts (nothing is scanned): cheap enough for a once-a-minute refresh.</summary>
-    public RecommendationInputs Inputs() => RecommendationInputsBuilder.Build(Engine, Analysis, Probe.Last, Store, Ledger.Records.Has(RecordKind.Shortcut),
-        LauncherInstalled, Recommendations.LeakTestNow, Core.Model.Moment.Now());
+    /// <summary>
+    /// The rules' inputs, from memory and the cached facts (nothing is scanned for them): cheap enough for a once-a-minute
+    /// refresh. The links under AppData are the last look's; a look older than an hour starts again in the background
+    /// (<see cref="AppDataLinkWatch.ScanIfOld"/>, never in the CI UI test), and its result is in the next refresh.
+    /// </summary>
+    public RecommendationInputs Inputs()
+    {
+        if (!Smoke) AppDataLinks.ScanIfOld();
+        return RecommendationInputsBuilder.Build(Engine, Analysis, Probe.Last, Store, Ledger.Records.Has(RecordKind.Shortcut),
+            LauncherInstalled, Recommendations.LeakTestNow, Core.Model.Moment.Now()) with
+        {
+            AppDataLinksToFix = AppDataLinks.Last?.ToAct ?? 0,
+            AppDataLinksFixed = Ledger.Records.Has(RecordKind.PathEntry) || Ledger.Records.Has(RecordKind.EnvironmentVariable) ||
+                                Ledger.Records.Has(RecordKind.RemovedPathEntry),
+        };
+    }
 
     /// <summary>Whether clearing the cache frees kernel pool on this PC, from the clears so far.</summary>
     public ClearEvidence ClearEvidence() => Analysis.Diagnostics.Cache.Evidence();

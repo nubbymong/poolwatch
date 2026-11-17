@@ -109,6 +109,9 @@ internal sealed class RecommendationActions
                     return (true, "");
                 case RecommendationId.ReportIncident:
                     return Report(r);
+                case RecommendationId.FixAppDataLinks:
+                    _shell.ShowAppDataLinks(); // the window asks before each change
+                    return (true, "");
                 default:
                     return (false, "PoolWatch does not know this suggestion.");
             }

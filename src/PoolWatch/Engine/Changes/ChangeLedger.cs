@@ -45,7 +45,7 @@ internal sealed class ChangeLedger
             new LogonTaskSource(new Ui.WindowsLogonTasks(engine.Paths), Ui.LogonTask.AtSignIn),
             new SettingsSource(live, records, d.Guard.TurnOff, d.Guard.Setting),
             new ServicesSource(d.Services, new ProfileStore(live)),
-            new RecordedSource(records, new TasksAndStartup(engine.Log), new WindowsClearTaskStore(), live),
+            new RecordedSource(records, new TasksAndStartup(engine.Log), new WindowsClearTaskStore(), live, environment: WindowsEnvironmentStore.Instance),
         ];
         return new ChangeLedger(sources, records, engine.Log, (change, result) =>
         {
@@ -85,16 +85,19 @@ internal sealed class ChangeLedger
             new LogonTaskSource(new Ui.WindowsLogonTasks(paths), Ui.LogonTask.AtSignIn),
             new SettingsSource(live, records, tokenGuardOff: null, TokenGuardSetting.ForCommandLine(paths, log)),
             new ServicesSource(services),
-            new RecordedSource(records, new TasksAndStartup(log), new WindowsClearTaskStore(), live),
+            new RecordedSource(records, new TasksAndStartup(log), new WindowsClearTaskStore(), live, environment: WindowsEnvironmentStore.Instance),
         ];
         return new ChangeLedger(sources, records, log);
     }
 
     public ChangeRecords Records { get; }
 
-    /// <summary>Put all back's order: what depends on PoolWatch first, the automatic clear before your own clear task comes back, the logon task last.</summary>
+    /// <summary>
+    /// Put all back's order: what depends on PoolWatch first, then the PATH entries and environment variables the AppData
+    /// links window changed, the automatic clear before your own clear task comes back, the logon task last.
+    /// </summary>
     public static readonly IReadOnlyList<ChangeKind> UndoOrder =
-        [ChangeKind.Shortcut, ChangeKind.StartupEntry, ChangeKind.ScheduledTask, ChangeKind.Service, ChangeKind.AutoClear,
+        [ChangeKind.Shortcut, ChangeKind.PathEntry, ChangeKind.EnvironmentVariable, ChangeKind.StartupEntry, ChangeKind.ScheduledTask, ChangeKind.Service, ChangeKind.AutoClear,
          ChangeKind.RemovedClearTask, ChangeKind.TokenGuard, ChangeKind.LogonTask];
 
     /// <summary>Every change, newest first (the ones that are a state, with no time, before them). Worker thread.</summary>

@@ -14,7 +14,7 @@ public static class RecommendationRules
 
     /// <summary>Also the order of the Simple view's suggestions (lowest first).</summary>
     private const int TokenGuardPriority = 10, ReplaceTaskPriority = 20, HourlyPriority = 30, CheckLeakPriority = 35, SignInPriority = 40,
-        ReportPriority = 50, ServicesPriority = 60, DefenderPriority = 70, ShortcutPriority = 80;
+        ReportPriority = 50, LinksPriority = 55, ServicesPriority = 60, DefenderPriority = 70, ShortcutPriority = 80;
 
     private const string TokenGuardTitle = "Protect this PC from the Windows token leak";
     private const string TradeOff = "With it on, any app may bring its window to the front.";
@@ -56,15 +56,17 @@ public static class RecommendationRules
     /// The offers the Simple view shows ahead of its feature cards: only what PoolWatch found on this PC after setup and
     /// that one click puts right. The token-leak guard once the leak shows (a check, the token findings, or the known
     /// issue's evidence), the cache clear when it is off and clearing is shown to help (setup's "decide later"), and a
-    /// report about an incident PoolWatch captured. What setup itself decides (starting at sign-in, a clear task of your
-    /// own, Defender, the Codex shortcut, the services) is not drip-fed here.
+    /// report about an incident PoolWatch captured, and the links under AppData that leak inside the Claude and Codex apps
+    /// (found by a look that runs on its own, so a tool that puts its link back later is offered again). What setup itself
+    /// decides (starting at sign-in, a clear task of your own, Defender, the Codex shortcut, the services) is not drip-fed
+    /// here.
     /// </summary>
     public static IReadOnlyList<Recommendation> Current(RecommendationInputs i, int max = 3) =>
         Candidates(i).Where(r => ShownLater.Contains(r.Id) && !Hidden(i.Dismissed, r.Key, i.NowMs)).OrderBy(r => r.Priority).Take(max).ToList();
 
     /// <summary>The offers <see cref="Current"/> may show.</summary>
     public static readonly IReadOnlySet<RecommendationId> ShownLater =
-        new HashSet<RecommendationId> { RecommendationId.TokenLeakGuard, RecommendationId.HourlyCacheClear, RecommendationId.ReportIncident };
+        new HashSet<RecommendationId> { RecommendationId.TokenLeakGuard, RecommendationId.HourlyCacheClear, RecommendationId.ReportIncident, RecommendationId.FixAppDataLinks };
 
     /// <summary>
     /// True while a key hidden at its moment is still within <see cref="DismissFor"/> of <paramref name="nowMs"/>, on the clock
@@ -98,6 +100,11 @@ public static class RecommendationRules
             yield return new Recommendation(RecommendationId.ReportIncident, "Report what PoolWatch found",
                 Clip(inc.Headline, 130) + " A report can help get it fixed, and you read every word before anything is sent.",
                 "Report", RecommendationAction.ReportIssue, ReportPriority) { Subject = inc.Id };
+        if (i.AppDataLinksToFix > 0)
+            yield return new Recommendation(RecommendationId.FixAppDataLinks, "Stop the leak through links under AppData",
+                (i.AppDataLinksToFix == 1 ? "PoolWatch found a link" : $"PoolWatch found {i.AppDataLinksToFix} links") + " under AppData that the Claude " +
+                "or Codex app's tools go through. Each use keeps a little of the kernel pool until a restart. PoolWatch shows each one and how to fix it.",
+                "Review", RecommendationAction.Apply, LinksPriority);
         if (i.CostlyOptionalServices.Count > 0 || i.SaturationOfferedTurnOffLast24h)
             yield return new Recommendation(RecommendationId.ReviewServices, "Review the background services",
                 i.CostlyOptionalServices.Count > 0

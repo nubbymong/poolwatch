@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using PoolWatch.Core.Links;
 using PoolWatch.Core.Services;
 
 namespace PoolWatch.Core.Changes;
@@ -10,7 +11,7 @@ namespace PoolWatch.Core.Changes;
 /// are listed from their own stores (service-changes.json, settings.json, Task Scheduler) and never copied here, so there
 /// is one truth for each change.
 /// </summary>
-public enum RecordKind { RemovedClearTask, ScheduledTask, StartupEntry, Shortcut }
+public enum RecordKind { RemovedClearTask, ScheduledTask, StartupEntry, Shortcut, PathEntry, EnvironmentVariable, RemovedPathEntry }
 
 /// <summary>
 /// One lasting change PoolWatch made, saved so it can be undone after a restart. The file is admin-only, but a record
@@ -24,7 +25,7 @@ public sealed record ChangeRecord
     public required DateTime ChangedUtc { get; init; }
     /// <summary>Where the change was made, in plain words: "the setup guide", "Settings", "the tray menu", "the command line", "the Services tab", "a suggestion".</summary>
     public required string Via { get; init; }
-    /// <summary>What the user recognises: the removed task's path, the scheduled task's or startup entry's name, the shortcut's file name.</summary>
+    /// <summary>What the user recognises: the removed task's path, the scheduled task's or startup entry's name, the shortcut's file name, the environment variable's name.</summary>
     public string? Name { get; init; }
     /// <summary>RemovedClearTask: the task's definition as Task Scheduler gave it (at most <see cref="ChangeRecordFile.MaxTaskXmlChars"/>).</summary>
     public string? TaskXml { get; init; }
@@ -34,12 +35,33 @@ public sealed record ChangeRecord
     public string? TaskUserId { get; init; }
     /// <summary>ScheduledTask / StartupEntry: whether it was on before PoolWatch switched it.</summary>
     public bool? EnabledBefore { get; init; }
-    /// <summary>StartupEntry: the <see cref="StartupLocation"/> label; ScheduledTask: the task path.</summary>
+    /// <summary>
+    /// StartupEntry: the <see cref="StartupLocation"/> label; ScheduledTask: the task path; PathEntry: whose PATH ("user" or
+    /// "machine", <see cref="EnvScopes"/>); EnvironmentVariable: "user".
+    /// </summary>
     public string? Location { get; init; }
     /// <summary>Shortcut: its full path.</summary>
     public string? Path { get; init; }
-    /// <summary>Shortcut: the SHA-256 of the bytes PoolWatch wrote, in hex.</summary>
+    /// <summary>
+    /// Shortcut: the SHA-256 of the bytes PoolWatch wrote, in hex; RemovedPathEntry: the SHA-256 of the PATH value PoolWatch
+    /// wrote without the entry (<see cref="PathList.Hash"/>), so Put back can tell whether the PATH is still exactly that.
+    /// </summary>
     public string? Sha256 { get; init; }
+    /// <summary>
+    /// PathEntry and RemovedPathEntry: the PATH entry as it was, exactly as written; EnvironmentVariable: the value before
+    /// PoolWatch set it, as written (null: it was not set).
+    /// </summary>
+    public string? Before { get; init; }
+    /// <summary>
+    /// PathEntry: the folder PoolWatch wrote in the entry's place; EnvironmentVariable: the folder PoolWatch set it to;
+    /// RemovedPathEntry: the folder the entry's link leads to, when PoolWatch removed it because that folder was on the PATH
+    /// already (null: its link led to a folder that is gone).
+    /// </summary>
+    public string? After { get; init; }
+    /// <summary>EnvironmentVariable: the registry kind of the value before ("String" or "ExpandString"); null when it was not set.</summary>
+    public string? ValueKind { get; init; }
+    /// <summary>PathEntry and RemovedPathEntry: the entry's place in the PATH value, from 0, when PoolWatch replaced or removed it.</summary>
+    public int? Index { get; init; }
 }
 
 /// <summary>The id of each change in the Active changes list; a record's id is derived from its target, so one target has one record.</summary>
@@ -53,6 +75,14 @@ public static class ChangeIds
     public static string ScheduledTask(string taskPath) => "task:" + taskPath;
     public static string StartupEntry(string location, string name) => $"startup:{location}\\{name}";
     public static string Shortcut(string path) => "shortcut:" + path;
+    /// <summary>
+    /// A PATH entry PoolWatch replaced: whose PATH, when, and the entry as it was. The time is in it because a tool can put
+    /// the same entry back after PoolWatch replaced it (codex update does), and each replacement then has a record of its own.
+    /// </summary>
+    public static string PathEntry(string scope, string entry, DateTime changedUtc) => $"path:{scope}:{changedUtc.Ticks}:{entry}";
+    public static string EnvironmentVariable(string name) => "env:" + name;
+    /// <summary>A PATH entry PoolWatch removed (its link led nowhere): whose PATH, when, and the entry as it was.</summary>
+    public static string RemovedPathEntry(string scope, string entry, DateTime changedUtc) => $"path-removed:{scope}:{changedUtc.Ticks}:{entry}";
 }
 
 /// <summary>
@@ -187,7 +217,10 @@ public static class ChangeRecordFile
     /// Why the record is not acted on, or null. The checks that need only the record: its id matches its target, every
     /// text is bounded and has no control character, a task path is not one of Microsoft's, a removed clear task was in
     /// the Task Scheduler root and has its definition, a startup location is one PoolWatch knows, a shortcut is a .lnk
-    /// on a local drive with a SHA-256. The live checks are the engine's, right before Undo acts.
+    /// on a local drive with a SHA-256, a PATH entry is the user's or the machine's with a plain entry to put back and a
+    /// plain local folder in its place, an environment variable is one of the few PoolWatch sets (<see cref="LinkFinder.Variables"/>),
+    /// the user's, set to a plain local folder, with its value before, a removed PATH entry is the user's, with a plain entry to
+    /// put back and the SHA-256 of the PATH PoolWatch left. The live checks are the engine's, right before Undo acts.
     /// </summary>
     public static string? Invalid(ChangeRecord r)
     {
@@ -215,12 +248,35 @@ public static class ChangeRecordFile
                 if (!Settings.IsLocalDrivePath(r.Path) || !r.Path!.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase)) return "not a shortcut on a local drive";
                 if (r.Sha256 is not { Length: 64 } hash || !hash.All(char.IsAsciiHexDigit)) return "no SHA-256 of what PoolWatch wrote";
                 return r.Id == ChangeIds.Shortcut(r.Path) ? null : "its id does not match its shortcut";
+            case RecordKind.PathEntry:
+                if (EnvScopes.Parse(r.Location) is null) return "not a PATH PoolWatch changes";
+                if (!PlainEntry(r.Before)) return "no PATH entry to put back";
+                if (!LinkPaths.Writable(r.After)) return "not a folder PoolWatch writes on a PATH";
+                if (r.Index is not (>= 0 and < PathList.MaxEntries)) return "no place in the PATH";
+                return r.Id == ChangeIds.PathEntry(r.Location!, r.Before!, r.ChangedUtc) ? null : "its id does not match its entry";
+            case RecordKind.EnvironmentVariable:
+                if (r.Location != EnvScopes.User) return "not a variable of your account";
+                if (r.Name is not { } variable || !LinkFinder.Variables.Contains(variable, StringComparer.Ordinal)) return "not a variable PoolWatch sets";
+                if (!LinkPaths.Writable(r.After)) return "not a folder PoolWatch sets a variable to";
+                if (r.Before is null ? r.ValueKind is not null : !Plain(r.Before) || r.ValueKind is not ("String" or "ExpandString")) return "no value to put back";
+                return r.Id == ChangeIds.EnvironmentVariable(variable) ? null : "its id does not match its variable";
+            case RecordKind.RemovedPathEntry:
+                // Only the account's own PATH: PoolWatch never removes an entry from the machine's.
+                if (r.Location != EnvScopes.User) return "not a PATH PoolWatch removes entries from";
+                if (!PlainEntry(r.Before)) return "no PATH entry to put back";
+                if (r.Sha256 is not { Length: 64 } sum || !sum.All(char.IsAsciiHexDigit)) return "no SHA-256 of the PATH PoolWatch left";
+                if (r.After is not null && !LinkPaths.Writable(r.After)) return "not a folder PoolWatch writes on a PATH";
+                if (r.Index is not (>= 0 and < PathList.MaxEntries)) return "no place in the PATH";
+                return r.Id == ChangeIds.RemovedPathEntry(r.Location!, r.Before!, r.ChangedUtc) ? null : "its id does not match its entry";
             default:
                 return "a kind of change this PoolWatch does not know";
         }
     }
 
     private static bool Plain(string? s) => s is { Length: > 0 and <= MaxTextChars } && !s.Any(char.IsControl);
+
+    /// <summary>A PATH entry PoolWatch can put back: plain text with no ";", which would make it two entries.</summary>
+    private static bool PlainEntry(string? s) => Plain(s) && !s!.Contains(';');
 
     /// <summary>
     /// A task path ("\Name" or "\Folder\Name"), never one of Microsoft's (TasksAndStartup leaves those alone too), and with

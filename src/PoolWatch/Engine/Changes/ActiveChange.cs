@@ -4,7 +4,7 @@ using PoolWatch.Core.Changes;
 namespace PoolWatch.Engine.Changes;
 
 /// <summary>Every kind of lasting change PoolWatch makes on the PC, each listed under Active changes.</summary>
-internal enum ChangeKind { LogonTask, AutoClear, TokenGuard, RemovedClearTask, Service, ScheduledTask, StartupEntry, Shortcut }
+internal enum ChangeKind { LogonTask, AutoClear, TokenGuard, RemovedClearTask, Service, ScheduledTask, StartupEntry, Shortcut, PathEntry, EnvironmentVariable }
 
 /// <summary>
 /// Where the Active changes window lists a change: a feature PoolWatch turned on (its button turns it off, or removes
@@ -74,9 +74,14 @@ internal sealed record ActiveChange(string Id, ChangeKind Kind, DateTime? Change
     [JsonIgnore]
     public string? Stamp { get; init; }
 
-    /// <summary>A feature PoolWatch turned on (the logon task, its settings, its shortcut), or something it turned off.</summary>
+    /// <summary>
+    /// A feature PoolWatch turned on (the logon task, its settings, its shortcut), another change (a PATH entry or an
+    /// environment variable the AppData links window changed), or something it turned off.
+    /// </summary>
     internal static ChangeGroup GroupOf(ChangeKind kind) =>
-        kind is ChangeKind.LogonTask or ChangeKind.AutoClear or ChangeKind.TokenGuard or ChangeKind.Shortcut ? ChangeGroup.Feature : ChangeGroup.TurnedOff;
+        kind is ChangeKind.LogonTask or ChangeKind.AutoClear or ChangeKind.TokenGuard or ChangeKind.Shortcut ? ChangeGroup.Feature
+        : kind is ChangeKind.PathEntry or ChangeKind.EnvironmentVariable ? ChangeGroup.Other
+        : ChangeGroup.TurnedOff;
 
     /// <summary>
     /// The row's button, and what the timeline says it did: a feature is turned off; the shortcut is removed, and so is the

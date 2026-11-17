@@ -20,7 +20,7 @@
     "actions": {
       "description": "The built-in actions that work around the issue. Never a command, a path or a web address.",
       "type": "array", "maxItems": 3, "uniqueItems": true,
-      "items": { "enum": ["auto-clear", "token-guard", "chatgpt-shortcut"] }
+      "items": { "enum": ["auto-clear", "token-guard", "chatgpt-shortcut", "appdata-links"] }
     },
     "suggestion": {
       "description": "Needed with actions, not allowed without: the sentence after the evidence on the action's suggestion card.",

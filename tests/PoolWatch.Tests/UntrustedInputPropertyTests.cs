@@ -10,6 +10,7 @@ using FsCheck.Fluent;
 using PoolWatch.Core;
 using PoolWatch.Core.Changes;
 using PoolWatch.Core.Knowledge;
+using PoolWatch.Core.Links;
 using PoolWatch.Core.Model;
 using PoolWatch.Core.Services;
 using PoolWatch.Core.Services.Agent;
@@ -366,7 +367,11 @@ public class UntrustedInputPropertyTests
         from hash in Gen.ArrayOf(Gen.Elements("0123456789abcdefABCDEF".ToCharArray()), 64)
         select Made(kind, changed, via, name, folder, enabled, logon, account, location, new string(hash));
 
-    /// <summary>A record as PoolWatch writes one of its kind: its id from its target, a task outside Microsoft's folder, a startup place PoolWatch knows, a shortcut on a local drive.</summary>
+    /// <summary>
+    /// A record as PoolWatch writes one of its kind: its id from its target, a task outside Microsoft's folder, a startup
+    /// place PoolWatch knows, a shortcut on a local drive, a PATH entry with a plain folder in its place, one of the
+    /// variables PoolWatch sets, an entry removed from the account's own PATH with the SHA-256 of the PATH it left.
+    /// </summary>
     private static ChangeRecord Made(RecordKind kind, DateTime when, string via, string name, string folder, bool on, int logon, string? account, string location, string hash)
     {
         string task = @"\Example " + name, path = @"\Example " + folder + task, shortcut = @"C:\Example\" + name + ".lnk";
@@ -384,6 +389,22 @@ public class UntrustedInputPropertyTests
             RecordKind.StartupEntry => new ChangeRecord
             {
                 Id = ChangeIds.StartupEntry(location, name), Kind = kind, ChangedUtc = when, Via = via, Location = location, Name = name, EnabledBefore = on,
+            },
+            RecordKind.PathEntry => new ChangeRecord
+            {
+                Id = ChangeIds.PathEntry(on ? EnvScopes.User : EnvScopes.Machine, @"%LOCALAPPDATA%\Example " + name, when), Kind = kind, ChangedUtc = when,
+                Via = via, Location = on ? EnvScopes.User : EnvScopes.Machine, Before = @"%LOCALAPPDATA%\Example " + name, After = @"C:\Example\" + folder, Index = logon,
+            },
+            RecordKind.EnvironmentVariable => new ChangeRecord
+            {
+                Id = ChangeIds.EnvironmentVariable(LinkFinder.Variables[logon % LinkFinder.Variables.Count]), Kind = kind, ChangedUtc = when, Via = via,
+                Location = EnvScopes.User, Name = LinkFinder.Variables[logon % LinkFinder.Variables.Count], Before = on ? @"C:\Old\" + name : null,
+                ValueKind = on ? (logon % 2 == 0 ? "String" : "ExpandString") : null, After = @"C:\Example\" + folder,
+            },
+            RecordKind.RemovedPathEntry => new ChangeRecord
+            {
+                Id = ChangeIds.RemovedPathEntry(EnvScopes.User, @"%LOCALAPPDATA%\Example " + name, when), Kind = kind, ChangedUtc = when, Via = via,
+                Location = EnvScopes.User, Before = @"%LOCALAPPDATA%\Example " + name, Index = logon, Sha256 = hash,
             },
             _ => new ChangeRecord { Id = ChangeIds.Shortcut(shortcut), Kind = kind, ChangedUtc = when, Via = via, Path = shortcut, Sha256 = hash },
         };

@@ -555,8 +555,9 @@ with Detailed recording, `findings.jsonl` in that day's folder under it (`data\<
 
 Point at the icon for the paged and non-paged pool; double-click it to open the window. Right-click it for the
 token-leak guard's line while it is not protected (above), **Open PoolWatch**, **Settings...** (in either view; the
-Simple view's header has no Settings button), **Run setup again...**, **Active changes...**, a line when a newer
-version is out, and the tools for
+Simple view's header has no Settings button), **Run setup again...**, **Active changes...**, **Links under
+AppData...** (only with the Claude or Codex desktop app installed, below), a line when a newer version is out, and the
+tools for
 technical users: **Capture now** (a short trace that shows which program allocates the memory), **Since boot
 report**, **Open incident folder**, **Export vendor bundle...**, **Copy latest incident summary**, **Mark...** and the
 experiments; then **Report an issue...** and **About PoolWatch**. **Exit**, at the bottom, stops PoolWatch until you
@@ -589,9 +590,13 @@ the tray menu. It has up to three groups (a group with nothing in it is left out
   `C:\ProgramData\PoolWatch\removed-tasks` for you to import in Task Scheduler. One whose RAMMap you could change
   without administrator rights, or whose RAMMap is no longer there, is put back only after a warning you accept.
 - **Other changes PoolWatch made**: a service you set to its Windows default with **Put back...** on the Services tab
-  ("service · set to its Windows default"), and a scheduled task or startup app that was off until you turned it on in
-  PoolWatch ("scheduled task · was off", "startup app · was off"). Each has **Put back**, which sets it back to how it
-  was before.
+  ("service · set to its Windows default"), a scheduled task or startup app that was off until you turned it on in
+  PoolWatch ("scheduled task · was off", "startup app · was off"), and a PATH entry or an environment variable the
+  [Links under AppData](#links-under-appdata) window changed or removed. Each has **Put back**, which sets it back to how
+  it was before: a replaced PATH entry goes back only where PoolWatch's folder still is on that PATH, a removed one
+  exactly while your PATH is still as PoolWatch left it (else at its old place among the entries there now, and not a
+  second time when it is on your PATH again), and a variable only while it is still what PoolWatch set it to (one you
+  changed since is yours, and stays).
 
 **Put all back**, at the bottom, asks once and then does them all. Some rows carry a note. The token-leak guard's row
 says that Turn off also puts back the Windows setting it changed when Windows allows it, and that one it found already
@@ -603,6 +608,149 @@ and **Put all back** says so once for all of them (see [Profiles](#profiles)). W
 "Uninstalling puts each of these back, or says why it could not.", or, when a row says the uninstaller leaves it,
 "Uninstalling puts each of these back, except where marked, or says why it could not." Not listed: cache clears that
 already ran (the cache refills by itself) and programs you ended (start them again).
+
+## Links under AppData
+
+With the Claude desktop app or the Codex desktop app installed (both Microsoft Store apps), a bug in Windows' filter
+for Store apps (`bindflt.sys`) makes every open through a junction or link located under `%APPDATA%` or
+`%LOCALAPPDATA%` keep a small block of the kernel pool (NTFS file records, pool tag `NtFC`) until Windows restarts:
+from the app itself, and from every terminal, tool and hook it starts, in a Code-tab session with Cowork idle too. The
+same open by the real folder, through a link elsewhere, or from a program started in a normal terminal keeps nothing.
+[peterlau03 traced it](https://github.com/anthropics/claude-code/issues/96870); the people who measured each case are
+named in the window and [credited below](#who-measured-it).
+
+Only a **Restart** frees what has built up. With Fast Startup on (Windows' default), **Shut down** keeps it: 2.7 GB of
+these records stayed through a Shut down and went with a Restart ([DraftingDreamer](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6732419760)).
+No cache clear frees them.
+
+PoolWatch looks for such links while it runs, at most once an hour, only when one of the two apps is installed for
+your account (it reads your Store app list), and reads only:
+
+- your PATH and the machine's, and winget's Links folder when it is on PATH;
+- uv's Pythons (`%APPDATA%\uv\python`), pnpm's global packages (`%LOCALAPPDATA%\pnpm`) and the Codex command-line
+  tool's installer link (`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`);
+- Claude Code's temp folder (`%LOCALAPPDATA%\Temp\claude`, with the Claude app);
+- the apps' own data folders: `%APPDATA%\Claude`; `%APPDATA%\Codex`, its `web` folder, `%LOCALAPPDATA%\Codex` and
+  `%LOCALAPPDATA%\OpenAI\Codex`;
+- the same tools and folders in each app's own copy of AppData (`%LOCALAPPDATA%\Packages\<the app>\LocalCache`), where
+  a program the app starts writes when it makes a folder in AppData, out of sight of programs outside the app;
+- the `pyvenv.cfg` of each venv whose `Scripts` folder is on your PATH, and the hooks in your Claude Code settings
+  (`%USERPROFILE%\.claude\settings.json`, or the `settings.json` in the folder `CLAUDE_CONFIG_DIR` names when it is
+  set; the row names the one it read).
+
+When it finds something, the Simple view shows **Stop the leak through links under AppData**; its **Review**, and
+**Links under AppData...** in the tray menu, open the window. Each row says what it is, what it costs (as measured),
+and what fixes it:
+
+- **A PATH entry that goes through a link under AppData** (such as `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`, or
+  nvm-windows' `.nodejs`): one such entry anywhere on PATH costs about one block for every program a Git Bash inside
+  the app starts. **Replace on PATH** puts the folder its link leads to in its place, after a question that names
+  both. Only that entry changes; every other entry, and whether the value fills in `%NAME%` variables, stay as they
+  were. When that folder is on your PATH already (`codex update` puts its link back in front after each fix), the
+  button is **Remove from PATH**: PoolWatch removes the entry rather than add the folder a second time. If the tool
+  later changes where its link leads (to switch versions, say), your PATH keeps the folder it leads to now: **Put back**
+  in Active changes puts the entry back. PoolWatch does not replace an entry whose folder is reached through another
+  link under AppData: the row says why.
+- **An entry on the machine's PATH**: advice only. Every account and Windows' own services read the machine's PATH,
+  so PoolWatch changes only your own: change such an entry yourself in Windows' Environment Variables window, to a
+  folder only administrators can change.
+- **A PATH entry whose link leads nowhere** (an uninstall left the link and the entry): every command lookup that
+  reaches it still keeps blocks, and a command that is not found looks in every entry, wherever this one is on PATH.
+  PoolWatch shows it only when, as administrator, it sees the drive and not the folder: a drive it does not see (one
+  mapped or `subst`'ed only in your own sign-in, or not connected now) or a folder it may not open is left out.
+  **Remove from PATH** removes it from your own PATH, after a question that names it and the folder it leads to (say
+  No if that folder is on a drive you connect only some of the time); the link itself is not deleted. **Put back** in
+  Active changes puts it back: exactly while your PATH is still as PoolWatch left it, or else at its old place among
+  the entries there then, and not a second time when it is on your PATH again already. An entry on the machine's PATH
+  is yours to remove: PoolWatch removes entries only from your own PATH, and never the only one.
+- **uv, pnpm and the Codex command-line tool kept under AppData**: **Set the variables...** sets, for your account,
+  `UV_PYTHON_INSTALL_DIR` and `UV_CACHE_DIR` (to `.uv\python` and `.uv\cache` in your profile), `PNPM_HOME` (`.pnpm`)
+  or `CODEX_INSTALL_DIR` (`.codex\bin`), after a question that lists them. That is all PoolWatch does: it never
+  reinstalls, moves or deletes your tools or files. A window then shows the steps left (reinstall the Pythons, rebuild
+  the venvs and tools, reinstall pnpm's global packages, run `codex update` again), and **Copy prompt for your AI
+  agent** copies them as a prompt your agent can follow with you. The prompt names no user or folder of yours: the
+  folders are written as `%USERPROFILE%\...`.
+- **Claude Code's temp folder as a junction**: Claude Code in the Claude app then retries a failing open tens of
+  thousands of times a second, and the kernel pool grew by about 230 MB a minute. **Set the variables...** sets
+  `CLAUDE_CODE_TMPDIR` to `.claude-tmp` in your profile, which measured 0: Claude Code then keeps its temp files and
+  scratchpads there. The steps say to make that folder if it is not there, and to quit the Claude app fully (Quit in
+  its tray menu) before you start it again.
+- **An app's data folder as a junction** (to keep it on another drive, say): about 2.2 GB an hour for the Claude app's,
+  150 MB a minute for the Codex app's. Making it an ordinary folder again stopped it. That moves the app's data, so
+  PoolWatch never does it: **Show the steps...** shows how to do it safely with the app closed (keep the junction under
+  another name, copy the data, check it, keep the old copy until the app works), with a prompt for your AI agent.
+- **A venv on your PATH whose Python is behind uv's link** (PlatformIO's `.platformio\penv`, Hermes Agent's venv): every
+  `python` a program of the app runs goes through the link, 188 to 383 blocks a start. **Show the steps...** shows how
+  to rebuild it on a Python outside AppData while keeping its packages. PoolWatch never changes another tool's venv.
+- **Claude Code hooks that start Python** while uv's Pythons are behind its links: hooks run on every tool call, so
+  they are often the largest part. **Show the steps...** shows how to have each hook start Python by its full path
+  outside AppData. PoolWatch reads only that one settings file (not plugins' hooks), names it in the row, never changes
+  it, and never puts a hook's command in the prompt.
+- **What is in an app's own copy of AppData**: shown with where it is, as advice only. PoolWatch changes nothing there.
+  A variable it sets for another row reaches the app's programs too, but what they already made there stays until you
+  rebuild or remove it from a terminal in the app.
+- **winget's Links folder**: advice only. Running a tool through one of its links keeps a block each time; a lookup
+  that misses there keeps nothing. Leave the folder on your PATH: every portable app winget installed needs it.
+- **Your projects** (a `node_modules` that is a junction, a venv on one of uv's links, a `.python-version` without an
+  exact patch): advice only. PoolWatch does not look inside your projects. TEMP is not reliably safe: a test run in a
+  worktree under TEMP whose `node_modules` was a junction grew the kernel pool by about 15 GB in an hour on one PC,
+  while two others kept nothing; `CLAUDE_CODE_TMPDIR` moves Claude Code's scratchpads and their worktrees out of
+  AppData. Running big test suites from a normal terminal keeps nothing.
+
+**Codex keeps my projects in OneDrive Documents: does that matter?** Only what was measured: a link outside AppData,
+on another drive or under your profile (where Documents and OneDrive usually are), kept nothing
+([0uternet](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6450742359)). A link inside the OneDrive
+folder, and OneDrive's cloud files (files that are online only until opened) inside the apps, were not measured. What
+does count is where a project's links lead: a venv whose Python is one of uv's links under AppData goes through that
+link wherever the project is.
+
+Above the list, the window adds what else it can tell, as hints rather than proof: the average size of NtFC's blocks
+since Windows started, when it matches the size an open through one of the links found keeps (the size follows the
+link); that Fast Startup is on, and when Windows last started from a Shut down with it, that what NtFC holds may be from
+before then; and, after a change, the Claude and Codex apps' programs that started before it and still run, so do not
+see it yet. Quit the app fully (Quit in its tray menu) and check in Task Manager that they are gone: PoolWatch never
+ends them.
+
+A program sees a new PATH or variable only when it starts, so quit the Claude and Codex apps fully and start them again
+after a change. Every change is listed in [Active changes](#active-changes), where **Put back** undoes it, and
+uninstalling puts them back too. If a tool puts back what PoolWatch fixed (`codex update` puts its link back on PATH,
+an installer sets its variable back into AppData), PoolWatch notices at its next look, says so once in a notice that
+names it, and offers the fix again. PoolWatch changes the PATH and the variables of the account it runs as: when you
+elevated it with another administrator's password, that administrator's.
+
+### Who measured it
+
+What the window and the notes say comes from these public reports, each linked to the comment it is from:
+[peterlau03](https://github.com/anthropics/claude-code/issues/96870) (the cause in `bindflt.sys`, what each kind of link
+costs, the fixes that measured 0),
+[konrad-rzonca](https://github.com/anthropics/claude-code/issues/96870#issuecomment-5854033138) (the app's programs
+leak without a package of their own, the app's own copy of AppData, the block size),
+[raimondasl](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6070736821) (Windows 26300.9550),
+[thyhellcat](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6102516200) (npm workspace junctions;
+[PATH entries left by uninstalls and winget's links](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6604756392)),
+[bronze1man](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6206136583) (worktrees under TEMP),
+[estoll37](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6264627896) (hooks, Docker),
+[0uternet](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6450742359) (only links under AppData
+leak; moving uv),
+[fsfxing2023-wq](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6523339301) (an exact Python
+version; the block size),
+[SynoSoftware](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6579764207) (PlatformIO's venv),
+DraftingDreamer ([Restart, not Shut down](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6732419760);
+[one block for each open](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6745868966);
+[one PATH entry anywhere costs](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6829825523)),
+[eugenetsaplin](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6738105313) (Hermes Agent's venv),
+[Aviv5374](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6777636553) (the Claude app's data
+folder),
+[morenogironadr](https://github.com/anthropics/claude-code/issues/96870#issuecomment-6919806410) (Windows 26200.9974),
+[jallers](https://github.com/anthropics/claude-code/issues/95489) (Claude Code's temp folder and
+`CLAUDE_CODE_TMPDIR`), [Ghostgfdsrhj](https://github.com/anthropics/claude-code/issues/95489#issuecomment-5738610812),
+[samZoneN](https://github.com/anthropics/claude-code/issues/95489#issuecomment-6254627304) and
+[alphamr123](https://github.com/anthropics/claude-code/issues/95489#issuecomment-6559240099) (the same, measured
+again), [S4kuzy0](https://github.com/openai/codex/issues/56160) and
+[zjr-cyber](https://github.com/openai/codex/issues/58641) (the Codex app's data folders, and a safe way to undo them),
+[lingbai-i](https://github.com/openai/codex/issues/58641#issuecomment-6571358612) (every one of them has to go), and
+[luxueqi123](https://github.com/anthropics/claude-code/issues/94198#issuecomment-5727311134) (Shut down keeps it with
+Fast Startup on).
 
 ## Report an issue
 
