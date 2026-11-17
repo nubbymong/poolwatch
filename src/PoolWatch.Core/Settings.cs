@@ -134,21 +134,39 @@ public sealed class Settings
     public string AutoClearMode { get; set; } = "auto";
     /// <summary>
     /// The urgent clear: while automatic clearing is on, a clear at once when the non-paged pool is over its alert and still
-    /// rising; the full one, or the light one in "lowpriority" mode (<see cref="Cache.ClearPolicy.UrgentNow"/>).
+    /// rising; the full one, or the light one in "lowpriority" mode (<see cref="Cache.ClearPolicy.UrgentNow"/>). On for a
+    /// new install; after an upgrade from a version without it, off until it is chosen (<see cref="AutoClearUrgentAsk"/>).
     /// </summary>
-    [Description("While automatic clearing is on, a clear at once when the non-paged pool is over its alert and still rising: full (light in lowpriority mode), 10 minutes or more apart, waiting after one that freed little. On by default. Applied when you save.")]
+    [Description("With automatic clearing on, a clear at once when the non-paged pool is over its alert and still rising: full (light in lowpriority mode), 10 minutes or more apart. On by default (off after an upgrade until chosen). Applied when you save.")]
     public bool AutoClearUrgent { get; set; } = true;
-    /// <summary>The urgent clear was never chosen, after an upgrade from a version without it.</summary>
+    /// <summary>
+    /// The urgent clear is still to be chosen: set after an upgrade from a version without it (a settings.json without
+    /// <c>autoClearUrgent</c>, which <see cref="Parse"/> reads off), until it is chosen: by the question PoolWatch asks at a
+    /// start while automatic clearing is on (<see cref="UrgentClearToAsk"/>; Turn on or Leave off, while Decide later leaves
+    /// it to be chosen), or where automatic clearing is turned on, which offers it (<see cref="UrgentAsOffered"/>: setup's
+    /// switch, Settings' box, the hourly clear's and the RAMMap task's cards). Never set on a new install, nor by reading a
+    /// --config file, which is read as written. Cleared once the urgent clear is on (<see cref="Normalize"/>): nothing is
+    /// left to ask then. Written only while set, so a file without it reads it unset.
+    /// </summary>
     [Browsable(false)] // not a choice: PoolWatch keeps it
-    [Description("After an upgrade from a version without the urgent clear (AutoClearUrgent): true until it is chosen. PoolWatch keeps it; it is not a choice.")]
+    [Description("After an upgrade from a version without the urgent clear (AutoClearUrgent): true until it is chosen, so PoolWatch asks about it at a start while automatic clearing is on. PoolWatch keeps it; it is not a choice.")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool AutoClearUrgentAsk { get; set; }
 
-    /// <summary>The urgent clear's question after an upgrade is due at this start.</summary>
-    public bool UrgentClearToAsk() => false;
+    /// <summary>
+    /// The urgent clear's question after an upgrade is due (<see cref="AutoClearUrgentAsk"/>): the urgent clear is still to
+    /// be chosen, and automatic clearing is on with a schedule or a size set, so it would act if it were on. With automatic
+    /// clearing off it is not asked: the urgent clear acts only while that is on, and each place that turns it on offers it.
+    /// </summary>
+    public bool UrgentClearToAsk() => AutoClearUrgentAsk && !AutoClearUrgent && AutoClearEnabled && (AutoClearEveryHours > 0 || AutoClearPoolGb > 0);
 
-    /// <summary>The urgent clear as a place that turns automatic clearing on offers it.</summary>
-    public bool UrgentAsOffered() => AutoClearUrgent;
+    /// <summary>
+    /// The urgent clear as a place that turns automatic clearing on offers it (setup's switch, Settings' box, the hourly
+    /// clear's and the RAMMap task's cards): as set; and while it is still to be chosen after an upgrade
+    /// (<see cref="AutoClearUrgentAsk"/>) with automatic clearing off, at its default, on, as for a new install. With
+    /// automatic clearing on and its question not answered yet, off, as it is in effect.
+    /// </summary>
+    public bool UrgentAsOffered() => AutoClearUrgent || (AutoClearUrgentAsk && !AutoClearEnabled);
     /// <summary>
     /// Add a CPU trace (sampling with stacks, DPC/ISR, context switches) to Capture now, and (with <see cref="DeeperCapture"/>)
     /// record one when the lag probe trips. Off by default: a 30 s CPU trace with stacks lags a busy PC itself.
@@ -421,10 +439,28 @@ public sealed class Settings
             if (s.SettingsVersion < 3) s.CpuTraceEnabled = false;
             // Every saved file before v4 says redactCopies: false (the old default, written out by Save): not a choice.
             if (s.SettingsVersion < 4) s.RedactCopies = true;
+            // A file without the urgent clear is from a version before it (every file up to 1.0.0): an upgrade. It reads
+            // off until its owner chooses, and is still to be chosen (asked about at a start while automatic clearing is
+            // on). By the key, not the format version: a build that had it saved version 4 too.
+            if (!Holds(json, "autoClearUrgent")) (s.AutoClearUrgent, s.AutoClearUrgentAsk) = (false, true);
         }
         s.SettingsVersion = CurrentSettingsVersion;
         s.Normalize();
         return s;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="json"/>'s object holds <paramref name="name"/>, by its exact name, as the serializer matches
+    /// names. Asked only of a text the serializer has read; one that cannot be parsed again counts as not holding it.
+    /// </summary>
+    private static bool Holds(string json, string name)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+            return doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty(name, out _);
+        }
+        catch (JsonException) { return false; }
     }
 
     public void Save(string path)
@@ -449,6 +485,9 @@ public sealed class Settings
         AutoClearEveryHours = double.IsFinite(AutoClearEveryHours) ? Math.Clamp(AutoClearEveryHours, 0, 24 * 7) : 1;
         AutoClearMinMinutes = double.IsFinite(AutoClearMinMinutes) ? Math.Clamp(AutoClearMinMinutes, 30, 24 * 60) : 30; // at most once per 30 min
         AutoClearMode = AutoClearMode is "lowpriority" or "standby" ? AutoClearMode : "auto";
+        // Still to be chosen only while the urgent clear is off: once it is on (chosen, or turned on in the Advanced
+        // settings), nothing is left to ask.
+        if (AutoClearUrgent) AutoClearUrgentAsk = false;
         // The non-paged alert's two limits also gate the urgent clear (an elevated purge): never at any pool, rising or not.
         NonPagedTotalAlertBytes = Math.Max(NonPagedTotalAlertBytes, MinNonPagedAlertBytes);
         NonPagedTotalRiseBytesPer10Min = Math.Max(NonPagedTotalRiseBytesPer10Min, MinNonPagedRiseBytes);
