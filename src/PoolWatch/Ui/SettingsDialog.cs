@@ -152,7 +152,10 @@ internal sealed class SettingsDialog : Form
             Row(first, _shortcutAnswer, indent, bottom: 10);
         }
 
-        // The second column: when PoolWatch clears the cache, its three rules by name, one under another.
+        // The second column: when PoolWatch clears the cache, its three rules by name, one under another. It is the form's
+        // tallest: with the urgent clear's box and the line under them whole (what turning it on does to a RAMMap task of
+        // your own is said in sight, not only in a tooltip), its rows are as close as the notifications' are, so the form
+        // still fits a 1024 x 600 screen.
         var second = Column();
         second.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
         Row(second, Heading("Automatic cache clearing"));
@@ -162,15 +165,15 @@ internal sealed class SettingsDialog : Form
         var rules = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         foreach (var rule in new[] { _fields.Schedule, _fields.PoolSize, _fields.Either })
         {
-            rule.Margin = new Padding(0, 0, 0, S(2));
+            rule.Margin = Padding.Empty;
             rules.Controls.Add(rule);
         }
         _every = Line(new Label { Text = "Every", AutoSize = true }, _fields.Hours, new Label { Text = "hours", AutoSize = true });
         _over = Line(new Label { Text = "When the kernel pool reaches", AutoSize = true }, _fields.PoolGb, new Label { Text = "GB", AutoSize = true });
         Row(second, rules, indent * 2);
-        Row(second, _every, indent);
-        Row(second, _over, indent);
-        Row(second, _fields.Urgent, indent, top: 2);
+        Row(second, _every, indent, bottom: 2);
+        Row(second, _over, indent, bottom: 2);
+        Row(second, _fields.Urgent, indent);
         Row(second, _clearHint, indent, bottom: 10);
         _clearFields.AddRange([rules, _every, _over, _fields.Urgent]);
         _tips.SetToolTip(_fields.AutoClear, SimpleSettings.AutoClearTip);
