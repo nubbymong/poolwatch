@@ -19,7 +19,7 @@ internal sealed class FakeLinkSystem : ILinkSystem
     private static readonly StringComparer Case = StringComparer.OrdinalIgnoreCase;
 
     public string AppData { get; init; } = @"C:\Users\someone\AppData\Roaming";
-    public string LocalAppData { get; init; } = @"C:\Users\someone\AppData\Local";
+    public string LocalFolder { get; init; } = @"C:\Users\someone\AppData\Local";
     public string Profile { get; init; } = @"C:\Users\someone";
     public List<string> Packages { get; } = ["Claude_5.11492.5.0_x64__pzs8sxrjxfjjc"];
     public Dictionary<string, string> Env { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -35,9 +35,9 @@ internal sealed class FakeLinkSystem : ILinkSystem
     {
         Env["USERPROFILE"] = Profile;
         Env["APPDATA"] = AppData;
-        Env["LOCALAPPDATA"] = LocalAppData;
+        Env["LOCALAPPDATA"] = LocalFolder;
         Real.Add(AppData + @"\desktop.ini");
-        Real.Add(LocalAppData + @"\desktop.ini");
+        Real.Add(LocalFolder + @"\desktop.ini");
     }
 
     public IReadOnlyList<string> PackageFullNames() => Packages;
@@ -196,11 +196,11 @@ public sealed class AppDataLinksAppTests : IDisposable
     {
         _pc.Link(_pc.AppData + @"\Example", @"D:\Example");
         _pc.Real.Add(@"D:\Example\bin\tool.exe");
-        _pc.Link(_pc.LocalAppData + @"\Programs\Rel\bin", @"..\..\RelTool\bin", targetThere: false);
-        _pc.Real.Add(_pc.LocalAppData + @"\RelTool\bin\tool.exe");
+        _pc.Link(_pc.LocalFolder + @"\Programs\Rel\bin", @"..\..\RelTool\bin", targetThere: false);
+        _pc.Real.Add(_pc.LocalFolder + @"\RelTool\bin\tool.exe");
         _pc.Values.Set(EnvScope.User, "Path", @"%APPDATA%\Example\bin;%LOCALAPPDATA%\Programs\Rel\bin", expand: true);
         var rows = Scan().Findings.Where(f => f.Kind == LinkKind.PathEntry).ToList();
-        Assert.Equal([@"D:\Example\bin", _pc.LocalAppData + @"\RelTool\bin"], rows.Select(r => r.Target));
+        Assert.Equal([@"D:\Example\bin", _pc.LocalFolder + @"\RelTool\bin"], rows.Select(r => r.Target));
         Assert.Equal([@"%APPDATA%\Example", @"%LOCALAPPDATA%\Programs\Rel\bin"], rows.Select(r => r.Link)); // the link itself, where it is
     }
 
@@ -218,9 +218,9 @@ public sealed class AppDataLinksAppTests : IDisposable
     [Fact]
     public void AFolderReachedThroughAnotherLinkUnderAppDataIsNotWrittenOnThePath()
     {
-        _pc.Link(_pc.LocalAppData + @"\Programs\Tool\bin", _pc.LocalAppData + @"\Tool\current\bin", targetThere: false);
-        _pc.Link(_pc.LocalAppData + @"\Tool\current", _pc.LocalAppData + @"\Tool\1.2");
-        _pc.Real.Add(_pc.LocalAppData + @"\Tool\1.2\bin\tool.exe");
+        _pc.Link(_pc.LocalFolder + @"\Programs\Tool\bin", _pc.LocalFolder + @"\Tool\current\bin", targetThere: false);
+        _pc.Link(_pc.LocalFolder + @"\Tool\current", _pc.LocalFolder + @"\Tool\1.2");
+        _pc.Real.Add(_pc.LocalFolder + @"\Tool\1.2\bin\tool.exe");
         _pc.Values.Set(EnvScope.User, "Path", @"%LOCALAPPDATA%\Programs\Tool\bin", expand: true);
         var row = Row(LinkKind.PathEntry);
         Assert.Null(row.Target);
@@ -243,7 +243,7 @@ public sealed class AppDataLinksAppTests : IDisposable
     [Fact]
     public void WingetsLinksFolderOnThePathIsNamedWithItsLinks()
     {
-        string links = _pc.LocalAppData + @"\Microsoft\WinGet\Links";
+        string links = _pc.LocalFolder + @"\Microsoft\WinGet\Links";
         _pc.Link(links + @"\rg.exe", @"C:\Users\someone\AppData\Local\Microsoft\WinGet\Packages\rg\rg.exe", targetThere: false);
         _pc.Link(links + @"\fd.exe", @"C:\Users\someone\AppData\Local\Microsoft\WinGet\Packages\fd\fd.exe", targetThere: false);
         _pc.Values.Set(EnvScope.User, "Path", @"%LOCALAPPDATA%\Microsoft\WinGet\Links", expand: true);
@@ -259,7 +259,7 @@ public sealed class AppDataLinksAppTests : IDisposable
         _pc.Link(python + @"\cpython-3.12-windows-x86_64-none", "cpython-3.12.13-windows-x86_64-none", targetThere: false);
         _pc.Real.Add(python + @"\cpython-3.12.13-windows-x86_64-none\python.exe");
         _pc.Values.Set(EnvScope.User, LinkFinder.UvCache, @"%LOCALAPPDATA%\uv\cache");
-        _pc.Env[LinkFinder.UvCache] = _pc.LocalAppData + @"\uv\cache";
+        _pc.Env[LinkFinder.UvCache] = _pc.LocalFolder + @"\uv\cache";
         var uv = Row(LinkKind.Uv);
         Assert.Equal((1, false), (uv.Count, uv.Moved));
         Assert.Equal(["cpython-3.12-windows-x86_64-none"], uv.Names);
@@ -277,7 +277,7 @@ public sealed class AppDataLinksAppTests : IDisposable
     [Fact]
     public void PnpmAndTheCodexToolKeptUnderAppDataAreOfferedTheirVariable()
     {
-        _pc.Real.Add(_pc.LocalAppData + @"\pnpm\global\5\node_modules\x");
+        _pc.Real.Add(_pc.LocalFolder + @"\pnpm\global\5\node_modules\x");
         var rows = Scan().Findings;
         Assert.Equal([LinkFinder.PnpmHome], rows.Single(f => f.Kind == LinkKind.Pnpm).EnvSettings.Select(s => s.Name));
         Assert.Equal([new EnvSetting(LinkFinder.CodexInstall, @"C:\Users\someone\.codex\bin", null)], rows.Single(f => f.Kind == LinkKind.Codex).EnvSettings);
@@ -309,7 +309,7 @@ public sealed class AppDataLinksAppTests : IDisposable
         Assert.Null(AppDataLinkFinder.Absolute(@"\\?\UNC\s\x", @"C:\y"));
         Assert.Null(AppDataLinkFinder.Absolute(@"\??\Volume{1}\x", @"C:\y"));
         Assert.Equal(@"C:\a\x", AppDataLinkFinder.Absolute(@"..\x", @"C:\a\b"));
-        Assert.Equal(_pc.LocalAppData + @"\y", AppDataLinkFinder.Expanded(@" ""%LOCALAPPDATA%\y\"" ", expand: true, _pc.Env));
+        Assert.Equal(_pc.LocalFolder + @"\y", AppDataLinkFinder.Expanded(@" ""%LOCALAPPDATA%\y\"" ", expand: true, _pc.Env));
     }
 
     // ------------------------------------------------------------------ replacing a PATH entry
@@ -490,6 +490,41 @@ public sealed class AppDataLinksAppTests : IDisposable
         Assert.Empty(_f.Records.All());
     }
 
+    /// <summary>
+    /// The real look on a junction of the test's own, in its TEMP folder (nothing outside it is opened or changed): the
+    /// junction is a link whose target is read through its own handle, what is through it is followed, and what is not
+    /// there is not there.
+    /// </summary>
+    [Fact]
+    public void TheRealLookReadsAJunctionsTargetThroughItsOwnHandle()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "pw-links-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string target = Path.Combine(root, "target"), link = Path.Combine(root, "link");
+            Directory.CreateDirectory(Path.Combine(target, "bin"));
+            Links.Junction(link, target);
+            var pc = new WindowsLinkSystem();
+            var look = pc.Look(link);
+            Assert.Equal(LinkState.Link, look.State);
+            string? leads = AppDataLinkFinder.Absolute(look.Target, root);
+            Assert.NotNull(leads);
+            Assert.True(NoFollow.SamePath(NoFollow.ResolvedPath(leads, dir: true), NoFollow.ResolvedPath(target, dir: true)!), $"{look.Target} is not {target}");
+            Assert.Equal(LinkState.Plain, pc.Look(target).State);
+            Assert.Equal(LinkState.Plain, pc.Look(Path.Combine(link, "bin")).State); // the folder in it, through the link
+            Assert.Equal(LinkState.NotThere, pc.Look(Path.Combine(root, "none")).State);
+            Assert.Equal(LinkState.NotThere, pc.Look(Path.Combine(root, "none", "deeper")).State);
+            Assert.True(NoFollow.SamePath(pc.Resolved(link), NoFollow.ResolvedPath(target, dir: true)!));
+            Assert.Null(pc.Resolved(Path.Combine(root, "none")));
+            Assert.Equal(["bin"], pc.Folders(link, 10).Select(f => Path.GetFileName(f)));
+            Assert.Equal(1, pc.LinksIn(root, 10));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
     // ------------------------------------------------------------------ the registry key, the watch, the window
 
     [Fact]
@@ -562,7 +597,7 @@ public sealed class AppDataLinksAppTests : IDisposable
     [Fact]
     public async Task TheGuidedFixShowsTheStepsLeftWithAPromptThatNamesNoUser()
     {
-        _pc.Real.Add(_pc.LocalAppData + @"\pnpm\global\5\node_modules\x");
+        _pc.Real.Add(_pc.LocalFolder + @"\pnpm\global\5\node_modules\x");
         var pnpm = Row(LinkKind.Pnpm);
         var yes = new Answers(true);
         string said = await View().Fix(pnpm, yes);

@@ -11,6 +11,9 @@ namespace PoolWatch.Core.Links;
 public static class LinkWords
 {
     public const string WindowTitle = "Links under AppData";
+
+    /// <summary>The account's local AppData folder as the window and the prompt write it, its variable: words only, never a path the code opens.</summary>
+    public const string LocalVariable = "%LOCALAPPDATA%";
     public const string Lead = "Inside the Claude and Codex desktop apps, every open through a junction or link under AppData keeps a small " +
                                "block of the kernel pool until Windows restarts. These are the links PoolWatch found that the apps' tools go through.";
     public const string NothingFound = "PoolWatch found no link under AppData on your PATH or in uv, pnpm or the Codex command-line tool.";
@@ -118,7 +121,7 @@ public static class LinkWords
         LinkKind.Uv => "rebuild the venvs and uv tools made before (uv venv -p with an exact version), then remove the old links (rmdir removes the " +
                        "link only): 0uternet did this.",
         LinkKind.Pnpm when f.EnvSettings.Count > 0 => "set PNPM_HOME to a folder outside AppData, then reinstall your global packages: that measured 0 " +
-            @"(peterlau03). pnpm's own settings stay in %LOCALAPPDATA%\pnpm\config. " + Guided,
+            $@"(peterlau03). pnpm's own settings stay in {LocalVariable}\pnpm\config. " + Guided,
         LinkKind.Pnpm => "reinstall your global packages so they are in pnpm's new home (peterlau03).",
         LinkKind.Codex when f.EnvSettings.Count > 0 => "set CODEX_INSTALL_DIR to a folder outside AppData, so the installer makes its link there " +
             "and codex update stops putting the one under AppData back (peterlau03). " + Guided,
@@ -173,14 +176,14 @@ public static class LinkWords
             "Quit the Claude and Codex apps fully, and open a new terminal outside them, so it sees the new variable.",
             "Put the new pnpm home on your PATH: run pnpm setup and check that it names the new folder, or add the folder to your PATH yourself.",
             "Reinstall each global package (pnpm add -g and its name). A terminal opened before the change still lists the old ones with pnpm ls -g.",
-            @"Once nothing needs it, remove the old %LOCALAPPDATA%\pnpm entry from your PATH. pnpm's own settings stay in %LOCALAPPDATA%\pnpm\config.",
+            $@"Once nothing needs it, remove the old {LocalVariable}\pnpm entry from your PATH. pnpm's own settings stay in {LocalVariable}\pnpm\config.",
             "Start the Claude and Codex apps again.",
         ],
         _ =>
         [
             "Quit the Claude and Codex apps fully, and open a new terminal outside them, so it sees the new variable.",
             "Run codex update (or the Codex install command again): it makes its link in the new folder, outside AppData, and puts that folder on your PATH.",
-            @"Remove the old %LOCALAPPDATA%\Programs\OpenAI\Codex\bin entry from your PATH, or let PoolWatch's AppData links window replace it.",
+            $@"Remove the old {LocalVariable}\Programs\OpenAI\Codex\bin entry from your PATH, or let PoolWatch's AppData links window replace it.",
             "Start the Claude and Codex apps again.",
         ],
     };
@@ -207,7 +210,7 @@ public static class LinkWords
         var sb = new StringBuilder();
         sb.Append("Please help me finish a fix that PoolWatch started on this Windows PC.\n\n");
         sb.Append("The problem: inside the Claude desktop app and the Codex desktop app (Microsoft Store packages), every open of a file or folder through ")
-          .Append("a junction or symbolic link located under %APPDATA% or %LOCALAPPDATA% leaks one block of the kernel's non-paged pool (pool tag NtFC) ")
+          .Append($"a junction or symbolic link located under %APPDATA% or {LocalVariable} leaks one block of the kernel's non-paged pool (pool tag NtFC) ")
           .Append("until Windows restarts. It is a bug in bindflt.sys. The measurements and the fixes that measured 0 are in ").Append(LinkFinder.IssueUrl).Append(".\n\n");
         sb.Append("PoolWatch has set these user environment variables (leave them as they are):\n");
         foreach (var s in set) sb.Append("- ").Append(s.Name).Append(" = ").Append(LinkPaths.InProfileWords(s.Value, profile)).Append('\n');

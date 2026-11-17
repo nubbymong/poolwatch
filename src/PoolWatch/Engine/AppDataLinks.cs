@@ -22,7 +22,7 @@ internal interface ILinkSystem
 {
     /// <summary>The account's %APPDATA% (Roaming), %LOCALAPPDATA% and profile folders, from Windows' known folders.</summary>
     string AppData { get; }
-    string LocalAppData { get; }
+    string LocalFolder { get; }
     string Profile { get; }
     /// <summary>The account's Store package full names (the per-user AppModel package repository).</summary>
     IReadOnlyList<string> PackageFullNames();
@@ -50,7 +50,7 @@ internal sealed class WindowsLinkSystem : ILinkSystem
     private const string PackagesKey = @"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
 
     public string AppData { get; } = System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData);
-    public string LocalAppData { get; } = System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData);
+    public string LocalFolder { get; } = System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData);
     public string Profile { get; } = System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
     public IEnvironmentStore Store => WindowsEnvironmentStore.Instance;
 
@@ -115,17 +115,17 @@ internal static class AppDataLinkFinder
     public const string PathName = "Path";
 
     /// <summary>The account's AppData folders, as full paths without a closing "\".</summary>
-    internal sealed record Roots(string AppData, string LocalAppData, string Profile)
+    internal sealed record Roots(string AppData, string LocalFolder, string Profile)
     {
-        public static Roots Of(ILinkSystem s) => new(Full(s.AppData), Full(s.LocalAppData), Full(s.Profile));
+        public static Roots Of(ILinkSystem s) => new(Full(s.AppData), Full(s.LocalFolder), Full(s.Profile));
 
         /// <summary>The AppData folder <paramref name="path"/> is below, or null.</summary>
-        public string? Holding(string path) => LinkPaths.Under(path, AppData) ? AppData : LinkPaths.Under(path, LocalAppData) ? LocalAppData : null;
+        public string? Holding(string path) => LinkPaths.Under(path, AppData) ? AppData : LinkPaths.Under(path, LocalFolder) ? LocalFolder : null;
 
         /// <summary>The path as the window shows it: the AppData folder at its start as %APPDATA% or %LOCALAPPDATA%.</summary>
         public string Shown(string path) =>
             LinkPaths.Under(path, AppData) ? "%APPDATA%" + path[AppData.Length..]
-            : LinkPaths.Under(path, LocalAppData) ? "%LOCALAPPDATA%" + path[LocalAppData.Length..]
+            : LinkPaths.Under(path, LocalFolder) ? LinkWords.LocalVariable + path[LocalFolder.Length..]
             : path;
 
         private static string Full(string path) => path.Length == 0 ? "" : Path.GetFullPath(path).TrimEnd('\\');
@@ -138,7 +138,7 @@ internal static class AppDataLinkFinder
         bool claude = packages.Any(LinkApps.IsClaude), codex = packages.Any(LinkApps.IsCodex);
         if (!claude && !codex) return new LinkScan(now, false, false, []);
         var roots = Roots.Of(s);
-        if (roots.AppData.Length == 0 || roots.LocalAppData.Length == 0) return new LinkScan(now, claude, codex, []);
+        if (roots.AppData.Length == 0 || roots.LocalFolder.Length == 0) return new LinkScan(now, claude, codex, []);
         var env = s.Environment();
         var found = new List<LinkFinding>();
         foreach (var scope in new[] { EnvScope.User, EnvScope.Machine })
@@ -175,7 +175,7 @@ internal static class AppDataLinkFinder
         string entry = entries[index];
         if (Expanded(entry, value.Expand, env) is not { } path) return null;
         var row = new LinkFinding { Kind = LinkKind.PathEntry, Scope = scope, Index = index, Entry = entry, Link = roots.Shown(path) };
-        if (path.Equals(Path.Join(roots.LocalAppData, @"Microsoft\WinGet\Links"), StringComparison.OrdinalIgnoreCase))
+        if (path.Equals(Path.Join(roots.LocalFolder, @"Microsoft\WinGet\Links"), StringComparison.OrdinalIgnoreCase))
         {
             int links = s.LinksIn(path, LinkFinder.MaxFolders);
             return links > 0 ? row with { Kind = LinkKind.WinGetLinks, Count = links } : null;
@@ -274,7 +274,7 @@ internal static class AppDataLinkFinder
     {
         string? home = Effective(env, LinkFinder.PnpmHome);
         if (Outside(roots, home)) return null;
-        string folder = home ?? Path.Join(roots.LocalAppData, "pnpm");
+        string folder = home ?? Path.Join(roots.LocalFolder, "pnpm");
         if (s.Look(Path.Join(folder, "global")).State == LinkState.NotThere) return null;
         return new LinkFinding { Kind = LinkKind.Pnpm, Link = roots.Shown(folder), EnvSettings = ToSet(s, roots, env, LinkFinder.PnpmHome) };
     }
@@ -284,7 +284,7 @@ internal static class AppDataLinkFinder
     {
         string? dir = Effective(env, LinkFinder.CodexInstall);
         if (Outside(roots, dir)) return null;
-        string bin = dir ?? Path.Join(roots.LocalAppData, @"Programs\OpenAI\Codex\bin");
+        string bin = dir ?? Path.Join(roots.LocalFolder, @"Programs\OpenAI\Codex\bin");
         if (s.Look(bin).State == LinkState.NotThere) return null;
         return new LinkFinding { Kind = LinkKind.Codex, Link = roots.Shown(bin), EnvSettings = ToSet(s, roots, env, LinkFinder.CodexInstall) };
     }

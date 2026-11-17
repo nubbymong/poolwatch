@@ -209,7 +209,8 @@ public class AppDataLinksTests
         Assert.All(records, r => Assert.Null(ChangeRecordFile.Invalid(r)));
         Assert.Equal(records, ChangeRecordFile.Parse(ChangeRecordFile.ToJson(records)));
         // Each replacement of an entry is a record of its own, even of the same entry: a tool can put it back in between.
-        Assert.NotEqual(PathRecord().Id, (PathRecord() with { ChangedUtc = When.AddMinutes(1) }).Id);
+        Assert.NotEqual(ChangeIds.PathEntry(EnvScopes.User, @"%LOCALAPPDATA%\Programs\Example\bin", When),
+            ChangeIds.PathEntry(EnvScopes.User, @"%LOCALAPPDATA%\Programs\Example\bin", When.AddMinutes(1)));
     }
 
     public static TheoryData<string, ChangeRecord> Refused => new()
