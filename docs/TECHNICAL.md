@@ -382,6 +382,22 @@ The hashes in `SHA256SUMS.txt` are in lower case and `Get-FileHash` prints upper
 changed file still names its signer, so check `Status` as well as the thumbprint. When the certificate is renewed, its
 thumbprint changes; this section then shows the new one.
 
+Releases after 1.0.0 also carry their SLSA build provenance, `PoolWatch-<tag>.intoto.jsonl`: a statement of the
+SHA-256 of the setup, both zips and `SHA256SUMS.txt`, and of the workflow run and the commit that built them, signed
+by the release workflow through GitHub's artifact attestations (Sigstore). GitHub keeps the same attestation. With the
+[GitHub CLI](https://cli.github.com/), in PowerShell:
+
+```powershell
+gh attestation verify .\PoolWatch-vX.Y.Z-setup-win-x64.exe --repo nubbymong/poolwatch --signer-workflow nubbymong/poolwatch/.github/workflows/ci.yml --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners
+```
+
+Put the name of the file you downloaded in place of `PoolWatch-vX.Y.Z-setup-win-x64.exe`, and the release's tag (the
+`vX.Y.Z` in its file names) in `refs/tags/vX.Y.Z`. With `--source-ref`, it accepts only provenance from the release
+workflow's run for that tag, not from a run on a branch or a pull request; with `--deny-self-hosted-runners`, only
+provenance made on GitHub's own runners, where the release is built. This asks GitHub for the attestation; add
+`--bundle .\PoolWatch-vX.Y.Z.intoto.jsonl` (the release's own copy) to check against that file instead. It fails for a
+file the release workflow did not attest.
+
 ## Build from source
 
 You need the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0). The code builds on any OS
