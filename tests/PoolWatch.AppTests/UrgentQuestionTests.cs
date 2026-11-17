@@ -254,7 +254,7 @@ public sealed class UrgentQuestionTests : IDisposable
         OnShown(closed);
         closed.Press(UrgentAnswer.TurnOn);
         closed.Dismissed();
-        Assert.Null(Assert.Single(closedAnswers));
+        Assert.False(Assert.Single(closedAnswers).HasValue);
     }
 
     /// <summary>

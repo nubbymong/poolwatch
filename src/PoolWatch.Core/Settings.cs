@@ -135,7 +135,8 @@ public sealed class Settings
     /// <summary>
     /// The urgent clear: while automatic clearing is on, a clear at once when the non-paged pool is over its alert and still
     /// rising; the full one, or the light one in "lowpriority" mode (<see cref="Cache.ClearPolicy.UrgentNow"/>). On for a
-    /// new install; after an upgrade from a version without it, off until it is chosen (<see cref="AutoClearUrgentAsk"/>).
+    /// new install; after an upgrade from a version without it, off until it is chosen (<see cref="AutoClearUrgentAsk"/>);
+    /// off in a --config file that does not name it (<see cref="Parse"/>).
     /// </summary>
     [Description("With automatic clearing on, a clear at once when the non-paged pool is over its alert and still rising: full (light in lowpriority mode), 10 minutes or more apart. On by default (off after an upgrade until chosen). Applied when you save.")]
     public bool AutoClearUrgent { get; set; } = true;
@@ -144,9 +145,10 @@ public sealed class Settings
     /// <c>autoClearUrgent</c>, which <see cref="Parse"/> reads off), until it is chosen: by the question PoolWatch asks at a
     /// start while automatic clearing is on (<see cref="UrgentClearToAsk"/>; Turn on or Leave off, while Decide later leaves
     /// it to be chosen), or where automatic clearing is turned on, which offers it (<see cref="UrgentAsOffered"/>: setup's
-    /// switch, Settings' box, the hourly clear's and the RAMMap task's cards). Never set on a new install, nor by reading a
-    /// --config file, which is read as written. Cleared once the urgent clear is on (<see cref="Normalize"/>): nothing is
-    /// left to ask then. Written only while set, so a file without it reads it unset.
+    /// switch, Settings' box, the hourly clear's and the RAMMap task's cards). Never set on a new install, nor in a
+    /// --config file, which is read-only, so nothing is asked (one that does not name the urgent clear reads it off).
+    /// Cleared once the urgent clear is on (<see cref="Normalize"/>): nothing is left to ask then. Written only while set,
+    /// so a file without it reads it unset.
     /// </summary>
     [Browsable(false)] // not a choice: PoolWatch keeps it
     [Description("After an upgrade from a version without the urgent clear (AutoClearUrgent): true until it is chosen, so PoolWatch asks about it at a start while automatic clearing is on. PoolWatch keeps it; it is not a choice.")]
@@ -420,7 +422,9 @@ public sealed class Settings
     /// True for a file given with <c>--config</c>. The version migrations below exist because
     /// PoolWatch's own Save wrote every setting, old defaults included, into the default settings.json, so an old value
     /// there is not a choice. A hand-written --config file without <c>settingsVersion</c> holds only what its author
-    /// chose (a CI config asking for <c>cpuTraceEnabled: true</c>), so it is read exactly as written, never migrated.
+    /// chose (a CI config asking for <c>cpuTraceEnabled: true</c>), so it is read exactly as written, never migrated, but
+    /// for the urgent clear: one that does not name <c>autoClearUrgent</c> reads it off, and it is never still to be
+    /// chosen (the file is read-only, so nothing is asked).
     /// </param>
     public static Settings Load(string path, bool explicitConfig = false) =>
         File.Exists(path) ? Parse(File.ReadAllText(path), explicitConfig) : new Settings();
@@ -443,6 +447,14 @@ public sealed class Settings
             // off until its owner chooses, and is still to be chosen (asked about at a start while automatic clearing is
             // on). By the key, not the format version: a build that had it saved version 4 too.
             if (!Holds(json, "autoClearUrgent")) (s.AutoClearUrgent, s.AutoClearUrgentAsk) = (false, true);
+        }
+        else
+        {
+            // A --config file is read-only, so the urgent clear is never asked about (no answer could be kept), and one
+            // that does not name it reads it off: pointed at a settings.json that 1.0.0 wrote with automatic clearing on,
+            // it would otherwise turn an elevated purge on that its owner was never asked about.
+            if (!Holds(json, "autoClearUrgent")) s.AutoClearUrgent = false;
+            s.AutoClearUrgentAsk = false;
         }
         s.SettingsVersion = CurrentSettingsVersion;
         s.Normalize();
