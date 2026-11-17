@@ -183,22 +183,32 @@ public static class ChangeWords
     /// <summary>A startup app's title in the window: "Helper at sign-in".</summary>
     public static string StartupTitle(string name) => name + " at sign-in";
 
-    /// <summary>"every hour, or at 8 GB", "every 30 minutes", "when the kernel pool reaches 8 GB".</summary>
-    // Tests first: a stub with the old behaviour, so the new tests build; the fix replaces it.
-    public static string AutoClearWhen(double everyHours, double poolGb, bool urgent) => AutoClearWhen(everyHours, poolGb);
-
-    public static string AutoClearWhen(double everyHours, double poolGb)
+    /// <summary>
+    /// "every hour, or at 8 GB", "every 30 minutes", "when the kernel pool reaches 8 GB"; with the urgent clear on
+    /// (<paramref name="urgent"/>) and a rule for it to go with, <see cref="AutoClearUrgent"/> after it ("every hour, or
+    /// at 8 GB, and at once while the non-paged pool is over its limit and rising").
+    /// </summary>
+    public static string AutoClearWhen(double everyHours, double poolGb, bool urgent = false)
     {
         string? every = everyHours > 0 ? Every(everyHours) : null;
         string? size = poolGb > 0 ? Number(poolGb) + " GB" : null;
-        return (every, size) switch
+        string rules = (every, size) switch
         {
             ({ } e, { } s) => $"{e}, or at {s}",
             ({ } e, null) => e,
             (null, { } s) => $"when the kernel pool reaches {s}",
             _ => "on, but with no schedule and no size rule",
         };
+        // With neither rule, the urgent clear does not run either (ClearPolicy.UrgentNow).
+        return urgent && (every is not null || size is not null) ? rules + AutoClearUrgent : rules;
     }
+
+    /// <summary>
+    /// The urgent clear, after the words of a rule that turns automatic clearing on (the hourly clear's card, replacing a
+    /// RAMMap task, setup's Standby cache step, the Active changes row): it is on by default, so a click that turns
+    /// clearing on turns it on too, and these say so.
+    /// </summary>
+    public const string AutoClearUrgent = ", and at once while the non-paged pool is over its limit and rising";
 
     /// <summary>
     /// "service · was Automatic and running", "service · set to its Windows default · was Manual", with the profile that did

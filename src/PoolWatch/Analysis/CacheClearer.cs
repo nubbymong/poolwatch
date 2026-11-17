@@ -176,7 +176,7 @@ internal sealed class CacheClearer
         long? rise = _nonPagedRise();
         lock (_lock)
             return ClearPolicy.Next(_engine.Settings, pool, now, _history.LastOrDefault()?.TickMs, _poolWatchStartedMs,
-                ClearPolicy.LastPoolClear(_history), status?.CanPurge, status?.LegacyTaskPresent,
+                ClearPolicy.LastPoolClear(_history, _engine.Settings), status?.CanPurge, status?.LegacyTaskPresent,
                 experimentRunning, Busy || _history.Any(r => !r.Done), ClearPolicy.EscalateNow(_history, _engine.Settings, now),
                 ClearPolicy.UrgentNow(_history, _engine.Settings, pool, rise, now));
     }
