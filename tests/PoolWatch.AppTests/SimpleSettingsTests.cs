@@ -307,6 +307,13 @@ public class SimpleSettingsTests
             var urgent = type.GetConstructors().Single(c => c.GetParameters().Any(p => p.Name == "Urgent")).GetParameters().Single(p => p.Name == "Urgent");
             Assert.False(urgent.HasDefaultValue, $"{type.Name}'s Urgent has a default");
         }
+        // Nor does whether it is still to be chosen after an upgrade: one left out would settle a choice never made.
+        var ask = typeof(AutoClearSettings).GetConstructors().Single(c => c.GetParameters().Any(p => p.Name == "UrgentAsk")).GetParameters().Single(p => p.Name == "UrgentAsk");
+        Assert.False(ask.HasDefaultValue, "AutoClearSettings' UrgentAsk has a default");
+        var unchosen = new Settings { AutoClearUrgent = false, AutoClearUrgentAsk = true };
+        var chosen = new Settings { AutoClearUrgent = false };
+        AutoClearSettings.Of(unchosen).ApplyTo(chosen);
+        Assert.True(chosen.AutoClearUrgentAsk);
         var off = new Settings { AutoClearUrgent = false };
         Assert.False(SimpleSettings.From(off).Urgent);
         Assert.False(AutoClearSettings.Of(off).Urgent);
