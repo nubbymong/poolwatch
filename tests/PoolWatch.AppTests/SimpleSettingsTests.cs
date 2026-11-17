@@ -321,7 +321,7 @@ public class SimpleSettingsTests
         string tray = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "TrayApp.cs"));
         Assert.Contains("_notices.Opened(inc, _live.Running.PoolNotices)", tray);
         Assert.Contains("_notices.TurnedRed(_analysis.Incidents.Open, _live.Running.PoolNotices)", tray);
-        Assert.Contains("PoolCauses.TrayNotice(i, level, lookup, services(), log)", File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "PoolCauses.cs")));
+        Assert.Contains("PoolCauses.TrayNotice(i, level, lookup, services(), log, partOfNonPagedRise)", File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "PoolCauses.cs")));
     }
 
     [Fact]
@@ -433,7 +433,9 @@ public class SimpleSettingsTests
         Assert.Contains("no effect yet", SimpleSettings.DeeperCaptureHint(new Settings()));
         Assert.DoesNotContain("no effect", SimpleSettings.DeeperCaptureHint(new Settings { CaptureOnAlert = true }));
         Assert.DoesNotContain("no effect", SimpleSettings.DeeperCaptureHint(new Settings { CpuTraceEnabled = true }));
-        Assert.StartsWith(SimpleSettings.ClearStutter + " Never more than once every 45 minutes.", SimpleSettings.AutoClearHint(new Settings { AutoClearMinMinutes = 45 }));
+        // The spacing as set, and the urgent clear's own 10 minutes (ClearPolicy.UrgentFloor).
+        Assert.StartsWith(SimpleSettings.ClearStutter + " Never more than once every 45 minutes, or 10 for an urgent clear.", SimpleSettings.AutoClearHint(new Settings { AutoClearMinMinutes = 45 }));
+        Assert.Equal(TimeSpan.FromMinutes(10), Core.Cache.ClearPolicy.UrgentFloor);
     }
 
     [Fact]

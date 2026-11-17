@@ -73,6 +73,29 @@ public sealed class Detector
     /// <summary>The clears the last evaluation read (<see cref="OwnClears.None"/> before the first or without any).</summary>
     public OwnClears Clears { get; private set; } = OwnClears.None;
 
+    private const long RiseUnknown = long.MinValue;
+    private long _nonPagedRise = RiseUnknown;
+
+    /// <summary>
+    /// The committed non-paged pool's rise over the last 10 minutes at the last evaluation, on the stitch (each own
+    /// clear's drop added back, as the non-paged alert reads it); null before two samples and while PoolWatch's own clear
+    /// is being measured (<see cref="Holding"/>). The urgent clear reads it (<see cref="Cache.ClearPolicy.UrgentNow"/>), on
+    /// the sampler thread after this evaluation, and so does the next-clear line on the UI thread: one 64-bit value, read
+    /// whole.
+    /// </summary>
+    public long? NonPagedRise10Min => Volatile.Read(ref _nonPagedRise) is var r && r != RiseUnknown ? r : null;
+
+    private static readonly IReadOnlySet<PoolTag> NoTags = new HashSet<PoolTag>();
+
+    /// <summary>
+    /// The tags whose non-paged part rose at least <see cref="Settings.GrowingDisplayBytesPer10Min"/> over the last 10
+    /// minutes, on the stitch, while the non-paged pool was over its alert and rising
+    /// (<see cref="Settings.NonPagedTotalAlertBytes"/>, <see cref="Settings.NonPagedTotalRiseBytesPer10Min"/>): the growth that
+    /// is part of that rise. Empty at any other time. Read under the history lock (a growth incident's notice under "Only
+    /// when it needs attention").
+    /// </summary>
+    public IReadOnlySet<PoolTag> NonPagedRisers { get; private set; } = NoTags;
+
     private readonly List<ClearedRetention> _clearedRetentions = [];
 
     /// <summary>
@@ -121,6 +144,8 @@ public sealed class Detector
         Clears = clears;
         Holding = false;
         _clearedRetentions.Clear();
+        Volatile.Write(ref _nonPagedRise, RiseUnknown);
+        NonPagedRisers = NoTags;
         if (n < 2) return alerts;
         var now = h.Times[n - 1];
         long nowMs = h.Ms[n - 1];
@@ -261,16 +286,20 @@ public sealed class Detector
         var total = new long[n - i10];
         for (int i = i10; i < n; i++) total[i - i10] = (long)h.Totals[i].CommittedNonPaged;
         long rise = RiseOf(total);
+        Volatile.Write(ref _nonPagedRise, rise);
         if ((long)totals.CommittedNonPaged > _settings.NonPagedTotalAlertBytes && rise >= _settings.NonPagedTotalRiseBytesPer10Min)
         {
             PoolTag? best = null; long bestGrowth = 0;
+            HashSet<PoolTag>? risers = null;
             foreach (var tag in h.KnownTags)
             {
                 var np = h.TagSeries(tag, i10, nonPagedOnly: true);
                 if (np.Length < 2) continue;
                 long g = RiseOf(np);
                 if (g > bestGrowth) { bestGrowth = g; best = tag; }
+                if (g >= _settings.GrowingDisplayBytesPer10Min) (risers ??= []).Add(tag);
             }
+            NonPagedRisers = risers ?? NoTags;
             if (best is { } b && bestGrowth >= rise / 4)
                 alerts.Add(new Alert(AlertKind.NonPagedTotal, b, now, $"non-paged pool {Fmt.Bytes((long)totals.CommittedNonPaged)} > {Fmt.Bytes(_settings.NonPagedTotalAlertBytes)} and rising ({Fmt.SignedBytes(rise)} in 10 min)",
                     bestGrowth, TimeSpan.FromMinutes(10), h.Times[i10]) { Ms = nowMs, OnsetMs = h.Ms[i10], LimitBytes = _settings.NonPagedTotalAlertBytes });

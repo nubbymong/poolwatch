@@ -20,8 +20,12 @@ internal enum CauseKind { Incident, Tag, Process, Finding }
 
 internal enum RowTone { Normal, Warning, Alert }
 
-/// <summary>A tray notice: its headline as the title (the toast names the app above it), and what it says under it.</summary>
-internal sealed record NoticeText(string Title, string Text);
+/// <summary>
+/// A tray notice: its headline as the title (the toast names the app above it), and what it says under it.
+/// <paramref name="Stays"/>: it stays on screen until you close it (<see cref="StayingNotice"/>: the non-paged pool over
+/// its limit and still rising), where a notice by the clock leaves the screen after a few seconds.
+/// </summary>
+internal sealed record NoticeText(string Title, string Text, bool Stays = false);
 
 /// <summary>
 /// One row of the Pool causes list: what is growing, what it grew, what PoolWatch's own clears freed of it, its net change
@@ -476,13 +480,17 @@ internal static class PoolCauses
     /// <summary>Where a notice that names no cause sends you: its own click opens the window.</summary>
     internal const string ClickForDetails = "Click here to open PoolWatch for details.";
 
+    /// <summary>The same, in the notice that stays, which has an Open PoolWatch button (<see cref="StayingNotice"/>).</summary>
+    internal const string OpenForDetails = "Open PoolWatch for details.";
+
     /// <summary>
     /// The tray's notice when a growth incident opens, in the status line's words, the headline as its title (the toast
     /// names the app above it): "Kernel pool: Open files (File) is growing", then in its text the likely cause by its
     /// friendly name only when the evidence is strong or a trace confirmed it (<see cref="PoolStatusLine.CauseSentence"/>),
     /// else that a click opens PoolWatch for details. The non-paged pool over its limit is the title of that incident's
-    /// notice, and the growth its first sentence. A title too long for a notice (a tag's long description) is
-    /// <see cref="GrowingTitle"/>, and the growth goes into the text. Never an exe, a PID or the detector's rule.
+    /// notice, and the growth its first sentence; that notice stays until it is closed (<see cref="NoticeText.Stays"/>,
+    /// <see cref="StayingNotice"/>), so its way to the details is its button. A title too long for a notice (a tag's long
+    /// description) is <see cref="GrowingTitle"/>, and the growth goes into the text. Never an exe, a PID or the detector's rule.
     /// Null for any other incident: a pool released (often by PoolWatch's own cache clear) needs nothing from you, and
     /// Pool causes lists it. The caller holds the history lock (the incident manager raises its event under it).
     /// </summary>
@@ -491,8 +499,8 @@ internal static class PoolCauses
         if (i.Kind is not (IncidentKind.Growth or IncidentKind.NonPagedTotal)) return null;
         string growing = $"Kernel pool: {TagWords(i.Tag, info)} is growing";
         string cause = FriendlyCause(i, services) is { } c ? PoolStatusLine.CauseSentence(c.name, c.level).TrimStart() : "";
+        if (i.Kind == IncidentKind.NonPagedTotal) return new(NonPagedTitle, $"{growing}. {(cause.Length > 0 ? cause : OpenForDetails)}", Stays: true);
         string then = cause.Length > 0 ? cause : ClickForDetails;
-        if (i.Kind == IncidentKind.NonPagedTotal) return new(NonPagedTitle, $"{growing}. {then}");
         return growing.Length <= MaxNoticeTitle ? new(growing, then) : new(GrowingTitle, $"{growing}. {then}");
     }
 
@@ -501,27 +509,31 @@ internal static class PoolCauses
     /// <paramref name="cause"/> (null: none yet), as the owner set <see cref="Core.Settings.PoolNotices"/>: every one; only
     /// one the tray icon shows red now, by the icon's own rule (UiData.State: the non-paged pool over its limit and still
     /// rising, or a growth whose cause a trace confirmed; a growth that turns red later is told then, by
-    /// <see cref="IncidentNotices.TurnedRed"/>); or none.
+    /// <see cref="IncidentNotices.TurnedRed"/>), and a growth that is part of the rise of a non-paged pool over its limit
+    /// (<paramref name="partOfNonPagedRise"/>: its tag's non-paged part rose with it, <see cref="Core.Detection.Detector.NonPagedRisers"/>),
+    /// which is what that red is about; or none.
     /// </summary>
-    internal static bool NoticeWanted(PoolNoticeLevel level, IncidentKind kind, Confidence? cause) => level switch
+    internal static bool NoticeWanted(PoolNoticeLevel level, IncidentKind kind, Confidence? cause, bool partOfNonPagedRise = false) => level switch
     {
         PoolNoticeLevel.EveryGrowth => true,
-        PoolNoticeLevel.NeedsAttention => UiData.State([(kind, cause)], retained: false) == TrayState.Red,
+        PoolNoticeLevel.NeedsAttention => UiData.State([(kind, cause)], retained: false) == TrayState.Red || (kind == IncidentKind.Growth && partOfNonPagedRise),
         _ => false,
     };
 
     /// <summary>
     /// The tray's handler for an incident that opened: <see cref="IncidentNotice"/> with the tag's description from
     /// <paramref name="lookup"/>, when <paramref name="level"/> (the setting as it is now) wants one (<see
-    /// cref="NoticeWanted"/>); null for no notice, and one held back by the setting is logged. A failure to word it is
-    /// logged, never thrown into the sampler.
+    /// cref="NoticeWanted"/>, with whether the incident's tag is part of the rise of a non-paged pool over its limit now,
+    /// <paramref name="partOfNonPagedRise"/>); null for no notice, and one held back by the setting is logged. A failure to
+    /// word it is logged, never thrown into the sampler.
     /// </summary>
-    internal static NoticeText? TrayNotice(Incident i, PoolNoticeLevel level, Func<PoolTag, TagInfo?> lookup, IReadOnlyList<ServiceEntry> services, Action<string> log)
+    internal static NoticeText? TrayNotice(Incident i, PoolNoticeLevel level, Func<PoolTag, TagInfo?> lookup, IReadOnlyList<ServiceEntry> services, Action<string> log,
+        Func<PoolTag, bool>? partOfNonPagedRise = null)
     {
         try
         {
             if (IncidentNotice(i, lookup(i.Tag), services) is not { } notice) return null;
-            if (NoticeWanted(level, i.Kind, UiData.CauseOf(i)?.level)) return notice;
+            if (NoticeWanted(level, i.Kind, UiData.CauseOf(i)?.level, partOfNonPagedRise?.Invoke(i.Tag) == true)) return notice;
             log($"notice not shown ({level}): {notice.Title}");
             return null;
         }
@@ -798,7 +810,13 @@ internal sealed record HandledBy(string? Schedule, bool GuardWorking)
 /// <param name="lookup">The tag's description (the knowledge base's).</param>
 /// <param name="services">The services running now, for a cause's friendly name.</param>
 /// <param name="log">The engine log: a notice held back by the choice, a failure to word one.</param>
-internal sealed class IncidentNotices(Func<PoolTag, TagInfo?> lookup, Func<IReadOnlyList<ServiceEntry>> services, Action<string> log)
+/// <param name="partOfNonPagedRise">
+/// Whether a tag's growth is part of the rise of a non-paged pool over its limit now (the detector's
+/// <see cref="Core.Detection.Detector.NonPagedRisers"/>, read under the history lock as both calls are): under "Only when
+/// it needs attention" such a growth is told too, as it opens, or at the refresh once it is. None: never.
+/// </param>
+internal sealed class IncidentNotices(Func<PoolTag, TagInfo?> lookup, Func<IReadOnlyList<ServiceEntry>> services, Action<string> log,
+    Func<PoolTag, bool>? partOfNonPagedRise = null)
 {
     /// <summary>Each open incident whose notice was shown, by its id, with the episode it was shown for (its <see cref="Incident.Reopened"/>).</summary>
     private readonly Dictionary<string, int> _told = new(StringComparer.Ordinal);
@@ -809,15 +827,16 @@ internal sealed class IncidentNotices(Func<PoolTag, TagInfo?> lookup, Func<IRead
     /// <summary>An incident opened or re-opened: its notice as <paramref name="level"/> wants it now (<see cref="PoolCauses.TrayNotice"/>), or null.</summary>
     public NoticeText? Opened(Incident i, PoolNoticeLevel level)
     {
-        var notice = PoolCauses.TrayNotice(i, level, lookup, services(), log);
+        var notice = PoolCauses.TrayNotice(i, level, lookup, services(), log, partOfNonPagedRise);
         if (notice is not null) _told[i.Id] = i.Reopened;
         return notice;
     }
 
     /// <summary>
     /// The tray's refresh, with the incidents <paramref name="open"/> now: under <see cref="PoolNoticeLevel.NeedsAttention"/>,
-    /// the notice of each one the tray icon shows red now whose notice this episode was not shown yet; none under the other
-    /// choices (every growth was told as it opened). The incidents no longer open are forgotten.
+    /// the notice of each one the tray icon shows red now, or whose growth is part of the rise of a non-paged pool over its
+    /// limit now, whose notice this episode was not shown yet; none under the other choices (every growth was told as it
+    /// opened). The incidents no longer open are forgotten.
     /// </summary>
     public IReadOnlyList<NoticeText> TurnedRed(IReadOnlyCollection<Incident> open, PoolNoticeLevel level)
     {
@@ -827,7 +846,7 @@ internal sealed class IncidentNotices(Func<PoolTag, TagInfo?> lookup, Func<IRead
         foreach (var i in open)
         {
             if (_told.TryGetValue(i.Id, out int episode) && episode == i.Reopened) continue;
-            if (!PoolCauses.NoticeWanted(level, i.Kind, UiData.CauseOf(i)?.level)) continue;
+            if (!PoolCauses.NoticeWanted(level, i.Kind, UiData.CauseOf(i)?.level, partOfNonPagedRise?.Invoke(i.Tag) == true)) continue;
             _told[i.Id] = i.Reopened; // once, even when it cannot be worded: a failure is logged once, not at every refresh
             try
             {

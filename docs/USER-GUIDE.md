@@ -53,6 +53,9 @@ safe.
 4. **When should PoolWatch empty the standby cache?** **On a schedule** (every 1 hour to begin with), **At a pool
    size** (when the kernel pool reaches 8 GB to begin with), **Whichever comes first** (recommended) or **Decide
    later**, which leaves automatic clearing off: PoolWatch watches the pool and suggests turning it on when it helps.
+   With a choice that clears, a switch under the choices, **Also clear at once if the non-paged pool is over 5 GB and
+   still rising** (on to begin with), adds the urgent clear (see
+   [When the cache is cleared](#when-the-cache-is-cleared)); turn it off there, or later in Settings.
    The step says that video or the mouse may stutter for a few seconds while the cache is emptied. If you already clear
    the cache with a RAMMap task of your own, the step says so: choosing a rule replaces that task, so the two never both
    run, and your task is saved so you can put it back.
@@ -189,9 +192,11 @@ hour, such as a release, a cache clear, a warning or an alert, leaves the cell e
 **Settings** (the Advanced view's header button, or **Settings...** in the tray menu in either view: one window, which
 comes to the front when it is open already) is a short form in plain words: starting at sign-in; update notices;
 automatic cache clearing, by name
-(**On a schedule**, **At a pool size** or **Whichever comes first**, recommended) with how often and at what pool size;
+(**On a schedule**, **At a pool size** or **Whichever comes first**, recommended) with how often and at what pool size,
+and the urgent clear's box under them ([When the cache is cleared](#when-the-cache-is-cleared));
 **Notifications**, which kernel pool notices you get (**Every growth**, the default; **Only when it needs attention**,
-only when the tray icon turns red; or **Off**; the token-leak guard's notices, which need your click, always appear);
+only when the tray icon turns red, and each growth that is part of a non-paged pool over its limit and rising; or
+**Off**; the token-leak guard's notices, which need your click, always appear);
 deeper automatic captures (traces PoolWatch records by itself also record file activity); the token-leak guard; and
 **Records**, what PoolWatch keeps on disk, as setup's Records step asks it: **Reports only** (the default: a report each
 time the pool grows) or **Detailed recording** (the reports, plus a record of everything, all day), with the line of the
@@ -217,6 +222,30 @@ that just then, the message after Save says so, and Active changes lists the set
 signing out also puts it back. A setting the guard found already changed, and did not change itself, is left as it is.
 
 ![Advanced settings: the settings in one grid](screenshots/5-settings-advanced.png)
+
+### When the cache is cleared
+
+With automatic clearing on, PoolWatch empties the standby cache on its schedule (every hour to begin with), when the
+kernel pool reaches its size (8 GB to begin with), whichever comes first, and never twice within 30 minutes.
+
+- **A clear at the size that frees little** (less than a tenth of the pool, or 512 MB) means the pool over the size is
+  not held by the cache: clearing again every 30 minutes would only stutter the PC. So the size rule waits up to 6
+  hours, and the schedule goes on. The wait ends sooner as soon as the pool is held by the cache again: a later clear
+  (on the schedule, by hand or urgent) frees more than that, or the pool grows past what that clear saw by 2 GB or a
+  quarter, whichever is more. The Simple view's line says both ("Next cache clear when the kernel pool reaches
+  10.3 GB, or 8 GB after 03:19").
+- **The urgent clear** (on to begin with; **Also clear at once if the non-paged pool is over its limit and still
+  rising** in Settings, and setup's switch): while the non-paged pool is over its alert level (5 GB to begin with) and
+  rose at least 100 MB in the last 10 minutes, the same as what turns the tray icon red, PoolWatch empties the whole
+  standby cache at once, without waiting for the schedule, the size or the 30 minutes. Never within 10 minutes of a
+  clear, and never while an experiment runs. When an urgent clear frees little, the non-paged pool's growth is not the
+  cache's (a leak, say), and PoolWatch waits until a clear frees more or the pool grows past what that clear saw by
+  2 GB or a quarter, rather than clearing every 10 minutes for nothing. The log, the timeline and the Simple view's
+  line say "urgent" for such a clear.
+
+On a PC with a ReFS Dev Drive that hung, the size rule had waited after a clear that freed 462 MB of 8.23 GB,
+while the next clears freed 1.99 GB and 5.75 GB; the non-paged pool alone reached 11.18 GB and kept rising, with no
+clear for 45 minutes. Both changes above come from that night.
 
 ### Growth and clears
 
@@ -453,12 +482,17 @@ The binoculars by the clock, with a dot in the state's colour:
 - **Grey binoculars**: starting, no reading yet.
 
 When PoolWatch opens an incident for a growth, a notice by the clock says so, with what grows as its title ("Kernel
-pool: Open files (File) is growing", or "Non-paged pool over the limit"). It names a likely cause only when the
-evidence is strong; otherwise it says "Click here to open PoolWatch for details." A pool that falls gives no notice.
-To get fewer, choose under **Notifications** in Settings **Only when it needs attention**: a notice only when the icon
-turns red, once (for a growth, that is when a trace confirms its cause, which comes after the growth started, so its
-notice names that cause); or **Off**. The change applies at once. When PoolWatch's own check finds the token leak while
-the guard is off, a notice says so; a click on it opens the window on the guard.
+pool: Open files (File) is growing"). It names a likely cause only when the evidence is strong; otherwise it says
+"Click here to open PoolWatch for details." A pool that falls gives no notice. A notice by the clock leaves the screen
+after a few seconds (Windows' own setting) for the notification centre, so the one that matters most, **Non-paged pool
+over the limit**, is a small window at the bottom right of the screen instead, as the token-leak guard's are: it stays
+above other windows until you close it, with **Open PoolWatch** and **Close**, and it never takes the keyboard from the
+program you are typing in. A newer one puts its words in the one open. To get fewer, choose under **Notifications** in
+Settings **Only when it needs attention**: a notice only when the icon turns red, once (for a growth, that is when a
+trace confirms its cause, which comes after the growth started, so its notice names that cause), and for each growth
+that is part of the rise of a non-paged pool over its limit, once; or **Off**. The change applies at once. When
+PoolWatch's own check finds the token leak while the guard is off, a notice says so; a click on it opens the window on
+the guard.
 
 A click on a notice opens PoolWatch's window and brings it to the front (a notice about changes PoolWatch made at start
 opens Active changes instead). Starting PoolWatch while it runs, from the Start menu, does the same. If PoolWatch's

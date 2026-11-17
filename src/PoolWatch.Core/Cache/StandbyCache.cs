@@ -86,11 +86,15 @@ public sealed class ClearRecord
     public string TriggerText => Trigger switch
     {
         ClearTrigger.PoolOverLimit => "pool over the limit", ClearTrigger.Schedule => "scheduled", ClearTrigger.Experiment => "experiment",
-        ClearTrigger.CommandLine => "command line", ClearTrigger.Escalation => "after a light clear freed little", _ => "manual",
+        ClearTrigger.CommandLine => "command line", ClearTrigger.Escalation => "after a light clear freed little",
+        ClearTrigger.Urgent => UrgentText, _ => "manual",
     };
 
+    /// <summary>An urgent clear's trigger in the log, the timeline and Report an issue.</summary>
+    public const string UrgentText = "urgent: non-paged pool over its limit and rising";
+
     /// <summary>PoolWatch started it itself (its automatic rule, or an experiment's phase), not a button or the command line.</summary>
-    public bool Automatic => Trigger is ClearTrigger.Schedule or ClearTrigger.PoolOverLimit or ClearTrigger.Experiment or ClearTrigger.Escalation;
+    public bool Automatic => Trigger is ClearTrigger.Schedule or ClearTrigger.PoolOverLimit or ClearTrigger.Experiment or ClearTrigger.Escalation or ClearTrigger.Urgent;
 
     /// <summary>What this clear freed from <paramref name="tags"/>, from the tags measured before and after it (0 when they were not).</summary>
     public long FreedFrom(IReadOnlySet<PoolTag> tags)
@@ -116,7 +120,9 @@ public sealed class ClearRecord
 
 /// <summary>
 /// When to clear automatically (off by default) and how: pool over <see cref="Settings.AutoClearPoolGb"/> and/or every
-/// <see cref="Settings.AutoClearEveryHours"/>, never within <see cref="Settings.AutoClearMinMinutes"/> of the last clear.
+/// <see cref="Settings.AutoClearEveryHours"/>, never within <see cref="Settings.AutoClearMinMinutes"/> of the last clear;
+/// and, with <see cref="Settings.AutoClearUrgent"/>, the urgent clear while the non-paged pool is over its alert and still
+/// rising (<see cref="UrgentNow"/>), which has its own spacing (<see cref="UrgentFloor"/>).
 /// The mode: the low-priority purge when past clears show it frees the pool about as well (at least
 /// <see cref="LowPriorityGoodEnough"/> of what a full standby purge freed), else the full standby purge.
 /// </summary>
@@ -126,6 +132,29 @@ public static class ClearPolicy
     public static readonly TimeSpan PoolRuleBackOff = TimeSpan.FromHours(6);
 
     /// <summary>
+    /// The urgent clear never runs within this of any clear, though it may run inside the spacing of the other rules
+    /// (<see cref="Settings.AutoClearMinMinutes"/>, 30 minutes at least). Ten minutes is the window the non-paged pool's
+    /// rise is read over: each urgent clear is judged on a rise read after the clear before it was measured (2 minutes)
+    /// and the pool had refilled since, not on the rise that clear was already the answer to.
+    /// </summary>
+    public static readonly TimeSpan UrgentFloor = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// How far the kernel pool must grow past what a clear that freed little saw before that clear stops counting
+    /// against the next one (the size rule's back-off, the urgent clear's stand-down): max(2 GB, a quarter of that pool).
+    /// A clear that freed little says the pool it saw was not cache-held; growth well past it is new, and on a PC where
+    /// clearing helps it is cache-held again (a ReFS Dev Drive's records piled up from 9.4 to 14.4 GB of pool in an hour,
+    /// and a clear freed 5.75 GB of them). 2 GB is four times the least a clear must free not to count as freeing little
+    /// (512 MB), well clear of the hundreds of megabytes a busy pool wobbles; a quarter keeps the margin in proportion for a
+    /// large limit. A pool that holds still is never cleared again for it, and one that keeps climbing is cleared once
+    /// for each such step, never every 30 (or 10) minutes.
+    /// </summary>
+    public static long GrowOnBy(long poolBefore) => Math.Max(2L << 30, poolBefore / 4);
+
+    /// <summary>The pool now is at least <see cref="GrowOnBy"/> above what clear <paramref name="r"/> saw before it ran.</summary>
+    public static bool GrewOn(ClearRecord r, long poolNow) => poolNow >= r.PoolBefore + GrowOnBy(r.PoolBefore);
+
+    /// <summary>
     /// The trigger of an automatic clear due at <paramref name="now"/>, or null. The spacing after the last clear, the schedule
     /// and the size rule's back-off are timed on the clock that only goes forward (<see cref="Moment.Ms"/>, each clear's
     /// <see cref="ClearRecord.TickMs"/>), so a system clock set back neither holds the clears back until it catches up nor,
@@ -133,8 +162,9 @@ public static class ClearPolicy
     /// </summary>
     /// <param name="lastClearMs">The last clear's <see cref="ClearRecord.TickMs"/>; null when there was none.</param>
     /// <param name="sinceMs">When PoolWatch started, on the forward clock (the first scheduled clear waits one period).</param>
-    /// <param name="lastPoolClear">The last measured clear the pool rule started: when it freed little (the pool over the
-    /// limit is not cache-held), the pool rule waits <see cref="PoolRuleBackOff"/> instead of purging every 30 min for nothing.</param>
+    /// <param name="lastPoolClear">The last measured clear the pool rule started (<see cref="LastPoolClear"/>): when it freed
+    /// little (the pool over the limit is not cache-held), the pool rule waits <see cref="PoolRuleBackOff"/> instead of
+    /// purging every 30 min for nothing, unless the pool has grown well past what it saw (<see cref="GrewOn"/>).</param>
     /// <param name="experimentRunning">An A/B experiment is running: no automatic clear, which would decide its result
     /// (the "lag before / after a clear" preset makes its own clear at the phase boundary).</param>
     public static ClearTrigger? Due(Settings s, PoolTotals now, Moment at, long? lastClearMs, long sinceMs, ClearRecord? lastPoolClear = null,
@@ -142,8 +172,8 @@ public static class ClearPolicy
     {
         if (!s.AutoClearEnabled || experimentRunning) return null;
         if (lastClearMs is { } last && at.Ms - last < Ms(TimeSpan.FromMinutes(s.AutoClearMinMinutes))) return null;
-        long pool = (long)(now.CommittedPaged + now.CommittedNonPaged);
-        bool backOff = BackOffEndsMs(lastPoolClear, at.Ms) is not null;
+        long pool = Total(now);
+        bool backOff = BackOffEndsMs(lastPoolClear, pool, at.Ms) is not null;
         if (s.AutoClearPoolGb > 0 && pool >= PoolLimit(s) && !backOff) return ClearTrigger.PoolOverLimit;
         if (s.AutoClearEveryHours > 0 && at.Ms - (lastClearMs ?? sinceMs) >= Ms(TimeSpan.FromHours(s.AutoClearEveryHours))) return ClearTrigger.Schedule;
         return null;
@@ -154,54 +184,120 @@ public static class ClearPolicy
     /// can never disagree with it, timed on the forward clock as it is; the times it gives are times of day by
     /// <paramref name="at"/> (<see cref="Moment.UtcOf"/>). The automatic rule also waits for the helper's status (<paramref name="canPurge"/>
     /// and <paramref name="ownClearTask"/>, null until it is read; the schedule is described meanwhile) and for a clear
-    /// that runs or is being measured (<paramref name="busy"/>).
+    /// that runs or is being measured (<paramref name="busy"/>). While the size rule backs off, the size at which the
+    /// pool would end its back-off (<see cref="GrewOn"/>) is given too (<see cref="NextClear.EarlyPoolBytes"/>), when it
+    /// could bring the clear forward.
     /// </summary>
     /// <param name="escalationDue"><see cref="EscalateNow"/>: the full purge runs at the next sample.</param>
+    /// <param name="urgentDue"><see cref="UrgentNow"/>: the urgent clear runs at the next sample.</param>
     public static NextClear Next(Settings s, PoolTotals now, Moment at, long? lastClearMs, long sinceMs, ClearRecord? lastPoolClear,
-        bool? canPurge, bool? ownClearTask, bool experimentRunning, bool busy, bool escalationDue = false)
+        bool? canPurge, bool? ownClearTask, bool experimentRunning, bool busy, bool escalationDue = false, bool urgentDue = false)
     {
         if (busy) return new(NextClearKind.Running);
         if (!s.AutoClearEnabled) return new(NextClearKind.Off);
         if (ownClearTask == true) return new(NextClearKind.OwnTask);
         if (canPurge == false) return new(NextClearKind.NotElevated);
         if (experimentRunning) return new(NextClearKind.Experiment);
-        if (escalationDue) return new(NextClearKind.Scheduled, at.Utc);
+        if (escalationDue || urgentDue) return new(NextClearKind.Scheduled, at.Utc);
         long nowMs = at.Ms;
+        long pool = Total(now);
         long spacingEnds = lastClearMs is { } last ? last + Ms(TimeSpan.FromMinutes(s.AutoClearMinMinutes)) : long.MinValue;
         long? scheduled = s.AutoClearEveryHours > 0 ? Math.Max((lastClearMs ?? sinceMs) + Ms(TimeSpan.FromHours(s.AutoClearEveryHours)), spacingEnds) : null;
         if (s.AutoClearPoolGb <= 0) return scheduled is { } atMs ? new(NextClearKind.Scheduled, at.UtcOf(atMs)) : new(NextClearKind.Off);
-        // The size rule may clear once the spacing and any back-off have passed.
-        long sizeFrom = Math.Max(spacingEnds, BackOffEndsMs(lastPoolClear, nowMs) ?? long.MinValue);
-        if ((long)(now.CommittedPaged + now.CommittedNonPaged) >= PoolLimit(s))
+        long limit = PoolLimit(s);
+        long? backOffEnds = BackOffEndsMs(lastPoolClear, pool, nowMs);
+        // While backed off, the pool growing past what the clear that freed little saw ends the back-off at once: the size
+        // rule then clears at that size (from the spacing's end), not only at the limit once the back-off is over.
+        long? early = backOffEnds is not null && lastPoolClear is { } lp ? Math.Max(limit, lp.PoolBefore + GrowOnBy(lp.PoolBefore)) : null;
+        DateTime? earlyAfter = early is not null && spacingEnds > nowMs ? at.UtcOf(spacingEnds) : null;
+        // The size rule may clear at the limit once the spacing and any back-off have passed.
+        long sizeFrom = Math.Max(spacingEnds, backOffEnds ?? long.MinValue);
+        if (pool >= limit)
         {
             long bySize = Math.Max(nowMs, sizeFrom);
-            return new(NextClearKind.Scheduled, at.UtcOf(scheduled is { } first && first < bySize ? first : bySize));
+            long first = scheduled is { } f && f < bySize ? f : bySize;
+            bool sooner = early is not null && Math.Max(nowMs, spacingEnds) < first;
+            return new(NextClearKind.Scheduled, at.UtcOf(first), EarlyPoolBytes: sooner ? early : null, EarlyAfterUtc: sooner ? earlyAfter : null);
         }
         long? after = sizeFrom > nowMs ? sizeFrom : null;
         DateTime? afterUtc = after is { } a ? at.UtcOf(a) : null;
-        if (scheduled is not { } next) return new(NextClearKind.AtPoolSize, PoolBytes: PoolLimit(s), PoolRuleAfterUtc: afterUtc);
+        if (scheduled is not { } next) return new(NextClearKind.AtPoolSize, PoolBytes: limit, PoolRuleAfterUtc: afterUtc, EarlyPoolBytes: early, EarlyAfterUtc: earlyAfter);
         // The size rule can only bring the clear forward when it is allowed before the scheduled time.
-        return after >= next ? new(NextClearKind.Scheduled, at.UtcOf(next)) : new(NextClearKind.Scheduled, at.UtcOf(next), PoolLimit(s), afterUtc);
+        bool atLimit = !(after >= next);
+        bool atEarly = early is not null && spacingEnds < next;
+        return new(NextClearKind.Scheduled, at.UtcOf(next), atLimit ? limit : null, atLimit ? afterUtc : null, atEarly ? early : null, atEarly ? earlyAfter : null);
     }
 
     /// <summary>
     /// What the automatic rule starts at this sample: the full purge right after a light clear that freed little
-    /// (<see cref="EscalateNow"/>), else a due clear (<see cref="Due"/>) in the mode the past clears favour
-    /// (<see cref="ModeFor"/>; the comparison run is marked <see cref="ClearTrigger.Experiment"/>); null when nothing is due.
+    /// (<see cref="EscalateNow"/>), else the urgent clear, the full purge too (<see cref="UrgentNow"/>), else a due clear
+    /// (<see cref="Due"/>) in the mode the past clears favour (<see cref="ModeFor"/>; the comparison run is marked
+    /// <see cref="ClearTrigger.Experiment"/>); null when nothing is due, and always while an experiment runs.
     /// The caller has already checked that no clear runs or waits for its measurement and that the helper allows one.
     /// </summary>
+    /// <param name="nonPagedRise">The non-paged pool's rise over the last 10 minutes, as the detector reads it across
+    /// PoolWatch's own clears (<see cref="Detection.Detector.NonPagedRise10Min"/>); null while it cannot tell.</param>
     public static (ClearMode Mode, ClearTrigger Trigger)? Automatic(IReadOnlyList<ClearRecord> history, Settings s, PoolTotals now, Moment at,
         long sinceMs, bool experimentRunning, long? nonPagedRise = null)
     {
         if (!s.AutoClearEnabled || experimentRunning) return null;
         if (EscalateNow(history, s, at)) return (ClearMode.Standby, ClearTrigger.Escalation);
+        if (UrgentNow(history, s, now, nonPagedRise, at)) return (ClearMode.Standby, ClearTrigger.Urgent);
         if (Due(s, now, at, history.LastOrDefault()?.TickMs, sinceMs, LastPoolClear(history)) is not { } trigger) return null;
         return (ModeFor(history, s), IsExperiment(history, s) ? ClearTrigger.Experiment : trigger);
     }
 
-    /// <summary>The last clear the size rule started that has a result: <see cref="Due"/> and <see cref="Next"/> back off after it.</summary>
-    public static ClearRecord? LastPoolClear(IReadOnlyList<ClearRecord> history) =>
-        history.LastOrDefault(r => r.Trigger == ClearTrigger.PoolOverLimit && r.Done);
+    /// <summary>
+    /// The urgent clear (<see cref="Settings.AutoClearUrgent"/>, only while automatic clearing is on): the committed
+    /// non-paged pool is over its alert (<see cref="Settings.NonPagedTotalAlertBytes"/>) and rose at least
+    /// <see cref="Settings.NonPagedTotalRiseBytesPer10Min"/> in the last 10 minutes (<paramref name="nonPagedRise"/>, as
+    /// the non-paged alert reads it; null while that cannot be told), the alert's own rule. It may run inside the spacing
+    /// of the other rules, but never within <see cref="UrgentFloor"/> of any clear, never while a clear waits for its
+    /// measurement, and not while it stands down (<see cref="UrgentStandsDown"/>). Constant time, but for the walk back
+    /// over the clears to the last one measured.
+    /// </summary>
+    public static bool UrgentNow(IReadOnlyList<ClearRecord> history, Settings s, PoolTotals now, long? nonPagedRise, Moment at)
+    {
+        if (!s.AutoClearEnabled || !s.AutoClearUrgent || nonPagedRise is not { } rise) return false;
+        if ((long)now.CommittedNonPaged <= s.NonPagedTotalAlertBytes || rise < s.NonPagedTotalRiseBytesPer10Min) return false;
+        if (history.Count > 0 && (!history[^1].Done || at.Ms - history[^1].TickMs < Ms(UrgentFloor))) return false;
+        return !UrgentStandsDown(history, Total(now));
+    }
+
+    /// <summary>
+    /// The last urgent clear, measured, freed little (<see cref="FreedLittle"/>): what grows the non-paged pool is not
+    /// cache-held, so an urgent clear every 10 minutes would only stutter the PC while a leak goes on. It stands down
+    /// until a clear measured after it frees real pool (the pool is cache-held again), or the pool grows on well past what
+    /// it saw (<see cref="GrewOn"/>). A clear that failed or freed little is passed over; only an urgent clear's own result
+    /// stands it down.
+    /// </summary>
+    public static bool UrgentStandsDown(IReadOnlyList<ClearRecord> history, long poolNow)
+    {
+        for (int i = history.Count - 1; i >= 0; i--)
+        {
+            var r = history[i];
+            if (r is not { After: not null, Error: null }) continue;
+            if (!FreedLittle(r)) return false;
+            if (r.Trigger == ClearTrigger.Urgent) return !GrewOn(r, poolNow);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// The last clear the size rule started that has a result, which <see cref="Due"/> and <see cref="Next"/> back off
+    /// after when it freed little; null when there is none, or when a clear measured after it freed real pool (any clear:
+    /// scheduled, by hand, urgent), which shows that the pool is cache-held again, so the back-off is over.
+    /// </summary>
+    public static ClearRecord? LastPoolClear(IReadOnlyList<ClearRecord> history)
+    {
+        for (int i = history.Count - 1; i >= 0; i--)
+        {
+            var r = history[i];
+            if (r.Trigger == ClearTrigger.PoolOverLimit && r.Done) return r;
+            if (r is { After: not null, Error: null } && !FreedLittle(r)) return null;
+        }
+        return null;
+    }
 
     /// <summary>
     /// The last clear was an automatic light (low-priority) one, measured, that freed little (<see cref="FreedLittle"/>),
@@ -222,9 +318,15 @@ public static class ClearPolicy
     /// <summary>A measured clear that freed less than max(512 MB, 10% of the pool before it): the pool it saw was not cache-held.</summary>
     public static bool FreedLittle(ClearRecord r) => r.Freed < Math.Max(512L << 20, r.PoolBefore / 10);
 
-    /// <summary>When the size rule's back-off after a pool-rule clear that freed little ends, on the forward clock; null when it is not backed off.</summary>
-    private static long? BackOffEndsMs(ClearRecord? lastPoolClear, long nowMs) =>
-        lastPoolClear is { After: not null, Error: null } lp && nowMs - lp.TickMs < Ms(PoolRuleBackOff) && FreedLittle(lp) ? lp.TickMs + Ms(PoolRuleBackOff) : null;
+    /// <summary>
+    /// When the size rule's back-off after a pool-rule clear that freed little ends, on the forward clock; null when it is
+    /// not backed off: no such clear, its 6 hours are over, or the pool now has grown well past what it saw (<see cref="GrewOn"/>).
+    /// </summary>
+    private static long? BackOffEndsMs(ClearRecord? lastPoolClear, long poolNow, long nowMs) =>
+        lastPoolClear is { After: not null, Error: null } lp && nowMs - lp.TickMs < Ms(PoolRuleBackOff) && FreedLittle(lp) && !GrewOn(lp, poolNow)
+            ? lp.TickMs + Ms(PoolRuleBackOff) : null;
+
+    private static long Total(PoolTotals t) => (long)(t.CommittedPaged + t.CommittedNonPaged);
 
     private static long PoolLimit(Settings s) => (long)(s.AutoClearPoolGb * (1L << 30));
 
@@ -293,7 +395,11 @@ public enum NextClearKind
 /// <param name="AtUtc">Scheduled: when.</param>
 /// <param name="PoolBytes">AtPoolSize: the size rule's limit. Scheduled: the limit that may bring the clear forward, when it can.</param>
 /// <param name="PoolRuleAfterUtc">The size rule waits until then (the spacing after the last clear, or its back-off).</param>
-public sealed record NextClear(NextClearKind Kind, DateTime? AtUtc = null, long? PoolBytes = null, DateTime? PoolRuleAfterUtc = null);
+/// <param name="EarlyPoolBytes">While the size rule backs off: the size at which the pool ends the back-off at once (it grew
+/// well past what the clear that freed little saw), when that can bring the clear forward.</param>
+/// <param name="EarlyAfterUtc">That size counts only from then (the spacing after the last clear); null when it counts now.</param>
+public sealed record NextClear(NextClearKind Kind, DateTime? AtUtc = null, long? PoolBytes = null, DateTime? PoolRuleAfterUtc = null,
+    long? EarlyPoolBytes = null, DateTime? EarlyAfterUtc = null);
 
 /// <summary>
 /// The Simple view's line about clearing, in plain words: what happens next, then what the last clear did ("Next cache
@@ -305,6 +411,9 @@ public static class ClearScheduleText
     /// <summary>A clear that freed less than half a megabyte (or less than 0: the pool grew meanwhile) is said to have freed "nothing".</summary>
     public const long NothingBelow = 512L << 10;
 
+    /// <summary>An urgent clear, as the line says it: "Last clear at 01:05 (urgent: the non-paged pool was climbing fast) freed 4.1 GB."</summary>
+    public const string UrgentWords = "(urgent: the non-paged pool was climbing fast)";
+
     public static string Line(NextClear next, IReadOnlyList<ClearRecord> history, PoolTotals now, DateTime nowUtc)
     {
         string first = next.Kind switch
@@ -314,13 +423,31 @@ public static class ClearScheduleText
             NextClearKind.NotElevated => "Automatic clearing needs PoolWatch to run as administrator.",
             NextClearKind.Experiment => "Automatic clearing waits until the experiment ends.",
             NextClearKind.Running => "A cache clear is running now.",
+            // While the size rule backs off: the size that ends the back-off first, then the limit once it is over.
+            NextClearKind.AtPoolSize when next.EarlyPoolBytes is { } early =>
+                $"Next cache clear when {PoolName.InText} reaches {Limit(early)}{After(next.EarlyAfterUtc, nowUtc)} (now {PlainWords.Amount(Total(now))}), " +
+                $"or {Limit(next.PoolBytes ?? 0)}{After(next.PoolRuleAfterUtc, nowUtc)}.",
             NextClearKind.AtPoolSize => $"Next cache clear when {PoolName.InText} reaches {Limit(next.PoolBytes ?? 0)} " +
                                         $"(now {PlainWords.Amount(Total(now))}){(next.PoolRuleAfterUtc is { } after ? ", after " + Clock(after, nowUtc) : "")}.",
-            _ => $"Next cache clear in {In((next.AtUtc ?? nowUtc) - nowUtc)}" +
-                 (next.PoolBytes is { } limit ? $" (sooner if {PoolName.InText} reaches {Limit(limit)}{(next.PoolRuleAfterUtc is { } a ? " after " + Clock(a, nowUtc) : "")})" : "") + ".",
+            _ => $"Next cache clear in {In((next.AtUtc ?? nowUtc) - nowUtc)}" + Sooner(next, nowUtc) + ".",
         };
         return LastResult(history, nowUtc, next.Kind == NextClearKind.Running) is { } last ? first + " " + last : first;
     }
+
+    /// <summary>
+    /// What may bring a scheduled clear forward: " (sooner if the kernel pool reaches 8 GB after 03:19)"; while the size rule
+    /// backs off, the size that ends the back-off first: " (sooner if the kernel pool reaches 10.3 GB, or 8 GB after 03:19)".
+    /// </summary>
+    private static string Sooner(NextClear next, DateTime nowUtc)
+    {
+        var sizes = new List<string>();
+        if (next.EarlyPoolBytes is { } early) sizes.Add(Limit(early) + After(next.EarlyAfterUtc, nowUtc));
+        if (next.PoolBytes is { } limit) sizes.Add(Limit(limit) + After(next.PoolRuleAfterUtc, nowUtc));
+        return sizes.Count == 0 ? "" : $" (sooner if {PoolName.InText} reaches {string.Join(", or ", sizes)})";
+    }
+
+    /// <summary>" after 03:19" for a time still to come; "" for none.</summary>
+    private static string After(DateTime? utc, DateTime nowUtc) => utc is { } t ? " after " + Clock(t, nowUtc) : "";
 
     /// <summary>The context the status line adds to a growth, "The next cache clear is in 12 min."; null when none is scheduled.</summary>
     public static string? Context(NextClear next, DateTime nowUtc) =>
@@ -354,7 +481,8 @@ public static class ClearScheduleText
             return $"Last clear {When(light.TimeUtc, nowUtc)} (light) freed {(light.Freed < NothingBelow ? "nothing" : "only " + PlainWords.Amount(light.Freed))}, " +
                    $"so PoolWatch ran a full clear at {HourMinute(last.TimeUtc)}: it freed {Freed(last.Freed)}.";
         string mostly = ClearEvidence.MostlyFrom(last) is { } records ? ", mostly " + ClearEvidence.Words(records) : "";
-        return $"Last clear {When(last.TimeUtc, nowUtc)} freed {Freed(last.Freed)}{mostly}.";
+        string urgent = last.Trigger == ClearTrigger.Urgent ? " " + UrgentWords : "";
+        return $"Last clear {When(last.TimeUtc, nowUtc)}{urgent} freed {Freed(last.Freed)}{mostly}.";
     }
 
     /// <summary>"4.7 GB", "709 MB", or "nothing" (also for a pool that grew during the 2 minutes).</summary>

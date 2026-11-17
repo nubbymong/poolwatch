@@ -1205,7 +1205,16 @@ when it is red then (the non-paged pool over its limit, or a re-opened growth th
 otherwise at the icon's 10-second refresh once it turns red (a growth whose cause a trace confirmed: the incident
 manager raises its event before any trace, so a new growth is never red as it opens); or none. Each episode of an
 incident gets at most one notice, under any choice, so a change of the choice repeats none (`IncidentNotices`); one
-held back as the incident opens is a line in `poolwatch.log`. The token-leak guard's notices are not these, and always
+held back as the incident opens is a line in `poolwatch.log`. Under "only when it needs attention", a growth whose
+tag's non-paged part rose with a non-paged pool over its limit and still rising (`Detector.NonPagedRisers`, at least
+`GrowingDisplayBytesPer10Min` in the 10 minutes, read under the history lock) is told too, as it opens or at the refresh
+once it is: that growth is what the red is about (a night that ended in a hang held back 55 growth notices while the
+non-paged pool was over its limit). The non-paged pool's notice stays until it is closed (`NoticeText.Stays`,
+`StayingNotice`): a notice by the clock leaves the screen after Windows' few seconds, and the log said "notice closed"
+7 seconds after each such one that night. It is a window as the token-leak guard's are (bottom right, above other
+windows, a taskbar button, Open PoolWatch and Close), made with the top-most style rather than `TopMost`, and shown
+without taking the focus (`ShowWithoutActivation`), so a key meant for another program never presses its button; one at
+a time, a newer one putting its words in it. The token-leak guard's notices are not these, and always
 show. A click on any notice opens the main window in the view last
 used and brings it to the front, unless that notice offers a place of its own (Active changes for the service profile's,
 the guard's offer for the token-leak watch's). Windows says only that a notice of the icon was clicked, never which, and
@@ -2066,6 +2075,29 @@ Save then puts only the four at-once settings into effect and says that nothing 
   paused: your own clear task (RAMMap) does this job.", "... needs PoolWatch to run as administrator.", "... waits
   until the experiment ends."), then what the last one did ("Last clear at 09:12 freed 4.7 GB.", "No cache clear yet.",
   "... is being measured.", "... did not run: <reason>.").
+- **The size rule's back-off.** A clear the size rule started that freed little (less than max(512 MB, 10% of the
+  pool before it), `ClearPolicy.FreedLittle`) says the pool over the limit is not cache-held, so the size rule waits
+  `PoolRuleBackOff` (6 hours) instead of purging every 30 minutes for nothing; the schedule goes on. The back-off ends
+  early when the pool is cache-held again: a clear measured after it (any trigger) did not free little
+  (`ClearPolicy.LastPoolClear` returns none), or the pool now is at least max(2 GB, a quarter of what that clear saw)
+  above what it saw (`ClearPolicy.GrewOn`, `GrowOnBy`). 2 GB is four times the least a clear must free not to count as
+  freeing little, well clear of a busy pool's wobble; a quarter keeps it in proportion for a large limit. A pool that
+  holds still is never cleared again for it, and one that keeps climbing is cleared once for each such step. `Next`
+  gives that size too (`NextClear.EarlyPoolBytes`), so the line says it ("when the kernel pool reaches 10.3 GB, or 8 GB
+  after 03:19"), and the minute-by-minute walk holds it to `Due`. Seen on a ReFS Dev Drive PC that hung: a size-rule
+  clear freed 462 MB of 8.23 GB, the scheduled clears after it freed 1.99 GB and 5.75 GB, and the size rule still waited
+  while the pool went from 9.3 GB to 21.4 GB (`UrgentClearTests` replays that night from its numbers).
+- **The urgent clear** (`Settings.AutoClearUrgent`, on by default, only while automatic clearing is on;
+  `ClearPolicy.UrgentNow`): the committed non-paged pool over `NonPagedTotalAlertBytes` and its rise over the last 10
+  minutes at least `NonPagedTotalRiseBytesPer10Min`, read by the detector on the stitch of section 6
+  (`Detector.NonPagedRise10Min`, the non-paged alert's own reading; none while a clear is measured). A full standby
+  purge (`ClearTrigger.Urgent`), inside `AutoClearMinMinutes` but never within `UrgentFloor` (10 minutes, the window the
+  rise is read over) of any clear, never while a clear waits for its measurement or an experiment runs. It stands down
+  after an urgent clear that freed little (`UrgentStandsDown`) until a clear measured after it frees real pool or the
+  pool grows on past what it saw (`GrewOn`), so a leak that is not cache-held is not purged every 10 minutes. Its
+  trigger is kept with the clear: the log, the finding and the Simple view's line say "urgent". `Next` says "now" when
+  it is due. On by default for new installs and upgrades (a file without it reads it on): it acts only on top of a rule
+  the owner turned on, and it is the clear that night needed.
 - **Escalation.** In "auto" mode, an automatic light (low-priority standby) clear that, measured 2 minutes later,
   freed less than max(512 MB, 10% of the pool before it) is followed right away by the full standby purge: once, inside
   the 30-minute spacing, never twice in a row, and not at all when the last measured full purge freed little too. The

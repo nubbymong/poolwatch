@@ -83,6 +83,7 @@ internal sealed class SettingsDialog : Form
     {
         _fields.Fill(SimpleSettings.From(shown));
         _clearHint.Text = SimpleSettings.AutoClearHint(shown);
+        _tips.SetToolTip(_fields.Urgent, SimpleSettings.UrgentTip(shown));
         _deeperHint.Text = SimpleSettings.DeeperCaptureHint(shown);
         ShowLogonNote(logonNote, null);
         EnableClearFields();
@@ -169,8 +170,9 @@ internal sealed class SettingsDialog : Form
         Row(second, rules, indent * 2);
         Row(second, _every, indent);
         Row(second, _over, indent);
+        Row(second, _fields.Urgent, indent, top: 2);
         Row(second, _clearHint, indent, bottom: 10);
-        _clearFields.AddRange([rules, _every, _over]);
+        _clearFields.AddRange([rules, _every, _over, _fields.Urgent]);
         _tips.SetToolTip(_fields.Schedule, "Clears every so many hours, whatever the size of the kernel pool.");
         _tips.SetToolTip(_fields.PoolSize, "Clears when the kernel pool reaches the size you set, however long that takes.");
         _tips.SetToolTip(_fields.Either, "Clears on the schedule, or sooner when the kernel pool reaches the size you set. Recommended.");
@@ -278,6 +280,7 @@ internal sealed class SettingsDialog : Form
         if (_editor is null) return;
         _fields.Fill(SimpleSettings.From(_editor.Edit));
         _clearHint.Text = SimpleSettings.AutoClearHint(_editor.Edit);
+        _tips.SetToolTip(_fields.Urgent, SimpleSettings.UrgentTip(_editor.Edit));
         _deeperHint.Text = SimpleSettings.DeeperCaptureHint(_editor.Edit);
         EnableClearFields();
         ShowProblems([]);
@@ -482,6 +485,8 @@ internal sealed record ShortcutOffer(Func<Task<(bool Ok, string Message)>> Creat
 internal sealed class SimpleSettingsFields
 {
     public CheckBox AutoClear { get; } = new WrapCheckBox { Text = "Clear the standby cache automatically", AutoSize = true };
+    /// <summary>The urgent clear, under the rules: on with automatic clearing only.</summary>
+    public CheckBox Urgent { get; } = new WrapCheckBox { Text = SimpleSettings.UrgentLabel, AutoSize = true, Checked = true };
     /// <summary>The automatic clear's three rules, by name (one is always picked).</summary>
     public RadioButton Schedule { get; } = new() { Text = SimpleSettings.ScheduleChoice, AutoSize = true };
     public RadioButton PoolSize { get; } = new() { Text = SimpleSettings.SizeChoice, AutoSize = true };
@@ -576,13 +581,14 @@ internal sealed class SimpleSettingsFields
         Detailed.Checked = v.Records == RecordMode.Detailed;
         RecordsHint.Text = SimpleSettings.RecordsLine(v.Records);
         ShowDays(v.RetentionDays);
+        Urgent.Checked = v.Urgent;
     }
 
     /// <summary>What the form holds: the rule keeps the numbers it uses, and turns the other rule off (0).</summary>
     public SimpleSettings Values()
     {
         var (hours, gb) = SimpleSettings.ForRule(Rule, Hours.Value, PoolGb.Value);
-        return new(AutoClear.Checked, hours, gb, Deeper.Checked, TokenGuard.Checked, Updates.Checked, Notices, Records, Days);
+        return new(AutoClear.Checked, hours, gb, Deeper.Checked, TokenGuard.Checked, Updates.Checked, Notices, Records, Days, Urgent.Checked);
     }
 }
 

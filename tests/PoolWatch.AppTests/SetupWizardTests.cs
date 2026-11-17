@@ -2849,9 +2849,13 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
             return (CheckGives is not null, "checked");
         }
 
-        public async Task<(bool Ok, string Message)> ApplyCache(CacheChoice choice, double hours, double gb, bool replaceOwnTask)
+        /// <summary>The urgent clear's switch each cache change was given, in order.</summary>
+        public List<bool> UrgentGiven = [];
+
+        public async Task<(bool Ok, string Message)> ApplyCache(CacheChoice choice, double hours, double gb, bool urgent, bool replaceOwnTask)
         {
             Calls.Add($"cache {choice} {hours} {gb}" + (replaceOwnTask ? " replacing your task" : ""));
+            UrgentGiven.Add(urgent);
             if (CacheGate is { } gate) await gate.Task;
             if (CacheResult.Item1)
             {
@@ -2859,6 +2863,7 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
                 Running.AutoClearEnabled = enabled;
                 if (every is { } h) Running.AutoClearEveryHours = h;
                 if (size is { } g) Running.AutoClearPoolGb = g;
+                if (enabled) Running.AutoClearUrgent = urgent; // as StandbyCacheSetup writes it: with a choice that clears
             }
             return CacheResult;
         }
@@ -3030,8 +3035,8 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
         public IUpdateCheck? Updates => null;
         public Task<(bool Ok, string Message)> Run(Recommendation r, IWin32Window owner) => actions.Run(r, owner, SetupSession.Via);
         public Task<(bool Ok, string Message)> CheckTokenLeak(CancellationToken stop) => actions.CheckTokenLeak(stop);
-        public Task<(bool Ok, string Message)> ApplyCache(CacheChoice choice, double hours, double gb, bool replaceOwnTask) =>
-            cache.Apply(choice, hours, gb, replaceOwnTask);
+        public Task<(bool Ok, string Message)> ApplyCache(CacheChoice choice, double hours, double gb, bool urgent, bool replaceOwnTask) =>
+            cache.Apply(choice, hours, gb, replaceOwnTask, urgent);
         public Task<(bool Ok, string Message)> ApplyRecords(RecordMode mode, int days) => new RecordsSetup(_ => { }, live, smoke: false).Apply(mode, days);
         public Task<(int All, int CanPutBack)?> ActiveChanges() => Task.FromResult<(int All, int CanPutBack)?>((0, 0));
         public void MarkCompleted() { }

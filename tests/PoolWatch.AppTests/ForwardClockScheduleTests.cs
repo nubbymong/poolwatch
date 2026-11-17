@@ -402,13 +402,14 @@ public sealed class ForwardClockScheduleTests : IDisposable
     public void ClearsAnOlderBuildSavedKeepTheirSpacingAndBackOffAfterTheyAreLoaded()
     {
         // clears.json as the published beta writes it: times of day, no forward clock. Read 10 minutes after a scheduled
-        // clear and 5 hours after a size-rule clear that freed almost nothing. The spacing (30 minutes) and the size rule's
-        // back-off (6 hours) go on from them on the forward clock, whatever the system clock does after the load.
+        // clear and 5 hours after a size-rule clear that freed almost nothing (the scheduled one freed little too: one that
+        // freed real pool would end the back-off). The spacing (30 minutes) and the size rule's back-off (6 hours) go on
+        // from them on the forward clock, whatever the system clock does after the load.
         var loaded = new Moment(T0, 50_000_000);
         string json = $$"""
             [
               {"TimeUtc":"{{T0.AddHours(-5):O}}","Mode":"Standby","Trigger":"PoolOverLimit","PoolBefore":{{10 * GB}},"PoolAfter":{{10 * GB - MB}},"PagedBefore":{{5 * GB}},"PagedAfter":{{5 * GB}},"StandbyBefore":0,"StandbyAfter":0,"Error":null},
-              {"TimeUtc":"{{T0.AddMinutes(-10):O}}","Mode":"Standby","Trigger":"Schedule","PoolBefore":{{10 * GB}},"PoolAfter":{{9 * GB}},"PagedBefore":{{5 * GB}},"PagedAfter":{{5 * GB}},"StandbyBefore":0,"StandbyAfter":0,"Error":null}
+              {"TimeUtc":"{{T0.AddMinutes(-10):O}}","Mode":"Standby","Trigger":"Schedule","PoolBefore":{{10 * GB}},"PoolAfter":{{10 * GB - 100 * MB}},"PagedBefore":{{5 * GB}},"PagedAfter":{{5 * GB}},"StandbyBefore":0,"StandbyAfter":0,"Error":null}
             ]
             """;
         var history = JsonSerializer.Deserialize<List<CacheClearer.Saved>>(json)!.Select(r => CacheClearer.FromSaved(r, loaded)).ToList();

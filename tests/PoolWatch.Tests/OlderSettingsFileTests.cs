@@ -145,6 +145,21 @@ public sealed class OlderSettingsFileTests : IDisposable
     }
 
     /// <summary>
+    /// A line a save adds after the automatic clear's mode: the urgent clear, which no file up to 1.0.0 has, at its default,
+    /// on. It acts only while automatic clearing is on, which the owner chose (off in this file), so an upgraded install
+    /// that clears gets it, and Settings or setup turns it off.
+    /// </summary>
+    private const string UrgentLine = "  \"autoClearUrgent\": true,\n";
+
+    /// <summary><paramref name="beta"/> with <see cref="UrgentLine"/> where a save writes it, after the automatic clear's mode.</summary>
+    private static string WithUrgent(string beta)
+    {
+        const string Mode = "  \"autoClearMode\": \"auto\",\n";
+        Assert.Contains(Mode, beta);
+        return beta.Replace(Mode, Mode + UrgentLine, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The other line a save adds: what PoolWatch keeps on disk, which the beta did not have (it always recorded the day), at
     /// its default, Reports only: an upgraded install stops recording the day until its owner chooses Detailed recording.
     /// </summary>
@@ -172,11 +187,13 @@ public sealed class OlderSettingsFileTests : IDisposable
         // Every other line as the beta wrote it, but three: of the watched apps' names that differ only in case ("claude",
         // "Claude"), a load keeps the first (Normalize), in this build as in the beta; the kernel pool notices' choice,
         // which the beta did not have, is written at its default (a notice for every growth, as the beta did); and so is
-        // what PoolWatch keeps on disk, which the beta did not have either: Reports only, the default.
+        // what PoolWatch keeps on disk, which the beta did not have either: Reports only, the default; and the urgent clear,
+        // new after 1.0.0, at its default (on).
         Assert.Contains("    \"claude\",\n    \"Claude\",\n", without);
-        Assert.Equal(WithRecords(WithNotices(without)).Replace("    \"Claude\",\n", "", StringComparison.Ordinal), Lf(saved));
+        Assert.Equal(WithRecords(WithNotices(WithUrgent(without))).Replace("    \"Claude\",\n", "", StringComparison.Ordinal), Lf(saved));
         Assert.Equal(PoolNoticeLevel.EveryGrowth, s.PoolNotices);
         Assert.Equal(RecordMode.ReportsOnly, s.RecordMode);
+        Assert.True(s.AutoClearUrgent);
     }
 
     /// <summary>
@@ -265,11 +282,13 @@ public sealed class OlderSettingsFileTests : IDisposable
         // and what PoolWatch keeps on disk, which it did not have either, at its default (Reports only), before the days.
         Assert.Equal("\"EveryGrowth\"", saved["poolNotices"]!.ToJsonString());
         Assert.Equal("\"ReportsOnly\"", saved["recordMode"]!.ToJsonString());
+        Assert.Equal("true", saved["autoClearUrgent"]!.ToJsonString()); // and the urgent clear, new after 1.0.0, at its default
         var keys = changed.Select(p => p.Key).Where(k => k != "startAtLogon").ToList();
+        keys.Insert(keys.IndexOf("autoClearMode") + 1, "autoClearUrgent");
         keys.Insert(keys.IndexOf("checkForUpdates") + 1, "poolNotices");
         keys.Insert(keys.IndexOf("retentionDays"), "recordMode");
         Assert.Equal(keys, saved.Select(p => p.Key));
-        Assert.All(saved.Where(p => p.Key is not ("poolNotices" or "recordMode")), p => Assert.True(changed[p.Key]!.ToJsonString() == p.Value!.ToJsonString(),
+        Assert.All(saved.Where(p => p.Key is not ("poolNotices" or "recordMode" or "autoClearUrgent")), p => Assert.True(changed[p.Key]!.ToJsonString() == p.Value!.ToJsonString(),
             $"{p.Key}: wrote {changed[p.Key]!.ToJsonString()}, read back {p.Value!.ToJsonString()}"));
         // The same settings as the same file without startAtLogon.
         changed.Remove("startAtLogon");

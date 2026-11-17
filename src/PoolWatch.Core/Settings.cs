@@ -121,19 +121,19 @@ public sealed class Settings
     [Description("Empty the standby cache automatically: on the schedule (AutoClearEveryHours) and at the pool size (AutoClearPoolGb), whichever comes first. Off by default. Applied when you save.")]
     public bool AutoClearEnabled { get; set; }
     /// <summary>Clear when paged + non-paged pool is over this (GB); 0 = no pool rule.</summary>
-    [Description("Empty the cache when the kernel pool (paged plus non-paged) reaches this many GB (0 to 1,024; default 8); 0 turns this rule off. A clear at this size that frees little holds the rule back for 6 hours. Applied when you save.")]
+    [Description("Empty the cache when the kernel pool (paged plus non-paged) reaches this many GB (0 to 1,024; default 8); 0 turns this rule off. A clear at this size that frees little holds it back for up to 6 hours. Applied when you save.")]
     public double AutoClearPoolGb { get; set; } = 8;
     /// <summary>Clear every N hours; 0 = no schedule.</summary>
     [Description("Empty the cache every this many hours, counted from the last clear, or from PoolWatch's start before the first (0 to 168; default 1); 0 turns this rule off. Applied when you save.")]
     public double AutoClearEveryHours { get; set; } = 1;
     /// <summary>Never two automatic clears within this many minutes.</summary>
-    [Description("Never two automatic clears within this many minutes (30 to 1,440; default 30). Applied when you save.")]
+    [Description("Never two automatic clears within this many minutes (30 to 1,440; default 30); the urgent clear (AutoClearUrgent) keeps 10 minutes from any clear instead. Applied when you save.")]
     public double AutoClearMinMinutes { get; set; } = 30;
     /// <summary>"auto" (low-priority first, the full purge when that frees little), "lowpriority" or "standby".</summary>
     [Description("How an automatic clear empties the cache. auto (default): the light clear (the low-priority part) while it frees about as much as the full one, which it tries once, else the full; lowpriority: only light; standby: only full. Applied when you save.")]
     public string AutoClearMode { get; set; } = "auto";
     /// <summary>The urgent clear: while automatic clearing is on, a full clear at once when the non-paged pool is over its alert and still rising.</summary>
-    [Description("While automatic clearing is on, also empty the cache at once (the full clear) when the non-paged pool is over NonPagedTotalAlertBytes and rose at least NonPagedTotalRiseBytesPer10Min in 10 minutes: inside AutoClearMinMinutes too, but never within 10 minutes of a clear, and not again after an urgent clear that freed little until a clear frees real pool or the pool grows on. On by default. Applied when you save.")]
+    [Description("While automatic clearing is on, a full clear at once when the non-paged pool is over NonPagedTotalAlertBytes and still rising, at most every 10 minutes; it waits after one that freed little. On by default. Applied when you save.")]
     public bool AutoClearUrgent { get; set; } = true;
     /// <summary>
     /// Add a CPU trace (sampling with stacks, DPC/ISR, context switches) to Capture now, and (with <see cref="DeeperCapture"/>)

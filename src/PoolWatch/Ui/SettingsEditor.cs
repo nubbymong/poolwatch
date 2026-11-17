@@ -130,10 +130,10 @@ internal sealed class SettingsEditor
     }
 }
 
-/// <summary>The automatic clear's settings, which take effect together.</summary>
-internal sealed record AutoClearSettings(bool Enabled, double EveryHours, double PoolGb, double MinMinutes, string Mode)
+/// <summary>The automatic clear's settings, which take effect together (the urgent clear's among them).</summary>
+internal sealed record AutoClearSettings(bool Enabled, double EveryHours, double PoolGb, double MinMinutes, string Mode, bool Urgent = true)
 {
-    public static AutoClearSettings Of(Settings s) => new(s.AutoClearEnabled, s.AutoClearEveryHours, s.AutoClearPoolGb, s.AutoClearMinMinutes, s.AutoClearMode);
+    public static AutoClearSettings Of(Settings s) => new(s.AutoClearEnabled, s.AutoClearEveryHours, s.AutoClearPoolGb, s.AutoClearMinMinutes, s.AutoClearMode, s.AutoClearUrgent);
 
     public void ApplyTo(Settings s)
     {
@@ -142,6 +142,7 @@ internal sealed record AutoClearSettings(bool Enabled, double EveryHours, double
         s.AutoClearPoolGb = PoolGb;
         s.AutoClearMinMinutes = MinMinutes;
         s.AutoClearMode = Mode;
+        s.AutoClearUrgent = Urgent;
     }
 }
 

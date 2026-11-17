@@ -190,6 +190,54 @@ public class UrgentClearTests
 
     // ------------------------------------------------------------------ the urgent clear
 
+    /// <summary>
+    /// The urgent clear reads the non-paged pool's rise the detector reads for its non-paged alert, on the same baseline
+    /// (each own clear's drop added back), and nothing while an own clear is being measured; the tags whose non-paged part
+    /// rose with a pool over its alert are the growth that is part of that rise (the notices).
+    /// </summary>
+    [Fact]
+    public void TheDetectorGivesTheNonPagedRiseAndTheTagsPartOfIt()
+    {
+        var settings = new Settings { NonPagedTotalAlertBytes = 5 * GB, NonPagedTotalRiseBytesPer10Min = 100 * MB };
+        var h = PoolWatch.Core.History.History.ForInterval(10);
+        var det = new PoolWatch.Core.Detection.Detector(settings);
+        Assert.Null(det.NonPagedRise10Min);
+        Assert.Empty(det.NonPagedRisers);
+        PoolTag riser = PoolTag.Parse("Abcd"), flat = PoolTag.Parse("Flat");
+        Sample At10s(int i)
+        {
+            var t = T0.AddSeconds(10 * i);
+            // The non-paged pool from 4.9 GB, up 5 MB every 10 seconds (300 MB in 10 minutes), all of it one tag's.
+            var tags = new List<PoolTagEntry> { new(riser, 0, 0, 0, 1, 0, (ulong)(400 * MB + i * 5 * MB)), new(flat, 0, 0, 0, 1, 0, (ulong)(200 * MB)) };
+            return new Sample(t, new PoolTotals(2UL << 30, (ulong)((long)(4.9 * GB) + i * 5 * MB), 0, 0), tags, []) { TickMs = At(t).Ms };
+        }
+        for (int i = 0; i <= 66; i++)
+        {
+            h.Add(At10s(i));
+            det.Evaluate(h);
+            if (i == 10)
+            {
+                // Under the alert: the rise is read (50 MB so far), and no tag is part of a rise over it.
+                Assert.Equal(50 * MB, det.NonPagedRise10Min);
+                Assert.Empty(det.NonPagedRisers);
+            }
+        }
+        // 11 minutes on: 5.22 GB, up 300 MB in the last 10 minutes.
+        Assert.Equal(300 * MB, det.NonPagedRise10Min);
+        Assert.Equal(riser, Assert.Single(det.NonPagedRisers));
+        // The urgent clear goes by it.
+        var s = Urgent();
+        Assert.Equal(ClearTrigger.Urgent, ClearPolicy.Automatic([], s, h.Totals[^1], At(T0.AddSeconds(660)), At(T0.AddHours(-1)).Ms, false, det.NonPagedRise10Min)?.Trigger);
+        // While an own clear is being measured, nothing is read.
+        var clear = new ClearRecord { TimeUtc = T0.AddSeconds(670), TickMs = At(T0.AddSeconds(670)).Ms, Mode = ClearMode.Standby, Trigger = ClearTrigger.Urgent, Before = h.Totals[^1] };
+        h.Add(At10s(67));
+        det.Evaluate(h, new PoolWatch.Core.Detection.OwnClears([clear], TimeSpan.FromMinutes(2)));
+        Assert.True(det.Holding);
+        Assert.Null(det.NonPagedRise10Min);
+        Assert.Empty(det.NonPagedRisers);
+        Assert.Null(ClearPolicy.Automatic([clear], s, h.Totals[^1], At(T0.AddSeconds(680)), At(T0.AddHours(-1)).Ms, false, det.NonPagedRise10Min));
+    }
+
     /// <summary>Clearing every 4 hours or at 32 GB (so neither rule is due here), the urgent clear on, the alert at 5 GB and 100 MB in 10 minutes.</summary>
     private static Settings Urgent(bool on = true)
     {
@@ -266,5 +314,26 @@ public class UrgentClearTests
         Assert.Null(Urgently([little, failed], T0.AddMinutes(70), still, GB));
         // A scheduled clear that freed little does not stand the urgent clear down: only its own result does.
         Assert.Equal(ClearTrigger.Urgent, Urgently([alsoLittle], T0.AddMinutes(70), still, GB)?.Trigger);
+    }
+
+    /// <summary>An urgent clear says so: in the log and the timeline (its trigger), on the graph (automatic) and in the Simple view's line.</summary>
+    [Fact]
+    public void AnUrgentClearSaysItIsUrgent()
+    {
+        var urgent = Clear(T0, ClearTrigger.Urgent, (5, 7), (3, 5)); // freed 4 GB
+        Assert.Equal("urgent: non-paged pool over its limit and rising", urgent.TriggerText);
+        Assert.StartsWith("Clear cache (standby list, urgent: non-paged pool over its limit and rising): freed 4.0 GB of pool", urgent.Summary());
+        Assert.Equal("Urgent", urgent.ToFinding().Data!["trigger"]);
+        Assert.True(urgent.Automatic);
+        string hm = T0.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+        string line = ClearScheduleText.Line(new NextClear(NextClearKind.Scheduled, T0.AddMinutes(50)), [urgent], Pool(3, 5), T0.AddMinutes(10));
+        Assert.Equal($"Next cache clear in 40 min. Last clear at {hm} (urgent: the non-paged pool was climbing fast) freed 4.0 GB.", line);
+        // And Next says the urgent clear runs now when it is due, as it says the full clear after a light one.
+        var s = Urgent();
+        var next = ClearPolicy.Next(s, Pool(3, 6), At(T0), null, At(T0.AddHours(-1)).Ms, null, true, false, false, false, urgentDue: true);
+        Assert.Equal(new NextClear(NextClearKind.Scheduled, T0), next);
+        Assert.True(ClearPolicy.UrgentNow([], s, Pool(3, 6), GB, At(T0)));
+        // An experiment holds it as it holds every automatic clear.
+        Assert.Equal(NextClearKind.Experiment, ClearPolicy.Next(s, Pool(3, 6), At(T0), null, At(T0.AddHours(-1)).Ms, null, true, false, true, false, urgentDue: true).Kind);
     }
 }

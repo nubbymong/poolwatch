@@ -67,6 +67,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
     private readonly BalloonClick _balloonClick;
     /// <summary>Which kernel pool notices show, once each episode of an incident: as it opens, or once it turns red (<see cref="IncidentNotices"/>).</summary>
     private readonly IncidentNotices _notices;
+    /// <summary>The non-paged pool's notice, which stays on screen until it is closed (<see cref="StayingNotice"/>).</summary>
+    private readonly StayingNotice _staying;
     /// <summary>A second start of PoolWatch shows the window (none in the CI UI test, or when its event could not be made).</summary>
     private readonly IDisposable? _showSignal;
     /// <summary>
@@ -98,7 +100,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _live = live;
         // A click on a notice: what that notice offers, else the main window (also a click from the notification centre).
         _balloonClick = new BalloonClick(ShowWindow, engine.Log.Info);
-        _notices = new IncidentNotices(analysis.Knowledge.Lookup, () => engine.Services, engine.Log.Info);
+        _notices = new IncidentNotices(analysis.Knowledge.Lookup, () => engine.Services, engine.Log.Info, tag => analysis.Detector.NonPagedRisers.Contains(tag));
+        _staying = new StayingNotice(ShowWindow, engine.Log.Info);
         Setup =new SetupContext(engine, analysis, _actions, live, ledger, this, smoke, new UpdateSwitch(live));
         _settings = new SettingsWindow(Setup.NewSettings, ShowSettingsDialog, Bring);
         if (!smoke)
@@ -176,11 +179,12 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _icon.BalloonTipClosed += (_, _) => _balloonClick.Closed();
         // Raised on the sampler's thread under the history lock: the notice is worded here, from the incident as it is now,
         // as the Notifications setting is now (Settings' Save changes it at once), and only the words go to the UI thread.
-        // A click on it opens the main window (a notice with no place of its own). One that turns red later is told by
-        // UpdateIcon, when "Only when it needs attention" is chosen.
+        // A click on it opens the main window (a notice with no place of its own); the non-paged pool's stays on screen
+        // until it is closed, with a button that opens it (Notify). One that turns red later is told by UpdateIcon, when
+        // "Only when it needs attention" is chosen.
         _onOpened = (inc, _) =>
         {
-            if (_notices.Opened(inc, _live.Running.PoolNotices) is { } notice) _ui.Post(_ => Balloon(notice.Title, notice.Text), null);
+            if (_notices.Opened(inc, _live.Running.PoolNotices) is { } notice) _ui.Post(_ => Notify(notice), null);
         };
         _analysis.Incidents.Opened += _onOpened;
         _onExperiment = step => _ui.Post(_ => Balloon("Experiment", step.Prompt, step.Phase == Core.Experiments.ExperimentPhase.Done ? 20_000 : 10_000), null);
@@ -539,7 +543,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
     /// </summary>
     internal void UpdateIcon()
     {
-        foreach (var notice in NoticesTurnedRed()) Balloon(notice.Title, notice.Text);
+        foreach (var notice in NoticesTurnedRed()) Notify(notice);
         var t = _engine.Latest?.Totals;
         bool guardNotProtected = _guardTray.NotProtected;
         var state = GuardTray.State(UiData.State(_analysis), guardNotProtected);
@@ -556,6 +560,16 @@ internal sealed class TrayApp : ApplicationContext, IShell
     private IReadOnlyList<NoticeText> NoticesTurnedRed()
     {
         lock (_analysis.History.SyncRoot) return _notices.TurnedRed(_analysis.Incidents.Open, _live.Running.PoolNotices);
+    }
+
+    /// <summary>
+    /// A kernel pool notice: the non-paged pool's, which stays (<see cref="NoticeText.Stays"/>), in its own window until it
+    /// is closed (<see cref="StayingNotice"/>); any other by the clock, whose click opens the main window.
+    /// </summary>
+    private void Notify(NoticeText notice)
+    {
+        if (notice.Stays) _staying.Show(notice);
+        else Balloon(notice.Title, notice.Text);
     }
 
     /// <summary>
@@ -616,6 +630,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _watchTimer.Stop();
         _watchTimer.Dispose();
         _taskbar.Dispose(); // before the icon goes, so it is never added again
+        _staying.Close();
         _icon.Visible = false;
         _icon.Dispose();
         _menu.Dispose();
