@@ -383,11 +383,12 @@ internal sealed class SafetyPage : StepPage
 /// <summary>
 /// Step 4: when to empty the standby cache, in four choices: on a schedule, at a pool size, whichever comes first, or
 /// decide later. Where a choice turns clearing on, it offers the urgent clear on a switch of its own (on to begin with:
-/// a full clear at once while the non-paged pool is over its limit and still rising), says once that video or the mouse
-/// may stutter while it runs, and, when the scan found a RAMMap clear task of your own, that a rule replaces it (Next then
-/// does). Until the scan has ended it says Next waits for it; while Next applies the choice, the cards, fields and switch
-/// are held. The switch's row fits the design's size with the step's gaps a little tighter (the heading's 20 to 12, the
-/// chart's 16 to 10), so the step still shows whole without scrolling.
+/// a clear at once (the full one, or the light one in "lowpriority" mode) while the non-paged pool is over its limit and
+/// still rising), says once that video or the mouse may stutter while it runs, and, when the scan found a RAMMap clear
+/// task of your own, that a rule replaces it (Next then does). Until the scan has ended it says Next waits for it; while
+/// Next applies the choice, the cards, fields and switch are held. The switch's row fits the design's size with the
+/// step's gaps a little tighter (the heading's 20 to 12, the chart's 16 to 10), so the step still shows whole without
+/// scrolling.
 /// </summary>
 internal sealed class CachePage : StepPage
 {

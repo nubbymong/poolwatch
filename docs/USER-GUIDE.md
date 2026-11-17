@@ -204,8 +204,8 @@ one chosen under them and more on each in its tooltip, and **Clean up reports an
 begin with). Turning Detailed recording on starts the day's files at the next sample; turning it off stops them at once
 (a handle scan being written then is finished first, on its own thread, and its two files closed after it).
 Under automatic clearing it says that clearing takes a few seconds, and video or the mouse may stutter while it runs,
-how often at most, and that turning it on first offers to remove a RAMMap clear task of your own (pointing at the box
-says why: so the two never both run).
+how often at most, and that turning it on offers to remove any RAMMap task of yours (pointing at the box says why:
+so the two never both run).
 When the Codex app is installed, PoolWatch was installed with its setup and its Codex shortcut is not on your desktop,
 Settings offers **Create shortcut**. **Advanced...** opens the settings in a grid, with a short description of
 the one selected in the box under it: what it does and its default, its unit, and the limits PoolWatch keeps
@@ -251,8 +251,8 @@ kernel pool reaches its size (8 GB to begin with), whichever comes first, and ne
   PoolWatch waits until a clear frees more of it or it grows past what that clear saw by 2 GB or a quarter, rather than
   clearing every 10 minutes for nothing. It runs only with automatic clearing on and a schedule or a size set. The log,
   the timeline and the Simple view's line say "urgent" for such a clear. Turning automatic clearing on from the hourly
-  clear's card, or by replacing a RAMMap task, turns the urgent clear on with it while its setting is on, and what
-  PoolWatch says then, and the row in Active changes, say so.
+  clear's card, or by replacing a RAMMap task, turns the urgent clear on with it while its setting is on: the card says
+  so before you click, under its reason, and what PoolWatch says then, and the row in Active changes, say so too.
 
 On a PC with a ReFS Dev Drive that hung, the size rule had waited after a clear that freed 462 MB of 8.23 GB,
 while the next clears freed 1.99 GB and 5.75 GB; the non-paged pool alone reached 11.18 GB and kept rising, with no
@@ -499,8 +499,10 @@ after a few seconds (Windows' own setting) for the notification centre, so the o
 over the limit**, is a small window at the bottom right of the screen with the taskbar instead, as the token-leak
 guard's are: it stays above other windows until you close it, with **Open PoolWatch** and **Close** (or Esc once you
 click into it), and it never takes the keyboard from the program you are typing in. A long text is cut to fit it. As
-Windows does with its own notices, it waits while a presentation or a full-screen program runs, and shows when that
-ends (the log says it was held). A newer one puts its words in the one open. To get fewer, choose under
+Windows does with its own notices, it waits while a game or another program runs in Direct3D's exclusive full screen,
+or Windows' presentation mode is on, and shows when that ends, or after 2 minutes at most: on a PC that hung, this notice
+came 6 minutes before the hang. A browser's video or a Remote Desktop window in full screen does not hold it. The log
+says it was held and for how long. A newer one puts its words in the one open. To get fewer, choose under
 **Notifications** in Settings **Only when it needs attention**: a notice only when the icon turns red, once (for a
 growth, that is when a trace confirms its cause, which comes after the growth started, so its notice names that cause),
 and for each growth that is part of the rise of a non-paged pool over its limit, once; or **Off**. The change applies at

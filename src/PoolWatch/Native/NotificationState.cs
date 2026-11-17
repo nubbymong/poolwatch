@@ -4,9 +4,10 @@ namespace PoolWatch.Native;
 
 /// <summary>
 /// Whether Windows holds notices back now, as it does its own toasts: SHQueryUserNotificationState (shellapi.h), which
-/// only reads the state. The notice that stays (Ui.StayingNotice) waits while a presentation or a full-screen program
-/// runs, so a window above all others with a pool tag's and a program's names never shows over a screen share or a
-/// presentation. Focus Assist's "do not disturb" has no documented call to read it, so it is not known here.
+/// only reads the state. The notice that stays (Ui.StayingNotice) waits, for 2 minutes at most, while a full-screen
+/// Direct3D program or presentation mode runs, so a window above all others with a pool tag's and a program's names does
+/// not show over a game or a presentation. Focus Assist's "do not disturb" has no documented call to read it, so it is not
+/// known here.
 /// </summary>
 internal static class NotificationState
 {
@@ -14,15 +15,17 @@ internal static class NotificationState
     internal const int NotPresent = 1, Busy = 2, RunningDirect3DFullScreen = 3, PresentationMode = 4, AcceptsNotifications = 5, QuietTime = 6, App = 7;
 
     /// <summary>
-    /// The states in which the notice waits: a full-screen program or presentation settings (QUNS_BUSY), a full-screen
-    /// Direct3D program, a game among them (QUNS_RUNNING_D3D_FULL_SCREEN), and presentation mode (QUNS_PRESENTATION_MODE).
-    /// In any other, it shows.
+    /// The states in which the notice waits (2 minutes at most, Ui.StayingNotice.MaxHoldMs): a Direct3D program in
+    /// exclusive full screen, as some games run (QUNS_RUNNING_D3D_FULL_SCREEN), and presentation mode, Windows'
+    /// presentation settings (QUNS_PRESENTATION_MODE). Not busy (QUNS_BUSY), which Windows says for any full-screen window, such as a video in a
+    /// browser or a Remote Desktop window: the non-paged pool's notice can come minutes before a hang, and must not wait
+    /// out a film. In any other state, it shows.
     /// </summary>
-    internal static bool Holds(int state) => state is Busy or RunningDirect3DFullScreen or PresentationMode;
+    internal static bool Holds(int state) => state is RunningDirect3DFullScreen or PresentationMode;
 
     /// <summary>
-    /// True while Windows says a presentation or a full-screen program runs (<see cref="Holds"/>); false when it says
-    /// otherwise or cannot say (the call failed), so a notice is never lost to the question.
+    /// True while Windows says a full-screen Direct3D program or presentation mode runs (<see cref="Holds"/>); false when
+    /// it says otherwise or cannot say (the call failed), so a notice is never lost to the question.
     /// </summary>
     public static bool Presenting()
     {

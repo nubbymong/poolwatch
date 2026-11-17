@@ -70,7 +70,8 @@ internal static class RecommendationInputsBuilder
         }
         var inputs = new RecommendationInputs
         {
-            NowUtc = nowUtc, NowMs = now.Ms, Facts = facts, AutoClearOn = engine.Settings.AutoClearEnabled, TokenGuardOn = engine.Settings.TokenGuardEnabled,
+            NowUtc = nowUtc, NowMs = now.Ms, Facts = facts, AutoClearOn = engine.Settings.AutoClearEnabled, AutoClearUrgent = engine.Settings.AutoClearUrgent,
+            TokenGuardOn = engine.Settings.TokenGuardEnabled,
             LeakTestNow = leakTestNow, SavedVerdictBuild = saved?.Build, SavedVerdict = saved?.Result,
             TokenSpawnLast24h = lastDay.Any(f => f.Kind == FindingKind.TokenSpawn && f.Severity >= FindingSeverity.Warning),
             SaturationOfferedTurnOffLast24h = lastDay.Any(f => f.Kind == FindingKind.Saturation && f.Data.TryGetValue("offerTurnOff", out var offer) && offer is true),

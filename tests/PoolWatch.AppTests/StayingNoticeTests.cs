@@ -101,8 +101,8 @@ public class StayingNoticeTests
     }
 
     /// <summary>
-    /// As Windows holds its own toasts back, the notice waits while a full-screen Direct3D program (a game, most often) or
-    /// presentation mode runs (a window above all others, with a pool tag's and a program's names, would show over a
+    /// As Windows holds its own toasts back, the notice waits while a full-screen Direct3D program (exclusive full screen,
+    /// as some games run) or presentation mode runs (a window above all others, with a pool tag's and a program's names, would show over a
     /// presentation), is logged as held, and shows once that ends; a newer one takes its place while it waits, timed from
     /// when the first began to wait, and the log says how long it was held. Windows' states: a full-screen Direct3D program
     /// and presentation mode hold it. Busy does not: Windows says it for any full-screen window (a video in a browser, a

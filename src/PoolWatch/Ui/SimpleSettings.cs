@@ -179,8 +179,12 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
     public static string AutoClearHint(Settings s) =>
         ClearStutter + $" At most every {Math.Max(30, s.AutoClearMinMinutes):0} minutes (10 for an urgent clear). " + OwnTaskLine;
 
-    /// <summary>What turning automatic clearing on does to a clear task of your own, as the line under it says it.</summary>
-    public const string OwnTaskLine = "Turning it on first offers to remove your own RAMMap clear task.";
+    /// <summary>
+    /// What turning automatic clearing on does to a clear task of your own, as the line under it says it: on every PC, so
+    /// it does not take such a task to be there (most PCs have none), and short, so the line still fits its column on four
+    /// lines with the spacing at its longest ("At most every 1440 minutes").
+    /// </summary>
+    public const string OwnTaskLine = "Turning it on offers to remove any RAMMap task of yours.";
 
     /// <summary>The automatic clear's box's tooltip: what turning it on does to a clear task of your own, and why.</summary>
     public const string AutoClearTip = "Turning it on first offers to remove a clear task of your own (RAMMap), so the two never both run.";

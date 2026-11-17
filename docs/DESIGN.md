@@ -1219,10 +1219,14 @@ a time, a newer one putting its words in it. It opens on the screen that holds t
 (`NoticeWindow.NoticeFont`: a form does not dispose a font it is given), closes on Esc once it has the focus (its Close
 is the cancel button), and cuts its words to what a notice holds (`NoticeWindow.Cut`, `ProfileAtStart.MaxNotice`, at a
 word's end), as its size is fixed and its text box has no scroll bar. As Windows holds its own toasts back, it waits
-while `SHQueryUserNotificationState` (`Native.NotificationState`) says busy, a full-screen Direct3D program or
-presentation mode, logged as held, and shows when that ends (asked every 5 seconds); a window above all others with a
-tag's and a program's names would otherwise show over a screen share. Focus Assist's do-not-disturb has no documented
-call to read, so it is not known. The token-leak guard's notices are not these, and always
+while `SHQueryUserNotificationState` (`Native.NotificationState`) says a full-screen Direct3D program (exclusive full
+screen, as some games run) or presentation mode, logged as held, and shows when that ends (asked every 5 seconds), or
+after 2 minutes whatever runs (`StayingNotice.MaxHoldMs`, timed from the first notice that waited, so a newer one in its
+place never holds it longer); the line that says it was shown then says how long it was held. A window above all others
+with a tag's and a program's names would otherwise show over a presentation. It does not wait for busy, which Windows
+says for any full-screen window (a video in a browser, a Remote Desktop window): this notice came 6 minutes before a
+hang, and must not wait out a film. Focus Assist's do-not-disturb has no documented call to read, so it is not known.
+The token-leak guard's notices are not these, and always
 show. A click on any notice opens the main window in the view last
 used and brings it to the front, unless that notice offers a place of its own (Active changes for the service profile's,
 the guard's offer for the token-leak watch's). Windows says only that a notice of the icon was clicked, never which, and
@@ -2134,7 +2138,10 @@ Save then puts only the four at-once settings into effect and says that nothing 
   when it is due. On by default for new installs and upgrades (a file without it reads it on): it acts only on top of a
   rule the owner turned on, and it is the clear that night needed. The words that turn automatic clearing on (the
   hourly clear's card and its result, replacing a RAMMap task, setup's timeline line) and Active changes' row say it
-  is turned on with the rule while it is on (`ChangeWords.AutoClearUrgent`).
+  is turned on with the rule while it is on (`ChangeWords.AutoClearUrgent`). The card says it before the click: an
+  offer that turns clearing on carries the setting (`RecommendationInputs.AutoClearUrgent`,
+  `Recommendation.TurnsOnUrgentClear`), and the card says so under its reason, before the stutter line
+  (`SimpleSettings.UrgentToo`), not in the reason, which a known issue's words or what a clear freed can replace.
 - **Escalation.** In "auto" mode, an automatic light (low-priority standby) clear that, measured 2 minutes later,
   freed less than max(512 MB, 10% of the pool before it) is followed right away by the full standby purge: once, inside
   the 30-minute spacing, never twice in a row, and not at all when the last measured full purge freed little too. The

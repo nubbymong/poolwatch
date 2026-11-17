@@ -8,23 +8,30 @@ namespace PoolWatch.Ui;
 /// shown as the token-leak guard's notices that need your click are (<see cref="GuardNotices"/>): a small window at the
 /// bottom right of the screen that holds the tray, never a modal box, above other windows, with a taskbar button. Unlike
 /// them it never takes the keyboard focus when it appears (it comes while you type in another program, and a key meant
-/// there must not press its button). As Windows holds its own toasts back, it waits while a presentation or a
-/// full-screen program runs (<see cref="Native.NotificationState.Presenting"/>), and shows when that ends: a window above
-/// all others, with a pool tag's and a program's names, would otherwise show over a screen share. One at a time: a newer
-/// one puts its words in the one open, or in the one waiting. Open PoolWatch opens the main window and closes it; Close,
-/// its close box, or Esc once it has the focus, closes it. Each one shown, held and closed is one line in the log. UI
-/// thread.
+/// there must not press its button). As Windows holds its own toasts back, it waits while a full-screen Direct3D program
+/// (exclusive full screen, as some games run) or presentation mode runs
+/// (<see cref="Native.NotificationState.Presenting"/>), and shows when that ends: a window above all others, with a pool
+/// tag's and a program's names, would otherwise show over a presentation. It waits <see cref="MaxHoldMs"/> (2 minutes) at
+/// most, then shows whatever runs: this notice can come minutes before a hang. One at a time: a newer one puts its words
+/// in the one open, or in the one waiting. Open PoolWatch opens the main window and closes it; Close, its close box, or
+/// Esc once it has the focus, closes it. Each one shown, held and closed is one line in the log, and one shown after it
+/// waited says for how long. UI thread.
 /// </summary>
 /// <param name="openWindow">What Open PoolWatch opens (the main window, or setup while it was never completed).</param>
 /// <param name="log">The engine log.</param>
-/// <param name="presenting">Whether a presentation or a full-screen program runs now (the tests give their own).</param>
-/// <param name="clockMs">The clock that only goes forward, in milliseconds (the tests give their own).</param>
+/// <param name="presenting">Whether a full-screen Direct3D program or presentation mode runs now (the tests give their own).</param>
+/// <param name="clockMs">The clock that only goes forward, in milliseconds (<see cref="Environment.TickCount64"/>, as
+/// <see cref="Core.Model.Moment.Ms"/>; the tests give their own): how long a notice has waited is timed on it.</param>
 internal sealed class StayingNotice(Action openWindow, Action<string> log, Func<bool>? presenting = null, Func<long>? clockMs = null)
 {
-    /// <summary>How often a notice that waits asks again whether the presentation or full-screen program has ended.</summary>
+    /// <summary>How often a notice that waits asks again whether it may show.</summary>
     internal const int WaitCheckMs = 5000;
 
-    /// <summary>The longest a notice is to wait (not kept to yet: the tests come first).</summary>
+    /// <summary>
+    /// The longest a notice waits, 2 minutes: the non-paged pool's notice came 6 minutes before a hang, so a game or a
+    /// presentation that runs on must not keep it back until after it. Then it shows whatever runs, and the log says how
+    /// long it waited. A newer one that takes its place is timed from when the first began to wait.
+    /// </summary>
     internal const int MaxHoldMs = 2 * 60 * 1000;
 
     private readonly Func<bool> _presenting = presenting ?? Native.NotificationState.Presenting;
@@ -40,12 +47,12 @@ internal sealed class StayingNotice(Action openWindow, Action<string> log, Func<
     /// <summary>The window open now; null when none (the tests).</summary>
     internal NoticeWindow? Open => _open is { IsDisposed: false } open ? open : null;
 
-    /// <summary>The notice that waits for a presentation or a full-screen program to end; null when none (the tests).</summary>
+    /// <summary>The notice that waits for a full-screen program or presentation mode to end; null when none (the tests).</summary>
     internal NoticeText? Held => _held;
 
     /// <summary>
-    /// Shows <paramref name="notice"/>: in the window open now, its words replaced; while a presentation or a full-screen
-    /// program runs, it waits (<see cref="Hold"/>); else in a new window, shown without taking the focus.
+    /// Shows <paramref name="notice"/>: in the window open now, its words replaced; while a full-screen Direct3D program or
+    /// presentation mode runs, it waits (<see cref="Hold"/>); else in a new window, shown without taking the focus.
     /// </summary>
     public void Show(NoticeText notice)
     {
@@ -60,40 +67,67 @@ internal sealed class StayingNotice(Action openWindow, Action<string> log, Func<
             WaitForTheEnd();
             return;
         }
-        // Shown now: one that still waited is older, and must not put its words in this one later.
-        _held = null;
-        _wait?.Stop();
-        var window = Make(notice);
-        _open = window;
-        window.Show(); // non-modal, and without taking the focus (NoticeWindow.ShowWithoutActivation)
-        log(ShownLine(notice, null));
+        // Shown now. One that still waited (for 2 minutes, or until what ran full screen ended) is older, and must not put
+        // its words in this one later; the log says how long it waited.
+        ShowNow(notice, _held is { } older ? Take(older).HeldMs : null);
     }
 
-    /// <summary>The log's line for a notice shown (how long it waited is not said yet: the tests come first).</summary>
-    internal static string ShownLine(NoticeText notice, long? heldMs) => $"notice shown (it stays until it is closed): {notice.Title}";
-
     /// <summary>
-    /// While a presentation or a full-screen program runs, keeps <paramref name="notice"/> to show when it ends (a newer
-    /// one in its place) and logs it: true. Otherwise false, and nothing is kept.
+    /// While a full-screen Direct3D program or presentation mode runs, and the notice that waits, if one does, has waited
+    /// less than <see cref="MaxHoldMs"/>, keeps <paramref name="notice"/> to show when that ends (a newer one in its place,
+    /// timed from when the first began to wait) and logs it: true. Otherwise false, and nothing is kept.
     /// </summary>
     internal bool Hold(NoticeText notice)
     {
-        if (!_presenting()) return false;
+        if (!MustWait()) return false;
         if (_held is null) _heldSinceMs = _clockMs();
         _held = notice;
-        log($"notice held while a presentation or a full-screen program runs (it shows when that ends): {notice.Title}");
+        log($"notice held while a full-screen Direct3D program or presentation mode runs (it shows when that ends, or after {MaxHoldMs / 60_000} minutes at most): {notice.Title}");
         return true;
     }
 
-    /// <summary>The notice that waited, taken to be shown with how long it waited, once the presentation or full-screen program has ended; null while it runs or when none waits.</summary>
-    internal Waited? Release()
+    /// <summary>
+    /// The notice that waited, taken to be shown, with how long it waited: once the full-screen program or presentation
+    /// mode has ended, or it has waited <see cref="MaxHoldMs"/>. Null while it still waits, or when none does.
+    /// </summary>
+    internal Waited? Release() => _held is { } held && !MustWait() ? Take(held) : null;
+
+    /// <summary>
+    /// Whether a notice waits now: while a full-screen Direct3D program or presentation mode runs, unless the one that
+    /// waits has waited <see cref="MaxHoldMs"/> (the clock is read first, so Windows is not asked then).
+    /// </summary>
+    private bool MustWait() => (_held is null || _clockMs() - _heldSinceMs < MaxHoldMs) && _presenting();
+
+    /// <summary>The notice that waits, taken from its place, with how long it waited.</summary>
+    private Waited Take(NoticeText held)
     {
-        if (_held is not { } held || _presenting()) return null;
         _held = null;
         return new Waited(held, _clockMs() - _heldSinceMs);
     }
 
-    /// <summary>Asks every <see cref="WaitCheckMs"/> whether the notice that waits can show now, and shows it then.</summary>
+    /// <summary>The log's line for a notice shown, and for how long it waited first (<paramref name="heldMs"/>; null when it did not).</summary>
+    internal static string ShownLine(NoticeText notice, long? heldMs) => heldMs is { } ms
+        ? $"notice shown after it was held {Seconds(ms)} (it waits {MaxHoldMs / 60_000} minutes at most; it stays until it is closed): {notice.Title}"
+        : $"notice shown (it stays until it is closed): {notice.Title}";
+
+    /// <summary>"45 seconds", "1 second": how long a notice waited, to the nearest second.</summary>
+    private static string Seconds(long ms)
+    {
+        long s = (ms + 500) / 1000;
+        return s == 1 ? "1 second" : $"{s} seconds";
+    }
+
+    /// <summary>Shows <paramref name="notice"/> in a new window, without taking the focus, and logs it with how long it waited.</summary>
+    private void ShowNow(NoticeText notice, long? heldMs)
+    {
+        _wait?.Stop();
+        var window = Make(notice);
+        _open = window;
+        window.Show(); // non-modal, and without taking the focus (NoticeWindow.ShowWithoutActivation)
+        log(ShownLine(notice, heldMs));
+    }
+
+    /// <summary>Asks every <see cref="WaitCheckMs"/> whether the notice that waits may show now, and shows it then.</summary>
     private void WaitForTheEnd()
     {
         if (_wait is null)
@@ -101,9 +135,7 @@ internal sealed class StayingNotice(Action openWindow, Action<string> log, Func<
             _wait = new System.Windows.Forms.Timer { Interval = WaitCheckMs };
             _wait.Tick += (_, _) =>
             {
-                if (Release() is not { } waited) return;
-                _wait?.Stop();
-                Show(waited.Notice);
+                if (Release() is { } waited) ShowNow(waited.Notice, waited.HeldMs);
             };
         }
         _wait.Start();

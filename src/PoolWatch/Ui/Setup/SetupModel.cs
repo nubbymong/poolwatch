@@ -109,9 +109,9 @@ internal static class SetupText
     /// <summary>What a clear is like while it runs, said where clearing is turned on.</summary>
     public const string Stutter = "Video or the mouse may stutter for a few seconds while it empties.";
     /// <summary>
-    /// The urgent clear's switch, under the choices that clear (<see cref="Settings.AutoClearUrgent"/>): a full clear at
-    /// once while the non-paged pool is over its alert and still rising, between the rule's own clears. Its name, as
-    /// Settings' box says it too.
+    /// The urgent clear's switch, under the choices that clear (<see cref="Settings.AutoClearUrgent"/>): a clear at once
+    /// (the full one, or the light one in "lowpriority" mode) while the non-paged pool is over its alert and still rising,
+    /// between the rule's own clears. Its name, as Settings' box says it too.
     /// </summary>
     public const string UrgentTitle = "Clear at once if the non-paged pool is over its limit and still rising";
 
