@@ -385,7 +385,7 @@ public class AppDataLinksTests
         Assert.Contains(packs.Single(p => p.Id == "ntfc-ai-desktop-apps").Links, l => l.Url == LinkFinder.IssueUrl);
         Assert.Contains(packs.Single(p => p.Id == "ntfc-ai-desktop-apps").Links, l => l.Url == "https://github.com/anthropics/claude-code/issues/95489");
         // The built-in name of the tag says what the leaked records are.
-        Assert.Contains("reparse", Core.Tags.BuiltinTags.Table[PoolTag.Parse("NtFC")].Description);
+        Assert.Contains("reparse", Core.Tags.BuiltinTags.Table[Core.PoolTag.Parse("NtFC")].Description);
         // Only a Restart frees it, in the window's words too.
         Assert.Contains("a Shut down with Fast Startup on keeps it", LinkWords.Restart);
     }
