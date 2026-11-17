@@ -31,8 +31,11 @@ public enum ClearMode
     Standby,
 }
 
-/// <summary>Why a clear ran. <see cref="Escalation"/>: the full purge right after an automatic light one freed little.</summary>
-public enum ClearTrigger { Manual, PoolOverLimit, Schedule, Experiment, CommandLine, Escalation }
+/// <summary>
+/// Why a clear ran. <see cref="Escalation"/>: the full purge right after an automatic light one freed little.
+/// <see cref="Urgent"/>: the non-paged pool over its alert and still rising fast.
+/// </summary>
+public enum ClearTrigger { Manual, PoolOverLimit, Schedule, Experiment, CommandLine, Escalation, Urgent }
 
 /// <summary>One clear: the moment, how, why, and the pool / memory lists just before and 2 minutes after.</summary>
 public sealed class ClearRecord
@@ -188,7 +191,7 @@ public static class ClearPolicy
     /// The caller has already checked that no clear runs or waits for its measurement and that the helper allows one.
     /// </summary>
     public static (ClearMode Mode, ClearTrigger Trigger)? Automatic(IReadOnlyList<ClearRecord> history, Settings s, PoolTotals now, Moment at,
-        long sinceMs, bool experimentRunning)
+        long sinceMs, bool experimentRunning, long? nonPagedRise = null)
     {
         if (!s.AutoClearEnabled || experimentRunning) return null;
         if (EscalateNow(history, s, at)) return (ClearMode.Standby, ClearTrigger.Escalation);

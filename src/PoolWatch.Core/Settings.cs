@@ -132,6 +132,9 @@ public sealed class Settings
     /// <summary>"auto" (low-priority first, the full purge when that frees little), "lowpriority" or "standby".</summary>
     [Description("How an automatic clear empties the cache. auto (default): the light clear (the low-priority part) while it frees about as much as the full one, which it tries once, else the full; lowpriority: only light; standby: only full. Applied when you save.")]
     public string AutoClearMode { get; set; } = "auto";
+    /// <summary>The urgent clear: while automatic clearing is on, a full clear at once when the non-paged pool is over its alert and still rising.</summary>
+    [Description("While automatic clearing is on, also empty the cache at once (the full clear) when the non-paged pool is over NonPagedTotalAlertBytes and rose at least NonPagedTotalRiseBytesPer10Min in 10 minutes: inside AutoClearMinMinutes too, but never within 10 minutes of a clear, and not again after an urgent clear that freed little until a clear frees real pool or the pool grows on. On by default. Applied when you save.")]
+    public bool AutoClearUrgent { get; set; } = true;
     /// <summary>
     /// Add a CPU trace (sampling with stacks, DPC/ISR, context switches) to Capture now, and (with <see cref="DeeperCapture"/>)
     /// record one when the lag probe trips. Off by default: a 30 s CPU trace with stacks lags a busy PC itself.
