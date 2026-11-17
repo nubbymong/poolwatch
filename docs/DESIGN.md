@@ -1846,7 +1846,7 @@ clear, the token-leak guard, the Codex shortcut), each with Turn off (the shortc
 start PoolWatch: Remove); what it turned off (services, scheduled tasks, startup apps, a clear task of the user's own),
 each with Put back; and "Other changes PoolWatch made" (a service set to its Windows default, a scheduled task or
 startup app that was off and that PoolWatch turned on, a PATH entry or an environment variable the Links under AppData
-window changed), each with Put back too. A row that cannot be put back, or that
+window changed or removed), each with Put back too. A row that cannot be put back, or that
 the uninstaller leaves, says so, and the footer then says that uninstalling puts the rest back ("except where marked"),
 or says why it could not (a change Windows would not let it put back). Its data file keeps its older name,
 `applied-changes.json`, so an installed copy's records stay readable.
@@ -1861,7 +1861,8 @@ or says why it could not (a change Windows would not let it put back). Its data 
 | Scheduled tasks and startup apps | `applied-changes.json` | switches them back |
 | The Codex shortcut | `applied-changes.json` | deletes it, only if its SHA-256 still matches what PoolWatch wrote |
 | A PATH entry the Links under AppData window replaced (section 16) | `applied-changes.json`: whose PATH, the entry as it was, the folder written and its place; each replacement is a record of its own, as a tool can put the entry back in between | puts the entry back where the folder PoolWatch wrote is: at its place, or, when a tool added entries in front, wherever it is once; when it is not on that PATH, the record goes and the PATH is left as it is |
-| An environment variable that window set | `applied-changes.json`: the variable (one of four), its value and kind before (or none), the folder set | sets it back as it was, or removes it, only while it is still what PoolWatch set it to |
+| A PATH entry that window removed from the account's own PATH (its link led nowhere) | `applied-changes.json`: the entry as it was, its place, and the SHA-256 of the PATH PoolWatch wrote | puts the entry back at its place only while the PATH is still exactly what PoolWatch wrote, so it comes back exactly; otherwise the record goes, the PATH is left as it is, and the message names the entry |
+| An environment variable that window set | `applied-changes.json`: the variable (one of five), its value and kind before (or none), the folder set | sets it back as it was, or removes it, only while it is still what PoolWatch set it to |
 
 `applied-changes.json` holds only the changes with no store of their own. It is admin-only and in the data folder, never
 under `--out`; at most 1 MB and 500 records; written to a temporary file and moved; one thread-safe instance per data
@@ -2282,17 +2283,35 @@ an AppData folder looks from the top down for the first folder that is a link (`
 one is a row: the folder to put in its place is the link's own target, one step, with the rest of the entry (never the
 fully resolved path, which would pin a tool's `current` link to one version), offered only when it is there, both
 ways reach it as the same folder, it is a plain local folder with no `;` or `%`, and it is not reached through another
-link under AppData; otherwise the row says why (one whose link leads nowhere is to be removed, which PoolWatch leaves to
-the user). winget's `Links` folder on PATH, uv's minor-version links in its Python folder, and pnpm's and the Codex
-command-line tool's folders under AppData are rows too, the last three with the variables that move them out
-(`UV_PYTHON_INSTALL_DIR` and `UV_CACHE_DIR`, `PNPM_HOME`, `CODEX_INSTALL_DIR`, to fixed folders in the profile), unless
-the account's environment already points them outside AppData. Every open of a path the account can change is for
-attributes only and as identification only, and a handle that is not a file or folder on a disk is not used
-(`LinkNative`); a link's target is read through that handle (`ReparseData`). Each change runs on the user's yes,
+link under AppData; otherwise the row says why. One whose link leads nowhere (an uninstall left it) is offered for
+removal from the account's own PATH (`PathList.Remove`: never from the machine's, never the only entry), recorded with
+the SHA-256 of the PATH it leaves so Put back acts only on exactly that PATH (`PathList.Insert`). winget's `Links`
+folder on PATH (advice only: taking it off PATH would break every portable app winget installed), uv's minor-version
+links in its Python folder, pnpm's and the Codex command-line tool's folders under AppData, and Claude Code's temp
+folder (`TEMP\claude`) as a junction (its retry loop, anthropics/claude-code issue 95489) are rows too, the last four
+with the variables that move them out (`UV_PYTHON_INSTALL_DIR` and `UV_CACHE_DIR`, `PNPM_HOME`, `CODEX_INSTALL_DIR`,
+`CLAUDE_CODE_TMPDIR`, to fixed folders in the profile), unless the account's environment already points them outside
+AppData. Rows PoolWatch changes nothing for, with steps and a prompt for the user's AI agent: an app's own data folder
+as a junction (`%APPDATA%\Claude`; the Codex app's four), a venv on PATH whose Python (its `pyvenv.cfg` home) is reached
+through a link under AppData (`VenvConfig`), and Claude Code hooks that start Python while uv's Pythons are behind its
+links (`ClaudeHooks`, from `settings.json`). The same tools and data folders are looked for in each app's own copy of
+AppData, its package's `LocalCache` (the Claude app's manifest keeps file-system write virtualisation on, so a folder a
+session makes in AppData lands there, out of sight of programs outside it), under a folder named from the package's
+full name only when that is a plain name (`LinkApps.Family`); those rows are advice only. Every open of a path the
+account can change is as identification only, and a handle that is not a file or folder on a disk is not used
+(`LinkNative`); a look is for attributes only, and a link's target and the length of its reparse data are read through
+that handle (`ReparseData`); the two files are opened on the entry itself, never through a link there, and read whole or
+not at all, bounded. The window's hints are read on demand: the average size of NtFC's blocks still held (`LinkBlocks`:
+the block an open keeps follows the link's reparse data, round_up_16(8 + length) + 16, a fit by fsfxing2023-wq that
+matches konrad-rzonca's readings; shown as a hint once NtFC holds 256 MB, never as proof), Fast Startup
+(`HiberbootEnabled`) and the last start's boot type (Kernel-Boot event 27: after a Shut down with Fast Startup on, what
+NtFC holds may be from before it, and only a Restart frees it), and the Claude and Codex apps' programs that started
+before the last change and still run (their path and start time, query rights only; never ended). Each change runs on the user's yes,
 judged again right before the write, recorded first (section 13), through the account's or the machine's
-`Environment` key checked by its kernel name (`WindowsEnvironmentStore`), and broadcast (`WM_SETTINGCHANGE`). A tool
-that puts back an entry PoolWatch replaced is offered the fix again: the Simple view's suggestion, and one tray notice
-per entry and run (`AppDataLinkFinder.Back`). The guided fix sets the variables only; the steps left, and a prompt for
+`Environment` key checked by its kernel name (`WindowsEnvironmentStore`), and broadcast (`WM_SETTINGCHANGE`). What a
+tool puts back after PoolWatch fixed it (an entry PoolWatch replaced or removed, back on the PATH; a variable it set,
+pointing into AppData again) is offered the fix again: the Simple view's suggestion, and one tray notice per row and run
+that names it (`AppDataLinkFinder.Back`). The guided fix sets the variables only; the steps left, and a prompt for
 the user's AI agent with every folder written from `%USERPROFILE%`, are shown for the user to follow.
 
 ## 17. Known issues (knowledge packs)

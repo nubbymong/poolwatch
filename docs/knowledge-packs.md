@@ -22,9 +22,9 @@ is decided by PoolWatch's own rules, the same with or without packs.
 | Pack | What it is | What PoolWatch can do |
 |---|---|---|
 | `windows-token-leak` | Windows 11 keeps a security token (pool tag `Toke`) for almost every program that starts another | the token-leak guard |
-| `ntfc-ai-desktop-apps` | NTFS file records (`NtFC`) pile up in the non-paged pool while the Codex or Claude desktop app runs | nothing: the note says what helped others |
+| `ntfc-ai-desktop-apps` | NTFS file records (`NtFC`) pile up in the non-paged pool while the Codex desktop app or a Code-tab session of the Claude desktop app runs | nothing: the note says what helped others, and that only a Restart frees them |
 | `codex-gpu-shader-cache` | one cause of the above: the Codex desktop app's GPU shader cache | a shortcut that starts the app without it |
-| `ntfc-appdata-links` | one cause of the above: opens through junctions and links under AppData inside the Claude and Codex apps (a bug in `bindflt.sys`) | the Links under AppData window: it replaces each such PATH entry, and sets uv's, pnpm's and the Codex command-line tool's variables |
+| `ntfc-appdata-links` | one cause of the above: opens through junctions and links under AppData inside the Claude and Codex apps (a bug in `bindflt.sys`); named from 20 MB an hour with the Claude app, as that cause often grows slower | the Links under AppData window: it replaces each such PATH entry, removes one whose link leads nowhere, sets uv's, pnpm's, the Codex command-line tool's and Claude Code's temp folder's variables, and gives steps for the rest |
 | `refs-standby-metadata` | ReFS file records (`Reff`, `RefF`, `RLin`, `MSPi`, `MSeb`, `MSb+`) kept in the kernel pool by the file cache | the hourly cache clear |
 
 ## Adding a known issue
@@ -98,7 +98,7 @@ about 20% at the 300-second maximum). While a clear is being measured, no growth
 | `auto-clear` | clears the cache every hour and shows what each clear freed | "Clear the cache every hour" |
 | `token-guard` | turns on its token-leak guard, which sets, each time PoolWatch starts, the Windows setting that stops the leak (Windows resets it at each sign-in) | "Protect this PC from the Windows token leak" |
 | `chatgpt-shortcut` | creates a desktop shortcut that starts the Codex desktop app (its program is ChatGPT.exe) without its GPU shader disk cache | "Start Codex without its shader cache" (setup's Fixes step and Settings offer the shortcut; the Simple view shows no card for it) |
-| `appdata-links` | shows the junctions and links under AppData it finds (only with the Claude or Codex desktop app installed), replaces each such PATH entry with the folder it leads to, and sets uv's, pnpm's and the Codex command-line tool's variables, each on your click; in effect once one of those changes is listed in Active changes, and it does not stop the issue (another link can come back) | "Stop the leak through links under AppData" (the Simple view, while a look found something to fix) |
+| `appdata-links` | shows the junctions and links under AppData it finds (only with the Claude or Codex desktop app installed), replaces each such PATH entry with the folder it leads to or removes one whose link leads nowhere, and sets uv's, pnpm's, the Codex command-line tool's and Claude Code's temp folder's variables, each on your click; in effect once one of those changes is listed in Active changes, and it does not stop the issue (another link can come back) | "Stop the leak through links under AppData" (the Simple view, while a look found something to fix) |
 
 The note says what PoolWatch already does about the issue, or names the suggestion while PoolWatch offers it, and
 otherwise says nothing of the action. The Windows setting the token-leak guard turns on stops its issue outright: while
