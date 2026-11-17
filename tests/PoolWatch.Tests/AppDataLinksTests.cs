@@ -528,13 +528,13 @@ public class AppDataLinksTests
     // ------------------------------------------------------------------ a PATH entry whose link leads nowhere, removed
 
     [Fact]
-    public void AnEntryIsRemovedAloneAndPutBackOnlyOnThePathPoolWatchLeft()
+    public void AnEntryIsRemovedAloneAndPutBackExactlyOnThePathPoolWatchLeft()
     {
         const string gone = @"%LOCALAPPDATA%\Programs\Gone\bin", path = @"C:\A;" + gone + @";C:\B";
         string? left = PathList.Remove(path, 1, gone);
         Assert.Equal(@"C:\A;C:\B", left);
         Assert.Equal(path, PathList.Insert(left!, 1, gone, PathList.Hash(left!)));
-        Assert.Null(PathList.Insert(@"C:\New;" + left, 1, gone, PathList.Hash(left!))); // the PATH changed since: nothing goes back
+        Assert.Null(PathList.Insert(@"C:\New;" + left, 1, gone, PathList.Hash(left!))); // the PATH changed since: Insert gives nothing (Put back then uses InsertAt)
         Assert.Null(PathList.Remove(path, 0, gone));                                    // not that entry there
         Assert.Null(PathList.Remove(gone, 0, gone));                                    // the only entry: an empty PATH could not come back exactly
         Assert.Equal(64, PathList.Hash("").Length);

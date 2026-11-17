@@ -230,7 +230,7 @@ internal sealed class ServicesSource(ServicesController services, ProfileStore? 
 /// Start-menu Programs folder, opened without following links, a plain file whose bytes still match what PoolWatch wrote;
 /// a PATH entry or an environment variable the AppData links window changed must still be as PoolWatch wrote it, and an
 /// entry it removed goes back exactly while the account's PATH is as PoolWatch left it, else at its old place among the
-/// entries there now (<see cref="AppDataLinkFixes.PutBack"/>).
+/// entries there now, or not at all when it is on the PATH again already (<see cref="AppDataLinkFixes.PutBack"/>).
 /// Putting a change back acts only on the record its row was drawn from (<see cref="ActiveChange.Stamp"/>), and removes
 /// only that record, as it was saved: one saved for that target since is kept.
 /// </summary>

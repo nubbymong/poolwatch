@@ -126,6 +126,8 @@ public static class PathList
     /// only while the value is exactly the one PoolWatch wrote (its <see cref="Hash"/> is <paramref name="written"/>), so
     /// the PATH comes back exactly as it was. Null otherwise: the PATH changed since, and the caller puts the entry back at
     /// its old place with <see cref="InsertAt"/> instead (or writes nothing when the entry is on the PATH again already).
+    /// Null too when the value would be longer than <see cref="MaxChars"/>; then InsertAt gives nothing either, and
+    /// Put back says the PATH would be too long.
     /// </summary>
     public static string? Insert(string value, int index, string entry, string written)
     {
