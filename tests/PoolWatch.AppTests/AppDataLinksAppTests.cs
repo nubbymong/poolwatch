@@ -90,6 +90,30 @@ internal sealed class FakeLinkSystem : ILinkSystem
         Real.Add(Path.GetDirectoryName(at)! + @"\desktop.ini");
         if (targetThere && Path.IsPathFullyQualified(target)) Real.Add(target + @"\tool.exe");
     }
+
+    /// <summary>The text of the small files a look reads, by their real paths; each is a real file too.</summary>
+    public Dictionary<string, string> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<string> ReadPaths { get; } = new();
+
+    public void AddFile(string path, string text)
+    {
+        Files[path] = text;
+        Real.Add(path);
+    }
+
+    /// <summary>Like Windows' read: a link at the path itself is never read, and a longer file is not read at all.</summary>
+    public string? ReadText(string path, int maxBytes)
+    {
+        ReadPaths.Add(path);
+        if (Links.ContainsKey(path) || Resolved(path) is not { } at || !Files.TryGetValue(at, out var text)) return null;
+        return System.Text.Encoding.UTF8.GetByteCount(text) > maxBytes ? null : text;
+    }
+
+    public (bool? FastStartup, int? BootType) BootSeen { get; set; }
+    public (bool? FastStartup, int? BootType) Boot() => BootSeen;
+
+    public List<AppProcess> Running { get; } = new();
+    public IReadOnlyList<AppProcess> AppProcesses() => Running;
 }
 
 /// <summary>The registry's environment variables, in memory: every write is counted, can be made to fail, and checks the value it expects.</summary>
@@ -204,15 +228,75 @@ public sealed class AppDataLinksAppTests : IDisposable
         Assert.Equal([@"%APPDATA%\Example", @"%LOCALAPPDATA%\Programs\Rel\bin"], rows.Select(r => r.Link)); // the link itself, where it is
     }
 
+    /// <summary>
+    /// An entry whose link leads nowhere (an uninstall left it) is removed from your own PATH on your yes, never replaced:
+    /// recorded first with the SHA-256 of the PATH it leaves, every other entry and the value's kind kept, the link itself
+    /// left alone. Put back gives the PATH back exactly while it is still as PoolWatch left it, and otherwise leaves it.
+    /// </summary>
     [Fact]
-    public void AnEntryWhoseLinkLeadsNowhereIsToBeRemovedNotReplaced()
+    public void AnEntryWhoseLinkLeadsNowhereIsRemovedNotReplacedAndPutBackExactly()
     {
         _pc.Links[CodexLink] = @"C:\Users\someone\.codex\gone\bin";
         var gone = Row(LinkKind.PathEntryGone);
         Assert.Null(gone.Target);
-        Assert.False(gone.CanFix);
+        Assert.True(gone.CanFix);
         Assert.Equal((false, "PoolWatch does not replace this entry."), Fixes().Replace(gone, "a test"));
         Assert.Empty(_pc.Values.Writes);
+
+        bool recordedFirst = false;
+        _pc.Values.BeforeWrite = () => recordedFirst = _f.Records.All().Any(r => r is { Kind: RecordKind.RemovedPathEntry, Before: Codex, Index: 1 });
+        var (ok, message) = Fixes().Remove(gone, "a test");
+        Assert.True(ok, message);
+        Assert.True(recordedFirst);
+        Assert.StartsWith("Removed " + Codex + " from your PATH", message);
+        const string left = @"%USERPROFILE%\.local\bin;C:\Tools";
+        Assert.Equal(new EnvValue(left, Expand: true), _pc.Values.Read(EnvScope.User, "Path"));
+        Assert.Equal(1, _pc.Values.Broadcasts);
+        Assert.True(_pc.Links.ContainsKey(CodexLink)); // the link itself is never deleted
+        var record = Assert.Single(_f.Records.All());
+        Assert.Null(ChangeRecordFile.Invalid(record));
+        Assert.Equal(PathList.Hash(left), record.Sha256);
+        _pc.Values.BeforeWrite = null;
+
+        // Put back: the PATH is still as PoolWatch left it, so it comes back exactly, its kind kept.
+        var source = new RecordedSource(_f.Records, _f.Toggles, _f.ClearTasks, _f.Live(), environment: _pc.Store);
+        var row = source.List().Single(c => c.Kind == ChangeKind.PathEntry);
+        Assert.Equal(ChangeGroup.Other, row.Group);
+        var result = source.Undo(row, confirmed: false);
+        Assert.True(result.Done, result.Message);
+        Assert.Equal(new EnvValue(UserPath, Expand: true), _pc.Values.Read(EnvScope.User, "Path"));
+        Assert.Empty(_f.Records.All());
+
+        // A PATH that changed since: nothing is put back, the record goes, and the message names the entry.
+        Assert.True(Fixes().Remove(Row(LinkKind.PathEntryGone), "a test").Ok);
+        _pc.Values.Set(EnvScope.User, "Path", @"C:\New;" + left, expand: true);
+        int writes = _pc.Values.Writes.Count;
+        result = source.Undo(source.List().Single(c => c.Kind == ChangeKind.PathEntry), confirmed: false);
+        Assert.True(result.Done);
+        Assert.Contains("changed after PoolWatch removed " + Codex, result.Message);
+        Assert.Equal(writes, _pc.Values.Writes.Count);
+        Assert.Equal(@"C:\New;" + left, _pc.Values.Text(EnvScope.User, "Path"));
+        Assert.Empty(_f.Records.All());
+    }
+
+    [Fact]
+    public void AnEntryIsNeverRemovedFromTheMachinesPathOrWhenItIsTheOnlyOne()
+    {
+        _pc.Links[CodexLink] = @"C:\Users\someone\.codex\gone\bin";
+        _pc.Values.Set(EnvScope.User, "Path", @"C:\Tools", expand: true);
+        _pc.Values.Set(EnvScope.Machine, "Path", @"C:\Windows;" + CodexLink);
+        var machine = Row(LinkKind.PathEntryGone);
+        Assert.Equal(EnvScope.Machine, machine.Scope);
+        Assert.False(machine.CanFix);
+        Assert.Equal((false, "PoolWatch does not remove this entry."), Fixes().Remove(machine, "a test"));
+
+        _pc.Values.Set(EnvScope.Machine, "Path", @"C:\Windows");
+        _pc.Values.Set(EnvScope.User, "Path", Codex, expand: true);
+        var (ok, message) = Fixes().Remove(Row(LinkKind.PathEntryGone), "a test");
+        Assert.False(ok);
+        Assert.Contains("it is the only one on your PATH", message);
+        Assert.Empty(_pc.Values.Writes);
+        Assert.Empty(_f.Records.All());
     }
 
     [Fact]
@@ -614,6 +698,167 @@ public sealed class AppDataLinksAppTests : IDisposable
         Assert.Equal(LinkWords.NotInstalled, AppDataLinksView.Status(LinkScan.None(DateTime.UtcNow)));
         Assert.Equal(LinkWords.NothingFound, AppDataLinksView.Status(new LinkScan(DateTime.UtcNow, true, false, [new LinkFinding { Kind = LinkKind.Projects }])));
         Assert.StartsWith("PoolWatch found 2 things that go through links under AppData; PoolWatch can fix 2 of them.", AppDataLinksView.Status(Scan()));
+    }
+
+    // ------------------------------------------------------------------ Claude Code's temp folder, the apps' data folders, their own copies
+
+    /// <summary>
+    /// Claude Code's temp folder as a junction (anthropics/claude-code issue 95489) is offered CLAUDE_CODE_TMPDIR, through
+    /// the same guided fix as uv's variables: recorded first, and put back from Active changes. Only with the Claude app,
+    /// and not once the variable is set outside AppData.
+    /// </summary>
+    [Fact]
+    public void ClaudeCodesTempFolderAsAJunctionIsOfferedItsVariable()
+    {
+        _pc.Link(_pc.LocalFolder + @"\Temp\claude", @"D:\ClaudeScratch");
+        var row = Row(LinkKind.ClaudeTemp);
+        Assert.Equal((@"%LOCALAPPDATA%\Temp\claude", @"D:\ClaudeScratch"), (row.Link, row.Target));
+        Assert.Equal([new EnvSetting(LinkFinder.ClaudeTemp, @"C:\Users\someone\.claude-tmp", null)], row.EnvSettings);
+        Assert.True(row.CanFix);
+        var (ok, said, _) = Fixes().SetVariables(row, "a test");
+        Assert.True(ok, said);
+        Assert.Equal(new EnvValue(@"C:\Users\someone\.claude-tmp", Expand: false), _pc.Values.Read(EnvScope.User, LinkFinder.ClaudeTemp));
+        Assert.Null(ChangeRecordFile.Invalid(Assert.Single(_f.Records.All())));
+
+        _pc.Env[LinkFinder.ClaudeTemp] = @"C:\Users\someone\.claude-tmp"; // set outside AppData: Claude Code no longer uses the junction
+        Assert.DoesNotContain(Scan().Findings, f => f.Kind == LinkKind.ClaudeTemp);
+        _pc.Env.Remove(LinkFinder.ClaudeTemp);
+        _pc.Packages.Clear();
+        _pc.Packages.Add("OpenAI.Codex_26.1.0.0_x64__2p2nqsd0c76g0"); // the Codex app has no Claude Code
+        Assert.DoesNotContain(Scan().Findings, f => f.Kind == LinkKind.ClaudeTemp);
+    }
+
+    [Fact]
+    public async Task AnAppsDataFolderAsAJunctionGetsStepsAndAPromptAndNothingIsChanged()
+    {
+        _pc.Link(_pc.AppData + @"\Claude", @"E:\CLAUDE");
+        var row = Row(LinkKind.AppFolder);
+        Assert.Equal((LinkApps.Claude, @"%APPDATA%\Claude", @"E:\CLAUDE"), (row.Tool, row.Link, row.Target));
+        Assert.True(row is { HasSteps: true, CanFix: false, InApp: null });
+        // The Codex app's data folders are looked at only with the Codex app.
+        _pc.Link(_pc.LocalFolder + @"\OpenAI\Codex", @"E:\Codex");
+        Assert.DoesNotContain(Scan().Findings, f => f is { Kind: LinkKind.AppFolder, Tool: LinkApps.Codex });
+        _pc.Packages.Add("OpenAI.Codex_26.1.0.0_x64__2p2nqsd0c76g0");
+        Assert.Contains(Scan().Findings, f => f is { Kind: LinkKind.AppFolder, Tool: LinkApps.Codex, Link: @"%LOCALAPPDATA%\OpenAI\Codex" });
+
+        var yes = new Answers(true);
+        Assert.Equal("", await View().Fix(row, yes));
+        Assert.Empty(yes.Asked); // nothing changes, so nothing is asked
+        var (steps, prompt) = Assert.Single(yes.Shown);
+        Assert.Contains("1. Quit the app fully", steps);
+        Assert.Contains(@"%APPDATA%\Claude", prompt);
+        Assert.DoesNotContain("someone", prompt);
+        Assert.Equal(RecommendationActions.Refused, await View(smoke: true).Fix(row, yes));
+        Assert.Single(yes.Shown);
+        Assert.Empty(_pc.Values.Writes);
+        Assert.Empty(_f.Records.All());
+    }
+
+    /// <summary>
+    /// What a program the app started made in the app's own copy of AppData (its package's LocalCache) is found too, named
+    /// as being there, and only advised: PoolWatch changes nothing there. A package name that is not a plain one is never
+    /// made into a folder to look in.
+    /// </summary>
+    [Fact]
+    public void TheAppsOwnCopyOfAppDataIsLookedAtTooAndOnlyAdvised()
+    {
+        string cache = _pc.LocalFolder + @"\Packages\Claude_pzs8sxrjxfjjc\LocalCache";
+        _pc.Link(cache + @"\Roaming\uv\python\cpython-3.12-windows-x86_64-none", "cpython-3.12.13-windows-x86_64-none", targetThere: false);
+        _pc.Real.Add(cache + @"\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\python.exe");
+        var row = Assert.Single(Scan().Findings, f => f.InApp is not null);
+        Assert.Equal((LinkKind.Uv, LinkApps.Claude, 1), (row.Kind, row.InApp, row.Count));
+        Assert.Equal(@"%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\uv\python", row.Link);
+        Assert.False(row.Actionable);
+        Assert.Equal("Advice only", LinkWords.Fix(row));
+        var (ok, _, set) = Fixes().SetVariables(row with { EnvSettings = [new(LinkFinder.UvPythons, @"C:\Users\someone\.uv\python", null)] }, "a test");
+        Assert.False(ok);
+        Assert.Empty(set);
+        Assert.Empty(_pc.Values.Writes);
+
+        _pc.Packages.Clear();
+        _pc.Packages.Add(@"Claude_1.0.0.0_x64__..\..\..\x");
+        Assert.DoesNotContain(Scan().Findings, f => f.InApp is not null);
+        Assert.DoesNotContain(_pc.Looked, p => p.Contains(@"\..\", StringComparison.Ordinal));
+    }
+
+    // ------------------------------------------------------------------ venvs on PATH, and Claude Code's hooks
+
+    /// <summary>
+    /// PlatformIO's venv is a plain folder on PATH, but its Python (home in pyvenv.cfg) is behind uv's link, so every python
+    /// a program of the app runs goes through it (SynoSoftware). It is found from the pyvenv.cfg beside the Scripts folder,
+    /// and only advised.
+    /// </summary>
+    [Fact]
+    public void AVenvOnThePathWhosePythonIsBehindUvsLinkIsFound()
+    {
+        string python = _pc.AppData + @"\uv\python";
+        _pc.Link(python + @"\cpython-3.13-windows-x86_64-none", python + @"\cpython-3.13.5-windows-x86_64-none");
+        string penv = _pc.Profile + @"\.platformio\penv";
+        _pc.AddFile(penv + @"\pyvenv.cfg", "home = " + python + "\\cpython-3.13-windows-x86_64-none\r\ninclude-system-site-packages = false\r\n");
+        _pc.Values.Set(EnvScope.User, "Path", penv + @"\Scripts;" + UserPath, expand: true);
+        var venv = Row(LinkKind.Venv);
+        Assert.Equal(("PlatformIO", 0, @"%USERPROFILE%\.platformio\penv", @"%APPDATA%\uv\python\cpython-3.13-windows-x86_64-none"),
+            (venv.Tool, venv.Index, venv.Link, venv.Home));
+        Assert.True(venv is { HasSteps: true, CanFix: false });
+        Assert.Contains(penv + @"\pyvenv.cfg", _pc.ReadPaths);
+        // A venv on a Python in a real folder goes through no link.
+        _pc.AddFile(penv + @"\pyvenv.cfg", "home = " + python + "\\cpython-3.13.5-windows-x86_64-none\r\n");
+        Assert.DoesNotContain(Scan().Findings, f => f.Kind == LinkKind.Venv);
+    }
+
+    [Fact]
+    public void HooksThatStartPythonAreCountedWhileUvsPythonsAreBehindItsLinks()
+    {
+        _pc.AddFile(_pc.Profile + @"\.claude\settings.json",
+            """{ "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "python3 check.py" }, { "type": "command", "command": "node log.js" } ] } ] } }""");
+        Assert.DoesNotContain(Scan().Findings, f => f.Kind == LinkKind.Hook); // uv's Pythons are not behind links here
+        _pc.Link(_pc.AppData + @"\uv\python\cpython-3.12-windows-x86_64-none", "cpython-3.12.13-windows-x86_64-none", targetThere: false);
+        _pc.Real.Add(_pc.AppData + @"\uv\python\cpython-3.12.13-windows-x86_64-none\python.exe");
+        var hook = Row(LinkKind.Hook);
+        Assert.Equal(1, hook.Count);
+        Assert.Equal(["python3 check.py"], hook.Names);
+        Assert.True(hook is { HasSteps: true, CanFix: false });
+        Assert.DoesNotContain("check.py", LinkWords.GuidePrompt(hook, _pc.Profile)); // a command never leaves the window
+    }
+
+    // ------------------------------------------------------------------ came back, the hints, the apps' programs
+
+    [Fact]
+    public void AVariableAToolPutBackIntoAppDataIsToldAboutAgain()
+    {
+        _pc.Real.Add(_pc.LocalFolder + @"\pnpm\global\5\node_modules\x");
+        Assert.True(Fixes().SetVariables(Row(LinkKind.Pnpm), "a test").Ok);
+        _pc.Env[LinkFinder.PnpmHome] = @"C:\Users\someone\.pnpm";
+        Assert.Empty(AppDataLinkFinder.Back(Scan(), _f.Records.All()));
+        _pc.Env[LinkFinder.PnpmHome] = _pc.LocalFolder + @"\pnpm"; // an installer set it back into AppData
+        var back = AppDataLinkFinder.Back(Scan(), _f.Records.All());
+        Assert.Equal([LinkKind.Pnpm], back.Select(f => f.Kind));
+        Assert.StartsWith("Back under AppData: pnpm's global packages.", LinkWords.CameBack(back));
+    }
+
+    [Fact]
+    public async Task TheWindowSaysWhatTheBlocksTheLastStartAndTheAppsProgramsShowAndEndsNothing()
+    {
+        _pc.BootSeen = (true, 1);
+        var view = View();
+        var entry = new Core.Model.PoolTagEntry(Core.PoolTag.Parse("NtFC"), 0, 0, 0, 2_000_100, 100, 352UL * 2_000_000);
+        var scan = new LinkScan(DateTime.UtcNow, true, false,
+            [new LinkFinding { Kind = LinkKind.Uv, Link = @"%APPDATA%\uv\python", Count = 1, Names = ["cpython-3.14-windows-x86_64-none"], Block = 352 }]);
+        string hints = view.Hints(scan, entry)!;
+        Assert.Contains("NTFS records (NtFC) average 352 bytes each since Windows started, the size an open through uv's Pythons (1 link) keeps", hints);
+        Assert.Contains("Windows last started from a Shut down with Fast Startup on", hints);
+        Assert.Equal("Fast Startup is on: to free what leaked, use Restart, not Shut down (DraftingDreamer).", view.Hints(scan, entry with { NonPagedUsed = 1 << 20 }));
+        _pc.BootSeen = (false, 0);
+        Assert.Null(view.Hints(scan, null));
+
+        // After a change, the apps' programs that started before it are named; none is ended.
+        _pc.Running.Add(new AppProcess("claude.exe", LinkApps.Claude, DateTime.UtcNow.AddHours(-1)));
+        _pc.Running.Add(new AppProcess("cowork-svc.exe", LinkApps.Claude, DateTime.UtcNow.AddHours(-1)));
+        string said = await View().Fix(Row(LinkKind.PathEntry), new Answers(true));
+        Assert.StartsWith("Replaced " + Codex, said);
+        Assert.Contains("2 programs of the Claude app (claude.exe, cowork-svc.exe) started before PoolWatch's change", said);
+        Assert.Contains("PoolWatch never ends them", view.Hints(scan, null));
+        Assert.Equal(2, _pc.Running.Count);
     }
 
     /// <summary>The running app and the command line (the uninstaller's put-back) both put the changes back through the registry.</summary>

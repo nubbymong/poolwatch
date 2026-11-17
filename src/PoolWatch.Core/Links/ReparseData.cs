@@ -44,6 +44,14 @@ public static class ReparseData
         return target.Any(char.IsControl) ? null : (target, relative);
     }
 
+    /// <summary>
+    /// The length of the reparse data after its 8-byte header (ReparseDataLength, the USHORT after the tag), which the size
+    /// of the block the leak keeps follows (<see cref="LinkBlocks.Expected"/>); null for data too short to hold it, or longer
+    /// than any reparse data can be.
+    /// </summary>
+    public static int? Length(ReadOnlySpan<byte> data) =>
+        data.Length < 8 || data.Length > MaxBytes ? null : BinaryPrimitives.ReadUInt16LittleEndian(data[4..]);
+
     /// <summary>Reparse data for a link to <paramref name="target"/>, as Windows writes it (the tests make links of their own with it).</summary>
     public static byte[] Make(uint tag, string target, string print, bool relative = false)
     {

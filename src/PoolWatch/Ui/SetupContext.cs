@@ -114,8 +114,9 @@ internal sealed class SetupContext
         return RecommendationInputsBuilder.Build(Engine, Analysis, Probe.Last, Store, Ledger.Records.Has(RecordKind.Shortcut),
             LauncherInstalled, Recommendations.LeakTestNow, Core.Model.Moment.Now()) with
         {
-            AppDataLinksToFix = AppDataLinks.Last?.ToFix ?? 0,
-            AppDataLinksFixed = Ledger.Records.Has(RecordKind.PathEntry) || Ledger.Records.Has(RecordKind.EnvironmentVariable),
+            AppDataLinksToFix = AppDataLinks.Last?.ToAct ?? 0,
+            AppDataLinksFixed = Ledger.Records.Has(RecordKind.PathEntry) || Ledger.Records.Has(RecordKind.EnvironmentVariable) ||
+                                Ledger.Records.Has(RecordKind.RemovedPathEntry),
         };
     }
 

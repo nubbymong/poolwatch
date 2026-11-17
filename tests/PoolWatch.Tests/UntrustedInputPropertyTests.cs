@@ -370,7 +370,7 @@ public class UntrustedInputPropertyTests
     /// <summary>
     /// A record as PoolWatch writes one of its kind: its id from its target, a task outside Microsoft's folder, a startup
     /// place PoolWatch knows, a shortcut on a local drive, a PATH entry with a plain folder in its place, one of the
-    /// variables PoolWatch sets.
+    /// variables PoolWatch sets, an entry removed from the account's own PATH with the SHA-256 of the PATH it left.
     /// </summary>
     private static ChangeRecord Made(RecordKind kind, DateTime when, string via, string name, string folder, bool on, int logon, string? account, string location, string hash)
     {
@@ -400,6 +400,11 @@ public class UntrustedInputPropertyTests
                 Id = ChangeIds.EnvironmentVariable(LinkFinder.Variables[logon % LinkFinder.Variables.Count]), Kind = kind, ChangedUtc = when, Via = via,
                 Location = EnvScopes.User, Name = LinkFinder.Variables[logon % LinkFinder.Variables.Count], Before = on ? @"C:\Old\" + name : null,
                 ValueKind = on ? (logon % 2 == 0 ? "String" : "ExpandString") : null, After = @"C:\Example\" + folder,
+            },
+            RecordKind.RemovedPathEntry => new ChangeRecord
+            {
+                Id = ChangeIds.RemovedPathEntry(EnvScopes.User, @"%LOCALAPPDATA%\Example " + name, when), Kind = kind, ChangedUtc = when, Via = via,
+                Location = EnvScopes.User, Before = @"%LOCALAPPDATA%\Example " + name, Index = logon, Sha256 = hash,
             },
             _ => new ChangeRecord { Id = ChangeIds.Shortcut(shortcut), Kind = kind, ChangedUtc = when, Via = via, Path = shortcut, Sha256 = hash },
         };

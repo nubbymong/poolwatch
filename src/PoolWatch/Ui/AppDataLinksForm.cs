@@ -14,12 +14,16 @@ internal interface IAppDataLinkDialogs
 }
 
 /// <summary>
-/// The AppData links window without a window (so it is tested): a look for the links, and each row's button. A row's
-/// change runs only after the user's yes to a question that says exactly what changes, off the UI thread, through
-/// <see cref="AppDataLinkFixes"/> (recorded first, so Active changes can put it back). The guided fix then shows the
-/// steps left, and the prompt for the user's AI agent. Refuses every change in the CI UI test.
+/// The AppData links window without a window (so it is tested): a look for the links, the hints under its status line,
+/// and each row's button. A row's change runs only after the user's yes to a question that says exactly what changes, off
+/// the UI thread, through <see cref="AppDataLinkFixes"/> (recorded first, so Active changes can put it back). The guided
+/// fix then shows the steps left, and the prompt for the user's AI agent; a row PoolWatch changes nothing for (a data
+/// folder, a venv, the hooks) shows its steps and prompt alone. After a change it names the apps' programs still running
+/// from before it, which do not see it yet; it never ends them. Refuses every button in the CI UI test.
 /// </summary>
-internal sealed class AppDataLinksView(AppDataLinkWatch watch, AppDataLinkFixes fixes, bool smoke, Action<string> timeline, string profile)
+/// <param name="ntfc">NtFC's row of the latest sample (its bytes and blocks held), for the hints; null: none.</param>
+internal sealed class AppDataLinksView(AppDataLinkWatch watch, AppDataLinkFixes fixes, bool smoke, Action<string> timeline, string profile,
+    Func<Core.Model.PoolTagEntry?>? ntfc = null)
 {
     /// <summary>Where the change was made, for the timeline and Active changes.</summary>
     public const string Via = "the AppData links window";
@@ -28,12 +32,19 @@ internal sealed class AppDataLinksView(AppDataLinkWatch watch, AppDataLinkFixes 
 
     public LinkScan? Scan { get; private set; }
 
-    /// <summary>Looks for the links now (a worker thread); the line the window shows above the list.</summary>
+    /// <summary>Looks for the links now (a worker thread); the lines the window shows above the list: what was found, then the hints.</summary>
     public async Task<string> Look()
     {
-        try { Scan = await watch.ScanNow(); }
+        LinkScan scan;
+        try { Scan = scan = await watch.ScanNow(); }
         catch (Exception ex) { return "PoolWatch could not look for the links: " + ex.Message; }
-        return Status(Scan);
+        string status = Status(scan);
+        if (!scan.Applies) return status;
+        var entry = ntfc?.Invoke();
+        string? hints;
+        try { hints = await Task.Run(() => Hints(scan, entry)); }
+        catch (Exception) { hints = null; } // a hint that could not be read is left out
+        return hints is null ? status : status + "\r\n" + hints;
     }
 
     /// <summary>The line above the list for a look's result.</summary>
@@ -51,26 +62,72 @@ internal sealed class AppDataLinksView(AppDataLinkWatch watch, AppDataLinkFixes 
         };
     }
 
-    /// <summary>The row's button: asks first, then changes, and says what happened (empty for a row it does nothing for).</summary>
+    /// <summary>
+    /// The hints under the status line, each on its own line, or null: what the size of NtFC's blocks points at, once it
+    /// holds enough to say (<see cref="LinkWords.BlockHint"/>); Fast Startup and the last start (<see cref="LinkWords.BootHint"/>);
+    /// and the apps' programs that started before PoolWatch's last change for these links and still run
+    /// (<see cref="LinkWords.StillRunning"/>). Reads only.
+    /// </summary>
+    internal string? Hints(LinkScan scan, Core.Model.PoolTagEntry? entry)
+    {
+        var lines = new List<string>();
+        long held = entry is { } e ? (long)Math.Min(e.NonPagedUsed, (ulong)long.MaxValue) : 0;
+        if (entry is { } t && held >= LinkWords.HintFromBytes && LinkBlocks.Average(t.NonPagedUsed, t.NonPagedAllocs, t.NonPagedFrees) is { } average &&
+            LinkWords.BlockHint(average, scan.Findings) is { } block)
+            lines.Add(block);
+        var (fast, boot) = fixes.System.Boot();
+        if (LinkWords.BootHint(fast, boot, held) is { } restart) lines.Add(restart);
+        if (fixes.LastChange() is { } last && LinkWords.StillRunning(fixes.StillOld(last)) is { } old) lines.Add(old);
+        return lines.Count == 0 ? null : string.Join("\r\n", lines);
+    }
+
+    /// <summary>NtFC's row in a sample, or null.</summary>
+    internal static Core.Model.PoolTagEntry? NtfcOf(Core.Model.Sample? sample)
+    {
+        if (sample is null) return null;
+        foreach (var t in sample.Tags)
+            if (t.Tag == Ntfc) return t;
+        return null;
+    }
+
+    private static readonly Core.PoolTag Ntfc = Core.PoolTag.Parse("NtFC");
+
+    /// <summary>The row's button: asks first, then changes, and says what happened (empty for a row it changes nothing for).</summary>
     public async Task<string> Fix(LinkFinding f, IAppDataLinkDialogs dialogs)
     {
         if (smoke) return RecommendationActions.Refused;
-        if (!f.CanFix) return "";
-        if (f.Kind == LinkKind.PathEntry)
+        if (f.HasSteps)
         {
-            if (!dialogs.Confirm(LinkWords.ReplaceTitle, LinkWords.ReplaceQuestion(f))) return NothingChanged;
-            var (ok, message) = await Task.Run(() => fixes.Replace(f, Via));
-            if (ok) timeline(message);
-            return message;
+            dialogs.ShowSteps(LinkWords.StepsTitle, LinkWords.GuideText(f), LinkWords.GuidePrompt(f, profile));
+            return "";
         }
-        if (!dialogs.Confirm(LinkWords.SetTitle, LinkWords.SetQuestion(f))) return NothingChanged;
-        var (_, said, set) = await Task.Run(() => fixes.SetVariables(f, Via));
-        if (set.Count > 0)
+        if (!f.CanFix) return "";
+        string said;
+        if (f.Kind is LinkKind.PathEntry or LinkKind.PathEntryGone)
         {
+            bool remove = f.Kind == LinkKind.PathEntryGone;
+            if (!dialogs.Confirm(remove ? LinkWords.RemoveTitle : LinkWords.ReplaceTitle, remove ? LinkWords.RemoveQuestion(f) : LinkWords.ReplaceQuestion(f)))
+                return NothingChanged;
+            var (ok, message) = await Task.Run(() => remove ? fixes.Remove(f, Via) : fixes.Replace(f, Via));
+            if (!ok) return message;
+            timeline(message);
+            said = message;
+        }
+        else
+        {
+            if (!dialogs.Confirm(LinkWords.SetTitle, LinkWords.SetQuestion(f))) return NothingChanged;
+            var (_, setSaid, set) = await Task.Run(() => fixes.SetVariables(f, Via));
+            if (set.Count == 0) return setSaid;
             timeline(string.Join(" ", set.Select(s => Core.Changes.ChangeWords.EnvironmentVariable(s.Name, s.Value) + ".")));
             dialogs.ShowSteps(LinkWords.StepsTitle, LinkWords.StepsText(f, set), LinkWords.Prompt(f, set, profile));
+            said = setSaid;
         }
-        return said;
+        // Every program of the apps running now started before this change: name them, so the user quits the app fully.
+        var changed = DateTime.UtcNow;
+        string? old = null;
+        try { old = await Task.Run(() => LinkWords.StillRunning(fixes.StillOld(changed))); }
+        catch (Exception) { } // named or not, the change is made
+        return old is null ? said : said + " " + old;
     }
 }
 
@@ -188,12 +245,12 @@ internal sealed class AppDataLinksForm : Form
         var f = Selected();
         _details.Text = f is null ? "" : LinkWords.Details(f).ReplaceLineEndings("\r\n");
         _fix.Text = f is null ? "Fix" : LinkWords.Button(f);
-        _fix.Enabled = !_busy && f is { CanFix: true };
+        _fix.Enabled = !_busy && f is { Actionable: true };
     }
 
     private async Task FixSelected()
     {
-        if (_busy || Selected() is not { CanFix: true } f) return;
+        if (_busy || Selected() is not { Actionable: true } f) return;
         _busy = true;
         _fix.Enabled = _again.Enabled = false;
         string said;

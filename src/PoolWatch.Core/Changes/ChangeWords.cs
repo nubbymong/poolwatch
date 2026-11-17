@@ -251,7 +251,7 @@ public static class ChangeWords
         RecordKind.ScheduledTask => r.Location!.TrimStart('\\'),
         RecordKind.StartupEntry => StartupTitle(r.Name!),
         RecordKind.Shortcut => ShortcutTitle,
-        RecordKind.PathEntry => "PATH entry " + r.Before!.Trim(),
+        RecordKind.PathEntry or RecordKind.RemovedPathEntry => "PATH entry " + r.Before!.Trim(),
         RecordKind.EnvironmentVariable => r.Name!,
         _ => Of(r),
     };
@@ -264,6 +264,7 @@ public static class ChangeWords
         RecordKind.StartupEntry => $"startup app · was {OnOff(r.EnabledBefore == true)}",
         RecordKind.Shortcut => ShortcutDetail,
         RecordKind.PathEntry => $"entry on {PathOf(r.Location)} · now {r.After}",
+        RecordKind.RemovedPathEntry => $"removed from {PathOf(r.Location)} · its link led to a folder that is gone",
         RecordKind.EnvironmentVariable => r.Before is { } was ? $"environment variable · was {was}" : $"environment variable · was not set · now {r.After}",
         _ => "",
     };
@@ -333,8 +334,13 @@ public static class ChangeWords
         RecordKind.Shortcut => Shortcut(r.Path!),
         RecordKind.PathEntry => PathEntry(r.Location!, r.Before!, r.After!),
         RecordKind.EnvironmentVariable => EnvironmentVariable(r.Name!, r.After!),
+        RecordKind.RemovedPathEntry => RemovedPathEntry(r.Location!, r.Before!),
         _ => "A change this PoolWatch does not know",
     };
+
+    /// <summary>"Removed %LOCALAPPDATA%\Programs\Example\bin from your PATH: its link led to a folder that is gone".</summary>
+    public static string RemovedPathEntry(string scope, string before) =>
+        $"Removed {before.Trim()} from {PathOf(scope)}: its link led to a folder that is gone";
 
     /// <summary>"Replaced %LOCALAPPDATA%\Programs\Example\bin on your PATH with the folder its link leads to, D:\Example\bin".</summary>
     public static string PathEntry(string scope, string before, string after) =>

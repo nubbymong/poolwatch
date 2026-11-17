@@ -3,8 +3,8 @@
   "format": 1,
   "id": "ntfc-appdata-links",
   "title": "Links under AppData leak inside the Claude and Codex apps",
-  "explanation": "One cause of NTFS file records (pool tag NtFC) piling up while the Claude or Codex desktop app runs: a bug in bindflt.sys, the filter behind the AppData of Microsoft Store apps. Inside the app's package, every open through a junction or symbolic link located under AppData leaves one record behind until a restart, from its terminals, tools and hooks too. The same open by the real folder, through a link elsewhere, or from a program outside the app leaves nothing.",
-  "workaround": "Reach the files without such a link: replace each PATH entry that goes through one with the folder it leads to, and move uv, pnpm and the Codex command-line tool out of AppData with their own variables, then reinstall what they hold. These measured 0 new records. A restart frees what has built up.",
+  "explanation": "One cause of NTFS records (pool tag NtFC) piling up while the Claude or Codex desktop app runs: a bug in bindflt.sys, the filter behind a Store app's AppData. Each open through a junction or symbolic link under AppData, by the app or a program it starts (a terminal, git, Python, a hook), leaves one reparse-point record until a Restart. Opens by the real folder, through a link elsewhere (Documents and OneDrive included), or from outside the app left none. OneDrive's cloud files inside the apps were not measured.",
+  "workaround": "Reach the files without such a link: put the folder each PATH entry's link leads to in its place, and move uv, pnpm, the Codex command-line tool and Claude Code's temp folder out of AppData with their own variables, then reinstall what they hold. These measured 0 new records. Only a Restart frees what has built up: a Shut down with Fast Startup on keeps it.",
   "actions": ["appdata-links"],
   "suggestion": "Opens through links under AppData leave these behind (traced by peterlau03 on GitHub). PoolWatch shows each link it finds and how to fix it.",
   "evidence": [
@@ -14,6 +14,13 @@
         { "name": "Claude desktop", "storePackage": "Claude" },
         { "name": "Claude desktop", "storePackage": "Anthropic" },
         { "name": "Codex desktop", "storePackage": "OpenAI.Codex" }
+      ]
+    },
+    {
+      "tagGrowth": { "tags": ["NtFC"], "name": "NTFS file records", "pool": "nonPaged", "minMBPerHour": 20 },
+      "running": [
+        { "name": "Claude desktop", "storePackage": "Claude" },
+        { "name": "Claude desktop", "storePackage": "Anthropic" }
       ]
     }
   ],
@@ -33,6 +40,18 @@
     {
       "title": "One such entry anywhere on PATH costs a record for each program started",
       "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6829825523"
+    },
+    {
+      "title": "Only a Restart frees it, and a Code-tab session leaks with Cowork idle",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6732419760"
+    },
+    {
+      "title": "Venvs on PATH whose Python is behind uv's link (PlatformIO)",
+      "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6579764207"
+    },
+    {
+      "title": "Claude Code's temp folder as a junction, and a retry loop, anthropics/claude-code issue 95489",
+      "url": "https://github.com/anthropics/claude-code/issues/95489"
     }
   ],
   "credits": [
@@ -43,7 +62,7 @@
     },
     {
       "name": "konrad-rzonca",
-      "what": "showed that the leak follows the app's package and reaches the processes it starts",
+      "what": "showed that the leak follows the app's package and reaches the processes it starts, and that the block size follows the link",
       "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-5854033138"
     },
     {
@@ -73,7 +92,7 @@
     },
     {
       "name": "DraftingDreamer",
-      "what": "measured one record for each open, and the cost of one such entry anywhere on PATH",
+      "what": "measured one record for each open, the cost of one such entry anywhere on PATH, and that only a Restart frees it",
       "url": "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6829825523"
     }
   ]

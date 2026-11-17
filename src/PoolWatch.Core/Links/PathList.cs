@@ -72,6 +72,37 @@ public static class PathList
         string next = Join(parts);
         return next.Length <= MaxChars ? next : null;
     }
+
+    /// <summary>
+    /// <paramref name="value"/> without the entry at <paramref name="index"/>, every other character as it was; null when
+    /// there is no entry there, the entry there is not <paramref name="expected"/> exactly, or it is the only entry (an
+    /// empty PATH could not be put back exactly).
+    /// </summary>
+    public static string? Remove(string value, int index, string expected)
+    {
+        var parts = Split(value).ToList();
+        if (parts.Count < 2 || index < 0 || index >= parts.Count || parts[index] != expected) return null;
+        parts.RemoveAt(index);
+        return Join(parts);
+    }
+
+    /// <summary>
+    /// Put back of a removed entry: <paramref name="value"/> with <paramref name="entry"/> again at <paramref name="index"/>,
+    /// only while the value is exactly the one PoolWatch wrote (its <see cref="Hash"/> is <paramref name="written"/>), so
+    /// the PATH comes back exactly as it was. Null otherwise: the PATH changed since, and nothing is put back.
+    /// </summary>
+    public static string? Insert(string value, int index, string entry, string written)
+    {
+        if (!Hash(value).Equals(written, StringComparison.OrdinalIgnoreCase)) return null;
+        var parts = Split(value).ToList();
+        if (index < 0 || index > parts.Count) return null;
+        parts.Insert(index, entry);
+        string next = Join(parts);
+        return next.Length <= MaxChars ? next : null;
+    }
+
+    /// <summary>The SHA-256 of a PATH value's text (UTF-8), in hex: what a removal records of the value it wrote.</summary>
+    public static string Hash(string value) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value)));
 }
 
 /// <summary>Pure checks on Windows paths given as text ("C:\Users\..."), for the link finder: the same on any OS.</summary>
@@ -150,9 +181,57 @@ public static class LinkApps
     /// <summary>The Codex desktop app's package: its name starts with OpenAI.Codex.</summary>
     public static bool IsCodex(string fullName) => Name(fullName).StartsWith("OpenAI.Codex", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>"Claude" or "Codex" for the package of one of the two apps, else null.</summary>
+    public static string? AppOf(string fullName) => IsClaude(fullName) ? Claude : IsCodex(fullName) ? Codex : null;
+
+    public const string Claude = "Claude", Codex = "Codex";
+
     private static string Name(string fullName)
     {
         int cut = fullName.IndexOf('_');
         return cut < 0 ? fullName : fullName[..cut];
     }
+
+    /// <summary>
+    /// The package family name of a package full name ("Claude_5.11492.5.0_x64__pzs8sxrjxfjjc" gives
+    /// "Claude_pzs8sxrjxfjjc"): the folder of its own copy of AppData under %LOCALAPPDATA%\Packages. The full name is a
+    /// registry key's name the account can write, so it is read strictly: five parts split by "_", a name of letters,
+    /// digits, "." and "-" (3 to 50 of them), and a publisher id of 13 lower-case letters and digits. Null for any other
+    /// text, so the family name is always one plain folder name.
+    /// </summary>
+    public static string? Family(string? fullName)
+    {
+        if (fullName is null || fullName.Length > 200) return null;
+        var parts = fullName.Split('_');
+        if (parts.Length != 5) return null;
+        string name = parts[0], publisher = parts[4];
+        bool nameOk = name.Length is >= 3 and <= 50 && name.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-') && name.Any(char.IsAsciiLetterOrDigit);
+        bool publisherOk = publisher.Length == 13 && publisher.All(c => char.IsAsciiDigit(c) || c is >= 'a' and <= 'z');
+        return nameOk && publisherOk ? name + "_" + publisher : null;
+    }
+
+    /// <summary>
+    /// "Claude" or "Codex" for a program of the Claude or Codex desktop app, by where its file is: in the app's package
+    /// folder (WindowsApps\Claude_..., WindowsApps\OpenAI.Codex_...), or a Claude Code engine the Claude app keeps in
+    /// %APPDATA%\Claude\claude-code (<paramref name="appData"/>: the account's %APPDATA%). Null for any other program.
+    /// </summary>
+    public static string? AppOfProgram(string path, string appData)
+    {
+        string p = path.Replace('/', '\\');
+        const string Apps = @"\WindowsApps\";
+        int at = p.IndexOf(Apps, StringComparison.OrdinalIgnoreCase);
+        if (at >= 0)
+        {
+            string rest = p[(at + Apps.Length)..];
+            int cut = rest.IndexOf('\\');
+            return cut > 0 ? AppOf(rest[..cut]) : null;
+        }
+        return appData.Length > 0 && LinkPaths.Under(p, appData.TrimEnd('\\') + @"\Claude\claude-code") ? Claude : null;
+    }
+
+    /// <summary>The tool that made a venv, when its folder shows it: PlatformIO's (.platformio\penv), Hermes Agent's; else null.</summary>
+    public static string? ToolOf(string venvFolder) =>
+        venvFolder.Contains(@"\.platformio\", StringComparison.OrdinalIgnoreCase) || venvFolder.EndsWith(@"\.platformio", StringComparison.OrdinalIgnoreCase) ? "PlatformIO"
+        : venvFolder.Contains("hermes", StringComparison.OrdinalIgnoreCase) ? "Hermes Agent"
+        : null;
 }

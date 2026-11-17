@@ -13,7 +13,7 @@ namespace PoolWatch.Native;
 /// </summary>
 internal static class LinkNative
 {
-    private const uint FILE_READ_ATTRIBUTES = 0x80, FILE_SHARE_ALL = 7, OPEN_EXISTING = 3;
+    private const uint FILE_READ_DATA = 0x1, FILE_READ_ATTRIBUTES = 0x80, FILE_SHARE_ALL = 7, OPEN_EXISTING = 3;
     private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000, FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     private const uint SECURITY_SQOS_PRESENT = 0x00100000, SECURITY_IDENTIFICATION = 0x00010000;
     private const uint FILE_TYPE_DISK = 1;
@@ -39,6 +39,16 @@ internal static class LinkNative
     public static SafeFileHandle Open(string path, bool follow) =>
         CreateFileW(path, FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, IntPtr.Zero, OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | (follow ? 0 : FILE_FLAG_OPEN_REPARSE_POINT) | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, IntPtr.Zero);
+
+    /// <summary>
+    /// Opens the entry at <paramref name="path"/> itself (never what a link there points at) to read its data and
+    /// attributes, as identification only, sharing it with every other open. Without backup semantics, so a folder is not
+    /// opened. The caller uses the handle only once <see cref="OnDisk"/> says it is a file on a disk and it is no reparse
+    /// point. Check IsInvalid.
+    /// </summary>
+    public static SafeFileHandle OpenToRead(string path) =>
+        CreateFileW(path, FILE_READ_DATA | FILE_READ_ATTRIBUTES, FILE_SHARE_ALL, IntPtr.Zero, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, IntPtr.Zero);
 
     /// <summary>Whether the open handle is a file or folder on a disk (not a pipe, a console or another device).</summary>
     public static bool OnDisk(SafeFileHandle h) => GetFileType(h) == FILE_TYPE_DISK;

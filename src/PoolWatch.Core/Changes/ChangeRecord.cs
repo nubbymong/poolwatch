@@ -11,7 +11,7 @@ namespace PoolWatch.Core.Changes;
 /// are listed from their own stores (service-changes.json, settings.json, Task Scheduler) and never copied here, so there
 /// is one truth for each change.
 /// </summary>
-public enum RecordKind { RemovedClearTask, ScheduledTask, StartupEntry, Shortcut, PathEntry, EnvironmentVariable }
+public enum RecordKind { RemovedClearTask, ScheduledTask, StartupEntry, Shortcut, PathEntry, EnvironmentVariable, RemovedPathEntry }
 
 /// <summary>
 /// One lasting change PoolWatch made, saved so it can be undone after a restart. The file is admin-only, but a record
@@ -42,18 +42,21 @@ public sealed record ChangeRecord
     public string? Location { get; init; }
     /// <summary>Shortcut: its full path.</summary>
     public string? Path { get; init; }
-    /// <summary>Shortcut: the SHA-256 of the bytes PoolWatch wrote, in hex.</summary>
+    /// <summary>
+    /// Shortcut: the SHA-256 of the bytes PoolWatch wrote, in hex; RemovedPathEntry: the SHA-256 of the PATH value PoolWatch
+    /// wrote without the entry (<see cref="PathList.Hash"/>), so Put back acts only on a PATH that is still exactly that.
+    /// </summary>
     public string? Sha256 { get; init; }
     /// <summary>
-    /// PathEntry: the PATH entry as it was, exactly as written; EnvironmentVariable: the value before PoolWatch set it, as
-    /// written (null: it was not set).
+    /// PathEntry and RemovedPathEntry: the PATH entry as it was, exactly as written; EnvironmentVariable: the value before
+    /// PoolWatch set it, as written (null: it was not set).
     /// </summary>
     public string? Before { get; init; }
     /// <summary>PathEntry: the folder PoolWatch wrote in the entry's place; EnvironmentVariable: the folder PoolWatch set it to.</summary>
     public string? After { get; init; }
     /// <summary>EnvironmentVariable: the registry kind of the value before ("String" or "ExpandString"); null when it was not set.</summary>
     public string? ValueKind { get; init; }
-    /// <summary>PathEntry: the entry's place in the PATH value, from 0, when PoolWatch replaced it.</summary>
+    /// <summary>PathEntry and RemovedPathEntry: the entry's place in the PATH value, from 0, when PoolWatch replaced or removed it.</summary>
     public int? Index { get; init; }
 }
 
@@ -74,6 +77,8 @@ public static class ChangeIds
     /// </summary>
     public static string PathEntry(string scope, string entry, DateTime changedUtc) => $"path:{scope}:{changedUtc.Ticks}:{entry}";
     public static string EnvironmentVariable(string name) => "env:" + name;
+    /// <summary>A PATH entry PoolWatch removed (its link led nowhere): whose PATH, when, and the entry as it was.</summary>
+    public static string RemovedPathEntry(string scope, string entry, DateTime changedUtc) => $"path-removed:{scope}:{changedUtc.Ticks}:{entry}";
 }
 
 /// <summary>
@@ -210,7 +215,8 @@ public static class ChangeRecordFile
     /// the Task Scheduler root and has its definition, a startup location is one PoolWatch knows, a shortcut is a .lnk
     /// on a local drive with a SHA-256, a PATH entry is the user's or the machine's with a plain entry to put back and a
     /// plain local folder in its place, an environment variable is one of the few PoolWatch sets (<see cref="LinkFinder.Variables"/>),
-    /// the user's, set to a plain local folder, with its value before. The live checks are the engine's, right before Undo acts.
+    /// the user's, set to a plain local folder, with its value before, a removed PATH entry is the user's, with a plain entry to
+    /// put back and the SHA-256 of the PATH PoolWatch left. The live checks are the engine's, right before Undo acts.
     /// </summary>
     public static string? Invalid(ChangeRecord r)
     {
@@ -250,6 +256,13 @@ public static class ChangeRecordFile
                 if (!LinkPaths.Writable(r.After)) return "not a folder PoolWatch sets a variable to";
                 if (r.Before is null ? r.ValueKind is not null : !Plain(r.Before) || r.ValueKind is not ("String" or "ExpandString")) return "no value to put back";
                 return r.Id == ChangeIds.EnvironmentVariable(variable) ? null : "its id does not match its variable";
+            case RecordKind.RemovedPathEntry:
+                // Only the account's own PATH: PoolWatch never removes an entry from the machine's.
+                if (r.Location != EnvScopes.User) return "not a PATH PoolWatch removes entries from";
+                if (!PlainEntry(r.Before)) return "no PATH entry to put back";
+                if (r.Sha256 is not { Length: 64 } sum || !sum.All(char.IsAsciiHexDigit)) return "no SHA-256 of the PATH PoolWatch left";
+                if (r.Index is not (>= 0 and < PathList.MaxEntries)) return "no place in the PATH";
+                return r.Id == ChangeIds.RemovedPathEntry(r.Location!, r.Before!, r.ChangedUtc) ? null : "its id does not match its entry";
             default:
                 return "a kind of change this PoolWatch does not know";
         }

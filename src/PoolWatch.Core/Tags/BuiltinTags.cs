@@ -37,7 +37,7 @@ public static class BuiltinTags
         [PoolTag.Parse("FMsl")] = new("fltmgr.sys", "STREAM_LIST_CTRL (filter manager per-stream context)", "builtin"),
         [PoolTag.Parse("FMfc")] = new("fltmgr.sys", "FCB_CONTEXT (filter manager file context)", "builtin"),
         [PoolTag.Parse("FMwi")] = new("fltmgr.sys", "Filter manager work item / stream context", "builtin"),
-        [PoolTag.Parse("NtFC")] = new("ntfs.sys", "NTFS file context (per open file; FCB-related)", "builtin"),
+        [PoolTag.Parse("NtFC")] = new("ntfs.sys", "NTFS file context (per open file); also reparse-point data that a filter driver did not free", "builtin"),
         [PoolTag.Parse("IoNm")] = new("nt!io", "I/O name parsing buffers (file names being opened)", "builtin"),
         // wcifs.sys, the Windows Container Isolation file-system filter (containers, sandboxes, MSIX/AppX isolation).
         [PoolTag.Parse("WCsc")] = new("wcifs.sys", "Windows Container Isolation filter: stream context", "builtin"),

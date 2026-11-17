@@ -1,5 +1,9 @@
 using System.ComponentModel;
+using System.Diagnostics;
+using System.Diagnostics.Eventing.Reader;
+using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32;
 using PoolWatch.Core.Changes;
 using PoolWatch.Core.Links;
@@ -11,12 +15,16 @@ namespace PoolWatch.Engine;
 /// <summary>What is at a path, the entry itself, never followed: nothing, a plain file or folder, or a junction or symbolic link.</summary>
 internal enum AtPath { NotThere, Plain, Link }
 
-/// <summary>A look at one path: its <see cref="AtPath"/> and, for a link, the target it holds (one step, as written in it).</summary>
-internal sealed record LinkLook(AtPath State, string? Target = null);
+/// <summary>
+/// A look at one path: its <see cref="AtPath"/> and, for a link, the target it holds (one step, as written in it) and the
+/// length of its reparse data (<see cref="ReparseData.Length"/>), which the size of the block the leak keeps follows.
+/// </summary>
+internal sealed record LinkLook(AtPath State, string? Target = null, int? DataLength = null);
 
 /// <summary>
 /// Everything the AppData link finder reads and its fixes write, so the tests stand in for Windows: no test reads a real
-/// PATH, looks at a real link or changes a variable. Each read is one explicit look; none follows a link into a write.
+/// PATH, looks at a real link, reads a real file of the account's, or changes a variable. Each read is one explicit look;
+/// none follows a link into a write.
 /// </summary>
 internal interface ILinkSystem
 {
@@ -37,17 +45,42 @@ internal interface ILinkSystem
     IReadOnlyList<string> Folders(string folder, int max);
     /// <summary>How many of the entries directly in <paramref name="folder"/> are links, counting at most <paramref name="max"/> entries.</summary>
     int LinksIn(string folder, int max);
+
+    /// <summary>
+    /// The text of a small file of the account's (a venv's pyvenv.cfg, Claude Code's settings.json): only when the entry at
+    /// <paramref name="path"/> itself is a plain file on a disk, never through a link at that path, at most
+    /// <paramref name="maxBytes"/> bytes (a longer file is not read). Null when it is not there or not read.
+    /// </summary>
+    string? ReadText(string path, int maxBytes) => null;
+
+    /// <summary>
+    /// Whether Fast Startup is on (null: not known), and the last start's boot type as Windows logged it (Kernel-Boot
+    /// event 27: 0 a full start or Restart, 1 a start from a Shut down with Fast Startup on, 2 from hibernation; null: not
+    /// known). Reads only.
+    /// </summary>
+    (bool? FastStartup, int? BootType) Boot() => (null, null);
+
+    /// <summary>The programs of the Claude and Codex desktop apps running now (<see cref="LinkApps.AppOfProgram"/>). Reads only.</summary>
+    IReadOnlyList<AppProcess> AppProcesses() => [];
 }
 
 /// <summary>
 /// The PC behind <see cref="ILinkSystem"/>: reads only, apart from the environment store's writes. Every open of a path
-/// the account can change goes through <see cref="LinkNative"/>: attributes only, identification only, and a handle that
-/// is not a file or folder on a disk is not used; a link's target is read through the handle that was checked.
+/// the account can change goes through <see cref="LinkNative"/>, as identification only, and a handle that is not a file
+/// or folder on a disk is not used: a look asks for attributes only, and a link's target is read through the handle that
+/// was checked; a small file is read through a handle opened on the entry itself, used only when that entry is a plain
+/// file.
 /// </summary>
 internal sealed class WindowsLinkSystem : ILinkSystem
 {
     /// <summary>The key <see cref="Setup.WindowsEnvironmentReads"/> reads the Store packages from.</summary>
     private const string PackagesKey = @"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
+
+    /// <summary>Where Windows keeps whether Fast Startup is on (HiberbootEnabled, a DWORD), under the machine's key.</summary>
+    private const string PowerKey = @"SYSTEM\CurrentControlSet\Control\Session Manager\Power";
+
+    /// <summary>The newest Kernel-Boot event 27 ("The boot type was 0x1."), whose first value is the boot type.</summary>
+    private const string BootQuery = "*[System[Provider[@Name='Microsoft-Windows-Kernel-Boot'] and EventID=27]]";
 
     public string AppData { get; } = System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData);
     public string LocalFolder { get; } = System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData);
@@ -73,8 +106,9 @@ internal sealed class WindowsLinkSystem : ILinkSystem
         }
         if (!LinkNative.OnDisk(h)) throw new IOException($"{path} is not a file or folder on a disk");
         if (NoFollow.ReparseTag(h) is not (ReparseData.MountPoint or ReparseData.SymbolicLink)) return new(AtPath.Plain);
-        // The target as the link holds it, one step, read through this handle (never by the path again).
-        return new(AtPath.Link, LinkNative.ReparseData(h) is { } data ? ReparseData.Target(data)?.Target : null);
+        // The target as the link holds it, one step, and its length, read through this handle (never by the path again).
+        var data = LinkNative.ReparseData(h);
+        return new(AtPath.Link, data is null ? null : ReparseData.Target(data)?.Target, data is null ? null : ReparseData.Length(data));
     }
 
     public string? Resolved(string path)
@@ -100,6 +134,73 @@ internal sealed class WindowsLinkSystem : ILinkSystem
         }
         catch (Exception ex) when (ex is DirectoryNotFoundException or FileNotFoundException) { return 0; }
     }
+
+    public string? ReadText(string path, int maxBytes)
+    {
+        try
+        {
+            using var h = LinkNative.OpenToRead(path);
+            // A link at the path itself, a folder, a pipe or a device is never read.
+            if (h.IsInvalid || !LinkNative.OnDisk(h) || NoFollow.ReparseTag(h) != 0) return null;
+            var buffer = new byte[maxBytes + 1];
+            int total = 0;
+            while (total < buffer.Length)
+            {
+                int n = RandomAccess.Read(h, buffer.AsSpan(total), total);
+                if (n <= 0) break;
+                total += n;
+            }
+            if (total > maxBytes) return null; // longer than PoolWatch reads: not read at all
+            // Bytes that are not UTF-8 are read as U+FFFD; a byte-order mark at the start is left out.
+            return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false).GetString(buffer, 0, total).TrimStart('\uFEFF');
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException or Win32Exception)
+        {
+            return null;
+        }
+    }
+
+    public (bool? FastStartup, int? BootType) Boot()
+    {
+        bool? fast = null;
+        int? type = null;
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(PowerKey);
+            if (key?.GetValue("HiberbootEnabled") is int on) fast = on != 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+        try
+        {
+            using var reader = new EventLogReader(new EventLogQuery("System", PathType.LogName, BootQuery) { ReverseDirection = true });
+            using var record = reader.ReadEvent();
+            if (record is not null && record.Properties.Count > 0 && record.Properties[0].Value is { } value)
+                type = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        }
+        catch (Exception ex) when (ex is EventLogException or UnauthorizedAccessException or InvalidCastException or FormatException or OverflowException) { }
+        return (fast, type);
+    }
+
+    public IReadOnlyList<AppProcess> AppProcesses()
+    {
+        var found = new List<AppProcess>();
+        foreach (var p in Process.GetProcesses())
+        {
+            using (p)
+            {
+                try
+                {
+                    // Query rights only: its path and when it started, nothing else of it.
+                    using var h = SafeProcess.Open(p.Id, NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION);
+                    if (h is null || !NativeMethods.GetProcessTimes(h.Handle, out long created, out _, out _, out _)) continue;
+                    if (Collectors.ProcessDetails.GetImagePath(h.Handle) is not { } path || LinkApps.AppOfProgram(path, AppData) is not { } app) continue;
+                    found.Add(new AppProcess(Path.GetFileName(path), app, DateTime.FromFileTimeUtc(created)));
+                }
+                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception) { }
+            }
+        }
+        return found;
+    }
 }
 
 /// <summary>
@@ -107,8 +208,12 @@ internal sealed class WindowsLinkSystem : ILinkSystem
 /// only when one of the two is installed for this account (<see cref="LinkApps"/>, from its Store package names): each
 /// PATH entry, the account's and the machine's, that is or passes through a junction or symbolic link located under
 /// %APPDATA% or %LOCALAPPDATA%; winget's Links folder on PATH; uv's minor-version links under %APPDATA%\uv\python; pnpm's
-/// global packages and the Codex command-line tool's bin link kept under AppData. Reads only, and nothing is followed
-/// into a write: what it finds is judged again right before a fix (<see cref="AppDataLinkFixes"/>).
+/// global packages and the Codex command-line tool's bin link kept under AppData; Claude Code's temp folder as a junction
+/// (issue 95489); the apps' own data folders as junctions; a venv on PATH whose Python is reached through such a link
+/// (its pyvenv.cfg read, bounded); Claude Code hooks that start Python (its settings.json read, bounded); and the same
+/// tools and folders in each app's own copy of AppData (%LOCALAPPDATA%\Packages\...\LocalCache), where a program the app
+/// started puts them, out of sight of programs outside it. Reads only, and nothing is followed into a write: what it finds
+/// is judged again right before a fix (<see cref="AppDataLinkFixes"/>).
 /// </summary>
 internal static class AppDataLinkFinder
 {
@@ -128,8 +233,20 @@ internal static class AppDataLinkFinder
             : LinkPaths.Under(path, LocalFolder) ? LinkWords.LocalVariable + path[LocalFolder.Length..]
             : path;
 
+        /// <summary>A folder below the account's local AppData folder, by its path from there ("Temp", "Packages\...").</summary>
+        public string Local(string below) => Path.Join(LocalFolder, below);
+
+        /// <summary>The account's own AppData, as the finder looks at it (the apps' own copies are <see cref="AppDataView"/>s too).</summary>
+        public AppDataView Own => new(null, AppData, LocalFolder);
+
         private static string Full(string path) => path.Length == 0 ? "" : Path.GetFullPath(path).TrimEnd('\\');
     }
+
+    /// <summary>
+    /// One view of AppData: the account's own (<see cref="App"/> null), or the copy the Claude or Codex app keeps in its
+    /// package's LocalCache, which programs the app starts write into: its Roaming and its Local folders.
+    /// </summary>
+    internal sealed record AppDataView(string? App, string Roaming, string Local);
 
     public static LinkScan Scan(ILinkSystem s, Action<string>? log = null)
     {
@@ -141,12 +258,14 @@ internal static class AppDataLinkFinder
         if (roots.AppData.Length == 0 || roots.LocalFolder.Length == 0) return new LinkScan(now, claude, codex, []);
         var env = s.Environment();
         var found = new List<LinkFinding>();
+        var paths = new List<(EnvScope Scope, EnvValue Value)>();
         foreach (var scope in new[] { EnvScope.User, EnvScope.Machine })
         {
             EnvValue? path;
             try { path = s.Store.Read(scope, PathName); }
             catch (Exception ex) { log?.Invoke($"appdata links: the {EnvScopes.Word(scope)} PATH was not read: {ex.Message}"); continue; }
             if (path is not { } value) continue;
+            paths.Add((scope, value));
             var entries = PathList.Split(value.Text);
             for (int i = 0; i < entries.Length && i < PathList.MaxEntries; i++)
             {
@@ -154,11 +273,17 @@ internal static class AppDataLinkFinder
                 catch (Exception ex) { log?.Invoke($"appdata links: a {EnvScopes.Word(scope)} PATH entry was not judged: {ex.Message}"); }
             }
         }
-        foreach (var look in new Func<LinkFinding?>[] { () => Uv(s, roots, env), () => Pnpm(s, roots, env), () => Codex(s, roots, env) })
+        LinkFinding? uv = null;
+        foreach (var look in new Func<LinkFinding?>[] { () => uv = Uv(s, roots, env), () => Pnpm(s, roots, env), () => Codex(s, roots, env), () => ClaudeTemp(s, roots, env, claude) })
         {
             try { if (look() is { } f) found.Add(f); }
             catch (Exception ex) { log?.Invoke("appdata links: a tool's folder was not judged: " + ex.Message); }
         }
+        found.AddRange(AppFolders(s, roots, roots.Own, claude, codex, log));
+        found.AddRange(Venvs(s, roots, env, paths, log));
+        try { if (Hooks(s, roots, env, uv) is { } hooks) found.Add(hooks); }
+        catch (Exception ex) { log?.Invoke("appdata links: Claude Code's hooks were not judged: " + ex.Message); }
+        found.AddRange(InApps(s, roots, packages, log));
         found.Add(new LinkFinding { Kind = LinkKind.Projects });
         return new LinkScan(now, claude, codex, found);
     }
@@ -191,7 +316,7 @@ internal static class AppDataLinkFinder
             if (look.State == AtPath.Link) { (link, found) = (level, look); break; }
         }
         if (link is null || found is null) return null;
-        row = row with { Link = roots.Shown(link) };
+        row = row with { Link = roots.Shown(link), Block = Block(found) };
         if (s.Resolved(path) is not { } really) return row with { Kind = LinkKind.PathEntryGone };
         if (Absolute(found.Target, Path.GetDirectoryName(link)!) is not { } leads) return row with { WhyNot = "its link leads to a place that is not a plain folder on a local drive." };
         string target = (leads.TrimEnd('\\') + path[link.Length..]).TrimEnd('\\');
@@ -240,6 +365,25 @@ internal static class AppDataLinkFinder
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return null; }
     }
 
+    /// <summary>The size of the block each open through the link keeps, from its reparse data's length; null when that was not read.</summary>
+    private static int? Block(LinkLook look) => look.DataLength is { } length ? LinkBlocks.Expected(length) : null;
+
+    /// <summary>A path as the window shows it: %APPDATA% or %LOCALAPPDATA% at its start, else %USERPROFILE%, else as it is.</summary>
+    private static string Shown(Roots roots, string path) => roots.Holding(path) is not null ? roots.Shown(path) : LinkPaths.InProfileWords(path, roots.Profile);
+
+    /// <summary>The first link on the way from the AppData folder down to <paramref name="path"/>, when it is under AppData; else null.</summary>
+    private static LinkLook? ThroughLink(ILinkSystem s, Roots roots, string path)
+    {
+        if (roots.Holding(path) is not { } root) return null;
+        foreach (string level in LinkPaths.Levels(path, root))
+        {
+            var look = s.Look(level);
+            if (look.State == AtPath.NotThere) return null;
+            if (look.State == AtPath.Link) return look;
+        }
+        return null;
+    }
+
     /// <summary>The value of <paramref name="name"/> the account's programs get, as a full path; null when it is not set or not a local path.</summary>
     private static string? Effective(IReadOnlyDictionary<string, string> env, string name) =>
         env.TryGetValue(name, out var v) ? Expanded(v, expand: false, env) : null;
@@ -253,6 +397,10 @@ internal static class AppDataLinkFinder
     private static List<EnvSetting> ToSet(ILinkSystem s, Roots roots, IReadOnlyDictionary<string, string> env, params string[] names) =>
         names.Where(n => !Outside(roots, Effective(env, n))).Select(n => new EnvSetting(n, LinkFinder.FolderFor(n, roots.Profile), Seen(s, n))).ToList();
 
+    /// <summary>The links among the folders directly in <paramref name="folder"/> (uv's minor-version links), each with its look.</summary>
+    private static List<(string Name, LinkLook Look)> LinkedFolders(ILinkSystem s, string folder) =>
+        s.Folders(folder, LinkFinder.MaxFolders).Select(f => (Name: Path.GetFileName(f.TrimEnd('\\')), Look: s.Look(f))).Where(x => x.Look.State == AtPath.Link).ToList();
+
     /// <summary>uv's Pythons reached through its minor-version links under AppData (%APPDATA%\uv\python by default).</summary>
     private static LinkFinding? Uv(ILinkSystem s, Roots roots, IReadOnlyDictionary<string, string> env)
     {
@@ -261,11 +409,12 @@ internal static class AppDataLinkFinder
         // Moved: the links left are in the folder uv used before, its default.
         string folder = !moved && set is not null ? set : Path.Join(roots.AppData, @"uv\python");
         if (roots.Holding(folder) is null) return null;
-        var links = s.Folders(folder, LinkFinder.MaxFolders).Where(f => s.Look(f).State == AtPath.Link).Select(f => Path.GetFileName(f.TrimEnd('\\'))).ToList();
+        var links = LinkedFolders(s, folder);
         if (links.Count == 0) return null;
         return new LinkFinding
         {
-            Kind = LinkKind.Uv, Link = roots.Shown(folder), Count = links.Count, Names = links.Take(LinkFinder.MaxNames).ToList(), Moved = moved,
+            Kind = LinkKind.Uv, Link = roots.Shown(folder), Count = links.Count, Names = links.Select(l => l.Name).Take(LinkFinder.MaxNames).ToList(), Moved = moved,
+            Block = links.Select(l => Block(l.Look)).FirstOrDefault(b => b is not null),
             EnvSettings = ToSet(s, roots, env, moved ? new[] { LinkFinder.UvCache } : new[] { LinkFinder.UvPythons, LinkFinder.UvCache }),
         };
     }
@@ -286,34 +435,192 @@ internal static class AppDataLinkFinder
         string? dir = Effective(env, LinkFinder.CodexInstall);
         if (Outside(roots, dir)) return null;
         string bin = dir ?? Path.Join(roots.LocalFolder, @"Programs\OpenAI\Codex\bin");
-        if (s.Look(bin).State == AtPath.NotThere) return null;
-        return new LinkFinding { Kind = LinkKind.Codex, Link = roots.Shown(bin), EnvSettings = ToSet(s, roots, env, LinkFinder.CodexInstall) };
+        var look = s.Look(bin);
+        if (look.State == AtPath.NotThere) return null;
+        return new LinkFinding { Kind = LinkKind.Codex, Link = roots.Shown(bin), Block = Block(look), EnvSettings = ToSet(s, roots, env, LinkFinder.CodexInstall) };
     }
 
     /// <summary>
-    /// The PATH entries a fix replaced before that are back on the PATH and can be fixed again: a tool put its link back
-    /// (codex update does). What the tray tells about once.
+    /// Claude Code's temp folder (TEMP\claude) as a junction or link, with the Claude app installed and CLAUDE_CODE_TMPDIR
+    /// not set outside AppData: the Claude app's Claude Code then retries a failing open thousands of times a second
+    /// (anthropics/claude-code issue 95489). Its fix sets CLAUDE_CODE_TMPDIR.
+    /// </summary>
+    private static LinkFinding? ClaudeTemp(ILinkSystem s, Roots roots, IReadOnlyDictionary<string, string> env, bool claude)
+    {
+        if (!claude || Outside(roots, Effective(env, LinkFinder.ClaudeTemp))) return null;
+        string temp = Effective(env, "TEMP") ?? roots.Local("Temp");
+        string folder = Path.Join(temp, "claude");
+        var look = s.Look(folder);
+        if (look.State != AtPath.Link) return null;
+        return new LinkFinding
+        {
+            Kind = LinkKind.ClaudeTemp, Link = Shown(roots, folder), Target = Absolute(look.Target, temp), Block = Block(look),
+            EnvSettings = ToSet(s, roots, env, LinkFinder.ClaudeTemp),
+        };
+    }
+
+    /// <summary>
+    /// The apps' own data folders as junctions or links, in one view of AppData: %APPDATA%\Claude for the Claude app;
+    /// %APPDATA%\Codex, its web folder, %LOCALAPPDATA%\Codex and %LOCALAPPDATA%\OpenAI\Codex for the Codex app. Each is
+    /// looked at alone (a look that fails leaves out that one); PoolWatch only gives steps for them.
+    /// </summary>
+    private static List<LinkFinding> AppFolders(ILinkSystem s, Roots roots, AppDataView view, bool claude, bool codex, Action<string>? log)
+    {
+        var places = new List<(string App, string Path)>();
+        if (claude) places.Add((LinkApps.Claude, Path.Join(view.Roaming, "Claude")));
+        if (codex)
+        {
+            places.Add((LinkApps.Codex, Path.Join(view.Roaming, "Codex")));
+            places.Add((LinkApps.Codex, Path.Join(view.Roaming, @"Codex\web")));
+            places.Add((LinkApps.Codex, Path.Join(view.Local, "Codex")));
+            places.Add((LinkApps.Codex, Path.Join(view.Local, @"OpenAI\Codex")));
+        }
+        var found = new List<LinkFinding>();
+        foreach (var (app, path) in places)
+        {
+            try
+            {
+                var look = s.Look(path);
+                if (look.State != AtPath.Link) continue;
+                found.Add(new LinkFinding
+                {
+                    Kind = LinkKind.AppFolder, Tool = app, InApp = view.App, Link = Shown(roots, path),
+                    Target = Absolute(look.Target, Path.GetDirectoryName(path)!), Block = Block(look),
+                });
+            }
+            catch (Exception ex) { log?.Invoke("appdata links: an app's data folder was not looked at: " + ex.Message); }
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// Each PATH entry that is a venv's Scripts folder whose Python (its home in the pyvenv.cfg beside it, read bounded) is
+    /// reached through a link under AppData: PlatformIO's and Hermes Agent's venvs on uv's links, which put every python a
+    /// program of the app runs through the link. The entry itself is a plain folder, so the PATH check does not see it.
+    /// </summary>
+    private static List<LinkFinding> Venvs(ILinkSystem s, Roots roots, IReadOnlyDictionary<string, string> env, List<(EnvScope Scope, EnvValue Value)> paths, Action<string>? log)
+    {
+        var found = new List<LinkFinding>();
+        foreach (var (scope, value) in paths)
+        {
+            var entries = PathList.Split(value.Text);
+            for (int i = 0; i < entries.Length && i < PathList.MaxEntries; i++)
+            {
+                try
+                {
+                    if (Expanded(entries[i], value.Expand, env) is not { } scripts || !Path.GetFileName(scripts).Equals("Scripts", StringComparison.OrdinalIgnoreCase) ||
+                        Path.GetDirectoryName(scripts) is not { } venv) continue;
+                    if (VenvConfig.Home(s.ReadText(Path.Join(venv, "pyvenv.cfg"), VenvConfig.MaxBytes)) is not { } home) continue;
+                    if (Expanded(home, expand: false, env) is not { } python || ThroughLink(s, roots, python) is not { } link) continue;
+                    found.Add(new LinkFinding
+                    {
+                        Kind = LinkKind.Venv, Scope = scope, Index = i, Entry = entries[i], Link = Shown(roots, venv), Home = roots.Shown(python),
+                        Tool = LinkApps.ToolOf(venv), Block = Block(link),
+                    });
+                }
+                catch (Exception ex) { log?.Invoke($"appdata links: a {EnvScopes.Word(scope)} PATH entry was not looked at as a venv: {ex.Message}"); }
+            }
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// The hooks in the account's Claude Code settings (CLAUDE_CONFIG_DIR's settings.json, or the profile's .claude one;
+    /// read bounded) that start Python likely through a link under AppData: by a full path through one, or by a name or
+    /// from uv's tool folder while uv's Pythons are reached through its links under AppData. Null when there are none.
+    /// </summary>
+    private static LinkFinding? Hooks(ILinkSystem s, Roots roots, IReadOnlyDictionary<string, string> env, LinkFinding? uv)
+    {
+        string folder = Effective(env, "CLAUDE_CONFIG_DIR") ?? Path.Join(roots.Profile, ".claude");
+        var commands = ClaudeHooks.Commands(s.ReadText(Path.Join(folder, "settings.json"), ClaudeHooks.MaxBytes))
+            .Where(c => ClaudeHooks.StartsPython(ClaudeHooks.Program(c)) && Likely(s, roots, env, ClaudeHooks.Program(c), uv)).ToList();
+        if (commands.Count == 0) return null;
+        return new LinkFinding
+        {
+            Kind = LinkKind.Hook, Link = Shown(roots, folder), Count = commands.Count,
+            Names = commands.Take(LinkFinder.MaxNames).Select(c => c.Length <= 120 ? c : c[..117] + "...").ToList(),
+        };
+    }
+
+    /// <summary>Whether a hook's Python program is likely reached through a link under AppData.</summary>
+    private static bool Likely(ILinkSystem s, Roots roots, IReadOnlyDictionary<string, string> env, string program, LinkFinding? uv)
+    {
+        bool uvLinked = uv is { Moved: false };
+        if (Expanded(program, expand: true, env) is not { } full) return uvLinked; // a name, found on PATH
+        // uv's own launchers (~\.local\bin\python3.12.exe) still go through its links (fsfxing2023-wq).
+        return ThroughLink(s, roots, full) is not null || uvLinked && LinkPaths.Under(full, Path.Join(roots.Profile, @".local\bin"));
+    }
+
+    /// <summary>
+    /// The same tools and data folders in each app's own copy of AppData (its package's LocalCache, Roaming and Local):
+    /// what a program the app started made there, which programs outside the app do not see. Each app's package is named
+    /// by its family name, read strictly (<see cref="LinkApps.Family"/>), so the folder is always one plain name.
+    /// </summary>
+    private static List<LinkFinding> InApps(ILinkSystem s, Roots roots, IReadOnlyList<string> packages, Action<string>? log)
+    {
+        var found = new List<LinkFinding>();
+        var apps = packages.Select(p => (App: LinkApps.AppOf(p), Family: LinkApps.Family(p))).Where(p => p.App is not null && p.Family is not null).Distinct().Take(4).ToList();
+        foreach (var (app, family) in apps)
+        {
+            try
+            {
+                string cache = roots.Local(Path.Join("Packages", family, "LocalCache"));
+                if (s.Look(cache).State == AtPath.NotThere) continue;
+                var view = new AppDataView(app, Path.Join(cache, "Roaming"), Path.Join(cache, "Local"));
+                string uv = Path.Join(view.Roaming, @"uv\python");
+                var links = LinkedFolders(s, uv);
+                if (links.Count > 0)
+                    found.Add(new LinkFinding
+                    {
+                        Kind = LinkKind.Uv, InApp = app, Link = roots.Shown(uv), Count = links.Count, Names = links.Select(l => l.Name).Take(LinkFinder.MaxNames).ToList(),
+                        Block = links.Select(l => Block(l.Look)).FirstOrDefault(b => b is not null),
+                    });
+                string pnpm = Path.Join(view.Local, "pnpm");
+                if (s.Look(Path.Join(pnpm, "global")).State != AtPath.NotThere) found.Add(new LinkFinding { Kind = LinkKind.Pnpm, InApp = app, Link = roots.Shown(pnpm) });
+                string bin = Path.Join(view.Local, @"Programs\OpenAI\Codex\bin");
+                var codex = s.Look(bin);
+                if (codex.State == AtPath.Link) found.Add(new LinkFinding { Kind = LinkKind.Codex, InApp = app, Link = roots.Shown(bin), Block = Block(codex) });
+                found.AddRange(AppFolders(s, roots, view, app == LinkApps.Claude, app == LinkApps.Codex, log));
+            }
+            catch (Exception ex) { log?.Invoke($"appdata links: the {app} app's own copy of AppData was not looked at: {ex.Message}"); }
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// What PoolWatch fixed before that is back, and can be fixed again: a PATH entry it replaced or removed that is on the
+    /// PATH again (codex update puts its link back), or a variable it set that points into AppData again (the Hermes
+    /// installer, a tool's own setup). What the tray tells about once, naming each.
     /// </summary>
     public static IReadOnlyList<LinkFinding> Back(LinkScan scan, IEnumerable<ChangeRecord> records)
     {
-        var replaced = records.Where(r => r.Kind == RecordKind.PathEntry).Select(r => (r.Location, r.Before)).ToHashSet();
-        return scan.Findings.Where(f => f is { Kind: LinkKind.PathEntry, Target: not null } && replaced.Contains((EnvScopes.Word(f.Scope), f.Entry))).ToList();
+        var all = records.ToList();
+        var replaced = all.Where(r => r.Kind == RecordKind.PathEntry).Select(r => (r.Location, r.Before)).ToHashSet();
+        var removed = all.Where(r => r.Kind == RecordKind.RemovedPathEntry).Select(r => (r.Location, r.Before)).ToHashSet();
+        var set = all.Where(r => r.Kind == RecordKind.EnvironmentVariable && r.Name is not null).Select(r => r.Name!).ToHashSet(StringComparer.Ordinal);
+        return scan.Findings.Where(f =>
+            f is { Kind: LinkKind.PathEntry, Target: not null } && replaced.Contains((EnvScopes.Word(f.Scope), f.Entry))
+            || f.Kind == LinkKind.PathEntryGone && removed.Contains((EnvScopes.Word(f.Scope), f.Entry))
+            || f.InApp is null && f.EnvSettings.Any(e => set.Contains(e.Name))).ToList();
     }
-
 }
 
 /// <summary>
-/// The AppData links window's two changes, and Put back for both. Each change is recorded before it is made, nothing is
-/// changed when the record cannot be saved, a failed change takes its record back, and each value is read again right
+/// The AppData links window's three changes, and Put back for each. Each change is recorded before it is made, nothing
+/// is changed when the record cannot be saved, a failed change takes its record back, and each value is read again right
 /// before it is written (through the key the write goes through), so a value that changed since the window showed it is
 /// left as it is. A PATH entry is judged again from scratch first (<see cref="AppDataLinkFinder.Judge"/>): the entry, its
 /// link and the folder it leads to must be as the row showed them. PoolWatch never reinstalls, moves or deletes a tool or
-/// a file: it writes only the one PATH entry, or the few variables of <see cref="LinkFinder.Variables"/>.
+/// a file: it writes only the one PATH entry (replaced, or removed from the account's own PATH when its link leads
+/// nowhere), or the few variables of <see cref="LinkFinder.Variables"/>.
 /// </summary>
 internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records, Log log)
 {
     /// <summary>What a fix says when what it would change is no longer as the window showed it.</summary>
     internal const string ChangedSince = "It is no longer as the window showed it, so PoolWatch changed nothing. Look again.";
+
+    /// <summary>What the window reads besides the changes: the boot, the apps' programs.</summary>
+    internal ILinkSystem System => system;
 
     /// <summary>Replaces the row's PATH entry with the folder its link leads to, and nothing else.</summary>
     public (bool Ok, string Message) Replace(LinkFinding shown, string via)
@@ -339,19 +646,62 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
             Id = ChangeIds.PathEntry(scope, shown.Entry, changed), Kind = RecordKind.PathEntry, ChangedUtc = changed, Via = via,
             Location = scope, Before = shown.Entry, After = target, Index = shown.Index,
         };
+        if (Write(record, shown.Scope, value, next, where) is { } failed) return (false, failed);
+        log.Info($"appdata links: {ChangeWords.PathEntry(scope, shown.Entry, target)} (from {via})");
+        return (true, ChangeWords.PathEntry(scope, shown.Entry, target) + ". " + LinkWords.Restart);
+    }
+
+    /// <summary>
+    /// Removes the row's entry from the account's own PATH, only while its link still leads nowhere, and nothing else.
+    /// The record keeps the SHA-256 of the PATH it leaves, so Put back acts only on that PATH, exactly.
+    /// </summary>
+    public (bool Ok, string Message) Remove(LinkFinding shown, string via)
+    {
+        if (shown is not { Kind: LinkKind.PathEntryGone, Scope: EnvScope.User, InApp: null }) return (false, "PoolWatch does not remove this entry.");
+        var store = system.Store;
+        string scope = EnvScopes.User, where = ChangeWords.PathOf(scope);
+        EnvValue value;
+        LinkFinding? now;
+        try
+        {
+            if (store.Read(EnvScope.User, AppDataLinkFinder.PathName) is not { } read) return (false, ChangedSince);
+            value = read;
+            now = AppDataLinkFinder.Judge(system, AppDataLinkFinder.Roots.Of(system), system.Environment(), EnvScope.User, value, shown.Index);
+        }
+        catch (Exception ex) { return (false, $"PoolWatch could not read {where}: {ex.Message}"); }
+        if (now is not { Kind: LinkKind.PathEntryGone } || now.Entry != shown.Entry) return (false, ChangedSince);
+        if (PathList.Split(value.Text).Length < 2) return (false, "PoolWatch did not remove the entry: it is the only one on your PATH. Remove it yourself in Windows' Environment Variables window.");
+        if (PathList.Remove(value.Text, shown.Index, shown.Entry) is not { } next) return (false, ChangedSince);
+        var changed = DateTime.UtcNow;
+        var record = new ChangeRecord
+        {
+            Id = ChangeIds.RemovedPathEntry(scope, shown.Entry, changed), Kind = RecordKind.RemovedPathEntry, ChangedUtc = changed, Via = via,
+            Location = scope, Before = shown.Entry, Index = shown.Index, Sha256 = PathList.Hash(next),
+        };
+        if (Write(record, EnvScope.User, value, next, where) is { } failed) return (false, failed);
+        log.Info($"appdata links: {ChangeWords.RemovedPathEntry(scope, shown.Entry)} (from {via})");
+        return (true, ChangeWords.RemovedPathEntry(scope, shown.Entry) + ". " + LinkWords.Restart);
+    }
+
+    /// <summary>
+    /// Records the change, then writes the PATH (its kind kept) only while it is still <paramref name="value"/>; a failed
+    /// write takes the record back. Null when it was written, else what the window says.
+    /// </summary>
+    private string? Write(ChangeRecord record, EnvScope scope, EnvValue value, string next, string where)
+    {
+        var store = system.Store;
         try { records.Put(record); }
-        catch (Exception ex) { return (false, $"PoolWatch did not change {where}, because it could not record the change to put it back later: {ex.Message}"); }
+        catch (Exception ex) { return $"PoolWatch did not change {where}, because it could not record the change to put it back later: {ex.Message}"; }
         string? error;
-        try { error = store.Write(shown.Scope, AppDataLinkFinder.PathName, value, new EnvValue(next, value.Expand)); }
+        try { error = store.Write(scope, AppDataLinkFinder.PathName, value, new EnvValue(next, value.Expand)); }
         catch (Exception ex) { error = ex.Message; }
         if (error is not null)
         {
             records.Remove(record);
-            return (false, $"PoolWatch could not change {where}: {error}.");
+            return $"PoolWatch could not change {where}: {error}.";
         }
         Tell(store);
-        log.Info($"appdata links: {ChangeWords.PathEntry(scope, shown.Entry, target)} (from {via})");
-        return (true, ChangeWords.PathEntry(scope, shown.Entry, target) + ". " + LinkWords.Restart);
+        return null;
     }
 
     /// <summary>
@@ -360,7 +710,8 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
     /// </summary>
     public (bool Ok, string Message, IReadOnlyList<EnvSetting> Set) SetVariables(LinkFinding shown, string via)
     {
-        if (shown.Kind is not (LinkKind.Uv or LinkKind.Pnpm or LinkKind.Codex) || shown.EnvSettings.Count == 0) return (false, "There is nothing to set for this row.", []);
+        if (shown.Kind is not (LinkKind.Uv or LinkKind.Pnpm or LinkKind.Codex or LinkKind.ClaudeTemp) || shown.InApp is not null || shown.EnvSettings.Count == 0)
+            return (false, "There is nothing to set for this row.", []);
         var store = system.Store;
         var set = new List<EnvSetting>();
         var errors = new List<string>();
@@ -400,7 +751,7 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
     /// Why the variable is not set to its folder, or null: only one of <see cref="LinkFinder.Variables"/>, only to
     /// PoolWatch's own folder for it (<see cref="LinkFinder.FolderFor"/>), a plain local path below the profile and
     /// outside AppData, and with no folder from the profile down to it a link (a folder not made yet is fine: the tool
-    /// makes it).
+    /// makes it, or the steps say to).
     /// </summary>
     internal string? WhyNotSet(EnvSetting s)
     {
@@ -422,6 +773,24 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
         return null;
     }
 
+    /// <summary>When PoolWatch last changed a PATH entry or a variable for links under AppData; null when the change list holds none.</summary>
+    public DateTime? LastChange()
+    {
+        var mine = records.All().Where(r => r.Kind is RecordKind.PathEntry or RecordKind.EnvironmentVariable or RecordKind.RemovedPathEntry).ToList();
+        return mine.Count == 0 ? null : mine.Max(r => r.ChangedUtc);
+    }
+
+    /// <summary>The Claude and Codex apps' programs that started before <paramref name="since"/> and still run: they do not see a change made since. Reads only.</summary>
+    public IReadOnlyList<AppProcess> StillOld(DateTime since)
+    {
+        try { return system.AppProcesses().Where(p => p.StartedUtc < since).ToList(); }
+        catch (Exception ex)
+        {
+            log.Info("appdata links: the apps' programs were not read: " + ex.Message);
+            return [];
+        }
+    }
+
     private void Tell(IEnvironmentStore store)
     {
         try { store.Broadcast(); }
@@ -430,7 +799,8 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
 
     /// <summary>
     /// Put back (Active changes, Put all back, the uninstaller), checked against the registry as it is now: a PATH entry
-    /// goes back only where the folder PoolWatch wrote is still on that PATH (<see cref="PathList.PutBack"/>), a variable
+    /// goes back only where the folder PoolWatch wrote is still on that PATH (<see cref="PathList.PutBack"/>), a removed
+    /// entry only while the account's PATH is still exactly what PoolWatch left (<see cref="PathList.Insert"/>), a variable
     /// only while it is still what PoolWatch set it to. Otherwise the record goes and the PC is left as it is. With no
     /// store (a test's ledger, or none given), nothing is put back.
     /// </summary>
@@ -452,6 +822,24 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
             if (store.Write(scope, AppDataLinkFinder.PathName, value, new EnvValue(next, value.Expand)) is { } error)
                 return new(false, $"PoolWatch could not put the entry back on {where}: {error}.");
             try { store.Broadcast(); } catch (Exception) { } // put back either way; programs started later read the registry
+            changes.Remove(r);
+            return new(true, $"Put {r.Before!.Trim()} back on {where}. " + LinkWords.Restart);
+        }
+        if (r.Kind == RecordKind.RemovedPathEntry)
+        {
+            string where = ChangeWords.PathOf(EnvScopes.User);
+            EnvValue? now;
+            try { now = store.Read(EnvScope.User, AppDataLinkFinder.PathName); }
+            catch (Exception ex) { return new(false, $"PoolWatch could not read {where}: {ex.Message}"); }
+            if (now is not { } value || PathList.Insert(value.Text, r.Index!.Value, r.Before!, r.Sha256!) is not { } next)
+            {
+                changes.Remove(r);
+                return new(true, $"{Capital(where)} changed after PoolWatch removed {r.Before!.Trim()}, so PoolWatch left it as it is. You can add the " +
+                                 "entry again in Windows' Environment Variables window.");
+            }
+            if (store.Write(EnvScope.User, AppDataLinkFinder.PathName, value, new EnvValue(next, value.Expand)) is { } error)
+                return new(false, $"PoolWatch could not put the entry back on {where}: {error}.");
+            try { store.Broadcast(); } catch (Exception) { }
             changes.Remove(r);
             return new(true, $"Put {r.Before!.Trim()} back on {where}. " + LinkWords.Restart);
         }

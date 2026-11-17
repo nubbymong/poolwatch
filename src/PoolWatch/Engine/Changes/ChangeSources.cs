@@ -228,7 +228,8 @@ internal sealed class ServicesSource(ServicesController services, ProfileStore? 
 /// on it: a removed clear task by <see cref="ClearTaskReplacer.PutBack"/>; a task or startup entry must still be there
 /// (when it is gone the record goes and the message says so); a shortcut must be a .lnk directly in your Desktop or
 /// Start-menu Programs folder, opened without following links, a plain file whose bytes still match what PoolWatch wrote;
-/// a PATH entry or an environment variable the AppData links window changed must still be as PoolWatch wrote it
+/// a PATH entry or an environment variable the AppData links window changed must still be as PoolWatch wrote it, and the
+/// account's PATH it removed an entry from exactly as PoolWatch left it
 /// (<see cref="AppDataLinkFixes.PutBack"/>).
 /// Putting a change back acts only on the record its row was drawn from (<see cref="ActiveChange.Stamp"/>), and removes
 /// only that record, as it was saved: one saved for that target since is kept.
@@ -332,7 +333,7 @@ internal sealed class RecordedSource : IChangeSource
         RecordKind.RemovedClearTask => ChangeKind.RemovedClearTask,
         RecordKind.ScheduledTask => ChangeKind.ScheduledTask,
         RecordKind.StartupEntry => ChangeKind.StartupEntry,
-        RecordKind.PathEntry => ChangeKind.PathEntry,
+        RecordKind.PathEntry or RecordKind.RemovedPathEntry => ChangeKind.PathEntry,
         RecordKind.EnvironmentVariable => ChangeKind.EnvironmentVariable,
         _ => ChangeKind.Shortcut,
     };
@@ -365,7 +366,7 @@ internal sealed class RecordedSource : IChangeSource
                 () => _toggles.SetTaskEnabled(r.Location!, r.EnabledBefore!.Value)),
             RecordKind.StartupEntry => SwitchBackNow(r, $"the startup app {r.Name}", () => _toggles.StartupExists(r.Location!, r.Name!),
                 () => _toggles.SetStartupEnabled(r.Location!, r.Name!, r.EnabledBefore!.Value)),
-            RecordKind.PathEntry or RecordKind.EnvironmentVariable => AppDataLinkFixes.PutBack(r, _environment, _records),
+            RecordKind.PathEntry or RecordKind.EnvironmentVariable or RecordKind.RemovedPathEntry => AppDataLinkFixes.PutBack(r, _environment, _records),
             _ => DeleteShortcut(r),
         };
     }

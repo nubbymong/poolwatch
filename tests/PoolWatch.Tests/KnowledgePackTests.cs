@@ -101,7 +101,9 @@ public class KnowledgePackTests
         Assert.DoesNotContain("sign-in", token.Suggestion);
 
         var ntfc = byId["ntfc-ai-desktop-apps"];
-        Assert.Equal(["https://github.com/openai/codex/issues/56160", "https://github.com/anthropics/claude-code/issues/55361",
+        Assert.Equal(["https://github.com/anthropics/claude-code/issues/96870", "https://github.com/anthropics/claude-code/issues/95489",
+            "https://github.com/anthropics/claude-code/issues/96870#issuecomment-6732419760", "https://github.com/openai/codex/issues/56160",
+            "https://github.com/openai/codex/issues/58641", "https://github.com/anthropics/claude-code/issues/55361",
             "https://github.com/openai/codex/issues/31212"], Urls(ntfc));
         Assert.Empty(ntfc.Actions);
         // Shown beside the shader-cache note for the Codex app, which offers something worth trying: not "cannot".

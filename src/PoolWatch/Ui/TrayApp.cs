@@ -65,7 +65,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
     private ActiveChangesForm? _activeChanges;
     /// <summary>The AppData links window, one at a time (<see cref="ShowAppDataLinks"/>).</summary>
     private AppDataLinksForm? _appDataLinks;
-    /// <summary>The PATH entries the tray has told about once in this run, back on the PATH after PoolWatch replaced them (<see cref="WatchAppDataLinks"/>).</summary>
+    /// <summary>What the tray has told about once in this run, back under AppData after PoolWatch fixed it (<see cref="WatchAppDataLinks"/>), by row.</summary>
     private readonly HashSet<string> _linksTold = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Settings, one at a time, from the tray menu and the Advanced view's Settings button (<see cref="ShowSettings"/>).</summary>
     private readonly SettingsWindow _settings;
@@ -467,16 +467,17 @@ internal sealed class TrayApp : ApplicationContext, IShell
     /// <summary>The tray menu's item that opens the AppData links window.</summary>
     internal const string AppDataLinksMenuItem = "Links under AppData...";
 
-    /// <summary>The tray's notice when a PATH entry PoolWatch replaced is back (a tool put its link back), and its title.</summary>
-    internal const string LinksBackTitle = "A link under AppData is back on your PATH";
-
-    internal static string LinksBackNotice(int count) => (count == 1 ? "A tool put back a PATH entry" : $"Tools put back {count} PATH entries") +
-        " that PoolWatch had replaced (codex update does this). Click here to see it and fix it again.";
+    /// <summary>
+    /// The title of the tray's notice when something PoolWatch fixed for links under AppData is back (a tool put its link
+    /// or its variable back); the notice names it (<see cref="Core.Links.LinkWords.CameBack"/>).
+    /// </summary>
+    internal const string LinksBackTitle = "A link under AppData is back";
 
     /// <summary>
     /// The look for links under AppData from the tray: at most once an hour (<see cref="Engine.AppDataLinkWatch.ScanIfOld"/>), once
-    /// setup was completed. A PATH entry PoolWatch replaced before that is back gets one notice in this run; a click opens
-    /// the window, which offers the fix again. Anything that goes wrong is logged, never shown.
+    /// setup was completed. What PoolWatch fixed before that is back (a PATH entry it replaced or removed, a variable it set
+    /// that points into AppData again: <see cref="Engine.AppDataLinkFinder.Back"/>) gets one notice in this run, naming it;
+    /// a click opens the window, which offers the fix again. Anything that goes wrong is logged, never shown.
     /// </summary>
     private async void WatchAppDataLinks()
     {
@@ -484,9 +485,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
         {
             if (!Setup.Store.GuideCompleted || Setup.AppDataLinks.ScanIfOld() is not { } look) return;
             var scan = await look;
-            var back = Engine.AppDataLinkFinder.Back(scan, Setup.Ledger.Records.All())
-                .Where(f => _linksTold.Add(Core.Links.EnvScopes.Word(f.Scope) + ":" + f.Entry)).ToList();
-            if (back.Count > 0) Balloon(LinksBackTitle, LinksBackNotice(back.Count), 10_000, ShowAppDataLinks);
+            var back = Engine.AppDataLinkFinder.Back(scan, Setup.Ledger.Records.All()).Where(f => _linksTold.Add(f.Key)).ToList();
+            if (back.Count > 0) Balloon(LinksBackTitle, Core.Links.LinkWords.CameBack(back), 10_000, ShowAppDataLinks);
         }
         catch (Exception ex)
         {
@@ -515,7 +515,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
     {
         if (_appDataLinks is { IsDisposed: false } open) { Bring(open); return; }
         var view = new AppDataLinksView(Setup.AppDataLinks, Setup.LinkFixes, Setup.Smoke, line => _analysis.Diagnostics.RecordOwnerChange(line, null),
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), () => AppDataLinksView.NtfcOf(_engine.Latest));
         _appDataLinks = new AppDataLinksForm(view);
         _appDataLinks.FormClosed += (_, _) => _appDataLinks = null;
         Open(_appDataLinks);
