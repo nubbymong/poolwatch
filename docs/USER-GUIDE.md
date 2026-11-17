@@ -593,8 +593,9 @@ the tray menu. It has up to three groups (a group with nothing in it is left out
   ("service · set to its Windows default"), a scheduled task or startup app that was off until you turned it on in
   PoolWatch ("scheduled task · was off", "startup app · was off"), and a PATH entry or an environment variable the
   [Links under AppData](#links-under-appdata) window changed or removed. Each has **Put back**, which sets it back to how
-  it was before: a replaced PATH entry goes back only where PoolWatch's folder still is on that PATH, a removed one only
-  while your PATH is still as PoolWatch left it, and a variable only while it is still what PoolWatch set it to (one you
+  it was before: a replaced PATH entry goes back only where PoolWatch's folder still is on that PATH, a removed one
+  exactly while your PATH is still as PoolWatch left it (else at its old place among the entries there now, and not a
+  second time when it is on your PATH again), and a variable only while it is still what PoolWatch set it to (one you
   changed since is yours, and stays).
 
 **Put all back**, at the bottom, asks once and then does them all. Some rows carry a note. The token-leak guard's row

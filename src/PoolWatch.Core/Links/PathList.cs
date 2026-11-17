@@ -124,7 +124,8 @@ public static class PathList
     /// <summary>
     /// Put back of a removed entry: <paramref name="value"/> with <paramref name="entry"/> again at <paramref name="index"/>,
     /// only while the value is exactly the one PoolWatch wrote (its <see cref="Hash"/> is <paramref name="written"/>), so
-    /// the PATH comes back exactly as it was. Null otherwise: the PATH changed since, and nothing is put back.
+    /// the PATH comes back exactly as it was. Null otherwise: the PATH changed since, and the caller puts the entry back at
+    /// its old place with <see cref="InsertAt"/> instead (or writes nothing when the entry is on the PATH again already).
     /// </summary>
     public static string? Insert(string value, int index, string entry, string written)
     {

@@ -419,7 +419,7 @@ internal static class ActiveChangesView
             ChangeKind.ScheduledTask => "Turns the scheduled task back to how it was before PoolWatch changed it.",
             ChangeKind.StartupEntry => "Turns the startup app back to how it was before PoolWatch changed it.",
             ChangeKind.RemovedClearTask => "Puts your clear task back in Task Scheduler, and turns PoolWatch's automatic clear off so the two never both run.",
-            ChangeKind.PathEntry => "Puts the entry back on the PATH: the link in place of the folder PoolWatch wrote, if that folder is still there, or the entry PoolWatch removed, if your PATH is still as PoolWatch left it. The Claude and Codex apps see it once you start them again.",
+            ChangeKind.PathEntry => "Puts the entry back on the PATH: the link in place of the folder PoolWatch wrote, if that folder is still there, or the entry PoolWatch removed, exactly while your PATH is still as PoolWatch left it, else at its old place among the entries there now. The Claude and Codex apps see it once you start them again.",
             ChangeKind.EnvironmentVariable => "Sets the variable back as it was (or removes it, if it was not set), if it is still as PoolWatch set it. What you reinstalled stays where it is.",
             _ => "Puts it back to how it was.",
         };

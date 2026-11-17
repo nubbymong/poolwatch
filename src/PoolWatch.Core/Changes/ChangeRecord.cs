@@ -44,7 +44,7 @@ public sealed record ChangeRecord
     public string? Path { get; init; }
     /// <summary>
     /// Shortcut: the SHA-256 of the bytes PoolWatch wrote, in hex; RemovedPathEntry: the SHA-256 of the PATH value PoolWatch
-    /// wrote without the entry (<see cref="PathList.Hash"/>), so Put back acts only on a PATH that is still exactly that.
+    /// wrote without the entry (<see cref="PathList.Hash"/>), so Put back can tell whether the PATH is still exactly that.
     /// </summary>
     public string? Sha256 { get; init; }
     /// <summary>

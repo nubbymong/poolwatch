@@ -719,7 +719,9 @@ internal sealed class AppDataLinkFixes(ILinkSystem system, ChangeRecords records
 
     /// <summary>
     /// Removes the row's entry from the account's own PATH, only while its link still leads nowhere, and nothing else.
-    /// The record keeps the SHA-256 of the PATH it leaves, so Put back acts only on that PATH, exactly.
+    /// The record keeps the SHA-256 of the PATH it leaves, so Put back can tell whether the PATH is still exactly that: then
+    /// the entry goes back exactly; if the PATH changed since, it goes back at its old place among the entries there now,
+    /// or nothing is written when the entry is on the PATH again already (<see cref="PutBack"/>).
     /// </summary>
     public (bool Ok, string Message) Remove(LinkFinding shown, string via)
     {
