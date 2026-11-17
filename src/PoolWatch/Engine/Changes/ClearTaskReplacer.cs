@@ -80,7 +80,8 @@ internal static class ClearTaskReplacer
         var (removed, error) = RemoveAll(found, records, via, store);
         if (error is not null) return (removed, error);
         // The schedule first, so the sampler never sees the clear on with the old one.
-        try { live.Apply(What(live.Running), s => { s.AutoClearEveryHours = 1; s.AutoClearEnabled = true; }); }
+        // The urgent clear as the card offered it before the click (Settings.UrgentAsOffered): a choice once made.
+        try { live.Apply(What(live.Running), s => { s.AutoClearUrgent = s.UrgentAsOffered(); s.AutoClearEveryHours = 1; s.AutoClearEnabled = true; }); }
         catch (Exception ex)
         {
             string notOn = "PoolWatch's automatic cache clearing could not be turned on: " + ex.Message;
@@ -95,11 +96,12 @@ internal static class ClearTaskReplacer
     }
 
     /// <summary>
-    /// What <see cref="Replace"/> turns on, as the log says it: the hourly clear, and the urgent clear with it when its
-    /// setting is on (on by default), so the log never says less than what runs.
+    /// What <see cref="Replace"/> turns on, as the log says it: the hourly clear, and the urgent clear with it when it
+    /// comes with it (its setting, on by default, or still to be chosen after an upgrade with automatic clearing off:
+    /// <see cref="Core.Settings.UrgentAsOffered"/>), so the log never says less than what runs.
     /// </summary>
     internal static string What(Core.Settings s) =>
-        $"the hourly automatic cache clear{(s.AutoClearUrgent ? ChangeWords.AutoClearUrgent : "")}, in place of your own clear task";
+        $"the hourly automatic cache clear{(s.UrgentAsOffered() ? ChangeWords.AutoClearUrgent : "")}, in place of your own clear task";
 
     /// <summary>
     /// Removes clear tasks of your own for <see cref="Replace"/> and for CacheHelper.ResolveLegacy after your yes. Every

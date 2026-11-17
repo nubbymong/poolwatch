@@ -155,7 +155,8 @@ internal sealed class StandbyCacheSetup(ISetupSystem system, LiveSettings live, 
             {
                 s.AutoClearEveryHours = every!.Value;
                 s.AutoClearPoolGb = size!.Value;
-                if (urgent is { } on) s.AutoClearUrgent = on;
+                // The step showed the switch: its choice, so an upgrade's question about it is not asked.
+                if (urgent is { } on) (s.AutoClearUrgent, s.AutoClearUrgentAsk) = (on, false);
                 s.AutoClearEnabled = true;
             }));
             if (!replaceOwnTask) await WriteRule();
@@ -320,7 +321,9 @@ internal sealed class SetupSession
         var running = host.Running;
         (_, Hours, PoolGb) = CacheChoices.Read(running);
         Cache = CacheChoices.Initial(running, firstRun);
-        Urgent = running.AutoClearUrgent; // on to begin with (the setting's default), else as set
+        // On to begin with (the setting's default, and while it is still to be chosen after an upgrade with automatic
+        // clearing off), else as set: Settings.UrgentAsOffered.
+        Urgent = running.UrgentAsOffered();
         // The first run starts on the recommended Reports only; opened again (or alone after an upgrade), on what is in effect.
         Records = Flow.FirstRun ? RecordChoices.Recommended : running.RecordMode;
         Days = _daysInEffect = running.RetentionDays;

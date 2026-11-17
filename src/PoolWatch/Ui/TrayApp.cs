@@ -18,9 +18,10 @@ namespace PoolWatch.Ui;
 /// after Explorer restarts (<see cref="TaskbarWatch"/>). Until the first setup is done,
 /// setup is the way in: it opens by itself at every start, and anything that would show the main window brings setup
 /// instead (<see cref="FirstRunGate"/>); once it is done, while what PoolWatch keeps on disk was never chosen (after an
-/// upgrade from 1.0.0-beta.2), setup's Records step opens alone at each start. Its menu opens Settings (in either view: the
-/// Simple view's header has no Settings button), runs setup again and opens Active changes, says when a newer release is
-/// out (update notices, information only), and holds the tools that are not on the main window (DESIGN.md section 11):
+/// upgrade from 1.0.0-beta.2), setup's Records step opens alone at each start; and while the urgent clear is still to be
+/// chosen after an upgrade with automatic clearing on, its question asks once at the start (<see cref="UrgentQuestion"/>).
+/// Its menu opens Settings (in either view: the Simple view's header has no Settings button), runs setup again and opens
+/// Active changes, says when a newer release is out (update notices, information only), and holds the tools that are not on the main window (DESIGN.md section 11):
 /// Capture now, Since boot report, Open incident folder, Export vendor bundle, Copy latest incident summary, the
 /// clear-task removals (shown only while there is something to remove), Report an issue and About. It is the shell setup
 /// and the suggestions call (<see cref="IShell"/>): one of each window at a time, and the token-leak guard's sign-in check
@@ -69,6 +70,8 @@ internal sealed class TrayApp : ApplicationContext, IShell
     private readonly IncidentNotices _notices;
     /// <summary>The non-paged pool's notice, which stays on screen until it is closed (<see cref="StayingNotice"/>).</summary>
     private readonly StayingNotice _staying;
+    /// <summary>The urgent clear's question after an upgrade, asked at the start while it is due (<see cref="UrgentQuestion"/>).</summary>
+    private readonly UrgentQuestion _urgentQuestion;
     /// <summary>A second start of PoolWatch shows the window (none in the CI UI test, or when its event could not be made).</summary>
     private readonly IDisposable? _showSignal;
     /// <summary>
@@ -102,6 +105,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _balloonClick = new BalloonClick(ShowWindow, engine.Log.Info);
         _notices = new IncidentNotices(analysis.Knowledge.Lookup, () => engine.Services, engine.Log.Info, tag => analysis.Detector.NonPagedRisers.Contains(tag));
         _staying = new StayingNotice(ShowWindow, engine.Log.Info);
+        _urgentQuestion = new UrgentQuestion(live, engine.Log.Info);
         Setup =new SetupContext(engine, analysis, _actions, live, ledger, this, smoke, new UpdateSwitch(live));
         _settings = new SettingsWindow(Setup.NewSettings, ShowSettingsDialog, Bring);
         if (!smoke)
@@ -228,6 +232,10 @@ internal sealed class TrayApp : ApplicationContext, IShell
             rememberView: advanced => _view?.Remember(advanced), startUpdates: () => _updates?.Start(),
             recordsChosen: () => Setup.Store.RecordsChosen, openRecords: OpenRecords);
         _gate.Start(showWindow);
+        // After an upgrade from a version without the urgent clear, it is off until it is chosen: with automatic clearing
+        // on, a question asks once at this start (Turn on, Leave off, Decide later), once setup was completed; never in the
+        // CI UI test.
+        _urgentQuestion.AtStart(Setup.Store.GuideCompleted, smoke);
         // The token-leak watch also runs while the window is hidden (never in the CI UI test, where it refuses anyway).
         _watchTimer = WatchTimer(smoke, WatchTokenLeak);
     }
@@ -631,6 +639,7 @@ internal sealed class TrayApp : ApplicationContext, IShell
         _watchTimer.Dispose();
         _taskbar.Dispose(); // before the icon goes, so it is never added again
         _staying.Close();
+        _urgentQuestion.Close(); // no answer: asked about again at the next start
         _icon.Visible = false;
         _icon.Dispose();
         _menu.Dispose();

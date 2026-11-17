@@ -8,11 +8,12 @@ namespace PoolWatch.Ui;
 /// shown as the token-leak guard's notices that need your click are (<see cref="GuardNotices"/>): a small window at the
 /// bottom right of the screen that holds the tray, never a modal box, above other windows, with a taskbar button. Unlike
 /// them it never takes the keyboard focus when it appears (it comes while you type in another program, and a key meant
-/// there must not press its button). As Windows holds its own toasts back, it waits while a full-screen Direct3D program
-/// (exclusive full screen, as some games run) or presentation mode runs
-/// (<see cref="Native.NotificationState.Presenting"/>), and shows when that ends: a window above all others, with a pool
-/// tag's and a program's names, would otherwise show over a presentation. It waits <see cref="MaxHoldMs"/> (2 minutes) at
-/// most, then shows whatever runs: this notice can come minutes before a hang. One at a time: a newer one puts its words
+/// there must not press its button). It waits while a full-screen Direct3D program (exclusive full screen, as some games
+/// run) or presentation mode runs (<see cref="Native.NotificationState.Presenting"/>), and shows when that ends: a window
+/// above all others, with a pool tag's and a program's names, would otherwise show over such a game, or a presentation
+/// with presentation mode on. It waits <see cref="MaxHoldMs"/> (2 minutes) at most, then shows whatever runs: this notice
+/// can come minutes before a hang. A slide show without presentation mode, or a game in a borderless window, never holds
+/// it (Windows says busy for those). One at a time: a newer one puts its words
 /// in the one open, or in the one waiting. Open PoolWatch opens the main window and closes it; Close, its close box, or
 /// Esc once it has the focus, closes it. Each one shown, held and closed is one line in the log, and one shown after it
 /// waited says for how long. UI thread.

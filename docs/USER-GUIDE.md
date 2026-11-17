@@ -97,6 +97,10 @@ change of the record mode or the cleanup in Settings, which is a choice too (sav
 then shows it, so its Done keeps it). What beta.2 recorded is cleaned up by the usual rule, 7 days of the PC's
 awake time without a write.
 
+**After an update from 1.0.0 or earlier**, which had no urgent clear, it is off until you choose. With automatic
+clearing on, PoolWatch asks once when it starts, with **Turn on**, **Leave off** and **Decide later** (see
+[When the cache is cleared](#when-the-cache-is-cleared)).
+
 Steps 4 and 5 wait until PoolWatch has read the PC ("Looking at your PC... Next is ready in a moment."), at most a
 minute; after that, setup goes on with what it knows. Nothing changes until you press **Next** on step 4 (the cache
 rule) or step 5 (the fixes you switched on); each change is then listed under [Active changes](#active-changes). On
@@ -239,8 +243,8 @@ kernel pool reaches its size (8 GB to begin with), whichever comes first, and ne
   ("Next cache clear when the kernel pool reaches 10.3 GB, or 8 GB after 03:19"). So while it waits, the size rule
   clears again at most once after each clear that takes the pool under the size, and once each time the pool climbs
   another 2 GB or a quarter.
-- **The urgent clear** (on to begin with; **Clear at once if the non-paged pool climbs** in Settings, and setup's
-  switch): while the non-paged pool is over its alert level (5 GB to begin with) and rose at least 100 MB in the last
+- **The urgent clear** (on to begin with on a new install, and off after an update until you choose, below; **Clear at
+  once if the non-paged pool climbs** in Settings, and setup's switch): while the non-paged pool is over its alert level (5 GB to begin with) and rose at least 100 MB in the last
   10 minutes (the non-paged alert's two limits; PoolWatch never goes below 1 GB and 10 MB for them), PoolWatch empties
   the standby cache at once, without waiting for the schedule, the size or the 30 minutes. It empties the whole cache,
   or only its light part if you chose light clears only in the Advanced settings. Never within 10 minutes of a clear,
@@ -251,8 +255,18 @@ kernel pool reaches its size (8 GB to begin with), whichever comes first, and ne
   PoolWatch waits until a clear frees more of it or it grows past what that clear saw by 2 GB or a quarter, rather than
   clearing every 10 minutes for nothing. It runs only with automatic clearing on and a schedule or a size set. The log,
   the timeline and the Simple view's line say "urgent" for such a clear. Turning automatic clearing on from the hourly
-  clear's card, or by replacing a RAMMap task, turns the urgent clear on with it while its setting is on: the card says
+  clear's card, or by replacing a RAMMap task, turns the urgent clear on with it unless you turned it off: the card says
   so before you click, under its reason, and what PoolWatch says then, and the row in Active changes, say so too.
+- **After an update from a version without the urgent clear** (1.0.0 and earlier), it is off until you choose. If
+  automatic clearing is on, PoolWatch asks once when it starts, in a small window at the bottom right of the screen with
+  the taskbar, as the non-paged pool's notice is ([The tray icon](#the-tray-icon)): **Clear at once if the non-paged pool is over its limit and still rising**, with
+  **Turn on**, **Leave off** and **Decide later**. Turn on turns it on. Leave off keeps it off, and PoolWatch does not
+  ask again. Decide later, or closing the window, keeps it off, and PoolWatch asks again the next time it starts. The
+  window never takes the keyboard from the program you are typing in, and PoolWatch's log says what you chose. If
+  automatic clearing is off, PoolWatch does not ask, as the urgent clear only acts while that is on: when you turn
+  automatic clearing on later, setup's switch, the box in Settings and the hourly clear's card offer the urgent clear
+  as on a new install (on to begin with), and what you choose there is your answer. Settings and setup can change it
+  at any time.
 
 On a PC with a ReFS Dev Drive that hung, the size rule had waited after a clear that freed 462 MB of 8.23 GB,
 while the next clears freed 1.99 GB and 5.75 GB; the non-paged pool alone reached 11.18 GB and kept rising, with no
@@ -498,11 +512,11 @@ pool: Open files (File) is growing"). It names a likely cause only when the evid
 after a few seconds (Windows' own setting) for the notification centre, so the one that matters most, **Non-paged pool
 over the limit**, is a small window at the bottom right of the screen with the taskbar instead, as the token-leak
 guard's are: it stays above other windows until you close it, with **Open PoolWatch** and **Close** (or Esc once you
-click into it), and it never takes the keyboard from the program you are typing in. A long text is cut to fit it. As
-Windows does with its own notices, it waits while a game or another program runs in Direct3D's exclusive full screen,
-or Windows' presentation mode is on, and shows when that ends, or after 2 minutes at most: on a PC that hung, this notice
-came 6 minutes before the hang. A browser's video or a Remote Desktop window in full screen does not hold it. The log
-says it was held and for how long. A newer one puts its words in the one open. To get fewer, choose under
+click into it), and it never takes the keyboard from the program you are typing in. A long text is cut to fit it. It
+waits while a game or another program runs in Direct3D's exclusive full screen, or Windows' presentation mode is on,
+and shows when that ends, or after 2 minutes at most: on a PC that hung, this notice came 6 minutes before the hang. A
+browser's video, a slide show or a Remote Desktop window in full screen does not hold it. The log says it was held and
+for how long. A newer one puts its words in the one open. To get fewer, choose under
 **Notifications** in Settings **Only when it needs attention**: a notice only when the icon turns red, once (for a
 growth, that is when a trace confirms its cause, which comes after the growth started, so its notice names that cause),
 and for each growth that is part of the rise of a non-paged pool over its limit, once; or **Off**. The change applies at

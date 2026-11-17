@@ -156,16 +156,23 @@ internal sealed class RecommendationActions
     {
         if (!_system.Elevated) return (false, "Clearing the cache needs PoolWatch to run as administrator.");
         if (_system.OwnClearTask) return (false, "Your own clear task (RAMMap) clears the cache. Replace it instead, so the two never both run.");
-        await Task.Run(() => _live.Apply($"the hourly automatic cache clear{Urgent()} ({via})", s => { s.AutoClearEveryHours = 1; s.AutoClearEnabled = true; }));
+        await Task.Run(() => _live.Apply($"the hourly automatic cache clear{Urgent()} ({via})", s =>
+        {
+            s.AutoClearUrgent = s.UrgentAsOffered(); // as the card said before the click: a choice once made
+            s.AutoClearEveryHours = 1;
+            s.AutoClearEnabled = true;
+        }));
         _system.Timeline($"Automatic cache clearing turned on, every hour{Urgent()} (from {via}).");
         return (true, $"PoolWatch clears the cache every hour{Urgent()}.");
     }
 
     /// <summary>
-    /// What the hourly clear turns on besides the hour: the urgent clear when its setting is on (on by default), said
-    /// after "every hour" (<see cref="Core.Changes.ChangeWords.AutoClearUrgent"/>), else nothing.
+    /// What the hourly clear turns on besides the hour: the urgent clear when it comes with it (its setting, on by default,
+    /// or still to be chosen after an upgrade with automatic clearing off: <see cref="Core.Settings.UrgentAsOffered"/>, the
+    /// same before the click and after), said after "every hour" (<see cref="Core.Changes.ChangeWords.AutoClearUrgent"/>),
+    /// else nothing.
     /// </summary>
-    private string Urgent() => _live.Running.AutoClearUrgent ? Core.Changes.ChangeWords.AutoClearUrgent : "";
+    private string Urgent() => _live.Running.UrgentAsOffered() ? Core.Changes.ChangeWords.AutoClearUrgent : "";
 
     private async Task<(bool, string)> ReplaceClearTask(string via)
     {

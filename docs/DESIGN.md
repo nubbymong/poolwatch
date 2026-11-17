@@ -1218,14 +1218,15 @@ a time, a newer one putting its words in it. It opens on the screen that holds t
 (`NoticeWindow.Area`, the `Shell_TrayWnd` window `TaskbarWatch.FindTaskbar` finds), shares one font
 (`NoticeWindow.NoticeFont`: a form does not dispose a font it is given), closes on Esc once it has the focus (its Close
 is the cancel button), and cuts its words to what a notice holds (`NoticeWindow.Cut`, `ProfileAtStart.MaxNotice`, at a
-word's end), as its size is fixed and its text box has no scroll bar. As Windows holds its own toasts back, it waits
-while `SHQueryUserNotificationState` (`Native.NotificationState`) says a full-screen Direct3D program (exclusive full
-screen, as some games run) or presentation mode, logged as held, and shows when that ends (asked every 5 seconds), or
-after 2 minutes whatever runs (`StayingNotice.MaxHoldMs`, timed from the first notice that waited, so a newer one in its
-place never holds it longer); the line that says it was shown then says how long it was held. A window above all others
-with a tag's and a program's names would otherwise show over a presentation. It does not wait for busy, which Windows
-says for any full-screen window (a video in a browser, a Remote Desktop window): this notice came 6 minutes before a
-hang, and must not wait out a film. Focus Assist's do-not-disturb has no documented call to read, so it is not known.
+word's end), as its size is fixed and its text box has no scroll bar. It waits while `SHQueryUserNotificationState`
+(`Native.NotificationState`) says a full-screen Direct3D program (exclusive full screen, as some games run) or
+presentation mode, logged as held, and shows when that ends (asked every 5 seconds), or after 2 minutes whatever runs
+(`StayingNotice.MaxHoldMs`, timed from the first notice that waited, so a newer one in its place never holds it
+longer); the line that says it was shown then says how long it was held. A window above all others with a tag's and a
+program's names would otherwise show over such a game, or a presentation with presentation mode on. It does not wait
+for busy, which Windows says for any full-screen window (a video in a browser, a slide show, a game in a borderless
+window, a Remote Desktop window), though Windows holds its own toasts for it: this notice came 6 minutes before a hang,
+and must not wait out a film. Focus Assist's do-not-disturb has no documented call to read, so it is not known.
 The token-leak guard's notices are not these, and always
 show. A click on any notice opens the main window in the view last
 used and brings it to the front, unless that notice offers a place of its own (Active changes for the service profile's,
@@ -1586,7 +1587,8 @@ a check still running just above None, `ImpactRows.ByLevel`), Safety (three prom
 schedule, At a pool size, Whichever comes first (recommended, preselected on every PC at a first run), Decide later; a
 small chart of the kernel pool; under the four choices, the urgent clear's switch (`Settings.AutoClearUrgent`, "Also
 clear at once if the non-paged pool is over 5 GB and still rising", with a green shield as the step's safety words
-have), shown only with a choice that clears, on to begin with (the setting's default, else as set), and hidden by
+have), shown only with a choice that clears, on to begin with (the setting's default, and while it is still to be
+chosen after an upgrade with automatic clearing off, `Settings.UrgentAsOffered`; else as set), and hidden by
 Decide later, which is still offered; the stutter line; and, with a RAMMap clear task of the user's own, the note that
 choosing a rule replaces it), Fixes (start when you sign in, Defender performance mode with its instructions, the Codex
 shortcut as a Yes/No, and the token-leak guard when the check found the leak, its "Why?" open with what you will notice
@@ -1603,7 +1605,8 @@ needs it, runs the token-leak check (usually about 20 seconds) once; the CI UI t
 for the read before Next ("Next is ready in a moment."), at most a minute in all (`EnvironmentProbe.HungAfter`): after
 that setup goes on with the facts PoolWatch had and shows the read when it ends. Nothing is changed until Next on the
 step that shows it: the Standby cache step writes the chosen rule and the urgent clear's switch as shown, in one change
-(`LiveSettings.Apply`; Decide later turns clearing off and leaves the switch as it is) and, exactly when the step
+(`LiveSettings.Apply`; the switch so written is chosen, so an upgrade's question about it is not asked; Decide later
+turns clearing off and leaves the switch as it is) and, exactly when the step
 shows the note, replaces the user's task first (from the same scan; the rule is written right after); the Fixes step's
 Next registers the sign-in task, creates the shortcut and turns the guard on through the same code as the cards. A Fixes
 row that appears while the step shows (the read or the leak check ended) holds Next for a second (`NextWait`), so a
@@ -1623,6 +1626,27 @@ Once setup was completed but no record mode was ever chosen (`setup.json` withou
 choice and records it; closed without Done it is cancelled at once (Reports only stays in force), and it opens again
 at the next start. It opens by itself, so Done is held until its window is first shown and for a second from then
 (`SetupSession.Shown`, from the window's `OnShown`), however long before that its session was made.
+After an upgrade from a version without the urgent clear (a `settings.json` without `autoClearUrgent`: every file up
+to 1.0.0), the urgent clear reads off and still to be chosen (`Settings.AutoClearUrgentAsk`, kept in `settings.json`
+only while set; a new install and a `--config` file never set it). While automatic clearing is on with a schedule or a
+size (`Settings.UrgentClearToAsk`), the tray app asks once at a start, never in the CI UI test and only once setup was
+completed (`UrgentQuestion`, from the start after `FirstRunGate`; once per start at most). It asks with the app's
+pattern for a question that needs a click outside setup, the token-leak guard's "Turn on / Not now" window, built as
+the non-paged pool's notice is (`UrgentQuestionWindow`: bottom right of the tray's screen, above other windows by its
+style, shown without taking the focus, so it never takes a key meant for another program, with a taskbar button and
+the shared font), not as a setup step alone: the question is one switch, setup's own Standby cache step has it for
+anyone who runs setup again, and a second step-alone mode would be a page and a layout of its own. Its title and words
+are the switch's (`SetupText.UrgentTitle`, `UrgentRow`, and the step's `Stutter` line); its answers, left to right:
+**Turn on**, green as the safe choice for the PC (the system's button under high contrast), **Leave off** and
+**Decide later** (Esc; Enter answers nothing). Turn on writes it on and Leave off writes it off, each chosen
+(`LiveSettings.Apply`, at once and in `settings.json`); Decide later, and a close without an answer (its close box,
+Alt+F4, PoolWatch exiting), write nothing, so it stays off and is asked about at the next start. Each answer is a log
+line. With automatic clearing off it is not asked (the urgent clear acts only while that is on): every place that turns
+clearing on offers it at its default, on, while it is still to be chosen (`Settings.UrgentAsOffered`): setup's switch,
+Settings' box (`SettingsEditor.StartFrom`; a Save that changes the automatic clear writes the box as shown, which
+chooses it, and one that leaves the automatic clear alone leaves it unchosen, `AutoClearSettings.UrgentAsk`), and the
+hourly clear's and the RAMMap task's cards, which say so before the click and turn it on with the hour. A file that has
+the key is never asked: it was chosen, or written by a build that had it on by default.
 Passing the Records step of the whole setup records the choice too, and so does a Settings Save
 that changes the record mode or the cleanup's days (`AtOnceSettings.ChoosesRecords`, `SettingsEditor.Commit`); a
 Save that changes neither chooses nothing. Settings is reachable in either view: the Simple view's header has no
@@ -2110,8 +2134,9 @@ Save then puts only the four at-once settings into effect and says that nothing 
   size-rule clear freed 462 MB of 8.23 GB, the scheduled clears after it freed 1.99 GB (taking the pool from 9.38 to
   7.38 GB) and 5.75 GB, and the size rule still waited while the pool went from 9.3 GB to 21.4 GB (`UrgentClearTests`
   replays that night from its numbers, each moment asked against the night's own clears as they had happened by then).
-- **The urgent clear** (`Settings.AutoClearUrgent`, on by default, only while automatic clearing is on with a schedule
-  or a size set, so it never runs while the line says automatic clearing is off; `ClearPolicy.UrgentNow`): the
+- **The urgent clear** (`Settings.AutoClearUrgent`, on by default for a new install, only while automatic clearing is
+  on with a schedule or a size set, so it never runs while the line says automatic clearing is off;
+  `ClearPolicy.UrgentNow`): the
   committed non-paged pool over `NonPagedTotalAlertBytes` and its rise over the last 10 minutes at least
   `NonPagedTotalRiseBytesPer10Min` (the non-paged alert's two limits, which `Settings.Normalize` keeps at 1 GB and
   10 MB at least, and the rule reads so again: they gate an elevated purge), read by the detector on the stitch of
@@ -2135,11 +2160,15 @@ Save then puts only the four at-once settings into effect and says that nothing 
   stand-down. Urgent clears are left out of "auto" mode's comparison of the light and full purges (`ModeFor`,
   `IsExperiment`, `LowPriorityVerdict`): taken while the non-paged pool climbs, their frees are not like the others'.
   Its trigger is kept with the clear: the log, the finding and the Simple view's line say "urgent". `Next` says "now"
-  when it is due. On by default for new installs and upgrades (a file without it reads it on): it acts only on top of a
-  rule the owner turned on, and it is the clear that night needed. The words that turn automatic clearing on (the
-  hourly clear's card and its result, replacing a RAMMap task, setup's timeline line) and Active changes' row say it
-  is turned on with the rule while it is on (`ChangeWords.AutoClearUrgent`). The card says it before the click: an
-  offer that turns clearing on carries the setting (`RecommendationInputs.AutoClearUrgent`,
+  when it is due. On by default for a new install: it acts only on top of a rule the owner turned on, and it is the
+  clear that night needed. After an upgrade (a `settings.json` without it) it is off until the owner chooses
+  (`Settings.AutoClearUrgentAsk`): with automatic clearing on, the tray app asks once at a start (Turn on, Leave off,
+  Decide later, which asks again at the next start: `UrgentQuestion`, section 11), and with it off, each place that
+  turns it on offers the urgent clear at its default (`Settings.UrgentAsOffered`), whose choice settles it. The words
+  that turn automatic clearing on (the hourly clear's card and its result, replacing a RAMMap task, setup's timeline
+  line) and Active changes' row say it is turned on with the rule while it is on (`ChangeWords.AutoClearUrgent`). The
+  card says it before the click: an offer that turns clearing on carries it as offered
+  (`RecommendationInputs.AutoClearUrgent`, from `Settings.UrgentAsOffered`, and the click writes it so;
   `Recommendation.TurnsOnUrgentClear`), and the card says so under its reason, before the stutter line
   (`SimpleSettings.UrgentToo`), not in the reason, which a known issue's words or what a clear freed can replace.
 - **Escalation.** In "auto" mode, an automatic light (low-priority standby) clear that, measured 2 minutes later,

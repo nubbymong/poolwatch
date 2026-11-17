@@ -15,10 +15,15 @@ What changed in each PoolWatch release, newest first, in plain words.
   the 30 minutes: the whole cache, or its light part if you chose light clears only. Never within 10 minutes of a clear
   (30 after one that failed), longer for several in a row (20, then 30 minutes), never during an experiment, and not
   again after one that freed little of the non-paged pool until a clear frees more of it or it grows on. It runs only
-  with automatic clearing on and a schedule or a size set, and it is on to begin with, after an upgrade too. Setup's
-  Standby cache step has a switch for it, and Settings a box. Turning automatic clearing on from the hourly clear's
-  card, or by replacing a RAMMap task, turns this on too, and PoolWatch says so: on the card before you click, after
-  the click, and in Active changes.
+  with automatic clearing on and a schedule or a size set. It is on to begin with on a new install. Setup's Standby
+  cache step has a switch for it, and Settings a box. Turning automatic clearing on from the hourly clear's card, or by
+  replacing a RAMMap task, turns this on too unless you turned it off, and PoolWatch says so: on the card before you
+  click, after the click, and in Active changes.
+- **After an update, you choose the urgent clear.** An update from 1.0.0 or earlier leaves it off until you choose. If
+  automatic clearing is on, PoolWatch asks once when it starts, in a small window that stays until you answer:
+  **Turn on**, **Leave off** (it does not ask again) or **Decide later** (it asks again at the next start; closing the
+  window does the same). If automatic clearing is off, it does not ask: setup, Settings and the hourly clear's card
+  offer the urgent clear when you turn clearing on.
 - **The non-paged pool's notice stays until you close it.** "Non-paged pool over the limit" left the screen after a
   few seconds, as every notice by the clock does; it is now a small window on the taskbar's screen that stays above
   other windows, with **Open PoolWatch** and **Close**, and never takes the keyboard from the program you type in. It
