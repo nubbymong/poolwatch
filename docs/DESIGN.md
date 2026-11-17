@@ -2167,9 +2167,9 @@ Save then puts only the four at-once settings into effect and says that nothing 
   `IsExperiment`, `LowPriorityVerdict`): taken while the non-paged pool climbs, their frees are not like the others'.
   Its trigger is kept with the clear: the log, the finding and the Simple view's line say "urgent". `Next` says "now"
   when it is due. On by default for a new install: it acts only on top of a rule the owner turned on, and it is the
-  clear that night needed. After an upgrade (a `settings.json` without it) it is off until the owner chooses
-  (`Settings.AutoClearUrgentAsk`): with automatic clearing on, the tray app asks once at a start (Turn on, Leave off,
-  Decide later, which asks again at the next start: `UrgentQuestion`, section 11), and with it off, each place that
+  clear that night needed. After an upgrade (a `settings.json` without it) the urgent clear is off until the owner
+  chooses (`Settings.AutoClearUrgentAsk`): with automatic clearing on, the tray app asks once at a start (Turn on, Leave
+  off, Decide later, which asks again at the next start: `UrgentQuestion`, section 11), and with it off, each place that
   turns it on offers the urgent clear at its default (`Settings.UrgentAsOffered`), whose choice settles it. The words
   that turn automatic clearing on (the hourly clear's card and its result, replacing a RAMMap task, setup's timeline
   line) and Active changes' row say it is turned on with the rule while it is on (`ChangeWords.AutoClearUrgent`). The

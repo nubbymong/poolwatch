@@ -258,12 +258,12 @@ kernel pool reaches its size (8 GB to begin with), whichever comes first, and ne
   for such a clear. Turning automatic clearing on from the hourly clear's card, or by replacing a RAMMap task, turns the
   urgent clear on with it unless you turned it off: the card says so before you click, under its reason, and what
   PoolWatch says then, and the row in Active changes, say so too.
-- **After an update from a version without the urgent clear** (1.0.0 and earlier), it is off until you choose. If
-  automatic clearing is on, PoolWatch asks once when it starts, in a small window at the bottom right of the screen with
-  the taskbar, as the non-paged pool's notice is ([The tray icon](#the-tray-icon)): **Clear at once if the non-paged
-  pool is over its limit and still rising**, with **Turn on**, **Leave off** and **Decide later**. Its buttons are
-  greyed for a second as it opens, so a click meant for what was in that corner does not answer it. Turn on turns it on.
-  Leave off keeps it off, and PoolWatch does not ask again. Decide later, or closing the window, keeps it off, and
+- **After an update from a version without the urgent clear** (1.0.0 and earlier), the urgent clear is off until you
+  choose. If automatic clearing is on, PoolWatch asks once when it starts, in a small window at the bottom right of the
+  screen with the taskbar, as the non-paged pool's notice is ([The tray icon](#the-tray-icon)): **Clear at once if the
+  non-paged pool is over its limit and still rising**, with **Turn on**, **Leave off** and **Decide later**. Its buttons
+  are greyed for a second as it opens, so a click meant for what was in that corner does not answer it. Turn on turns it
+  on. Leave off keeps it off, and PoolWatch does not ask again. Decide later, or closing the window, keeps it off, and
   PoolWatch asks again the next time it starts. The window never takes the keyboard from the program you are typing in,
   and PoolWatch's log says what you chose. If automatic clearing is off, PoolWatch does not ask, as the urgent clear
   only acts while that is on: when you turn automatic clearing on later, setup's switch, the box in Settings and the
