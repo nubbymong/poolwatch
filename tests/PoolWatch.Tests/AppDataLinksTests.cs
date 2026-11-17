@@ -357,4 +357,50 @@ public class AppDataLinksTests
         Assert.Contains(issue.Credits, c => c.Name == "peterlau03" && c.Url == LinkFinder.IssueUrl);
         Assert.All(issue.Credits, c => Assert.StartsWith(LinkFinder.IssueUrl, c.Url));
     }
+
+    /// <summary>
+    /// What the two NtFC notes say matches what was measured in issue 96870: any program a Code-tab session starts leaks,
+    /// with Cowork idle (DraftingDreamer), one reparse-point record for each open through a link under AppData; no cache
+    /// clear frees it, and only a Restart does: 2,726.8 MB stayed through a Shut down with Fast Startup on (DraftingDreamer).
+    /// Links elsewhere, Documents and OneDrive included, leaked nothing; OneDrive's cloud files inside the apps were not
+    /// measured, and the note says just that.
+    /// </summary>
+    [Fact]
+    public void TheNtfcNotesSayWhatWasMeasuredAndThatOnlyARestartFreesIt()
+    {
+        var packs = KnowledgeBase.Embedded().Entries.Where(e => e.Id is "ntfc-ai-desktop-apps" or LinkFinder.KnownIssueId).ToList();
+        Assert.Equal(2, packs.Count);
+        foreach (var p in packs)
+        {
+            Assert.DoesNotContain("Cowork feature on", p.Explanation);
+            Assert.Contains("reparse", p.Explanation);
+            Assert.Contains("Restart", p.Workaround);
+            Assert.Contains("a Shut down with Fast Startup on keeps it", p.Workaround);
+            Assert.DoesNotContain("A restart frees", p.Workaround);
+        }
+        Assert.Contains("Code-tab session", packs.Single(p => p.Id == "ntfc-ai-desktop-apps").Explanation);
+        var links = packs.Single(p => p.Id == LinkFinder.KnownIssueId);
+        Assert.Contains("OneDrive", links.Explanation);
+        Assert.Contains("not measured", links.Explanation);
+        Assert.Contains(packs.Single(p => p.Id == "ntfc-ai-desktop-apps").Links, l => l.Url == LinkFinder.IssueUrl);
+        Assert.Contains(packs.Single(p => p.Id == "ntfc-ai-desktop-apps").Links, l => l.Url == "https://github.com/anthropics/claude-code/issues/95489");
+        // The built-in name of the tag says what the leaked records are.
+        Assert.Contains("reparse", Core.Tags.BuiltinTags.Table[PoolTag.Parse("NtFC")].Description);
+        // Only a Restart frees it, in the window's words too.
+        Assert.Contains("a Shut down with Fast Startup on keeps it", LinkWords.Restart);
+    }
+
+    /// <summary>
+    /// winget's Links folder: the cost is a run of a tool through one of its links (thyhellcat); a lookup that misses there
+    /// keeps nothing. Taking the folder off PATH would break every portable app winget installed, so the window never
+    /// says to.
+    /// </summary>
+    [Fact]
+    public void WingetsLinksAreAdviceOnlyAndNeverTakenOffThePath()
+    {
+        string details = LinkWords.Details(new LinkFinding { Kind = LinkKind.WinGetLinks, Entry = @"%LOCALAPPDATA%\Microsoft\WinGet\Links", Count = 3 });
+        Assert.Contains("Leave the folder on your PATH", details);
+        Assert.Contains("each run of a tool through one of these links", details);
+        Assert.DoesNotContain("remove the entry", details, StringComparison.OrdinalIgnoreCase);
+    }
 }

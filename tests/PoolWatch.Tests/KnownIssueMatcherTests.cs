@@ -94,6 +94,25 @@ public class KnownIssueMatcherTests
         Assert.Empty(Ids(Grew(Quiet() with { Running = [CodexDesktop] }, ("NtFC", 2048, 0))));         // paged, not the reported leak
     }
 
+    /// <summary>
+    /// With the Claude app, the links under AppData leak far slower than the reports of gigabytes an hour: 7.6 MB an hour
+    /// over 15 hours (konrad-rzonca), about 26 MB an hour over 12 (DraftingDreamer), against a baseline of 3 MB in 75 hours
+    /// once fixed (estoll37). So that cause is named from 20 MB an hour with the Claude app; the Codex app and the general
+    /// note keep 100 MB an hour.
+    /// </summary>
+    [Fact]
+    public void TheLinksUnderAppDataAreNamedFromTwentyMbAnHourWithTheClaudeApp()
+    {
+        var m = Single(Grew(Quiet() with { Running = [ClaudeDesktop] }, ("NtFC", 0, 21)), "ntfc-appdata-links");
+        Assert.Equal(["NTFS file records grew 21 MB in the last hour.", "Claude desktop is running."], m.Seen);
+        Assert.Equal(["ntfc-appdata-links"], Ids(Grew(Quiet() with { Running = [ClaudeDesktop] }, ("NtFC", 0, 21))));
+        Assert.Equal(["ntfc-appdata-links"], Ids(Grew(Quiet() with { Running = [new("claude.exe", "AnthropicPBC.Claude")] }, ("NtFC", 0, 21))));
+        Assert.Empty(Ids(Grew(Quiet() with { Running = [ClaudeDesktop] }, ("NtFC", 0, 19))));   // under 20 MB an hour
+        Assert.Empty(Ids(Grew(Quiet() with { Running = [CodexDesktop] }, ("NtFC", 0, 21))));    // the Codex app: 100 MB an hour
+        Assert.Empty(Ids(Grew(Quiet() with { Running = [ClaudeCode] }, ("NtFC", 0, 21))));      // not the packaged app
+        Assert.Empty(Ids(Grew(Quiet() with { Running = [ClaudeDesktop] }, ("NtFC", 21, 0))));   // paged
+    }
+
     [Fact]
     public void AProgramIsMatchedByItsFileNameInAnyCase()
     {
