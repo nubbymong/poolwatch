@@ -11,12 +11,13 @@ internal enum UrgentAnswer { TurnOn, LeaveOff, Later }
 /// reads it off and still to be chosen (<see cref="Core.Settings.AutoClearUrgentAsk"/>). While automatic clearing is on with
 /// a rule (<see cref="Core.Settings.UrgentClearToAsk"/>), the tray app asks at its start: once per start at most, never in
 /// the CI UI test, and only once setup was completed (until then setup opens at each start, and its Standby cache step has
-/// the switch). It asks as the token-leak guard asks for its click and as the non-paged pool's notice stays: a small window
-/// at the bottom right of the screen that holds the tray, above other windows, never taking the focus
-/// (<see cref="UrgentQuestionWindow"/>), with the title and words of setup's switch and three answers. Turn on (green, the
-/// safe choice for the PC) turns the urgent clear on; Leave off keeps it off, and it is not asked about again; Decide later,
-/// and a close without an answer, write nothing, so it stays off and is asked about at the next start. An answer is written
-/// at once and in settings.json (<see cref="LiveSettings.Apply"/>), and each is a line in the log. UI thread.
+/// the switch). It asks as the token-leak guard asks for its click and as the non-paged pool's notice stays: a small
+/// window at the bottom right of the screen that holds the tray, above other windows, never taking the focus
+/// (<see cref="UrgentQuestionWindow"/>), with the title and words of setup's switch and three answers, greyed for a
+/// second as it opens (<see cref="UrgentQuestionWindow.HeldFor"/>). Turn on (green, the safe choice for the PC) turns
+/// the urgent clear on; Leave off keeps it off, and it is not asked about again; Decide later, and a close without an
+/// answer, write nothing, so it stays off and is asked about at the next start. An answer is written at once and in
+/// settings.json (<see cref="LiveSettings.Apply"/>), and each is a line in the log. UI thread.
 /// </summary>
 /// <param name="live">The running settings, and settings.json.</param>
 /// <param name="log">The engine log.</param>
@@ -92,8 +93,12 @@ internal sealed class UrgentQuestion(LiveSettings live, Action<string> log, Acti
 /// <see cref="Form.TopMost"/>, whose change brings a window forward) and shown without taking the focus, so a key meant
 /// for the program you type in never answers it, at the bottom right of the screen that holds the tray, with a taskbar
 /// button and the one shared font. Turn on is green, the safe choice for the PC, as setup shows its safety in green (the
-/// system's own button under high contrast). Esc, once it has the focus, is Decide later; Enter answers nothing by
-/// itself. An answer is given once; a close with none (its close box, Alt+F4, PoolWatch exiting) is given as none.
+/// system's own button under high contrast). It opens by itself, in the corner where a click aimed at what was there just
+/// before could land, so its buttons are greyed, and a press answers nothing, until its window is first shown and for
+/// <see cref="SetupSession.NextWait"/> (a second) from then, as the Records step that opens alone holds its Done
+/// (<see cref="HeldFor"/>). Tab goes through the buttons left to right; once they can be pressed, Decide later has the
+/// focus. Esc, once it has the focus, is Decide later; Enter presses the button with the focus, Decide later until you
+/// move it. An answer is given once; a close with none (its close box, Alt+F4, PoolWatch exiting) is given as none.
 /// </summary>
 internal sealed class UrgentQuestionWindow : Form
 {
@@ -101,13 +106,21 @@ internal sealed class UrgentQuestionWindow : Form
     private readonly TextBox _words;
     private readonly Dictionary<UrgentAnswer, Button> _buttons = [];
     private bool _done;
+    /// <summary>The time the hold is measured by (<see cref="System.Diagnostics.Stopwatch"/> ticks; the tests move it on).</summary>
+    private readonly Func<long> _clock;
+    /// <summary>When the window was first shown; null until then, while the buttons are held whatever the time.</summary>
+    private long? _shownAt;
+    /// <summary>Gives the buttons back once the hold is over (<see cref="HoldEnds"/>).</summary>
+    private readonly System.Windows.Forms.Timer _hold = new();
 
     /// <param name="alertBytes">The non-paged alert's level, as setup's switch says it ("over 5 GB").</param>
     /// <param name="answered">The answer, once: null when the window closed without one.</param>
-    /// <param name="clock">The tests: a clock they move on (not read yet).</param>
+    /// <param name="clock">The tests: a clock they move on (<see cref="System.Diagnostics.Stopwatch"/> ticks), for the buttons' hold.</param>
     public UrgentQuestionWindow(long alertBytes, Action<UrgentAnswer?> answered, Func<long>? clock = null)
     {
         _answered = answered;
+        _clock = clock ?? System.Diagnostics.Stopwatch.GetTimestamp;
+        _hold.Tick += (_, _) => HoldEnds();
         Icon = TrayIcons.App;
         FormBorderStyle = FormBorderStyle.FixedToolWindow;
         ShowInTaskbar = true;
@@ -121,10 +134,11 @@ internal sealed class UrgentQuestionWindow : Form
             BackColor = SystemColors.Control, TabStop = false,
         };
         var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Padding = new Padding(6) };
-        // Right to left: Decide later at the right end, Turn on at the left, where the words are read from.
-        foreach (var (answer, label) in new[] { (UrgentAnswer.Later, UrgentQuestion.LaterLabel), (UrgentAnswer.LeaveOff, UrgentQuestion.LeaveOffLabel), (UrgentAnswer.TurnOn, UrgentQuestion.TurnOnLabel) })
+        // Right to left: Decide later at the right end, Turn on at the left, where the words are read from. Tab goes as they
+        // are read, left to right. Greyed until the hold is over (HoldEnds).
+        foreach (var (answer, label, tab) in new[] { (UrgentAnswer.Later, UrgentQuestion.LaterLabel, 2), (UrgentAnswer.LeaveOff, UrgentQuestion.LeaveOffLabel, 1), (UrgentAnswer.TurnOn, UrgentQuestion.TurnOnLabel, 0) })
         {
-            var button = new Button { Text = label, AutoSize = true };
+            var button = new Button { Text = label, AutoSize = true, TabIndex = tab, Enabled = false };
             button.Click += (_, _) => Press(answer);
             _buttons[answer] = button;
             bar.Controls.Add(button);
@@ -160,19 +174,66 @@ internal sealed class UrgentQuestionWindow : Form
     /// <summary>The button of an answer (the tests).</summary>
     internal Button ButtonFor(UrgentAnswer answer) => _buttons[answer];
 
-    /// <summary>How much longer the buttons are held (none held yet).</summary>
-    internal TimeSpan HeldFor => TimeSpan.Zero;
+    /// <summary>
+    /// How much longer the buttons are held: all of <see cref="SetupSession.NextWait"/> until the window is first shown,
+    /// however long after it was made (a slow sign-in), and <see cref="SetupSession.NextWait"/> from then; zero once that
+    /// is over.
+    /// </summary>
+    internal TimeSpan HeldFor
+    {
+        get
+        {
+            if (_shownAt is not { } from) return SetupSession.NextWait;
+            var left = SetupSession.NextWait - System.Diagnostics.Stopwatch.GetElapsedTime(from, _clock());
+            return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+        }
+    }
 
-    /// <summary>Whether the hold's timer runs (none yet).</summary>
-    internal bool HoldRunning => false;
+    /// <summary>Whether the hold's timer runs (the tests).</summary>
+    internal bool HoldRunning => _hold.Enabled;
 
-    /// <summary>The hold's timer went off (nothing held yet).</summary>
-    internal void HoldEnds() { }
+    /// <summary>The window is on screen for the first time: the buttons' hold runs from now.</summary>
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        if (_shownAt is not null) return;
+        _shownAt = _clock();
+        StartHold(SetupSession.NextWait);
+    }
 
-    /// <summary>An answer's button: the answer, once, then the window closes.</summary>
+    /// <summary>Starts the hold's timer, to go off once <paramref name="left"/> is over.</summary>
+    private void StartHold(TimeSpan left)
+    {
+        _hold.Interval = Math.Max(1, (int)Math.Ceiling(left.TotalMilliseconds));
+        _hold.Start();
+    }
+
+    /// <summary>
+    /// The hold's timer went off: with the hold over, the buttons can be pressed and Decide later has the focus (so Enter
+    /// presses it until the focus is moved); a tick that came early waits the rest.
+    /// </summary>
+    internal void HoldEnds()
+    {
+        _hold.Stop();
+        if (HeldFor is { Ticks: > 0 } left)
+        {
+            StartHold(left);
+            return;
+        }
+        foreach (var button in _buttons.Values) button.Enabled = true;
+        ActiveControl = _buttons[UrgentAnswer.Later];
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _hold.Dispose();
+        base.Dispose(disposing);
+    }
+
+    /// <summary>An answer's button: the answer, once, then the window closes. Nothing while the buttons are held.</summary>
     internal void Press(UrgentAnswer answer)
     {
-        if (_done) return;
+        if (_done || HeldFor > TimeSpan.Zero) return;
         _done = true;
         _answered(answer);
         Close();

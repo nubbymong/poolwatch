@@ -138,7 +138,7 @@ public sealed class Settings
     /// new install; after an upgrade from a version without it, off until it is chosen (<see cref="AutoClearUrgentAsk"/>);
     /// off in a --config file that does not name it (<see cref="Parse"/>).
     /// </summary>
-    [Description("With automatic clearing on, a clear at once when the non-paged pool is over its alert and still rising: full (light in lowpriority mode), 10 minutes or more apart. On by default (off after an upgrade until chosen). Applied when you save.")]
+    [Description("With automatic clearing on, a clear at once when the non-paged pool is over its alert and still rising, 10 minutes or more apart, waiting after one that freed little. On by default; off after an upgrade until chosen. Applied when you save.")]
     public bool AutoClearUrgent { get; set; } = true;
     /// <summary>
     /// The urgent clear is still to be chosen: set after an upgrade from a version without it (a settings.json without

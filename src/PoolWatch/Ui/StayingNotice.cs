@@ -12,11 +12,11 @@ namespace PoolWatch.Ui;
 /// run) or presentation mode runs (<see cref="Native.NotificationState.Presenting"/>), and shows when that ends: a window
 /// above all others, with a pool tag's and a program's names, would otherwise show over such a game, or a presentation
 /// with presentation mode on. It waits <see cref="MaxHoldMs"/> (2 minutes) at most, then shows whatever runs: this notice
-/// can come minutes before a hang. A slide show without presentation mode, or a game in a borderless window, never holds
-/// it (Windows says busy for those). One at a time: a newer one puts its words
-/// in the one open, or in the one waiting. Open PoolWatch opens the main window and closes it; Close, its close box, or
-/// Esc once it has the focus, closes it. Each one shown, held and closed is one line in the log, and one shown after it
-/// waited says for how long. UI thread.
+/// can come minutes before a hang. A slide show without presentation mode, or a game in a borderless window, never
+/// holds it (Windows says busy for those). One at a time: a newer one puts its words in the one open, or in the one
+/// waiting. Open PoolWatch opens the main window and closes it; Close, its close box, or Esc once it has the focus,
+/// closes it. Each one shown, held and closed is one line in the log, and one shown after it waited says for how long.
+/// UI thread.
 /// </summary>
 /// <param name="openWindow">What Open PoolWatch opens (the main window, or setup while it was never completed).</param>
 /// <param name="log">The engine log.</param>

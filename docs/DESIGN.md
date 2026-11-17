@@ -1626,27 +1626,33 @@ Once setup was completed but no record mode was ever chosen (`setup.json` withou
 choice and records it; closed without Done it is cancelled at once (Reports only stays in force), and it opens again
 at the next start. It opens by itself, so Done is held until its window is first shown and for a second from then
 (`SetupSession.Shown`, from the window's `OnShown`), however long before that its session was made.
-After an upgrade from a version without the urgent clear (a `settings.json` without `autoClearUrgent`: every file up
-to 1.0.0), the urgent clear reads off and still to be chosen (`Settings.AutoClearUrgentAsk`, kept in `settings.json`
-only while set; a new install and a `--config` file never set it). While automatic clearing is on with a schedule or a
-size (`Settings.UrgentClearToAsk`), the tray app asks once at a start, never in the CI UI test and only once setup was
-completed (`UrgentQuestion`, from the start after `FirstRunGate`; once per start at most). It asks with the app's
-pattern for a question that needs a click outside setup, the token-leak guard's "Turn on / Not now" window, built as
-the non-paged pool's notice is (`UrgentQuestionWindow`: bottom right of the tray's screen, above other windows by its
-style, shown without taking the focus, so it never takes a key meant for another program, with a taskbar button and
-the shared font), not as a setup step alone: the question is one switch, setup's own Standby cache step has it for
-anyone who runs setup again, and a second step-alone mode would be a page and a layout of its own. Its title and words
-are the switch's (`SetupText.UrgentTitle`, `UrgentRow`, and the step's `Stutter` line); its answers, left to right:
-**Turn on**, green as the safe choice for the PC (the system's button under high contrast), **Leave off** and
-**Decide later** (Esc; Enter answers nothing). Turn on writes it on and Leave off writes it off, each chosen
-(`LiveSettings.Apply`, at once and in `settings.json`); Decide later, and a close without an answer (its close box,
-Alt+F4, PoolWatch exiting), write nothing, so it stays off and is asked about at the next start. Each answer is a log
-line. With automatic clearing off it is not asked (the urgent clear acts only while that is on): every place that turns
-clearing on offers it at its default, on, while it is still to be chosen (`Settings.UrgentAsOffered`): setup's switch,
-Settings' box (`SettingsEditor.StartFrom`; a Save that changes the automatic clear writes the box as shown, which
-chooses it, and one that leaves the automatic clear alone leaves it unchosen, `AutoClearSettings.UrgentAsk`), and the
-hourly clear's and the RAMMap task's cards, which say so before the click and turn it on with the hour. A file that has
-the key is never asked: it was chosen, or written by a build that had it on by default.
+After an upgrade from a version without the urgent clear (a `settings.json` without `autoClearUrgent`: every file up to
+1.0.0), the urgent clear reads off and still to be chosen (`Settings.AutoClearUrgentAsk`, kept in `settings.json` only
+while set; a new install never sets it). A `--config` file is never asked, since it is read-only and no answer could be
+kept, and one without `autoClearUrgent` reads the urgent clear off, so one that 1.0.0 wrote with automatic clearing on
+never turns it on unasked (CI's files that clear name it on: `ci/ui-config.json`, `ci/soak-churn-config.json`). While
+automatic clearing is on with a schedule or a size (`Settings.UrgentClearToAsk`), the tray app asks once at a start,
+never in the CI UI test and only once setup was completed (`UrgentQuestion`, from the start after `FirstRunGate`; once
+per start at most). It asks with the app's pattern for a question that needs a click outside setup, the token-leak
+guard's "Turn on / Not now" window, built as the non-paged pool's notice is (`UrgentQuestionWindow`: bottom right of the
+tray's screen, above other windows by its style, shown without taking the focus, so it never takes a key meant for
+another program, with a taskbar button and the shared font), not as a setup step alone: the question is one switch,
+setup's own Standby cache step has it for anyone who runs setup again, and a second step-alone mode would be a page and
+a layout of its own. Its title and words are the switch's (`SetupText.UrgentTitle`, `UrgentRow`, and the step's
+`Stutter` line); its answers, left to right: **Turn on**, green as the safe choice for the PC (the system's button under
+high contrast), **Leave off** and **Decide later** (Esc is Decide later; Enter presses the button with the focus, Decide
+later until you move it; Tab goes left to right). Its buttons are greyed for a second as it opens: held until its window
+is first shown and for `SetupSession.NextWait` from then (`UrgentQuestionWindow.HeldFor`), as the Records step alone
+holds its Done, since it opens by itself in the corner where a click aimed at what was there just before could otherwise
+answer it. Turn on writes it on and Leave off writes it off, each chosen (`LiveSettings.Apply`, at once and in
+`settings.json`); Decide later, and a close without an answer (its close box, Alt+F4, PoolWatch exiting), write nothing,
+so it stays off and is asked about at the next start. Each answer is a log line. With automatic clearing off it is not
+asked (the urgent clear acts only while that is on): every place that turns clearing on offers it at its default, on,
+while it is still to be chosen (`Settings.UrgentAsOffered`): setup's switch, Settings' box (`SettingsEditor.StartFrom`;
+a Save that changes the automatic clear writes the box as shown, which chooses it, and one that leaves the automatic
+clear alone leaves it unchosen, `AutoClearSettings.UrgentAsk`), and the hourly clear's and the RAMMap task's cards,
+which say so before the click and turn it on with the hour. A file that has the key is never asked: it was chosen, or
+written by a build that had it on by default.
 Passing the Records step of the whole setup records the choice too, and so does a Settings Save
 that changes the record mode or the cleanup's days (`AtOnceSettings.ChoosesRecords`, `SettingsEditor.Commit`); a
 Save that changes neither chooses nothing. Settings is reachable in either view: the Simple view's header has no
@@ -2088,11 +2094,11 @@ switches made before this version (they are only in `findings.jsonl`).
 
 ## 14. Live settings
 
-A saved setting takes effect at PoolWatch's next start, except four: the automatic clear and the token-leak guard
-apply at once when setup, a card, Settings' Save or Active changes changes them, and update notices when setup or
-Settings does, or the next-clear line, Active changes and the update notice would be wrong until a restart; and the
-notifications (`PoolNotices`) when Settings does, since the tray reads the running value at each notice and at each
-refresh of its icon.
+A saved setting takes effect at PoolWatch's next start, except four: the automatic clear and the token-leak guard apply
+at once when setup, a card, Settings' Save, the urgent clear's question after an upgrade or Active changes changes them,
+and update notices when setup or Settings does, or the next-clear line, Active changes and the update notice would be
+wrong until a restart; and the notifications (`PoolNotices`) when Settings does, since the tray reads the running value
+at each notice and at each refresh of its icon.
 Show RAM and the service profiles (section 13) are saved the same way whenever the window changes them.
 `LiveSettings.Apply` loads `settings.json`, changes it, normalises it, writes it to a temporary file and moves it over
 the old one (not with `--config`, which is read-only); a failed write throws and changes nothing. Then it changes the

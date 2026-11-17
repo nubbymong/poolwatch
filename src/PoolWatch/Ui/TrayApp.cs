@@ -18,16 +18,17 @@ namespace PoolWatch.Ui;
 /// after Explorer restarts (<see cref="TaskbarWatch"/>). Until the first setup is done,
 /// setup is the way in: it opens by itself at every start, and anything that would show the main window brings setup
 /// instead (<see cref="FirstRunGate"/>); once it is done, while what PoolWatch keeps on disk was never chosen (after an
-/// upgrade from 1.0.0-beta.2), setup's Records step opens alone at each start; and while the urgent clear is still to be
-/// chosen after an upgrade with automatic clearing on, its question asks once at the start (<see cref="UrgentQuestion"/>).
-/// Its menu opens Settings (in either view: the Simple view's header has no Settings button), runs setup again and opens
-/// Active changes, says when a newer release is out (update notices, information only), and holds the tools that are not on the main window (DESIGN.md section 11):
-/// Capture now, Since boot report, Open incident folder, Export vendor bundle, Copy latest incident summary, the
-/// clear-task removals (shown only while there is something to remove), Report an issue and About. It is the shell setup
-/// and the suggestions call (<see cref="IShell"/>): one of each window at a time, and the token-leak guard's sign-in check
-/// with its notices. Once setup was completed, it also looks for the token leak every 30 minutes while the window is
-/// hidden (<see cref="WatchTokenLeak"/>: the check-only test, which changes nothing), and says so when it finds it with
-/// the guard off; a click shows where the window offers the guard. The installer's exit signal ends it cleanly.
+/// upgrade from 1.0.0-beta.2), setup's Records step opens alone at each start; and while the urgent clear is still to
+/// be chosen after an upgrade with automatic clearing on, its question asks once at the start
+/// (<see cref="UrgentQuestion"/>). Its menu opens Settings (in either view: the Simple view's header has no Settings
+/// button), runs setup again and opens Active changes, says when a newer release is out (update notices, information
+/// only), and holds the tools that are not on the main window (DESIGN.md section 11): Capture now, Since boot report,
+/// Open incident folder, Export vendor bundle, Copy latest incident summary, the clear-task removals (shown only while
+/// there is something to remove), Report an issue and About. It is the shell setup and the suggestions call
+/// (<see cref="IShell"/>): one of each window at a time, and the token-leak guard's sign-in check with its notices.
+/// Once setup was completed, it also looks for the token leak every 30 minutes while the window is hidden
+/// (<see cref="WatchTokenLeak"/>: the check-only test, which changes nothing), and says so when it finds it with the
+/// guard off; a click shows where the window offers the guard. The installer's exit signal ends it cleanly.
 /// </summary>
 internal sealed class TrayApp : ApplicationContext, IShell
 {

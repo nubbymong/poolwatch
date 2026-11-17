@@ -97,8 +97,8 @@ change of the record mode or the cleanup in Settings, which is a choice too (sav
 then shows it, so its Done keeps it). What beta.2 recorded is cleaned up by the usual rule, 7 days of the PC's
 awake time without a write.
 
-**After an update from 1.0.0 or earlier**, which had no urgent clear, it is off until you choose. With automatic
-clearing on, PoolWatch asks once when it starts, with **Turn on**, **Leave off** and **Decide later** (see
+**After an update from 1.0.0 or earlier**, which had no urgent clear, the urgent clear is off until you choose. With
+automatic clearing on, PoolWatch asks once when it starts, with **Turn on**, **Leave off** and **Decide later** (see
 [When the cache is cleared](#when-the-cache-is-cleared)).
 
 Steps 4 and 5 wait until PoolWatch has read the PC ("Looking at your PC... Next is ready in a moment."), at most a
@@ -244,29 +244,31 @@ kernel pool reaches its size (8 GB to begin with), whichever comes first, and ne
   clears again at most once after each clear that takes the pool under the size, and once each time the pool climbs
   another 2 GB or a quarter.
 - **The urgent clear** (on to begin with on a new install, and off after an update until you choose, below; **Clear at
-  once if the non-paged pool climbs** in Settings, and setup's switch): while the non-paged pool is over its alert level (5 GB to begin with) and rose at least 100 MB in the last
-  10 minutes (the non-paged alert's two limits; PoolWatch never goes below 1 GB and 10 MB for them), PoolWatch empties
-  the standby cache at once, without waiting for the schedule, the size or the 30 minutes. It empties the whole cache,
-  or only its light part if you chose light clears only in the Advanced settings. Never within 10 minutes of a clear,
-  30 minutes after a clear that failed, and never while an experiment runs. Urgent clears in a row wait longer each
-  time: 10 minutes, then 20, then 30 (or the spacing you set), until a clear finds the non-paged pool back under its
-  alert level. An urgent clear is judged on the non-paged pool only: when one frees little of it (less than a tenth
-  of it or 256 MB, whichever is more), the non-paged pool's growth is not the cache's (a driver's leak, say), and
-  PoolWatch waits until a clear frees more of it or it grows past what that clear saw by 2 GB or a quarter, rather than
-  clearing every 10 minutes for nothing. It runs only with automatic clearing on and a schedule or a size set. The log,
-  the timeline and the Simple view's line say "urgent" for such a clear. Turning automatic clearing on from the hourly
-  clear's card, or by replacing a RAMMap task, turns the urgent clear on with it unless you turned it off: the card says
-  so before you click, under its reason, and what PoolWatch says then, and the row in Active changes, say so too.
+  once if the non-paged pool climbs** in Settings, and setup's switch): while the non-paged pool is over its alert level
+  (5 GB to begin with) and rose at least 100 MB in the last 10 minutes (the non-paged alert's two limits; PoolWatch
+  never goes below 1 GB and 10 MB for them), PoolWatch empties the standby cache at once, without waiting for the
+  schedule, the size or the 30 minutes. It empties the whole cache, or only its light part if you chose light clears
+  only in the Advanced settings. Never within 10 minutes of a clear, 30 minutes after a clear that failed, and never
+  while an experiment runs. Urgent clears in a row wait longer each time: 10 minutes, then 20, then 30 (or the spacing
+  you set), until a clear finds the non-paged pool back under its alert level. An urgent clear is judged on the
+  non-paged pool only: when one frees little of it (less than a tenth of it or 256 MB, whichever is more), the non-paged
+  pool's growth is not the cache's (a driver's leak, say), and PoolWatch waits until a clear frees more of it or it
+  grows past what that clear saw by 2 GB or a quarter, rather than clearing every 10 minutes for nothing. It runs only
+  with automatic clearing on and a schedule or a size set. The log, the timeline and the Simple view's line say "urgent"
+  for such a clear. Turning automatic clearing on from the hourly clear's card, or by replacing a RAMMap task, turns the
+  urgent clear on with it unless you turned it off: the card says so before you click, under its reason, and what
+  PoolWatch says then, and the row in Active changes, say so too.
 - **After an update from a version without the urgent clear** (1.0.0 and earlier), it is off until you choose. If
   automatic clearing is on, PoolWatch asks once when it starts, in a small window at the bottom right of the screen with
-  the taskbar, as the non-paged pool's notice is ([The tray icon](#the-tray-icon)): **Clear at once if the non-paged pool is over its limit and still rising**, with
-  **Turn on**, **Leave off** and **Decide later**. Turn on turns it on. Leave off keeps it off, and PoolWatch does not
-  ask again. Decide later, or closing the window, keeps it off, and PoolWatch asks again the next time it starts. The
-  window never takes the keyboard from the program you are typing in, and PoolWatch's log says what you chose. If
-  automatic clearing is off, PoolWatch does not ask, as the urgent clear only acts while that is on: when you turn
-  automatic clearing on later, setup's switch, the box in Settings and the hourly clear's card offer the urgent clear
-  as on a new install (on to begin with), and what you choose there is your answer. Settings and setup can change it
-  at any time.
+  the taskbar, as the non-paged pool's notice is ([The tray icon](#the-tray-icon)): **Clear at once if the non-paged
+  pool is over its limit and still rising**, with **Turn on**, **Leave off** and **Decide later**. Its buttons are
+  greyed for a second as it opens, so a click meant for what was in that corner does not answer it. Turn on turns it on.
+  Leave off keeps it off, and PoolWatch does not ask again. Decide later, or closing the window, keeps it off, and
+  PoolWatch asks again the next time it starts. The window never takes the keyboard from the program you are typing in,
+  and PoolWatch's log says what you chose. If automatic clearing is off, PoolWatch does not ask, as the urgent clear
+  only acts while that is on: when you turn automatic clearing on later, setup's switch, the box in Settings and the
+  hourly clear's card offer the urgent clear as on a new install (on to begin with), and what you choose there is your
+  answer. Settings and setup can change it at any time.
 
 On a PC with a ReFS Dev Drive that hung, the size rule had waited after a clear that freed 462 MB of 8.23 GB,
 while the next clears freed 1.99 GB and 5.75 GB; the non-paged pool alone reached 11.18 GB and kept rising, with no
