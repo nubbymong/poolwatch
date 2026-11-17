@@ -136,13 +136,15 @@ public class SimpleSettingsTests
         var fields = new SimpleSettingsFields();
         foreach (var v in new SimpleSettings[]
                  {
-                     new(true, 2.5m, 12m, false, false, false, PoolNoticeLevel.Off, RecordMode.ReportsOnly, 7), new(false, 6m, 0m, true, false, false, PoolNoticeLevel.Off, RecordMode.ReportsOnly, 7),
-                     new(false, 1m, 8m, false, true, false, PoolNoticeLevel.Off, RecordMode.ReportsOnly, 7), new(false, 0.5m, 1m, false, false, true, PoolNoticeLevel.Off, RecordMode.ReportsOnly, 7),
-                     new(false, 0.5m, 1m, false, false, false, PoolNoticeLevel.NeedsAttention, RecordMode.ReportsOnly, 7),
-                     new(false, 0.5m, 1m, false, false, false, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7),
+                     new(true, 2.5m, 12m, false, false, false, PoolNoticeLevel.Off, RecordMode.ReportsOnly, 7, Urgent: false), new(false, 6m, 0m, true, false, false, PoolNoticeLevel.Off, RecordMode.ReportsOnly, 7, Urgent: false),
+                     new(false, 1m, 8m, false, true, false, PoolNoticeLevel.Off, RecordMode.ReportsOnly, 7, Urgent: false), new(false, 0.5m, 1m, false, false, true, PoolNoticeLevel.Off, RecordMode.ReportsOnly, 7, Urgent: false),
+                     new(false, 0.5m, 1m, false, false, false, PoolNoticeLevel.NeedsAttention, RecordMode.ReportsOnly, 7, Urgent: false),
+                     new(false, 0.5m, 1m, false, false, false, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: false),
                      // The records' choice and the cleanup's days read back too (each value its own, so a field wired to another fails).
-                     new(false, 0.5m, 1m, false, false, false, PoolNoticeLevel.EveryGrowth, RecordMode.Detailed, 30),
-                     new(false, 0.5m, 1m, false, false, false, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 1),
+                     new(false, 0.5m, 1m, false, false, false, PoolNoticeLevel.EveryGrowth, RecordMode.Detailed, 30, Urgent: false),
+                     new(false, 0.5m, 1m, false, false, false, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 1, Urgent: false),
+                     // The urgent clear's box reads back too, ticked on its own.
+                     new(false, 0.5m, 1m, false, false, false, PoolNoticeLevel.EveryGrowth, RecordMode.ReportsOnly, 7, Urgent: true),
                  })
         {
             fields.Fill(v);
