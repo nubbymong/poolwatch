@@ -478,6 +478,45 @@ public sealed class RecommendationActionsTests : IDisposable
         Assert.StartsWith("On this PC, clearing the cache freed 2.0 GB", Card(Evidence(true, 2, "Reff"), RecommendationId.HourlyCacheClear).Why);
     }
 
+    /// <summary>
+    /// The hourly card's Turn on turns the urgent clear on with the hour while its setting is on (on by default), so the
+    /// card says so before the click, under its reason, whatever gives that reason: the rules' own words, a known issue's,
+    /// or what a clear freed here (each replaces the rules' reason, so a clause in it would be lost). With the setting off
+    /// it says nothing of it. Its words are the ones said after the click, and where to turn it off; the window's rules
+    /// are given the setting.
+    /// </summary>
+    [Fact]
+    public void TheHourlyCardSaysBeforeTheClickThatTheUrgentClearComesWithIt()
+    {
+        var facts = Facts(Ntfs, DevDrive);
+        var seen = new KnowledgeEvidence
+        {
+            NowUtc = DateTime.UtcNow, WindowsBuild = facts.Build, FileSystems = ["NTFS", "ReFS"], GrowthOver = TimeSpan.FromHours(1),
+            Growth = new Dictionary<PoolTag, TagGrowth> { [PoolTag.Parse("Toke")] = new(300L << 20, 0), [PoolTag.Parse("Reff")] = new(400L << 20, 0) },
+        };
+        IReadOnlyList<KnownIssueMatch> known = KnownIssueMatcher.Match(KnowledgeBase.Embedded(), seen), none = [];
+        foreach (bool urgent in new[] { true, false })
+        {
+            var inputs = new RecommendationInputs { NowUtc = DateTime.UtcNow, NowMs = Moment.Now().Ms, Facts = facts, AutoClearUrgent = urgent };
+            foreach (var (matches, evidence, reason) in new (IReadOnlyList<KnownIssueMatch>, ClearEvidence, string)[]
+                     {
+                         (none, Evidence(null), "Windows keeps details of recently used files in the kernel pool"),
+                         (known, Evidence(null), "ReFS file records grew 400 MB in the last hour."),
+                         (none, Evidence(true, 2, "Reff"), "On this PC, clearing the cache freed 2.0 GB"),
+                     })
+            {
+                var card = CardItem.Of(SetupContext.Suggest(inputs, matches, facts, evidence).Single(r => r.Id == RecommendationId.HourlyCacheClear));
+                Assert.StartsWith(reason, card.Text);
+                Assert.Equal(urgent ? SimpleSettings.UrgentToo + " " + SimpleSettings.ClearStutter : SimpleSettings.ClearStutter, card.Details);
+            }
+        }
+        Assert.Equal("PoolWatch then also clears at once while the non-paged pool is over its limit and rising; Settings can turn that off.",
+            SimpleSettings.UrgentToo);
+        Assert.Contains(Core.Changes.ChangeWords.AutoClearUrgent[", and ".Length..], SimpleSettings.UrgentToo); // as said after the click
+        Assert.Contains("AutoClearUrgent = engine.Settings.AutoClearUrgent,",
+            File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "Setup", "RecommendationInputsBuilder.cs")));
+    }
+
     [Fact]
     public void TheTextsArePlainWords()
     {

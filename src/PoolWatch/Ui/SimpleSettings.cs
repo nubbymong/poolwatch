@@ -163,6 +163,13 @@ internal sealed record SimpleSettings(bool AutoClear, decimal EveryHours, decima
         r.State == RecommendationState.Offer && r.Id is RecommendationId.HourlyCacheClear or RecommendationId.ReplaceClearTask;
 
     /// <summary>
+    /// What a card's button turns on with the hour while the urgent clear's setting is on
+    /// (<see cref="Recommendation.TurnsOnUrgentClear"/>): said on the card before the click, as PoolWatch says it after
+    /// (<see cref="Core.Changes.ChangeWords.AutoClearUrgent"/>), and where to turn it off.
+    /// </summary>
+    public const string UrgentToo = "PoolWatch then also clears at once while the non-paged pool is over its limit and rising; Settings can turn that off.";
+
+    /// <summary>
     /// The line under automatic clearing: first what a clear is like while it runs, then the spacing rule from
     /// <see cref="Settings.AutoClearMinMinutes"/> and the urgent clear's own 10 minutes, then what turning it on does to a
     /// clear task of your own (<see cref="OwnTaskLine"/>), in sight, as the box that may lead to removing that task is

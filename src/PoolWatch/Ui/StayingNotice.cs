@@ -18,15 +18,24 @@ namespace PoolWatch.Ui;
 /// <param name="openWindow">What Open PoolWatch opens (the main window, or setup while it was never completed).</param>
 /// <param name="log">The engine log.</param>
 /// <param name="presenting">Whether a presentation or a full-screen program runs now (the tests give their own).</param>
-internal sealed class StayingNotice(Action openWindow, Action<string> log, Func<bool>? presenting = null)
+/// <param name="clockMs">The clock that only goes forward, in milliseconds (the tests give their own).</param>
+internal sealed class StayingNotice(Action openWindow, Action<string> log, Func<bool>? presenting = null, Func<long>? clockMs = null)
 {
     /// <summary>How often a notice that waits asks again whether the presentation or full-screen program has ended.</summary>
     internal const int WaitCheckMs = 5000;
 
+    /// <summary>The longest a notice is to wait (not kept to yet: the tests come first).</summary>
+    internal const int MaxHoldMs = 2 * 60 * 1000;
+
     private readonly Func<bool> _presenting = presenting ?? Native.NotificationState.Presenting;
+    private readonly Func<long> _clockMs = clockMs ?? (() => Environment.TickCount64);
     private NoticeWindow? _open;
     private NoticeText? _held;
+    private long _heldSinceMs;
     private System.Windows.Forms.Timer? _wait;
+
+    /// <summary>A notice that waited, taken to be shown, and how long it waited, in milliseconds.</summary>
+    internal readonly record struct Waited(NoticeText Notice, long HeldMs);
 
     /// <summary>The window open now; null when none (the tests).</summary>
     internal NoticeWindow? Open => _open is { IsDisposed: false } open ? open : null;
@@ -57,8 +66,11 @@ internal sealed class StayingNotice(Action openWindow, Action<string> log, Func<
         var window = Make(notice);
         _open = window;
         window.Show(); // non-modal, and without taking the focus (NoticeWindow.ShowWithoutActivation)
-        log($"notice shown (it stays until it is closed): {notice.Title}");
+        log(ShownLine(notice, null));
     }
+
+    /// <summary>The log's line for a notice shown (how long it waited is not said yet: the tests come first).</summary>
+    internal static string ShownLine(NoticeText notice, long? heldMs) => $"notice shown (it stays until it is closed): {notice.Title}";
 
     /// <summary>
     /// While a presentation or a full-screen program runs, keeps <paramref name="notice"/> to show when it ends (a newer
@@ -67,17 +79,18 @@ internal sealed class StayingNotice(Action openWindow, Action<string> log, Func<
     internal bool Hold(NoticeText notice)
     {
         if (!_presenting()) return false;
+        if (_held is null) _heldSinceMs = _clockMs();
         _held = notice;
         log($"notice held while a presentation or a full-screen program runs (it shows when that ends): {notice.Title}");
         return true;
     }
 
-    /// <summary>The notice that waited, taken to be shown, once the presentation or full-screen program has ended; null while it runs or when none waits.</summary>
-    internal NoticeText? Release()
+    /// <summary>The notice that waited, taken to be shown with how long it waited, once the presentation or full-screen program has ended; null while it runs or when none waits.</summary>
+    internal Waited? Release()
     {
         if (_held is not { } held || _presenting()) return null;
         _held = null;
-        return held;
+        return new Waited(held, _clockMs() - _heldSinceMs);
     }
 
     /// <summary>Asks every <see cref="WaitCheckMs"/> whether the notice that waits can show now, and shows it then.</summary>
@@ -88,9 +101,9 @@ internal sealed class StayingNotice(Action openWindow, Action<string> log, Func<
             _wait = new System.Windows.Forms.Timer { Interval = WaitCheckMs };
             _wait.Tick += (_, _) =>
             {
-                if (Release() is not { } notice) return;
+                if (Release() is not { } waited) return;
                 _wait?.Stop();
-                Show(notice);
+                Show(waited.Notice);
             };
         }
         _wait.Start();

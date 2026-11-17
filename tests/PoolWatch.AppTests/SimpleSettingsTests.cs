@@ -461,9 +461,11 @@ public class SimpleSettingsTests
         Assert.DoesNotContain("no effect", SimpleSettings.DeeperCaptureHint(new Settings { CpuTraceEnabled = true }));
         // The spacing as set, the urgent clear's own 10 minutes (ClearPolicy.UrgentFloor), and what turning it on does to
         // a clear task of your own, in sight: the keyboard and a screen reader never show a tooltip, and that box can lead
-        // to removing your task. The tooltip says why, too.
-        Assert.Equal(SimpleSettings.ClearStutter + " At most every 45 minutes (10 for an urgent clear). Turning it on first offers to remove your own RAMMap clear task.",
+        // to removing your task. The tooltip says why, too. Shown on every PC, it does not take a RAMMap task to be there
+        // (most PCs have none), and it is no longer than the line it replaced.
+        Assert.Equal(SimpleSettings.ClearStutter + " At most every 45 minutes (10 for an urgent clear). Turning it on offers to remove any RAMMap clear task of yours.",
             SimpleSettings.AutoClearHint(new Settings { AutoClearMinMinutes = 45 }));
+        Assert.True(SimpleSettings.OwnTaskLine.Length <= "Turning it on first offers to remove your own RAMMap clear task.".Length, SimpleSettings.OwnTaskLine);
         Assert.Equal(TimeSpan.FromMinutes(10), Core.Cache.ClearPolicy.UrgentFloor);
         Assert.Contains("RAMMap", SimpleSettings.AutoClearTip);
         Assert.Contains("_tips.SetToolTip(_fields.AutoClear, SimpleSettings.AutoClearTip);",
