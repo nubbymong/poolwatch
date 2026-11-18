@@ -263,7 +263,23 @@ switch ($Scenario) {
         $cpuCap = @(Get-ChildItem "$Out\incidents\*\report.json" -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json } |
             Where-Object { $_.kind -eq 'Capture' -and $null -ne $_.capture.cpu })
         if ($cpuCap.Count -ge 1) { Write-Host "  lag cpu: $($cpuCap[0].capture.cpu.summary)" }
-        Assert-True ($lf.Count -eq 0 -or ($cpuCap.Count -ge 1 -and [int64]$cpuCap[0].capture.cpu.samples -gt 1000 -and [int64]$cpuCap[0].capture.cpu.poolBytes -gt 0)) "the lag trip recorded a CPU trace with the pool size"
+        # The trace says whether it started at the trip or was held back: its first note, "Recorded: <what it holds>.", adds
+        # "; held back from <time>: <why>" only for a request the capture governor held back. A trace that started at the
+        # trip records the burn: more than 1000 samples. One held back while the PC was saturated (CPU over 85%, as the burn
+        # makes it) starts after the burn, when its sample count says only how idle the runner was then (845 on an Arm64
+        # runner). So a held-back trace must say why it was held back, in the words the Lag finding was given when its
+        # trace was kept for later, and hold the pool size and a sampled profile.
+        $heldBack = @(if ($cpuCap.Count -ge 1) { @($cpuCap[0].capture.notes) | Where-Object { "$_" -clike 'Recorded: *; held back from *' } })
+        if ($heldBack.Count -eq 0) {
+            Assert-True ($lf.Count -eq 0 -or ($cpuCap.Count -ge 1 -and [int64]$cpuCap[0].capture.cpu.samples -gt 1000 -and [int64]$cpuCap[0].capture.cpu.poolBytes -gt 0)) "the lag trip recorded a CPU trace with the pool size"
+        } else {
+            $lagCpu = $cpuCap[0].capture.cpu
+            $why = [regex]::Match("$($heldBack[0])", '; held back from \S+: (.+)\)\.$').Groups[1].Value
+            $told = @($lf | Where-Object { @($_.details) -ccontains "Capture skipped: $why; kept as the next capture to run when the PC allows." })
+            Write-Host "  lag cpu held back: $($heldBack[0])"
+            Assert-True ($why.Length -gt 0 -and $told.Count -ge 1) "the lag trip's held-back CPU trace says why it was held back, as its Lag finding does ($why)"
+            Assert-True ([int64]$lagCpu.samples -gt 0 -and [int64]$lagCpu.poolBytes -gt 0) "the lag trip's held-back CPU trace recorded the pool size and a sampled profile ($($lagCpu.samples) samples, pool $($lagCpu.poolBytes) bytes)"
+        }
     }
     'clearcache' {
         # The runner is elevated, as PoolWatch always is, so the clear runs in-process:
