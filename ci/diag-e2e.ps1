@@ -263,12 +263,13 @@ switch ($Scenario) {
         $cpuCap = @(Get-ChildItem "$Out\incidents\*\report.json" -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json } |
             Where-Object { $_.kind -eq 'Capture' -and $null -ne $_.capture.cpu })
         if ($cpuCap.Count -ge 1) { Write-Host "  lag cpu: $($cpuCap[0].capture.cpu.summary)" }
-        # The trace says whether it started at the trip or was held back: its first note, "Recorded: <what it holds>.", adds
-        # "; held back from <time>: <why>" only for a request the capture governor held back. A trace that started at the
-        # trip records the burn: more than 1000 samples. One held back while the PC was saturated (CPU over 85%, as the burn
-        # makes it) starts after the burn, when its sample count says only how idle the runner was then (845 on an Arm64
-        # runner). So a held-back trace must say why it was held back, in the words the Lag finding was given when its
-        # trace was kept for later, and hold the pool size and a sampled profile.
+        # The trace says whether it started at the trip or was held back: its "Recorded: <what it holds>." note (found by
+        # its text, wherever it sits among the notes) adds "; held back from <time>: <why>" only for a request the capture
+        # governor held back. A trace that started at the trip records the burn: more than 1000 samples. One held back
+        # while the PC was saturated (CPU over 85%, as the burn makes it) starts after the burn, when its sample count says
+        # only how idle the runner was then (845 on an Arm64 runner). So a held-back trace must say why it was held back,
+        # in the words the Lag finding was given when its trace was kept for later, and hold the pool size and a sampled
+        # profile.
         $heldBack = @(if ($cpuCap.Count -ge 1) { @($cpuCap[0].capture.notes) | Where-Object { "$_" -clike 'Recorded: *; held back from *' } })
         if ($heldBack.Count -eq 0) {
             Assert-True ($lf.Count -eq 0 -or ($cpuCap.Count -ge 1 -and [int64]$cpuCap[0].capture.cpu.samples -gt 1000 -and [int64]$cpuCap[0].capture.cpu.poolBytes -gt 0)) "the lag trip recorded a CPU trace with the pool size"
