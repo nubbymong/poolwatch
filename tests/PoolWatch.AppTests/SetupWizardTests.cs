@@ -886,6 +886,36 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
         Assert.DoesNotContain("replace own task", system.Calls);
     }
 
+    /// <summary>
+    /// Where the step says a rule replaces your own clear task, Next writes the settings once, after the task is removed:
+    /// the rule chosen and the urgent clear's switch as the step shows them. Your task is removed by the code the Simple
+    /// view's Replace runs (ClearTaskReplacer, here over the fixture's Task Scheduler and records), which by itself turns
+    /// on the hourly clear with the urgent clear as a card offers it. Written first, that was in effect until the step's
+    /// own write: the sampler could see clearing on with an urgent clear its owner had switched off on the step.
+    /// </summary>
+    [Fact]
+    public async Task WhereARuleReplacesYourOwnTaskTheRuleAndTheSwitchAsShownAreTheOnlyWrite()
+    {
+        var live = _f.Live();
+        Assert.True(live.Running.AutoClearUrgent); // on to begin with, as a write of the hourly clear would turn it on
+        _f.ClearTasks.Tasks.Add(new CacheHelper.LegacyTaskInfo(@"\Clear standby", "SYSTEM", "RAMMap64.exe -Et", "1 trigger", true)
+        {
+            Xml = TaskXml.Ram(), LogonType = 5, UserId = "S-1-5-18",
+        });
+        // The settings in effect after each write, as the sampler reads them: the switch, the two rules, the urgent clear.
+        var writes = new List<(bool On, double EveryHours, double PoolGb, bool Urgent)>();
+        live.Applied += _ => writes.Add((live.Running.AutoClearEnabled, live.Running.AutoClearEveryHours, live.Running.AutoClearPoolGb, live.Running.AutoClearUrgent));
+
+        var (ok, message) = await new StandbyCacheSetup(new ReplacingSystem(_f), live, smoke: false).Apply(CacheChoice.PoolSize, 1, 6, replaceOwnTask: true, urgent: false);
+
+        Assert.True(ok, message);
+        Assert.Empty(_f.ClearTasks.Tasks); // your task is removed, saved first
+        Assert.Single(_f.Records.All(), r => r.Kind == RecordKind.RemovedClearTask);
+        Assert.Equal([(true, 0.0, 6.0, false)], writes);
+        var saved = _f.Saved();
+        Assert.Equal((true, 0.0, 6.0, false), (saved.AutoClearEnabled, saved.AutoClearEveryHours, saved.AutoClearPoolGb, saved.AutoClearUrgent));
+    }
+
     [Fact]
     public async Task ClearingNeedsAdministratorAndTheTestRunChangesNothing()
     {
@@ -2958,6 +2988,27 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
         public (bool Ok, string Message) CreateChatGptShortcut(string? iconPath, string via) => throw new NotSupportedException();
         public string IncidentsDir => "";
         public void Timeline(string line) => TimelineLines.Add(line);
+    }
+
+    /// <summary>
+    /// The PC behind the standby cache's choice with your own clear tasks replaced by the code the app runs
+    /// (ClearTaskReplacer), over the fixture's Task Scheduler and its records: no real task is read or removed.
+    /// </summary>
+    private sealed class ReplacingSystem(ChangeFixture f) : ISetupSystem
+    {
+        public EnvironmentFacts? Facts => null;
+        public Task<EnvironmentFacts> Rescan() =>
+            Task.FromResult(new EnvironmentFacts { ScannedUtc = DateTime.UtcNow, WindowsName = "Windows 11 Pro", Build = "26200.7000", Architecture = "x64" });
+        public bool Elevated => true;
+        public bool OwnClearTask => f.ClearTasks.Tasks.Count > 0;
+        public void RefreshClearStatus() { }
+        public string? RegisterLogonTask() => throw new NotSupportedException();
+        public (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via) =>
+            ClearTaskReplacer.Replace(f.Records, live, via, f.ClearTasks);
+        public Task<LeakVerdict?> CheckTokenLeak(CancellationToken stop) => throw new NotSupportedException();
+        public (bool Ok, string Message) CreateChatGptShortcut(string? iconPath, string via) => throw new NotSupportedException();
+        public string IncidentsDir => "";
+        public void Timeline(string line) { }
     }
 
     /// <summary>

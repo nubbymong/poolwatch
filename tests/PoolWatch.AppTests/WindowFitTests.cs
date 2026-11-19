@@ -146,6 +146,20 @@ public class WindowFitTests
     }
 
     /// <summary>
+    /// About's list of what PoolWatch changes on your choice names what the Links under AppData window changes too:
+    /// entries of your own PATH and some tools' own variables. It left them out, though Active changes lists them.
+    /// </summary>
+    [Fact]
+    public void AboutNamesTheChangesToYourPathAndToTheToolsVariablesForTheLinksUnderAppData()
+    {
+        using var about = new AboutDialog(LongAbout(), actions: null);
+        string changes = Assert.Single(All(about).Select(c => c.Text), t => t.StartsWith("PoolWatch watches and reads.", StringComparison.Ordinal));
+        Assert.Contains("a desktop shortcut for Codex, your own PATH entries and some tools' own variables (for the links under AppData), and, when you turn it on, " +
+                        "the token-leak guard's focus setting while you are signed in.", changes);
+        Assert.Contains("Active changes lists every lasting change, with a way to put it back", changes);
+    }
+
+    /// <summary>
     /// Every line Settings can show under its sign-in box (<see cref="SettingsDialog.LogonTick"/>), with a Windows error
     /// message as long as Task Scheduler's usual ones, or none (-1), each with and without the Codex offer, and each with
     /// the spacing of automatic clears at its default (30 minutes) and at its longest (1,440), which the line under

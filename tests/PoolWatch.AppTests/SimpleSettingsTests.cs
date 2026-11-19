@@ -369,6 +369,46 @@ public class SimpleSettingsTests
     }
 
     /// <summary>
+    /// Save puts the automatic clear's settings into the running settings one after the other, while the sampler reads
+    /// them (<see cref="AutoClearSettings.ApplyTo"/>). The switch is written last when it goes on, after the rules and the
+    /// urgent clear's value, and first when it goes off. Written first when it went on, the sampler could see clearing on
+    /// with the urgent clear as it was before the Save: on, although its box was unticked. The order of the writes cannot
+    /// be seen from outside, so it is read from the source; what is written stays every value, either way round.
+    /// </summary>
+    [Fact]
+    public void SaveWritesTheAutomaticClearsSwitchLastWhenItGoesOnAndFirstWhenItGoesOff()
+    {
+        string source = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "SettingsEditor.cs")).Replace("\r\n", "\n");
+        int declared = source.IndexOf("internal sealed record AutoClearSettings(", StringComparison.Ordinal);
+        Assert.True(declared >= 0, "AutoClearSettings was not found");
+        int start = source.IndexOf("    public void ApplyTo(Settings s)\n    {\n", declared, StringComparison.Ordinal);
+        Assert.True(start >= 0, "AutoClearSettings.ApplyTo was not found");
+        int end = source.IndexOf("\n    }\n", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the end of AutoClearSettings.ApplyTo was not found");
+        var writes = source[start..end].Split('\n').Select(l => l.Trim())
+            .Where(l => !l.StartsWith("//", StringComparison.Ordinal) && l.Contains("s.AutoClear", StringComparison.Ordinal)).ToList();
+        Assert.Equal(
+        [
+            "if (!Enabled) s.AutoClearEnabled = false;",
+            "s.AutoClearEveryHours = EveryHours;",
+            "s.AutoClearPoolGb = PoolGb;",
+            "s.AutoClearMinMinutes = MinMinutes;",
+            "s.AutoClearMode = Mode;",
+            "s.AutoClearUrgent = Urgent;",
+            "s.AutoClearUrgentAsk = UrgentAsk;",
+            "if (Enabled) s.AutoClearEnabled = true;",
+        ], writes);
+
+        var on = new AutoClearSettings(true, 2, 6, 45, "standby", Urgent: false, UrgentAsk: false);
+        var s = new Settings();
+        on.ApplyTo(s);
+        Assert.Equal(on, AutoClearSettings.Of(s));
+        var off = on with { Enabled = false, Urgent = true };
+        off.ApplyTo(s);
+        Assert.Equal(off, AutoClearSettings.Of(s));
+    }
+
+    /// <summary>
     /// The notifications take effect at once, as the other at-once settings: Save puts the form's choice into the running
     /// settings and settings.json (LiveSettings.Apply), and the tray reads the running value at each notice, so the next
     /// incident's notice follows it with no restart. A choice the form left alone never undoes one made elsewhere.
