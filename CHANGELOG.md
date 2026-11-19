@@ -67,8 +67,8 @@ What changed in each PoolWatch release, newest first, in plain words.
   them knowledge packs, settings, its list of changes, an AI agent's answer, a startup shortcut and GitHub's answer to
   the update check) hundreds of random inputs each time the tests run. They found six cases a reader got wrong; none of
   them stopped PoolWatch, and each is now read or refused as it should be.
-- **Each release carries its build provenance.** From this release on, the release also has
-  `PoolWatch-v1.1.0.intoto.jsonl`, a signed statement of which GitHub workflow run built each file, which
+- **Each release carries its build provenance.** From this release on, each release also has a file named for its tag,
+  here `PoolWatch-v1.1.0.intoto.jsonl`, a signed statement of which GitHub workflow run built each file, which
   `gh attestation verify` checks. The technical page says how.
 
 ## 1.0.0 - 2026-11-13

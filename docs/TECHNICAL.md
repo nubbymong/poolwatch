@@ -37,7 +37,7 @@ a click or a setting you turned on:
 | Turns off the services of your service profile that are on (never a protected service, and never one PoolWatch does not recognise) | each time PoolWatch starts, after the 1 to 15 minutes you chose, if you ticked **Apply this profile when PoolWatch starts** for that profile |
 | Ends a program (**End it now**) | your click, after a question that names it |
 | Creates the scheduled task that starts it at sign-in | your switch in setup, or your click in Settings |
-| Replaces your own RAMMap clear task, or puts it back | your choice of a rule in setup's Standby cache step (it says so), Settings, or **Put back** |
+| Replaces your own RAMMap clear task, or puts it back | your choice of a rule in setup's Standby cache step (it says so), **Replace** on the Simple view's card, Settings, or **Put back** |
 | Sets Windows' focus setting that stops the token leak, at most until you sign out: turning the guard off puts it back when Windows allows it (if Windows does not, or the guard found it already changed, it can stay until you sign out) | the token-leak guard, when you turn it on |
 | Creates the desktop shortcut "ChatGPT (no shader cache)", the Codex shortcut | your Yes in setup, or **Create shortcut** in Settings |
 | Writes the AI agent's prompt, `poolwatch-services.md` | **Save the prompt...**, only where you pick |

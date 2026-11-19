@@ -364,9 +364,9 @@ PoolWatch run their code, change the wrong thing, or leak data.
   says where two of PoolWatch's own windows open: the notice that the non-paged pool is over its limit, and the urgent
   clear's question after an upgrade, open at the bottom right of the screen that taskbar window is on (the primary
   screen when PoolWatch finds none). So a program that makes a window of that class can choose that screen: always one
-  of the PC's own screens, at its bottom right, and what the two windows say and their buttons stay PoolWatch's. It
-  needs such a program already running as you, and that is all it gets: through this message nothing of PoolWatch's is
-  read, nothing else is changed, and the program gains no rights.
+  of the PC's own screens, at its bottom right, and what the two windows say and their buttons stay PoolWatch's. All
+  of this needs such a program already running as you, and that is all it gets: through the message or such a window
+  nothing of PoolWatch's is read, nothing else is changed, and the program gains no rights.
 - **One network request, optional: the update check.** About once a day, while "Tell me when a new version is out" is
   on (it is by default), the tray app sends one HTTPS GET for its own repository's latest release, to
   `https://api.github.com/repositories/1435312349/releases/latest`: the repository by its number, which stays with it
@@ -608,12 +608,12 @@ after an upgrade has **Done** in its place), so setup guards it against a press 
   The definitions are kept in PoolWatch's admin-only data folder.
 - **A program that can make and release non-paged pool can set off up to six urgent clears an hour.** How long the
   urgent clear waits after a clear, and whether it stands down after one that freed little, go by the size of the
-  non-paged pool as PoolWatch reads it just before a clear and 2 minutes after it. So, while the urgent clear is on, a
-  program running as you, without administrator rights, that can make Windows use non-paged pool and release it again
-  can set off up to six urgent clears an hour: one every 10 minutes, the shortest time the urgent clear leaves after
-  any clear, against one automatic clear every 30 minutes at most otherwise. That is all it gets: an urgent clear only
-  empties the standby cache, so through it nothing is read, written or run, and such a program can already empty the
-  cache by using memory.
+  non-paged pool as PoolWatch reads it just before a clear and 2 minutes after it. So, while automatic clearing and
+  its urgent clear are on, a program running as you, without administrator rights, that can make Windows use non-paged
+  pool and release it again can set off up to six urgent clears an hour: one every 10 minutes, the shortest time the
+  urgent clear leaves after any clear, against one automatic clear every 30 minutes at most otherwise. That is all it
+  gets: an urgent clear only empties the standby cache, so through it nothing is read, written or run, and such a
+  program can already empty the cache by using memory.
 - **During the token-leak test at sign-in, the workaround is off.** PoolWatch tests before it turns the workaround on,
   instead of always turning it on. That is a deliberate choice: the workaround lets any program take the focus, and the
   test can only run with it off, because it measures the leak the workaround removes. What PoolWatch cannot change is
