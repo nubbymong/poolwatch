@@ -131,13 +131,14 @@ At first start, **Set up PoolWatch** opens on its own, before the main window: e
 reads your PC and lists each known cause of a growing kernel pool with how much it affects this PC, the highest first
 (high, medium, low, not known where it could not check, then none), and, for a cause setup has a fix for, the step with
 that fix. Then you choose when PoolWatch empties the standby cache (on a schedule, at a pool size, whichever comes
-first, or decide later) and the fixes that fit this PC: start PoolWatch when you sign in, the token-leak guard if this
-Windows build has the leak, and, if the Codex app is installed, a Codex shortcut without its shader cache. For Microsoft
-Defender on a Dev Drive it shows you where the setting is; PoolWatch never changes Defender. Setup changes no services:
-it shows where to trim them later, in the app. Last, you choose what PoolWatch keeps on disk: **Reports only** (the
-default: a report each time the pool grows, and no record of the day) or **Detailed recording** (the reports, plus a
-record of the whole day). Nothing changes until you press **Next** on the step where you chose it
-([setup in the user guide](docs/USER-GUIDE.md#at-first-start-set-up-poolwatch)).
+first, or decide later; with a choice that clears, a switch, on to begin with, also clears at once while the non-paged
+pool is over its limit and still rising) and the fixes that fit this PC: start PoolWatch when you sign in, the
+token-leak guard if this Windows build has the leak, and, if the Codex app is installed, a Codex shortcut without its
+shader cache. For Microsoft Defender on a Dev Drive it shows you where the setting is; PoolWatch never changes
+Defender. Setup changes no services: it shows where to trim them later, in the app. Last, you choose what PoolWatch
+keeps on disk: **Reports only** (the default: a report each time the pool grows, and no record of the day) or
+**Detailed recording** (the reports, plus a record of the whole day). Nothing changes until you press **Next** on the
+step where you chose it ([setup in the user guide](docs/USER-GUIDE.md#at-first-start-set-up-poolwatch)).
 
 <p align="center">
   <img alt="Set up PoolWatch, step 2 of 8, How your PC is impacted: each known cause of a growing kernel pool with its impact level. On the test machine Background services is Low impact, with Trim in the app; the Windows token leak is Not known (it could not be checked there) and the other three are None, each with Still watching" src="docs/screenshots/6-setup-2-your-pc.png">

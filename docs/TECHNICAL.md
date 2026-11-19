@@ -373,8 +373,8 @@ its uninstaller are signed (Authenticode, with an RFC 3161 timestamp); the other
 Microsoft. In PowerShell:
 
 ```powershell
-(Get-FileHash .\PoolWatch-v1.0.0-setup-win-x64.exe -Algorithm SHA256).Hash   # compare with SHA256SUMS.txt
-$sig = Get-AuthenticodeSignature .\PoolWatch-v1.0.0-setup-win-x64.exe
+(Get-FileHash .\PoolWatch-v1.1.0-setup-win-x64.exe -Algorithm SHA256).Hash   # compare with SHA256SUMS.txt
+$sig = Get-AuthenticodeSignature .\PoolWatch-v1.1.0-setup-win-x64.exe
 $sig.Status                          # must be: Valid
 $sig.SignerCertificate.Thumbprint    # must be: 00EC0DEE208F91785D253C0731E28249C68053FD
 ```

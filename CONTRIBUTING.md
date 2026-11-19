@@ -19,8 +19,8 @@ read it first.
   refused. Neither source says a service is safe to turn off on a person's own PC; the app says what each is written
   for.
 - **Changes**: open an issue first for anything larger than a fix, so we can agree on the approach. Then a pull request
-  against `beta`: new work goes there, and `main` only receives releases. Pull requests are squash-merged once CI is
-  green.
+  against `main` (there is no `beta` branch at present): the next release is made from `main`. Pull requests are
+  squash-merged once CI is green.
 
 ## Making a change
 

@@ -785,8 +785,8 @@ Each release also has two zips, if you would rather install by hand:
 
 | File | Needs |
 |---|---|
-| `PoolWatch-v1.0.0-win-x64-selfcontained.zip` | nothing else (.NET is inside) |
-| `PoolWatch-v1.0.0-win-x64.zip` | the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) (x64), installed for all users |
+| `PoolWatch-v1.1.0-win-x64-selfcontained.zip` | nothing else (.NET is inside) |
+| `PoolWatch-v1.1.0-win-x64.zip` | the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) (x64), installed for all users |
 
 Start PoolWatch with `PoolWatch.exe`. That program is PoolWatch's launcher: it asks for administrator rights and starts
 PoolWatch itself, `app\PoolWatch.exe` in the `app` folder beside it, with an environment it builds from Windows' own

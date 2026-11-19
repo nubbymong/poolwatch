@@ -2,6 +2,8 @@
 
 What changed in each PoolWatch release, newest first, in plain words.
 
+## Unreleased
+
 ## 1.1.0 - 2026-11-20
 
 - **The size rule clears again once the cache holds the pool again.** After a clear at the pool size that frees
@@ -52,21 +54,21 @@ What changed in each PoolWatch release, newest first, in plain words.
   it says when the size of the leaked blocks matches a link it found, when Fast Startup kept what leaked before the
   last Shut down, and, after a change, which of the apps' programs still run from before it (PoolWatch never ends
   them). A variable a tool puts back into AppData is told about again, like a PATH entry.
-- **The NtFC notes say what was measured.** It is any Code-tab session of the Claude app: it leaked with Cowork idle,
-  so Cowork is not needed for it; each open through a link under AppData keeps one reparse-point record; no cache clear
-  frees them, and only a Restart does, as a Shut down with Fast Startup on keeps them. A link outside AppData, on
-  another drive or under your profile, kept nothing; a link inside OneDrive, and OneDrive's cloud files inside the
-  apps, were not measured. The links cause is now named from 20 MB an hour
+- **The notes on NTFS file records (pool tag NtFC) say what was measured.** It is any Code-tab session of the Claude
+  app: it leaked with Cowork idle, so Cowork is not needed for it; each open through a link under AppData keeps one
+  reparse-point record; no cache clear frees them, and only a Restart does, as a Shut down with Fast Startup on keeps
+  them. A link outside AppData, on another drive or under your profile, kept nothing; a link inside OneDrive, and
+  OneDrive's cloud files inside the apps, were not measured. The links cause is now named from 20 MB an hour
   with the Claude app, where it often grows slower than the 100 MB an hour the note waited for. The built-in name of
   the NtFC tag says it also holds reparse-point data a filter driver did not free, and the window no longer suggests
   taking winget's Links folder off PATH. The people who measured each case are credited in the notes and the user
   guide.
-- **Damaged files are read more safely.** New tests give each reader of a file PoolWatch does not control (knowledge
-  packs, settings, its list of changes, an AI agent's answer, a startup shortcut, GitHub's answer to the update check)
-  hundreds of random inputs on every run. They found six cases a reader got wrong; none of them stopped PoolWatch, and
-  each is now read or refused as it should be.
+- **Damaged files are read more safely.** New tests give the readers of input PoolWatch treats as untrusted (among
+  them knowledge packs, settings, its list of changes, an AI agent's answer, a startup shortcut and GitHub's answer to
+  the update check) hundreds of random inputs each time the tests run. They found six cases a reader got wrong; none of
+  them stopped PoolWatch, and each is now read or refused as it should be.
 - **Each release carries its build provenance.** From this release on, the release also has
-  `PoolWatch-<version>.intoto.jsonl`, a signed statement of which GitHub workflow run built each file, which
+  `PoolWatch-v1.1.0.intoto.jsonl`, a signed statement of which GitHub workflow run built each file, which
   `gh attestation verify` checks. The technical page says how.
 
 ## 1.0.0 - 2026-11-13
