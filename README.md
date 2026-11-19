@@ -21,7 +21,7 @@
     <img alt="Download the latest PoolWatch release" src="https://img.shields.io/github/v/release/nubbymong/poolwatch?style=for-the-badge&amp;label=Download&amp;labelColor=102A43&amp;color=C62F37">
   </picture></a>
   <br>
-  Get <code>PoolWatch-v1.0.0-setup-win-x64.exe</code> from the release page (<a href="#install">install steps</a>).
+  Get <code>PoolWatch-v1.1.0-setup-win-x64.exe</code> from the release page (<a href="#install">install steps</a>).
   <br>
   Free and open source · Windows 11, 64-bit · Signed · No telemetry ·
   <a href="docs/TECHNICAL.md#why-it-needs-administrator-rights">Runs as administrator</a>
@@ -257,7 +257,7 @@ signed build provenance, a record of the commit and the workflow run that built 
 PoolWatch asks GitHub's API whether a newer stable release of PoolWatch is out:
 
 - It sends one request for PoolWatch's latest release on GitHub, which carries PoolWatch's own version in its
-  User-Agent line ("PoolWatch/1.0.0"). No sign-in, no cookies, nothing about you or your PC. The full request is in
+  User-Agent line ("PoolWatch/1.1.0"). No sign-in, no cookies, nothing about you or your PC. The full request is in
   [SECURITY.md](SECURITY.md#security-model).
 - GitHub sees your IP address and the time, as it does for any web page.
 - The first check waits until you have finished setup; its last step has the switch.
@@ -306,7 +306,7 @@ an export before you post it.
 ## Install
 
 1. From the [latest release](https://github.com/nubbymong/poolwatch/releases/latest), download
-   `PoolWatch-v1.0.0-setup-win-x64.exe`.
+   `PoolWatch-v1.1.0-setup-win-x64.exe`.
 2. Run it, and click **Yes** when Windows asks whether to allow it to make changes
    ([why it needs administrator rights](docs/TECHNICAL.md#why-it-needs-administrator-rights)).
 3. Click **Next**, then **Install**. Setup installs PoolWatch in `C:\Program Files\PoolWatch`, with .NET included, and

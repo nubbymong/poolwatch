@@ -182,8 +182,8 @@ Everything pushed here is published: code, docs, commit messages, branch names, 
 
 ## Branches, reviews and releases
 
-- Branch from `beta` and open the pull request against `beta`. `main` holds releases only: `beta` is merged into
-  `main`, and a `v*` tag on `main` builds, signs and publishes the release.
+- Branch from `main` and open the pull request against `main` (there is no `beta` branch at present). `main` is
+  what the next release is made from, and a `v*` tag on `main` builds, signs and publishes the release.
 - Pull requests are squash-merged once CI is green. The title becomes the commit message: a plain, capitalised
   sentence with no `feat:`-style prefix (see `git log`).
 - A change users will notice gets a line under "Unreleased" in [CHANGELOG.md](CHANGELOG.md).
