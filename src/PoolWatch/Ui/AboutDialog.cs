@@ -28,7 +28,8 @@ internal sealed class AboutDialog : Form
     private const string Changes =
         "PoolWatch watches and reads. It changes your PC only where you choose to: clearing the cache (now or automatically), " +
         "background services, scheduled tasks, startup apps, ending a program, starting at sign-in, replacing your own clear task, " +
-        "a desktop shortcut for Codex, and, when you turn it on, the token-leak guard's focus setting while you are signed in. " +
+        "a desktop shortcut for Codex, your own PATH entries and some tools' own variables (for the links under AppData), and, " +
+        "when you turn it on, the token-leak guard's focus setting while you are signed in. " +
         "On its own it only secures its data folder and removes an older PoolWatch's unused clear-cache tasks. Active changes " +
         "lists every lasting change, with a way to put it back; SECURITY.md in the source repository lists every action.";
 

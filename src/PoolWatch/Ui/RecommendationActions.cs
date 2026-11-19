@@ -24,7 +24,12 @@ internal interface ISetupSystem
     void RefreshClearStatus();
     /// <summary>Registers PoolWatch to start at sign-in; null, or why not.</summary>
     string? RegisterLogonTask();
-    (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via);
+    /// <summary>
+    /// Removes your own clear tasks, each saved first, then turns the automatic clear on, in one write
+    /// (<see cref="Engine.Changes.ClearTaskReplacer.Replace"/>): the hourly clear, or, with <paramref name="shown"/>, the
+    /// clear the caller shows (setup's Standby cache step).
+    /// </summary>
+    (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via, Engine.Changes.ReplacementClear? shown = null);
     Task<LeakVerdict?> CheckTokenLeak(CancellationToken stop);
     (bool Ok, string Message) CreateChatGptShortcut(string? iconPath, string via);
     string IncidentsDir { get; }

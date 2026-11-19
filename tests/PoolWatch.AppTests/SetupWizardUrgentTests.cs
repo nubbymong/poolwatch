@@ -130,4 +130,41 @@ public sealed partial class SetupWizardTests
         Assert.False((await Session(Busy(), chosenOff)).Urgent);
         Assert.True((await Session(Busy(), new FakeHost(Busy()))).Urgent); // a new install: on
     }
+
+    /// <summary>
+    /// After an upgrade with automatic clearing on, the step shows the rule in effect and the switch off, as it is, still
+    /// to be chosen. Next pressed with both left as they are changes no rule, and is still the owner's choice of the
+    /// switch as the step showed it: the urgent clear stays off and is no longer to be chosen, so its question is not
+    /// asked at the next start. Nothing else is written, and the timeline gets no line, as nothing changed.
+    /// </summary>
+    [Fact]
+    public async Task NextWithTheRuleAndTheSwitchLeftAsTheyAreStillChoosesTheUrgentClearAfterAnUpgrade()
+    {
+        Directory.CreateDirectory(_f.Paths.DataRoot);
+        new Settings { AutoClearEnabled = true, AutoClearUrgent = false, AutoClearUrgentAsk = true }.Save(_f.Paths.SettingsFile); // as an upgrade reads, clearing on
+        var live = _f.Live(_f.Saved());
+        Assert.True(live.Running.UrgentClearToAsk()); // asked about at each start until it is chosen
+        var (choice, hours, gb) = CacheChoices.Read(live.Running);
+        Assert.True(CacheChoices.InEffect(live.Running, choice, hours, gb, urgent: false)); // the step as it opens: all of it in effect
+        var system = new FakeSystem();
+
+        Assert.Equal((true, ""), await Cache(system, live).Apply(choice, hours, gb, replaceOwnTask: false, urgent: false));
+
+        Assert.Equal((true, false, false), (live.Running.AutoClearEnabled, live.Running.AutoClearUrgent, live.Running.AutoClearUrgentAsk));
+        Assert.False(live.Running.UrgentClearToAsk());
+        var saved = _f.Saved();
+        Assert.Equal((true, false, false), (saved.AutoClearEnabled, saved.AutoClearUrgent, saved.AutoClearUrgentAsk));
+        Assert.False(saved.UrgentClearToAsk());
+        Assert.Equal((hours, gb), (saved.AutoClearEveryHours, saved.AutoClearPoolGb)); // the rule as it was
+        Assert.Empty(system.TimelineLines);
+        Assert.Empty(system.Calls);
+        // Decide later shows no switch and chooses nothing: the urgent clear stays to be chosen.
+        using var later = new ChangeFixture();
+        Directory.CreateDirectory(later.Paths.DataRoot);
+        new Settings { AutoClearEnabled = false, AutoClearUrgent = false, AutoClearUrgentAsk = true }.Save(later.Paths.SettingsFile);
+        var off = later.Live(later.Saved());
+        Assert.Equal((true, ""), await Cache(new FakeSystem(), off).Apply(CacheChoice.Later, 1, 8, replaceOwnTask: false, urgent: false));
+        Assert.True(off.Running.AutoClearUrgentAsk);
+        Assert.True(later.Saved().AutoClearUrgentAsk);
+    }
 }

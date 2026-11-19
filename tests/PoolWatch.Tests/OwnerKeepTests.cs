@@ -193,7 +193,8 @@ public class OwnerKeepTests
     /// <summary>
     /// Bytes still reachable from what <paramref name="make"/> returns, after a full collection on each side. The count is
     /// the whole process's, so memory other tests freed meanwhile can make one measure come out at nothing or below: then
-    /// it is measured again (at most three times), and the largest is kept.
+    /// it is measured again (at most three times), each time with the one before let go first, and the largest is
+    /// kept.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal static long Retained(Func<object> make)
@@ -203,9 +204,12 @@ public class OwnerKeepTests
         for (int i = 0; i < 3 && largest <= 0; i++)
         {
             long before = GC.GetTotalMemory(forceFullCollection: true);
-            var kept = make();
+            object? kept = make();
             long after = GC.GetTotalMemory(forceFullCollection: true);
             GC.KeepAlive(kept);
+            // Let go before the next measure: unoptimized code keeps a local's last value reachable, so the next
+            // "before" would count it and that measure would come out at nothing.
+            kept = null;
             largest = Math.Max(largest, after - before);
         }
         return largest;

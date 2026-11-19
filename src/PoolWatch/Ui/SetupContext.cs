@@ -176,8 +176,8 @@ internal sealed class WindowsSetupSystem(SetupContext c) : ISetupSystem
     public bool OwnClearTask => Cache.HelperStatus?.LegacyTaskPresent ?? c.Probe.Last?.OwnClearTasks.Count > 0;
     public void RefreshClearStatus() => Cache.RefreshStatus();
     public string? RegisterLogonTask() => new WindowsLogonTasks(c.Engine.Paths).RegisterCurrent();
-    public (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via) =>
-        ClearTaskReplacer.Replace(c.Ledger.Records, live, via);
+    public (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via, ReplacementClear? shown = null) =>
+        ClearTaskReplacer.Replace(c.Ledger.Records, live, via, shown);
     public Task<LeakVerdict?> CheckTokenLeak(CancellationToken stop) => c.Analysis.Diagnostics.Guard.TestOnly(stop);
     public (bool Ok, string Message) CreateChatGptShortcut(string? iconPath, string via) => ChatGptShortcut.Create(c.Engine.Paths, c.Ledger.Records, iconPath, via);
     public string IncidentsDir => c.Engine.Paths.IncidentsDir;

@@ -21,7 +21,7 @@
     <img alt="Download the latest PoolWatch release" src="https://img.shields.io/github/v/release/nubbymong/poolwatch?style=for-the-badge&amp;label=Download&amp;labelColor=102A43&amp;color=C62F37">
   </picture></a>
   <br>
-  Get <code>PoolWatch-v1.0.0-setup-win-x64.exe</code> from the release page (<a href="#install">install steps</a>).
+  Get <code>PoolWatch-v1.1.0-setup-win-x64.exe</code> from the release page (<a href="#install">install steps</a>).
   <br>
   Free and open source · Windows 11, 64-bit · Signed · No telemetry ·
   <a href="docs/TECHNICAL.md#why-it-needs-administrator-rights">Runs as administrator</a>
@@ -131,13 +131,14 @@ At first start, **Set up PoolWatch** opens on its own, before the main window: e
 reads your PC and lists each known cause of a growing kernel pool with how much it affects this PC, the highest first
 (high, medium, low, not known where it could not check, then none), and, for a cause setup has a fix for, the step with
 that fix. Then you choose when PoolWatch empties the standby cache (on a schedule, at a pool size, whichever comes
-first, or decide later) and the fixes that fit this PC: start PoolWatch when you sign in, the token-leak guard if this
-Windows build has the leak, and, if the Codex app is installed, a Codex shortcut without its shader cache. For Microsoft
-Defender on a Dev Drive it shows you where the setting is; PoolWatch never changes Defender. Setup changes no services:
-it shows where to trim them later, in the app. Last, you choose what PoolWatch keeps on disk: **Reports only** (the
-default: a report each time the pool grows, and no record of the day) or **Detailed recording** (the reports, plus a
-record of the whole day). Nothing changes until you press **Next** on the step where you chose it
-([setup in the user guide](docs/USER-GUIDE.md#at-first-start-set-up-poolwatch)).
+first, or decide later; with a choice that clears, a switch, on to begin with, also clears at once while the non-paged
+pool is over its limit and still rising) and the fixes that fit this PC: start PoolWatch when you sign in, the
+token-leak guard if this Windows build has the leak, and, if the Codex app is installed, a Codex shortcut without its
+shader cache. For Microsoft Defender on a Dev Drive it shows you where the setting is; PoolWatch never changes
+Defender. Setup changes no services: it shows where to trim them later, in the app. Last, you choose what PoolWatch
+keeps on disk: **Reports only** (the default: a report each time the pool grows, and no record of the day) or
+**Detailed recording** (the reports, plus a record of the whole day). Nothing changes until you press **Next** on the
+step where you chose it ([setup in the user guide](docs/USER-GUIDE.md#at-first-start-set-up-poolwatch)).
 
 <p align="center">
   <img alt="Set up PoolWatch, step 2 of 8, How your PC is impacted: each known cause of a growing kernel pool with its impact level. On the test machine Background services is Low impact, with Trim in the app; the Windows token leak is Not known (it could not be checked there) and the other three are None, each with Still watching" src="docs/screenshots/6-setup-2-your-pc.png">
@@ -257,7 +258,7 @@ signed build provenance, a record of the commit and the workflow run that built 
 PoolWatch asks GitHub's API whether a newer stable release of PoolWatch is out:
 
 - It sends one request for PoolWatch's latest release on GitHub, which carries PoolWatch's own version in its
-  User-Agent line ("PoolWatch/1.0.0"). No sign-in, no cookies, nothing about you or your PC. The full request is in
+  User-Agent line ("PoolWatch/1.1.0"). No sign-in, no cookies, nothing about you or your PC. The full request is in
   [SECURITY.md](SECURITY.md#security-model).
 - GitHub sees your IP address and the time, as it does for any web page.
 - The first check waits until you have finished setup; its last step has the switch.
@@ -306,7 +307,7 @@ an export before you post it.
 ## Install
 
 1. From the [latest release](https://github.com/nubbymong/poolwatch/releases/latest), download
-   `PoolWatch-v1.0.0-setup-win-x64.exe`.
+   `PoolWatch-v1.1.0-setup-win-x64.exe`.
 2. Run it, and click **Yes** when Windows asks whether to allow it to make changes
    ([why it needs administrator rights](docs/TECHNICAL.md#why-it-needs-administrator-rights)).
 3. Click **Next**, then **Install**. Setup installs PoolWatch in `C:\Program Files\PoolWatch`, with .NET included, and

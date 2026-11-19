@@ -813,7 +813,7 @@ public sealed class RecommendationActionsTests : IDisposable
         public bool OwnClearTask { get; set; }
         public void RefreshClearStatus() => Calls.Add("refresh clear status");
         public string? RegisterLogonTask() { Calls.Add("register logon task"); return LogonError; }
-        public (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via)
+        public (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via, PoolWatch.Engine.Changes.ReplacementClear? shown = null)
         {
             Calls.Add("replace clear tasks via " + via);
             return (Removed, ReplaceError);
