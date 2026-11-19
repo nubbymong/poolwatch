@@ -44,9 +44,20 @@ internal sealed class WindowsClearTaskStore : IClearTaskStore
 }
 
 /// <summary>
+/// The automatic clear that <see cref="ClearTaskReplacer.Replace"/> turns on in place of your own clear tasks, when its
+/// caller shows another than the hourly clear: setup's Standby cache step, with the rule chosen and the urgent clear's
+/// switch as the step shows them. <paramref name="Write"/> is the whole change to the settings, the switch that turns
+/// the automatic clear on last in it, and <paramref name="What"/> what the log says of it. Replace writes it once the
+/// tasks are removed, and writes nothing else: the sampler never sees clearing on with a rule or an urgent clear other
+/// than the ones shown.
+/// </summary>
+internal sealed record ReplacementClear(string What, Action<Core.Settings> Write);
+
+/// <summary>
 /// A clear task of your own (Sysinternals RAMMap in a scheduled task) and PoolWatch's automatic clear do the same job and
 /// must never both run. <see cref="Replace"/> (the setup guide) removes your tasks, only once every definition is saved
-/// for Undo (<see cref="RemoveAll"/>), and turns the hourly automatic clear on; <see cref="PutBack"/> (Undo) turns the
+/// for Undo (<see cref="RemoveAll"/>), and turns the automatic clear on, in one write: the hourly clear, or the clear
+/// its caller shows (<see cref="ReplacementClear"/>); <see cref="PutBack"/> (Undo) turns the
 /// automatic clear off first and registers the saved definition again, after checking it as untrusted input: only
 /// RAMMap clear actions from one folder, no access rules of its own, run as the account it is registered with, the root
 /// folder, no task of that name now, never a task that needs a password, and a program you can change (by its folder's
@@ -61,27 +72,36 @@ internal static class ClearTaskReplacer
     private static readonly XNamespace TaskNs = "http://schemas.microsoft.com/windows/2004/02/mit/task";
 
     /// <summary>
-    /// Removes every clear task of your own (every definition saved first), then turns the hourly automatic clear on.
+    /// Removes every clear task of your own (every definition saved first), then turns the automatic clear on, in one
+    /// write: the hourly clear, or, with <paramref name="shown"/>, the clear its caller shows (setup's Standby cache
+    /// step: the rule chosen and the urgent clear's switch as the step shows them).
     /// Elevated. The caller then re-reads the clear status (CacheClearer.RefreshStatus): until it does, the automatic
     /// clear stays paused for the tasks the last hourly check found, and the "Next cache clear" line says so.
     /// </summary>
-    public static (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) Replace(ChangeRecords records, LiveSettings live, string via) =>
-        Replace(records, live, via, new WindowsClearTaskStore());
+    public static (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) Replace(ChangeRecords records, LiveSettings live, string via,
+        ReplacementClear? shown = null) => Replace(records, live, via, new WindowsClearTaskStore(), shown);
 
     /// <summary>
     /// <see cref="Replace"/> over <paramref name="store"/>. When a task is left in place (<see cref="RemoveAll"/>), or the
     /// automatic clear cannot be turned on, it stays off and the error says so; the tasks removed stay recorded for Undo.
     /// </summary>
-    internal static (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) Replace(ChangeRecords records, LiveSettings live, string via, IClearTaskStore store)
+    internal static (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) Replace(ChangeRecords records, LiveSettings live, string via, IClearTaskStore store,
+        ReplacementClear? shown = null)
     {
         IReadOnlyList<CacheHelper.LegacyTaskInfo> found;
         try { found = store.Find(); }
         catch (Exception ex) { return ([], "PoolWatch could not read your scheduled tasks: " + ex.Message); }
         var (removed, error) = RemoveAll(found, records, via, store);
         if (error is not null) return (removed, error);
-        // The schedule first, so the sampler never sees the clear on with the old one.
-        // The urgent clear as the card offered it before the click (Settings.UrgentAsOffered): a choice once made.
-        try { live.Apply(What(live.Running), s => { s.AutoClearUrgent = s.UrgentAsOffered(); s.AutoClearEveryHours = 1; s.AutoClearEnabled = true; }); }
+        try
+        {
+            // One write either way, so the sampler never sees the clear on with a rule or an urgent clear its owner did not
+            // choose. The caller's clear as it shows it, in place of the hourly clear; else the hourly clear: the schedule
+            // first, so the sampler never sees the clear on with the old one, and the urgent clear as the card offered it
+            // before the click (Settings.UrgentAsOffered), a choice once made.
+            if (shown is not null) live.Apply(shown.What, shown.Write);
+            else live.Apply(What(live.Running), s => { s.AutoClearUrgent = s.UrgentAsOffered(); s.AutoClearEveryHours = 1; s.AutoClearEnabled = true; });
+        }
         catch (Exception ex)
         {
             string notOn = "PoolWatch's automatic cache clearing could not be turned on: " + ex.Message;

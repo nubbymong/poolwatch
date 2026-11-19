@@ -146,15 +146,23 @@ internal sealed record AutoClearSettings(bool Enabled, double EveryHours, double
     public static AutoClearSettings Of(Settings s) =>
         new(s.AutoClearEnabled, s.AutoClearEveryHours, s.AutoClearPoolGb, s.AutoClearMinMinutes, s.AutoClearMode, s.AutoClearUrgent, s.AutoClearUrgentAsk);
 
+    /// <summary>
+    /// Writes each value, one after the other. On the running settings the sampler reads them meanwhile, so the switch
+    /// is written first when it goes off and last when it goes on: a Save that turns clearing on never has it see clearing
+    /// on before the rules and the urgent clear's value saved with it are in place (written first, the switch went on with
+    /// the urgent clear as it was before, on although its box was unticked), and one that turns clearing off never has it
+    /// see the new values while clearing is still on.
+    /// </summary>
     public void ApplyTo(Settings s)
     {
-        s.AutoClearEnabled = Enabled;
+        if (!Enabled) s.AutoClearEnabled = false;
         s.AutoClearEveryHours = EveryHours;
         s.AutoClearPoolGb = PoolGb;
         s.AutoClearMinMinutes = MinMinutes;
         s.AutoClearMode = Mode;
         s.AutoClearUrgent = Urgent;
         s.AutoClearUrgentAsk = UrgentAsk;
+        if (Enabled) s.AutoClearEnabled = true;
     }
 }
 

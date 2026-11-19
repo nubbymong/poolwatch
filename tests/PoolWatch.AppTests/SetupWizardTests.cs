@@ -855,8 +855,8 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
         (ok, _) = await Cache(system, live).Apply(CacheChoice.PoolSize, 1, 6, replaceOwnTask: true);
         Assert.True(ok);
         Assert.Equal(["replace own task", "refresh clear status", "rescan"], system.Calls);
-        // Replacing turns the hourly clear on, and PoolWatch's own clear waits for your task until the status is read
-        // again: by then the rule chosen is in place, so no clear runs on the hourly rule nobody chose.
+        // Replacing writes the rule chosen, in place of the hourly clear it turns on by itself, and PoolWatch's own clear
+        // waits for your task until the status is read again: no clear runs on an hourly rule nobody chose.
         Assert.Equal([(true, 0.0, 6.0)], system.RulesAtRefresh);
         // The rule chosen is what stays, and the timeline names no hourly clear.
         Assert.Equal((true, 0.0, 6.0), (live.Running.AutoClearEnabled, live.Running.AutoClearEveryHours, live.Running.AutoClearPoolGb));
@@ -2953,8 +2953,8 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
 
     /// <summary>
     /// The PC behind the standby cache's choice: whether PoolWatch is elevated, a clear task of your own (as the hourly
-    /// check read it), replacing it (as ClearTaskReplacer does: the hourly clear turned on, or why a task was left), the
-    /// timeline.
+    /// check read it), replacing it (as ClearTaskReplacer does: the clear its caller shows, else the hourly clear, turned
+    /// on in one write, or why a task was left), the timeline.
     /// </summary>
     private sealed class FakeSystem : ISetupSystem
     {
@@ -2977,11 +2977,13 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
             if (Live?.Running is { } s) RulesAtRefresh.Add((s.AutoClearEnabled, s.AutoClearEveryHours, s.AutoClearPoolGb));
         }
         public string? RegisterLogonTask() => throw new NotSupportedException();
-        public (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via)
+        public (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via, ReplacementClear? shown = null)
         {
             Calls.Add("replace own task");
             if (ReplaceError is { } error) return ([], error);
-            live.Apply("the hourly automatic cache clear, in place of your own clear task", s => { s.AutoClearEveryHours = 1; s.AutoClearEnabled = true; });
+            // One write, as ClearTaskReplacer makes it: the clear its caller shows, else the hourly clear.
+            if (shown is not null) live.Apply(shown.What, shown.Write);
+            else live.Apply("the hourly automatic cache clear, in place of your own clear task", s => { s.AutoClearEveryHours = 1; s.AutoClearEnabled = true; });
             return ([], null);
         }
         public Task<LeakVerdict?> CheckTokenLeak(CancellationToken stop) => throw new NotSupportedException();
@@ -3003,8 +3005,8 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
         public bool OwnClearTask => f.ClearTasks.Tasks.Count > 0;
         public void RefreshClearStatus() { }
         public string? RegisterLogonTask() => throw new NotSupportedException();
-        public (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via) =>
-            ClearTaskReplacer.Replace(f.Records, live, via, f.ClearTasks);
+        public (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via, ReplacementClear? shown = null) =>
+            ClearTaskReplacer.Replace(f.Records, live, via, f.ClearTasks, shown);
         public Task<LeakVerdict?> CheckTokenLeak(CancellationToken stop) => throw new NotSupportedException();
         public (bool Ok, string Message) CreateChatGptShortcut(string? iconPath, string via) => throw new NotSupportedException();
         public string IncidentsDir => "";
@@ -3057,10 +3059,11 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
             Calls.Add("register the sign-in task");
             return null;
         }
-        public (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via)
+        public (IReadOnlyList<CacheHelper.LegacyTaskInfo> Removed, string? Error) ReplaceClearTasks(LiveSettings live, string via, ReplacementClear? shown = null)
         {
             Calls.Add("replace own task");
-            live.Apply("the hourly automatic cache clear, in place of your own clear task", s => { s.AutoClearEveryHours = 1; s.AutoClearEnabled = true; });
+            if (shown is not null) live.Apply(shown.What, shown.Write);
+            else live.Apply("the hourly automatic cache clear, in place of your own clear task", s => { s.AutoClearEveryHours = 1; s.AutoClearEnabled = true; });
             return ([], null);
         }
         public Task<LeakVerdict?> CheckTokenLeak(CancellationToken stop) => Task.FromResult<LeakVerdict?>(null);

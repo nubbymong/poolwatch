@@ -121,9 +121,11 @@ internal sealed class SetupHost : ISetupHost
 /// <summary>
 /// The Standby cache step's choice, applied through the running settings as Settings' Save and the suggestions apply it
 /// (at once, and in settings.json): a schedule, a pool size, both, or off; with a choice that clears, the urgent clear's
-/// switch as the step showed it (Decide later leaves it as it is). Where the step said that a rule replaces your
+/// switch as the step showed it (Decide later leaves it as it is), which is then chosen: also when the rule and the
+/// switch are in effect already, where that is all Next writes. Where the step said that a rule replaces your
 /// own RAMMap clear task, a rule removes that task first, through the code the suggestions' Replace uses
-/// (<see cref="ISetupSystem.ReplaceClearTasks"/>: your task is saved for putting back), so the two never both run.
+/// (<see cref="ISetupSystem.ReplaceClearTasks"/>: your task is saved for putting back), so the two never both run, and
+/// that code writes the rule and the switch, as its one write.
 /// Clearing needs PoolWatch to run as administrator. Nothing happens in the CI UI test.
 /// </summary>
 internal sealed class StandbyCacheSetup(ISetupSystem system, LiveSettings live, bool smoke)
@@ -145,22 +147,30 @@ internal sealed class StandbyCacheSetup(ISetupSystem system, LiveSettings live, 
                 system.Timeline($"Automatic cache clearing turned off (from {SetupSession.Via}).");
                 return (true, "Automatic cache clearing is off. PoolWatch suggests it when it helps.");
             }
-            if (!replaceOwnTask && CacheChoices.InEffect(live.Running, choice, hours, gb, urgent)) return (true, "");
+            if (!replaceOwnTask && CacheChoices.InEffect(live.Running, choice, hours, gb, urgent))
+            {
+                // Nothing to change. The step still showed the switch, and Next left it as it is: that is its choice all the
+                // same, so an upgrade's question about it is not asked (it is still to be chosen only while it is off).
+                if (urgent is { } left && live.Running.AutoClearUrgentAsk)
+                    await Task.Run(() => live.Apply($"the urgent clear left {(left ? "on" : "off")}, as setup's switch showed it ({SetupSession.Via})",
+                        s => { s.AutoClearUrgent = left; s.AutoClearUrgentAsk = false; }));
+                return (true, "");
+            }
             if (!system.Elevated) return (false, "Clearing the cache needs PoolWatch to run as administrator.");
             var (_, every, size) = CacheChoices.Writes(choice, hours, gb);
             string words = CacheChoices.Words(choice, hours, gb);
             string urgentWords = urgent is { } u ? CacheChoices.UrgentWords(u) : "";
             // The rules, the urgent clear and the switch in one change, so the sampler never sees the clear on with the old rules.
-            Task WriteRule() => Task.Run(() => live.Apply($"automatic cache clearing {words}{urgentWords} ({SetupSession.Via})", s =>
+            var rule = new Engine.Changes.ReplacementClear($"automatic cache clearing {words}{urgentWords} ({SetupSession.Via})", s =>
             {
                 s.AutoClearEveryHours = every!.Value;
                 s.AutoClearPoolGb = size!.Value;
                 // The step showed the switch: its choice, so an upgrade's question about it is not asked.
                 if (urgent is { } on) (s.AutoClearUrgent, s.AutoClearUrgentAsk) = (on, false);
                 s.AutoClearEnabled = true;
-            }));
-            if (!replaceOwnTask) await WriteRule();
-            else if (await ReplaceOwnTask(WriteRule) is { } why) return (false, why);
+            });
+            if (!replaceOwnTask) await Task.Run(() => live.Apply(rule.What, rule.Write));
+            else if (await ReplaceOwnTask(rule) is { } why) return (false, why);
             system.Timeline($"Automatic cache clearing turned on, {words}{urgentWords} (from {SetupSession.Via}).");
             return (true, $"PoolWatch empties the standby cache {words}.");
         }
@@ -169,22 +179,19 @@ internal sealed class StandbyCacheSetup(ISetupSystem system, LiveSettings live, 
 
     /// <summary>
     /// Your own clear tasks removed, each saved for Undo first (<see cref="Engine.Changes.ClearTaskReplacer"/>, as the
-    /// suggestions' Replace runs it), then the rule chosen written at once, then the clear status and the scan read again;
-    /// null, or why a task was left in place. Replace turns the hourly clear on, and PoolWatch's own clear stays paused for
-    /// your task until the status is read again: the rule chosen is written before that, so no clear ever runs on an hourly
-    /// rule nobody chose. The timeline names no schedule: the rule chosen follows on its own line.
+    /// suggestions' Replace runs it), and the rule chosen written by that same code once they are removed, as its one
+    /// write, in place of the hourly clear it turns on by itself; then the clear status and the scan read again. Null, or
+    /// why a task was left in place. So the sampler never sees clearing on with an hourly rule, or an urgent clear,
+    /// that nobody chose on the step (written first, the hourly clear was in effect until the step's own write).
+    /// The timeline names no schedule: the rule chosen follows on its own line.
     /// </summary>
-    private async Task<string?> ReplaceOwnTask(Func<Task> writeRule)
+    private async Task<string?> ReplaceOwnTask(Engine.Changes.ReplacementClear rule)
     {
         string? error = null;
         try
         {
-            (_, error) = await Task.Run(() => system.ReplaceClearTasks(live, SetupSession.Via));
-            if (error is null)
-            {
-                system.Timeline($"Replaced your own clear task with PoolWatch's automatic cache clear (from {SetupSession.Via}).");
-                await writeRule();
-            }
+            (_, error) = await Task.Run(() => system.ReplaceClearTasks(live, SetupSession.Via, rule));
+            if (error is null) system.Timeline($"Replaced your own clear task with PoolWatch's automatic cache clear (from {SetupSession.Via}).");
         }
         finally
         {

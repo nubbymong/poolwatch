@@ -765,6 +765,47 @@ public sealed class ClearTaskReplacerTests : IDisposable
             ClearTaskReplacer.What(new Settings { AutoClearEnabled = true, AutoClearUrgent = false, AutoClearUrgentAsk = true }));
     }
 
+    /// <summary>
+    /// With the clear its caller shows (setup's Standby cache step: the rule chosen and the urgent clear's switch as the
+    /// step shows them), Replace writes that once your tasks are removed, and nothing else: neither the hourly clear nor
+    /// the urgent clear as a card offers it is in effect in between, where the sampler could act on it. While a task is
+    /// left in place, nothing is written.
+    /// </summary>
+    [Fact]
+    public void ReplaceWritesTheClearItsCallerShowsOnceInPlaceOfTheHourlyClear()
+    {
+        var live = _f.Live(new Settings { AutoClearEnabled = false, AutoClearEveryHours = 3 });
+        Assert.True(live.Running.UrgentAsOffered()); // the hourly clear would turn the urgent clear on with it
+        _f.ClearTasks.Tasks.Add(Own());
+        // The settings in effect after each write: the switch, the two rules, the urgent clear.
+        var writes = new List<(bool On, double EveryHours, double PoolGb, bool Urgent)>();
+        live.Applied += _ => writes.Add((live.Running.AutoClearEnabled, live.Running.AutoClearEveryHours, live.Running.AutoClearPoolGb, live.Running.AutoClearUrgent));
+        var shown = new ReplacementClear("automatic cache clearing when the kernel pool reaches 6 GB, without the urgent clear (setup)", s =>
+        {
+            s.AutoClearEveryHours = 0;
+            s.AutoClearPoolGb = 6;
+            s.AutoClearUrgent = false;
+            s.AutoClearEnabled = true;
+        });
+
+        var (removed, error) = ClearTaskReplacer.Replace(_f.Records, live, "setup", _f.ClearTasks, shown);
+
+        Assert.Null(error);
+        Assert.Equal([@"\Clear standby"], removed.Select(t => t.Path));
+        Assert.Equal([(true, 0.0, 6.0, false)], writes);
+        var saved = _f.Saved();
+        Assert.Equal((true, 0.0, 6.0, false), (saved.AutoClearEnabled, saved.AutoClearEveryHours, saved.AutoClearPoolGb, saved.AutoClearUrgent));
+
+        // A task left in place (its definition cannot be read): the clear shown is not written either.
+        writes.Clear();
+        _f.ClearTasks.Tasks.Add(Own(@"\Unreadable") with { Xml = null });
+        (removed, error) = ClearTaskReplacer.Replace(_f.Records, live, "setup", _f.ClearTasks, shown with { Write = s => s.AutoClearPoolGb = 12 });
+        Assert.NotNull(error);
+        Assert.Empty(removed);
+        Assert.Empty(writes);
+        Assert.Equal(6.0, live.Running.AutoClearPoolGb);
+    }
+
     [Fact]
     public void WithNoClearTaskTheHourlyClearGoesOnEvenWhenTheListCannotBeRead()
     {
