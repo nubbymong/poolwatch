@@ -370,26 +370,18 @@ public class SimpleSettingsTests
 
     /// <summary>
     /// Save puts the automatic clear's settings into the running settings one after the other, while the sampler reads
-    /// them (<see cref="AutoClearSettings.ApplyTo"/>). The switch is written last when it goes on, after the rules and the
-    /// urgent clear's value, and first when it goes off. Written first when it went on, the sampler could see clearing on
-    /// with the urgent clear as it was before the Save: on, although its box was unticked. The order of the writes cannot
-    /// be seen from outside, so it is read from the source; what is written stays every value, either way round.
+    /// them (<see cref="AutoClearSettings.ApplyTo"/>). The switch is written first, off, when clearing goes off or when a
+    /// value being saved differs from the one the settings hold, and last, on, when clearing is on: off, the values, on.
+    /// Written only where it changed, a Save from one rule to another with clearing on wrote the values with the switch
+    /// on, and the settings held mixes of the two rules meanwhile. The order of the writes cannot be seen from outside,
+    /// so it is read from the source; what is written stays every value, either way round.
     /// </summary>
     [Fact]
-    public void SaveWritesTheAutomaticClearsSwitchLastWhenItGoesOnAndFirstWhenItGoesOff()
+    public void SaveWritesTheAutomaticClearsSwitchOffFirstWhenClearingGoesOffOrAValueChangesAndOnLast()
     {
-        string source = File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Ui", "SettingsEditor.cs")).Replace("\r\n", "\n");
-        int declared = source.IndexOf("internal sealed record AutoClearSettings(", StringComparison.Ordinal);
-        Assert.True(declared >= 0, "AutoClearSettings was not found");
-        int start = source.IndexOf("    public void ApplyTo(Settings s)\n    {\n", declared, StringComparison.Ordinal);
-        Assert.True(start >= 0, "AutoClearSettings.ApplyTo was not found");
-        int end = source.IndexOf("\n    }\n", start, StringComparison.Ordinal);
-        Assert.True(end > start, "the end of AutoClearSettings.ApplyTo was not found");
-        var writes = source[start..end].Split('\n').Select(l => l.Trim())
-            .Where(l => !l.StartsWith("//", StringComparison.Ordinal) && l.Contains("s.AutoClear", StringComparison.Ordinal)).ToList();
         Assert.Equal(
         [
-            "if (!Enabled) s.AutoClearEnabled = false;",
+            "if (!Enabled || AutoClearSettings.Of(s) != this) s.AutoClearEnabled = false;",
             "s.AutoClearEveryHours = EveryHours;",
             "s.AutoClearPoolGb = PoolGb;",
             "s.AutoClearMinMinutes = MinMinutes;",
@@ -397,7 +389,7 @@ public class SimpleSettingsTests
             "s.AutoClearUrgent = Urgent;",
             "s.AutoClearUrgentAsk = UrgentAsk;",
             "if (Enabled) s.AutoClearEnabled = true;",
-        ], writes);
+        ], AutoClearWrites.Statements());
 
         var on = new AutoClearSettings(true, 2, 6, 45, "standby", Urgent: false, UrgentAsk: false);
         var s = new Settings();
@@ -406,6 +398,42 @@ public class SimpleSettingsTests
         var off = on with { Enabled = false, Urgent = true };
         off.ApplyTo(s);
         Assert.Equal(off, AutoClearSettings.Of(s));
+    }
+
+    /// <summary>
+    /// A Save while automatic clearing is on, from one set of its values to another: the settings never hold clearing on
+    /// with values other than the ones saved before or the ones saved now. The switch goes off first, each value is
+    /// written while it is off, and it goes on last. Written with the switch left on, the settings held, one write after
+    /// the other, clearing on with mixes nobody chose: going from the light clear only with the urgent clear on to the
+    /// full clear only without it, the full clear with the urgent clear on. Every state the settings pass through is
+    /// recorded (<see cref="AutoClearWrites.States"/>). A Save that changes nothing never turns the switch off.
+    /// </summary>
+    [Fact]
+    public void ASaveFromOneRuleToAnotherNeverLeavesClearingOnWithValuesNobodyChose()
+    {
+        var lightWithUrgent = new AutoClearSettings(true, 2, 0, 45, "lowpriority", Urgent: true, UrgentAsk: false);
+        var fullWithoutUrgent = new AutoClearSettings(true, 0, 6, 30, "standby", Urgent: false, UrgentAsk: false);
+        var stillToChoose = new AutoClearSettings(true, 1, 8, 30, "auto", Urgent: false, UrgentAsk: true); // as after an upgrade
+        AutoClearSettings[] all =
+        [
+            lightWithUrgent, fullWithoutUrgent, stillToChoose,
+            lightWithUrgent with { Enabled = false }, fullWithoutUrgent with { Enabled = false },
+        ];
+        foreach (var before in all)
+        {
+            foreach (var after in all)
+            {
+                var states = AutoClearWrites.States(before, after);
+                Assert.Equal(before, states[0]);
+                Assert.Equal(after, states[^1]);
+                foreach (var state in states)
+                    Assert.True(!state.Enabled || state == before || state == after, $"From {before} to {after}, the settings held {state}");
+                // Nothing changes: each value is written as it is, and the switch is never off in between.
+                if (before == after) Assert.All(states, state => Assert.Equal(before, state));
+                // On before and after, with another value: the switch is off while the values are written.
+                if (before.Enabled && after.Enabled && before != after) Assert.Contains(states, state => !state.Enabled);
+            }
+        }
     }
 
     /// <summary>

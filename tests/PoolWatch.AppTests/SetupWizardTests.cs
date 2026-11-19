@@ -916,6 +916,41 @@ public sealed partial class SetupWizardTests : IDisposable // the Records step's
         Assert.Equal((true, 0.0, 6.0, false), (saved.AutoClearEnabled, saved.AutoClearEveryHours, saved.AutoClearPoolGb, saved.AutoClearUrgent));
     }
 
+    /// <summary>
+    /// Next's write of a rule is PoolWatch's own, made from the values the step showed
+    /// (<see cref="ReplacementClear.Write"/>): the same one where a clear task of yours is replaced, which the code that
+    /// removes the task runs once it is removed, and where there is none. So the two cannot come to differ, and the code
+    /// that removes your task, which runs as administrator, runs no write its caller made up. The write is read as the
+    /// running settings were handed it (<see cref="LiveSettings.Applied"/>).
+    /// </summary>
+    [Fact]
+    public async Task NextsWriteOfARuleIsTheOnePoolWatchBuildsFromTheValuesShownWithATaskOfYoursToReplaceOrWithout()
+    {
+        foreach (bool ownTask in new[] { false, true })
+        {
+            using var f = new ChangeFixture();
+            var live = f.Live();
+            if (ownTask)
+            {
+                f.ClearTasks.Tasks.Add(new CacheHelper.LegacyTaskInfo(@"\Clear standby", "SYSTEM", "RAMMap64.exe -Et", "1 trigger", true)
+                {
+                    Xml = TaskXml.Ram(), LogonType = 5, UserId = "S-1-5-18",
+                });
+            }
+            var writes = new List<Action<Settings>>();
+            live.Applied += writes.Add;
+
+            var (ok, message) = await new StandbyCacheSetup(new ReplacingSystem(f), live, smoke: false).Apply(CacheChoice.PoolSize, 1, 6, replaceOwnTask: ownTask, urgent: false);
+
+            Assert.True(ok, message);
+            Assert.Empty(f.ClearTasks.Tasks);
+            var write = Assert.Single(writes);
+            Assert.IsType<ReplacementClear>(write.Target);
+            Assert.Equal(typeof(ReplacementClear).GetMethod(nameof(ReplacementClear.Write)), write.Method);
+            Assert.Equal((true, 0.0, 6.0, false), (live.Running.AutoClearEnabled, live.Running.AutoClearEveryHours, live.Running.AutoClearPoolGb, live.Running.AutoClearUrgent));
+        }
+    }
+
     [Fact]
     public async Task ClearingNeedsAdministratorAndTheTestRunChangesNothing()
     {
