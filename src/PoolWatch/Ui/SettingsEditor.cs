@@ -148,14 +148,17 @@ internal sealed record AutoClearSettings(bool Enabled, double EveryHours, double
 
     /// <summary>
     /// Writes each value, one after the other. On the running settings the sampler reads them meanwhile, so the switch
-    /// is written first when it goes off and last when it goes on: a Save that turns clearing on never has it see clearing
-    /// on before the rules and the urgent clear's value saved with it are in place (written first, the switch went on with
-    /// the urgent clear as it was before, on although its box was unticked), and one that turns clearing off never has it
-    /// see the new values while clearing is still on.
+    /// is written first, off, when clearing goes off or when any value here differs from the one the settings hold, and
+    /// last, on, when clearing is on: off, the values, on. So the settings never hold clearing on with values other than
+    /// the ones saved before or the ones saved now (written with the switch left on, a Save from one rule to another
+    /// passed through mixes of the two, such as the new rule with the urgent clear as it was before, on although its box
+    /// was unticked). A Save that changes nothing writes each value as it is and never turns the switch off. This is
+    /// about what the settings hold, not what a sample reads: one that read the switch just before a Save may still read
+    /// values from before it and from after it.
     /// </summary>
     public void ApplyTo(Settings s)
     {
-        if (!Enabled) s.AutoClearEnabled = false;
+        if (!Enabled || AutoClearSettings.Of(s) != this) s.AutoClearEnabled = false;
         s.AutoClearEveryHours = EveryHours;
         s.AutoClearPoolGb = PoolGb;
         s.AutoClearMinMinutes = MinMinutes;

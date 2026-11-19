@@ -2,6 +2,7 @@ using PoolWatch.Core;
 using PoolWatch.Core.Changes;
 using PoolWatch.Engine;
 using PoolWatch.Engine.Changes;
+using AutoClearSettings = PoolWatch.Ui.AutoClearSettings;
 
 namespace PoolWatch.AppTests;
 
@@ -767,9 +768,9 @@ public sealed class ClearTaskReplacerTests : IDisposable
 
     /// <summary>
     /// With the clear its caller shows (setup's Standby cache step: the rule chosen and the urgent clear's switch as the
-    /// step shows them), Replace writes that once your tasks are removed, and nothing else: neither the hourly clear nor
-    /// the urgent clear as a card offers it is in effect in between, where the sampler could act on it. While a task is
-    /// left in place, nothing is written.
+    /// step shows them, given as values), Replace writes that once your tasks are removed, and nothing else: neither the
+    /// hourly clear nor the urgent clear as a card offers it is in effect in between, where the sampler could act on it.
+    /// While a task is left in place, nothing is written.
     /// </summary>
     [Fact]
     public void ReplaceWritesTheClearItsCallerShowsOnceInPlaceOfTheHourlyClear()
@@ -780,13 +781,7 @@ public sealed class ClearTaskReplacerTests : IDisposable
         // The settings in effect after each write: the switch, the two rules, the urgent clear.
         var writes = new List<(bool On, double EveryHours, double PoolGb, bool Urgent)>();
         live.Applied += _ => writes.Add((live.Running.AutoClearEnabled, live.Running.AutoClearEveryHours, live.Running.AutoClearPoolGb, live.Running.AutoClearUrgent));
-        var shown = new ReplacementClear("automatic cache clearing when the kernel pool reaches 6 GB, without the urgent clear (setup)", s =>
-        {
-            s.AutoClearEveryHours = 0;
-            s.AutoClearPoolGb = 6;
-            s.AutoClearUrgent = false;
-            s.AutoClearEnabled = true;
-        });
+        var shown = new ReplacementClear("automatic cache clearing when the kernel pool reaches 6 GB, without the urgent clear (setup)", EveryHours: 0, PoolGb: 6, Urgent: false);
 
         var (removed, error) = ClearTaskReplacer.Replace(_f.Records, live, "setup", _f.ClearTasks, shown);
 
@@ -799,11 +794,60 @@ public sealed class ClearTaskReplacerTests : IDisposable
         // A task left in place (its definition cannot be read): the clear shown is not written either.
         writes.Clear();
         _f.ClearTasks.Tasks.Add(Own(@"\Unreadable") with { Xml = null });
-        (removed, error) = ClearTaskReplacer.Replace(_f.Records, live, "setup", _f.ClearTasks, shown with { Write = s => s.AutoClearPoolGb = 12 });
+        (removed, error) = ClearTaskReplacer.Replace(_f.Records, live, "setup", _f.ClearTasks, shown with { PoolGb = 12 });
         Assert.NotNull(error);
         Assert.Empty(removed);
         Assert.Empty(writes);
         Assert.Equal(6.0, live.Running.AutoClearPoolGb);
+    }
+
+    /// <summary>
+    /// The clear a caller shows is values only, and the write is PoolWatch's own, made from them
+    /// (<see cref="ReplacementClear.Write"/>): the automatic clear's settings with the rule shown, the urgent clear's
+    /// switch as shown and then chosen, and clearing on (<see cref="ReplacementClear.In"/>), written by the rule
+    /// Settings' Save writes them by (AutoClearSettings.ApplyTo), and nothing else. So the rule and the urgent clear's
+    /// values are in place before the switch goes on, and where clearing was on already with other values the switch
+    /// goes off first: the settings never hold clearing on with values other than the ones in effect before or the ones
+    /// shown. Every state they pass through is recorded (<see cref="AutoClearWrites.States"/>). A clear with no switch
+    /// for the urgent clear leaves it, and whether it is still to be chosen, as they were.
+    /// </summary>
+    [Fact]
+    public void TheWriteReplaceBuildsPutsTheRuleAndTheUrgentClearInPlaceBeforeTheSwitchAndLeavesAnUrgentClearItWasNotGiven()
+    {
+        var shown = new ReplacementClear("automatic cache clearing when the kernel pool reaches 6 GB, without the urgent clear (setup)", EveryHours: 0, PoolGb: 6, Urgent: false);
+        Settings[] starts =
+        [
+            new Settings(), // a new install: clearing off, the urgent clear on
+            new Settings { AutoClearEnabled = true, AutoClearEveryHours = 2, AutoClearPoolGb = 0, AutoClearMode = "lowpriority" }, // on already, by another rule
+            new Settings { AutoClearEnabled = true, AutoClearUrgent = false, AutoClearUrgentAsk = true }, // after an upgrade: the urgent clear still to be chosen
+        ];
+        foreach (var start in starts)
+        {
+            var before = AutoClearSettings.Of(start);
+            var then = shown.In(start);
+            Assert.Equal(before with { Enabled = true, EveryHours = 0, PoolGb = 6, Urgent = false, UrgentAsk = false }, then);
+            var states = AutoClearWrites.States(before, then);
+            foreach (var state in states)
+                Assert.True(!state.Enabled || state == before || state == then, $"From {before}, the settings held {state}");
+            // The switch goes on last, with the rule and the urgent clear's values in place.
+            Assert.Equal(then with { Enabled = false }, states[^2]);
+            Assert.Equal(then, states[^1]);
+            shown.Write(start);
+            Assert.Equal(then, AutoClearSettings.Of(start));
+        }
+
+        // No switch for the urgent clear: it, and whether it is still to be chosen, stay as they were.
+        var noSwitch = shown with { Urgent = null };
+        foreach (var (urgent, ask) in new[] { (true, false), (false, false), (false, true) })
+        {
+            var s = new Settings { AutoClearUrgent = urgent, AutoClearUrgentAsk = ask };
+            noSwitch.Write(s);
+            Assert.Equal((true, 0.0, 6.0, urgent, ask), (s.AutoClearEnabled, s.AutoClearEveryHours, s.AutoClearPoolGb, s.AutoClearUrgent, s.AutoClearUrgentAsk));
+        }
+
+        // The write is that rule and nothing of its own (read from the source: the order of a write's steps cannot be seen from outside).
+        Assert.Contains("    public void Write(Core.Settings s) => In(s).ApplyTo(s);",
+            File.ReadAllText(Path.Combine(TrayIconsTests.RepoRoot(), "src", "PoolWatch", "Engine", "Changes", "ClearTaskReplacer.cs")));
     }
 
     [Fact]

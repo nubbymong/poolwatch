@@ -125,7 +125,9 @@ internal sealed class SetupHost : ISetupHost
 /// switch are in effect already, where that is all Next writes. Where the step said that a rule replaces your
 /// own RAMMap clear task, a rule removes that task first, through the code the suggestions' Replace uses
 /// (<see cref="ISetupSystem.ReplaceClearTasks"/>: your task is saved for putting back), so the two never both run, and
-/// that code writes the rule and the switch, as its one write.
+/// that code writes the rule and the switch, as its one write. With a task to replace or without, the step gives the
+/// rule and the switch as values and the write is the one made from them
+/// (<see cref="Engine.Changes.ReplacementClear.Write"/>), so the two never differ.
 /// Clearing needs PoolWatch to run as administrator. Nothing happens in the CI UI test.
 /// </summary>
 internal sealed class StandbyCacheSetup(ISetupSystem system, LiveSettings live, bool smoke)
@@ -160,15 +162,12 @@ internal sealed class StandbyCacheSetup(ISetupSystem system, LiveSettings live, 
             var (_, every, size) = CacheChoices.Writes(choice, hours, gb);
             string words = CacheChoices.Words(choice, hours, gb);
             string urgentWords = urgent is { } u ? CacheChoices.UrgentWords(u) : "";
-            // The rules, the urgent clear and the switch in one change, so the sampler never sees the clear on with the old rules.
-            var rule = new Engine.Changes.ReplacementClear($"automatic cache clearing {words}{urgentWords} ({SetupSession.Via})", s =>
-            {
-                s.AutoClearEveryHours = every!.Value;
-                s.AutoClearPoolGb = size!.Value;
-                // The step showed the switch: its choice, so an upgrade's question about it is not asked.
-                if (urgent is { } on) (s.AutoClearUrgent, s.AutoClearUrgentAsk) = (on, false);
-                s.AutoClearEnabled = true;
-            });
+            // The rule and the urgent clear's switch as the step showed them, as values (the switch, shown, is its choice,
+            // so an upgrade's question about it is not asked). ReplacementClear writes them, the same with a task of yours
+            // to replace and without, in one change: the switch off first where clearing is on with other values, then the
+            // rule and the urgent clear, and the switch on last, so the settings never hold the clear on with values other
+            // than the ones in effect before or the ones shown.
+            var rule = new Engine.Changes.ReplacementClear($"automatic cache clearing {words}{urgentWords} ({SetupSession.Via})", every!.Value, size!.Value, urgent);
             if (!replaceOwnTask) await Task.Run(() => live.Apply(rule.What, rule.Write));
             else if (await ReplaceOwnTask(rule) is { } why) return (false, why);
             system.Timeline($"Automatic cache clearing turned on, {words}{urgentWords} (from {SetupSession.Via}).");
@@ -181,7 +180,7 @@ internal sealed class StandbyCacheSetup(ISetupSystem system, LiveSettings live, 
     /// Your own clear tasks removed, each saved for Undo first (<see cref="Engine.Changes.ClearTaskReplacer"/>, as the
     /// suggestions' Replace runs it), and the rule chosen written by that same code once they are removed, as its one
     /// write, in place of the hourly clear it turns on by itself; then the clear status and the scan read again. Null, or
-    /// why a task was left in place. So the sampler never sees clearing on with an hourly rule, or an urgent clear,
+    /// why a task was left in place. So the settings never hold clearing on with an hourly rule, or an urgent clear,
     /// that nobody chose on the step (written first, the hourly clear was in effect until the step's own write).
     /// The timeline names no schedule: the rule chosen follows on its own line.
     /// </summary>
