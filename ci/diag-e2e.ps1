@@ -152,8 +152,32 @@ switch ($Scenario) {
         # is loaded and unloaded again (FilterManager events in the System log); filter instances are listed.
         $before = (fltmc filters) -join "`n"
         Write-Host $before
+        # A findings.jsonl left in the -Out folder by an earlier run would satisfy the wait below at once: remove it first.
+        if ([string]::IsNullOrWhiteSpace($Out)) { throw 'filters: -Out is empty' }
+        $findingsFile = Join-Path $Out 'findings.jsonl'
+        if (Test-Path -LiteralPath $findingsFile) { Remove-Item -LiteralPath $findingsFile -Force }
         $pw = Start-PoolWatch $Exe @('--headless', '--duration', "$Duration", '--config', "$PSScriptRoot\diag-config.json", '--out', $Out)
-        Start-Sleep -Seconds 15
+        # The zygote starts only after PoolWatch's first look at the running processes, which its "processes at start"
+        # finding records: a process already running at that look is listed there, not as a start. A fixed 15 s sleep
+        # raced PoolWatch's start-up, which took 13 s to its first sample on one runner (run 44521022144). The file is read
+        # with every share mode PoolWatch's own append allows, and as text, so a line still being written stops nothing.
+        # An open or read that fails all the same (the file just made, or held for a moment in a way this open does not
+        # share) is tried again at the next poll. Bounded: when the look does not come within 60 s, the zygote starts
+        # anyway and the checks below say what is missing.
+        $until = (Get-Date).AddSeconds(60)
+        $looked = $false
+        while (-not $looked -and -not $pw.HasExited -and (Get-Date) -lt $until) {
+            if (Test-Path -LiteralPath $findingsFile) {
+                try {
+                    $stream = [IO.File]::Open($findingsFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+                    try { $looked = ([IO.StreamReader]::new($stream)).ReadToEnd().Contains('processes at start') } finally { $stream.Dispose() }
+                } catch [System.IO.IOException] {
+                    Write-Host "  findings.jsonl not readable yet, trying again: $($_.Exception.Message)"
+                }
+            }
+            if (-not $looked) { Start-Sleep -Milliseconds 500 }
+        }
+        Assert-True $looked "PoolWatch's first look at the running processes came before vmmemCmZygote started"
         $zygote = Join-Path $work 'vmmemCmZygote.exe'
         Copy-Item (Join-Path (Split-Path $Leaker) '*') $work -Recurse
         Copy-Item $Leaker $zygote

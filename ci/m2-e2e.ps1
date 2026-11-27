@@ -80,12 +80,19 @@ switch ($Scenario) {
             Write-Host ("  traced incident {0}: tags={1} poolEvents={2} top={3} ({4})" -f $x.id, ($x.capture.tags -join ','), $x.capture.poolEvents, $x.suspects[0].image, $x.suspects[0].confidence)
         }
         # Unrelated growth on the runner can alert first and take the first trace; the leak's incident is then queued
-        # and traced next. Judge the traced incident whose growth the correlation already pins on Leaker.exe.
-        # (Unrelated growth, e.g. Windows servicing, can also be traced and list Leaker.exe lower down: only incidents
-        # whose top suspect is Leaker.exe count; File first, as it is the tag the leak drives.)
-        $cap = @($reports | Where-Object { $null -ne $_.capture -and $_.suspects.Count -gt 0 -and $_.suspects[0].image -eq 'Leaker.exe' -and $_.capture.tags -ccontains $_.tag } |
+        # and traced next. Judge the traced incident whose growth the correlation already pins on Leaker.exe, of a tag
+        # the leak itself allocates for each handle it holds open to its one file: File (the file object), IoNm (the
+        # file object's name) and Ntfc (NTFS's context for each open), File first. In run 45938582107 the trace confirmed
+        # Leaker.exe on all three, on x64 and on Arm. Not every file-system tag (report.json's fileSystemTag): that also
+        # counts the cache's tags (MmSt, CcVl, FMfn), which other programs' file activity grows on its own, Windows
+        # servicing's and the search indexer's among them (in that run FMfn's incident on Arm named SearchIndexer.exe
+        # first). Unrelated growth can also list Leaker.exe first by correlation alone: in run 44520492206 the registry
+        # tag CM53 grew while the leak ran, the correlation put Leaker.exe first, and the trace, which started once that
+        # growth had ended, rightly did not confirm it.
+        $leakTags = @('File', 'IoNm', 'Ntfc')
+        $cap = @($reports | Where-Object { $null -ne $_.capture -and $leakTags -ccontains $_.tag -and $_.suspects.Count -gt 0 -and $_.suspects[0].image -eq 'Leaker.exe' -and $_.capture.tags -ccontains $_.tag } |
             Sort-Object @{ Expression = { $_.tag -ceq 'File' }; Descending = $true }, @{ Expression = { [int64]$_.growthBytes }; Descending = $true })
-        Assert-True ($cap.Count -ge 1) "a confirmation trace was attached to an incident Leaker.exe is a suspect in"
+        Assert-True ($cap.Count -ge 1) "a confirmation trace was attached to an incident of a tag the leak allocates ($($leakTags -join ', ')) that Leaker.exe is the top suspect in"
         if ($cap.Count -ge 1) {
             $r = $cap[0]; $c = $r.capture
             Write-Host "  capture: tags=$($c.tags -join ',') parsed=$($c.poolEventsParsed) poolEvents=$($c.poolEvents) stacked=$($c.stackedPoolEvents) fileEvents=$($c.fileEvents) error=$($c.error)"
