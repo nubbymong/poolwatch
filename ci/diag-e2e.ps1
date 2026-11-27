@@ -153,7 +153,22 @@ switch ($Scenario) {
         $before = (fltmc filters) -join "`n"
         Write-Host $before
         $pw = Start-PoolWatch $Exe @('--headless', '--duration', "$Duration", '--config', "$PSScriptRoot\diag-config.json", '--out', $Out)
-        Start-Sleep -Seconds 15
+        # The zygote starts only after PoolWatch's first look at the running processes, which its "processes at start"
+        # finding records: a process already running at that look is listed there, not as a start. A fixed 15 s sleep
+        # raced PoolWatch's start-up, which took 13 s to its first sample on one runner (run 44521022144). The file is read
+        # with every share mode PoolWatch's own append allows, and as text, so a line still being written stops nothing.
+        # Bounded: when the look does not come within 60 s, the zygote starts anyway and the checks below say what is missing.
+        $findingsFile = Join-Path $Out 'findings.jsonl'
+        $until = (Get-Date).AddSeconds(60)
+        $looked = $false
+        while (-not $looked -and -not $pw.HasExited -and (Get-Date) -lt $until) {
+            if (Test-Path -LiteralPath $findingsFile) {
+                $stream = [IO.File]::Open($findingsFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+                try { $looked = ([IO.StreamReader]::new($stream)).ReadToEnd().Contains('processes at start') } finally { $stream.Dispose() }
+            }
+            if (-not $looked) { Start-Sleep -Milliseconds 500 }
+        }
+        Assert-True $looked "PoolWatch's first look at the running processes came before vmmemCmZygote started"
         $zygote = Join-Path $work 'vmmemCmZygote.exe'
         Copy-Item (Join-Path (Split-Path $Leaker) '*') $work -Recurse
         Copy-Item $Leaker $zygote
