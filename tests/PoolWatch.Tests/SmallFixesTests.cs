@@ -66,7 +66,10 @@ public class SmallFixesTests : IDisposable
     [Fact]
     public void EventFindingsCannotEvictOtherFindings()
     {
-        var log = new FindingLog();
+        // The test's own moment, two hours after its findings, for the log's clock and for Within: on the PC's clock its
+        // findings fell out of the last 30 days on 2026-11-25, and the test failed from then on.
+        var now = At(T0.AddHours(2));
+        var log = new FindingLog(() => now);
         log.Add(new Finding { TimeUtc = T0, Kind = FindingKind.Crash, Severity = FindingSeverity.Alert, Title = "keep me" });
         for (int i = 0; i < 5000; i++)
             log.Add(new Finding { TimeUtc = T0.AddSeconds(i), Kind = i % 2 == 0 ? FindingKind.PackageActivation : FindingKind.FilterEvent, Title = $"event {i}" });
@@ -79,7 +82,7 @@ public class SmallFixesTests : IDisposable
         Assert.False(FindingLog.IsHighVolume(new Finding { TimeUtc = T0, Kind = FindingKind.FilterEvent, Severity = FindingSeverity.Warning, Title = "pair" }));
         log.Add(new Finding { TimeUtc = T0, Kind = FindingKind.Mark, Title = "last" });
         Assert.Equal("last", log.Snapshot()[^1].Title);
-        Assert.Single(log.Within(TimeSpan.FromDays(30), Moment.Now()), f => f.Kind == FindingKind.Mark);
+        Assert.Single(log.Within(TimeSpan.FromDays(30), now), f => f.Kind == FindingKind.Mark);
     }
 
     // ---- 4. crash records are paged through, never skipped
