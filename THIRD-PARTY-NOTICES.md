@@ -10,8 +10,8 @@ yours that runs RAMMap. Work PoolWatch builds on without shipping it is credited
 
 | Component | Version | In the release as | Licence (as declared by the package) |
 |---|---|---|---|
-| Microsoft.Diagnostics.Tracing.TraceEvent ([PerfView](https://github.com/microsoft/perfview)) | 4.0.0 | `Microsoft.Diagnostics.Tracing.TraceEvent.dll`, `Microsoft.Diagnostics.FastSerialization.dll`, `Dia2Lib.dll`, `TraceReloggerLib.dll` (inside `app\PoolWatch.exe`, PoolWatch itself) | MIT, © Microsoft Corporation |
-| TraceEvent's native DLLs | from TraceEvent 4.0.0 | `app\amd64\KernelTraceControl.dll` (Windows Performance Toolkit, 10.0.22000.1) and `app\amd64\msdia140.dll` (the Debug Interface Access SDK, 14.50.35403.0), next to PoolWatch itself; both Microsoft binaries, Authenticode-signed by Microsoft Corporation | Microsoft redistributable binaries. Microsoft ships them inside the TraceEvent NuGet package, which declares MIT (see below), and distributes them under Microsoft's own terms; they are not themselves open source. See the note below. |
+| Microsoft.Diagnostics.Tracing.TraceEvent ([PerfView](https://github.com/microsoft/perfview)) | 4.0.2 | `Microsoft.Diagnostics.Tracing.TraceEvent.dll`, `Microsoft.Diagnostics.FastSerialization.dll`, `Dia2Lib.dll`, `TraceReloggerLib.dll` (inside `app\PoolWatch.exe`, PoolWatch itself) | MIT, © Microsoft Corporation |
+| TraceEvent's native DLLs | from TraceEvent 4.0.2 | `app\amd64\KernelTraceControl.dll` (Windows Performance Toolkit, 10.0.22000.1) and `app\amd64\msdia140.dll` (the Debug Interface Access SDK, 14.50.35403.0), next to PoolWatch itself; both Microsoft binaries, Authenticode-signed by Microsoft Corporation | Microsoft redistributable binaries. Microsoft ships them inside the TraceEvent NuGet package, which declares MIT (see below), and distributes them under Microsoft's own terms; they are not themselves open source. See the note below. |
 | Microsoft.Diagnostics.NETCore.Client ([dotnet/diagnostics](https://github.com/dotnet/diagnostics)) | 0.2.661903 | inside `app\PoolWatch.exe` (a TraceEvent dependency) | MIT, © Microsoft Corporation |
 | Microsoft.Extensions.Logging.Abstractions, Microsoft.Extensions.DependencyInjection.Abstractions ([dotnet/runtime](https://github.com/dotnet/runtime)) | 8.0.3 and 8.0.2 | inside `app\PoolWatch.exe` (Logging.Abstractions is a dependency of Microsoft.Diagnostics.NETCore.Client, and DependencyInjection.Abstractions one of Logging.Abstractions) | MIT, © .NET Foundation and Contributors |
 | System.Management ([dotnet/runtime](https://github.com/dotnet/runtime)) | 10.0.14 | inside `app\PoolWatch.exe` | MIT, © .NET Foundation and Contributors |
@@ -90,6 +90,15 @@ whose bytes changed (`Microsoft.Diagnostics.Tracing.TraceEvent.dll`, `Microsoft.
 NETCore.Client's, both Extensions DLLs and System.Management's) and the four that did not (`Dia2Lib.dll`,
 `TraceReloggerLib.dll` and the two native DLLs). Each signature is valid, and each signer's organisation is Microsoft
 Corporation (the certificates that sign the Extensions DLLs and System.Management are named .NET).
+
+Re-checked on 2026-11-27, for TraceEvent 4.0.2 (from 4.0.0): its `.nuspec` differs from 4.0.0's only in the version and
+the release-notes link, so it declares the same MIT licence, copyright and dependencies, which resolve as before
+(Microsoft.Diagnostics.NETCore.Client 0.2.661903, and `System.Reflection.TypeExtensions`, not shipped): no other row
+changes. The package holds the same files as 4.0.0, still with no licence, notice, readme or redist text file. Only
+`Microsoft.Diagnostics.Tracing.TraceEvent.dll`, `Microsoft.Diagnostics.FastSerialization.dll` and TraceEvent's XML API
+documentation changed; `Dia2Lib.dll`, `TraceReloggerLib.dll` and the two native DLLs are byte for byte 4.0.0's, so the
+native DLLs' versions above are unchanged. The two changed DLLs carry valid Authenticode signatures (PowerShell's
+`Get-AuthenticodeSignature`), signed by Microsoft Corporation, file version 4.0.2.
 
 The NativeAOT compiler packages (Microsoft.DotNet.ILCompiler and runtime.win-x64.Microsoft.DotNet.ILCompiler), whose
 runtime parts the launcher carries, are not in this repository's lock files: only CI's publish of the launcher downloads
