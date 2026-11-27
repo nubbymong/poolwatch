@@ -312,9 +312,9 @@ public sealed class TokenCorrelator
         // ended, but a clock set back or forward between them would make this negative or a day too long.
         string span = Fmt.Duration(TimeSpan.FromMilliseconds(_closedMs[^1] - _closedMs[first]));
         string top = Named(parents, n) is { } p
-            ? $"; the starts that rise and fall with Toke most: {p.Name}'s ({p.Share:P0} of starts, {Correlation.OwnerRanking.Moves(p.Spearman)})"
+            ? $"; the starts that rise and fall with Toke: {p.Name}'s ({p.Share:P0} of starts, {Correlation.OwnerRanking.Moves(p.Spearman)})"
             : Tracking(parents, n) is { } u
-                ? $"; the starts that rise and fall with Toke most are made by a process PoolWatch could not name ({u.Name}, {u.Share:P0} of starts, {Correlation.OwnerRanking.Moves(u.Spearman)})"
+                ? $"; the starts that rise and fall with Toke are made by a process PoolWatch could not name ({u.Name}, {u.Share:P0} of starts, {Correlation.OwnerRanking.Moves(u.Spearman)})"
                 : parents.Count > 0 ? $"; the starts of no single parent rise and fall with Toke (most starts: {parents[0].Name}'s, {parents[0].Share:P0})" : "";
         string summary = verdict switch
         {
@@ -397,17 +397,21 @@ public sealed class TokenCorrelator
 
     /// <summary>
     /// Of <paramref name="owners"/>, named or not, the one whose starts rise and fall with Toke the most as far as
-    /// <paramref name="buckets"/> buckets can tell. Of those at <see cref="NamesOwnerFrom"/> or more, it is the one with
-    /// the most starts (the higher correlation first among equals) of those whose correlation no other's is higher than
-    /// beyond chance (<see cref="HigherBeyondChance"/>). Over a few buckets a correlation is rough, and the highest alone
-    /// is often chance: in CI a Windows process with 8 of 339 starts came out at 0.701 over 10 buckets against 0.675 for
-    /// the program that made 322 of them, each leaving tokens behind, and was listed in its place.
+    /// <paramref name="buckets"/> buckets can tell: of those at <see cref="NamesOwnerFrom"/> or more whose correlation no
+    /// other's beats beyond chance (<see cref="HigherBeyondChance"/>), the one with the most starts (the higher
+    /// correlation first among equals). Over a few buckets a correlation is rough, and the highest alone is often chance:
+    /// in CI a Windows process with 8 of 339 starts came out at 0.701 over 10 buckets against 0.675 for the program that
+    /// made 322 of them, each leaving tokens behind, and was listed in its place.
     /// </summary>
     private static OwnerTokenStat? Tracking(IReadOnlyList<OwnerTokenStat> owners, int buckets)
     {
         var moving = owners.Where(o => o.Spearman >= NamesOwnerFrom).ToList();
-        return moving.Where(o => !moving.Any(other => HigherBeyondChance(other.Spearman, o.Spearman, buckets)))
-            .OrderByDescending(o => o.Starts).ThenByDescending(o => o.Spearman).FirstOrDefault();
+        if (moving.Count == 0) return null;
+        // Another's correlation beats an owner's beyond chance exactly when the highest does (the gap grows with it), and
+        // the highest never beats its own, so its owner is always left.
+        double highest = moving.Max(o => o.Spearman);
+        return moving.Where(o => !HigherBeyondChance(highest, o.Spearman, buckets))
+            .OrderByDescending(o => o.Starts).ThenByDescending(o => o.Spearman).First();
     }
 
     /// <summary>

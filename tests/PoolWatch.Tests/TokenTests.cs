@@ -85,7 +85,7 @@ public class TokenTests
         Assert.Equal(TokenVerdict.TracksStarts, a.Verdict);
         Assert.True(a.Owners.Single(o => o.Name == "Other").Starts > a.Owners.Single(o => o.Name == "Codex").Starts, a.Summary);
         Assert.Equal("Codex", a.Owners[0].Name);
-        Assert.Contains("; the starts that rise and fall with Toke most: Codex's (", a.Summary);
+        Assert.Contains("; the starts that rise and fall with Toke: Codex's (", a.Summary);
         Assert.DoesNotContain("Other", a.Summary);
         Assert.Equal("Codex", Assert.Single(rig.Findings).Image);
         // Named picks none when no owner's starts move with Toke at least somewhat (one with no correlation at all
@@ -124,7 +124,7 @@ public class TokenTests
         Assert.Equal(TokenVerdict.TracksStarts, a.Verdict);
         var unknown = Assert.Single(a.Owners, o => o.Name == "PID 9999");
         Assert.Equal(Core.Identity.OwnerKind.Unknown, unknown.Kind);
-        Assert.Contains("; the starts that rise and fall with Toke most are made by a process PoolWatch could not name (PID 9999, ", a.Summary);
+        Assert.Contains("; the starts that rise and fall with Toke are made by a process PoolWatch could not name (PID 9999, ", a.Summary);
         Assert.Null(TokenCorrelator.Named(a.Owners, a.Buckets));
         Assert.Null(Assert.Single(rig.Findings).Image);
     }
@@ -150,7 +150,7 @@ public class TokenTests
         Assert.True(app.Starts > unknown.Starts, $"{app.Starts} against {unknown.Starts}");
         Assert.Equal(unknown, a.Owners[0]); // listed first, as the one whose starts track Toke the most
         Assert.Null(TokenCorrelator.Named(a.Owners, a.Buckets));
-        Assert.Contains("; the starts that rise and fall with Toke most are made by a process PoolWatch could not name (PID 9999, ", a.Summary);
+        Assert.Contains("; the starts that rise and fall with Toke are made by a process PoolWatch could not name (PID 9999, ", a.Summary);
         Assert.DoesNotContain("Other", a.Summary);
         var f = Assert.Single(rig.Findings);
         Assert.Null(f.Image);
@@ -187,7 +187,7 @@ public class TokenTests
         Assert.InRange(unknown.Spearman, 0.703, 0.705); // 53.5 / sqrt(82.5 x 70), the tied ranks averaged
         Assert.Equal(app, a.Owners[0]);
         Assert.Equal(app, TokenCorrelator.Named(a.Owners, a.Buckets));
-        Assert.Contains("; the starts that rise and fall with Toke most: Other's (", a.Summary);
+        Assert.Contains("; the starts that rise and fall with Toke: Other's (", a.Summary);
         Assert.DoesNotContain("could not name", a.Summary);
         Assert.Equal("Other", Assert.Single(rig.Findings).Image);
     }
@@ -212,6 +212,17 @@ public class TokenTests
         // Over 10 buckets, against 0.675, it takes about 0.94: 0.93 is 1.52 standard errors, 0.95 is 1.84.
         Assert.False(TokenCorrelator.HigherBeyondChance(0.93, 0.675, 10));
         Assert.True(TokenCorrelator.HigherBeyondChance(0.95, 0.675, 10));
+        // Three owners over 10 buckets. The one with the fewest starts beats the one with the most beyond chance (0.97
+        // against 0.60, 2.54 standard errors), but the middle one does not (0.85, 1.02), and the fewest's does not beat the
+        // middle one's (1.52). Of the two that no other beats, the middle one has the more starts: it is listed first, not
+        // the one with the highest correlation.
+        OwnerTokenStat most = new("app:most", "Most", 300, 0.73, 0.60), middle = new("app:middle", "Middle", 100, 0.24, 0.85),
+            fewest = new("app:fewest", "Fewest", 10, 0.03, 0.97);
+        Assert.InRange(TokenCorrelator.CorrelationGap(0.97, 0.60, 10), 2.53, 2.55);
+        Assert.InRange(TokenCorrelator.CorrelationGap(0.85, 0.60, 10), 1.01, 1.03);
+        Assert.InRange(TokenCorrelator.CorrelationGap(0.97, 0.85, 10), 1.51, 1.53);
+        Assert.Equal(middle, TokenCorrelator.Named([most, middle, fewest], 10));
+        Assert.Equal(middle, TokenCorrelator.Named([fewest, middle, most], 10));
         // Over 3 buckets or fewer nothing can be told, and the owner with the most starts keeps the first place.
         Assert.Equal(0, TokenCorrelator.CorrelationGap(0.99, 0.3, 3));
         var weak = leaker with { Spearman = 0.3 };
