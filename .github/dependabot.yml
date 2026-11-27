@@ -10,6 +10,14 @@ updates:
     groups:
       test-packages:
         patterns: [xunit*, Microsoft.NET.Test.Sdk, FsCheck]
+    ignore:
+      # System.Management is versioned with the .NET runtime: its next major, 11.0, is built for .NET 11 and adds a
+      # package the app would ship (System.CodeDom 11.0). PoolWatch stays on .NET 10 (global.json, the projects' target
+      # frameworks) until it moves to .NET 11 in a change of its own; take this rule out then. Only a new major is
+      # ignored: its 10.0.x updates, security fixes among them, still come. TraceEvent and the test packages are not
+      # versioned with the runtime and are not ignored.
+      - dependency-name: System.Management
+        update-types: [version-update:semver-major]
   - package-ecosystem: github-actions
     directory: /
     schedule:

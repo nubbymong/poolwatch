@@ -51,6 +51,10 @@ dotnet publish src/PoolWatch.Launcher/PoolWatch.Launcher.csproj -c Release -r wi
   lock file: the native compiler comes as packages at the SDK's own known versions (as the self-contained build's runtime
   packs do), which no lock file records; on Windows NuGet checks each package's signature as it restores. Its unit tests
   (in `tests/PoolWatch.AppTests`) use its normal build, which needs neither.
+- `global.json` holds every build to the .NET 10 SDK (the newest 10.0 one installed). GitHub's Windows runners also
+  have the .NET 11 SDK, which `dotnet` would otherwise pick, and its single-file publish left out the native DLLs that
+  ship in `app\amd64\` (warning NETSDK1236). Moving to .NET 11 changes `global.json`, the target frameworks and the
+  System.Management rule in `.github/dependabot.yml` together.
 - Nothing in the build turns a warning into an error, so read the build's summary: a change that adds a warning is
   not done.
 - `tests/PoolWatch.Tests` also runs on Linux and natively on Windows on Arm; `tests/PoolWatch.AppTests` runs on Windows
