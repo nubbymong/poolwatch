@@ -66,8 +66,8 @@ public class SmallFixesTests : IDisposable
     [Fact]
     public void EventFindingsCannotEvictOtherFindings()
     {
-        // The test's own moment, after every finding it adds, for the log's clock and for Within: on the PC's clock the
-        // findings at T0 fell out of the last 30 days on 2026-11-25 and the test failed from then on.
+        // The test's own moment, two hours after its findings, for the log's clock and for Within: on the PC's clock its
+        // findings fell out of the last 30 days on 2026-11-25, and the test failed from then on.
         var now = At(T0.AddHours(2));
         var log = new FindingLog(() => now);
         log.Add(new Finding { TimeUtc = T0, Kind = FindingKind.Crash, Severity = FindingSeverity.Alert, Title = "keep me" });
