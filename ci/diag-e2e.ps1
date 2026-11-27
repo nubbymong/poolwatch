@@ -109,8 +109,8 @@ switch ($Scenario) {
     }
     'tokens' {
         # Every start leaks tokens (Leaker duplicates its own token for each child and holds the copies): Toke outstanding
-        # allocations must track Leaker's starts, Leaker must be the top parent, and the leak must never be called
-        # "not a per-start leak".
+        # allocations must track Leaker's starts, Leaker must be the top parent and the program the finding names, and
+        # the leak must never be called "not a per-start leak".
         $pw = Start-PoolWatch $Exe @('--headless', '--duration', "$($Duration + 40)", '--config', "$PSScriptRoot\diag-config.json", '--out', $Out)
         Start-Sleep -Seconds 15
         # Eight tokens per start and sharp on / off segments: the runner's own token churn (services, WMI, a Windows Update
@@ -137,7 +137,8 @@ switch ($Scenario) {
         Assert-True ($ti.Count -eq 0) "no TokenSpawn finding calls this per-start leak 'not a per-start leak' ($($ti.Count))"
         if ($tf.Count -ge 1) {
             $d = $tf[0].data
-            Assert-True ($d.owners[0].name -eq 'Leaker') "the owner with most starts is Leaker ($($d.owners[0].name))"
+            Assert-True ($d.owners[0].name -eq 'Leaker') "the owner listed first is Leaker ($($d.owners[0].name))"
+            Assert-True ($tf[0].image -eq 'Leaker') "the finding gives Leaker as the program behind it ($($tf[0].image))"
             Assert-True ([double]$d.spearman -ge 0.6) "Toke vs starts Spearman >= 0.6 ($($d.spearman))"
             Assert-True ([double]$d.perStart -ge 0.3) "outstanding Toke per start >= 0.3 ($($d.perStart))"
             Assert-True ([int64]$d.tokeOutstandingDelta -ge 150) "Toke outstanding rose >= 150 ($($d.tokeOutstandingDelta))"

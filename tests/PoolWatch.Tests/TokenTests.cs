@@ -90,8 +90,8 @@ public class TokenTests
         Assert.Equal("Codex", Assert.Single(rig.Findings).Image);
         // Named picks none when no owner's starts move with Toke at least somewhat (one with no correlation at all
         // included), and none that PoolWatch could not name.
-        Assert.Null(TokenCorrelator.Named([new OwnerTokenStat("app:other", "Other", 900, 0.6, double.NaN), new OwnerTokenStat("app:codex", "Codex", 600, 0.4, 0.2)]));
-        Assert.Null(TokenCorrelator.Named([new OwnerTokenStat("pid:9", "PID 9", 900, 0.6, 0.95, Core.Identity.OwnerKind.Unknown)]));
+        Assert.Null(TokenCorrelator.Named([new OwnerTokenStat("app:other", "Other", 900, 0.6, double.NaN), new OwnerTokenStat("app:codex", "Codex", 600, 0.4, 0.2)], 24));
+        Assert.Null(TokenCorrelator.Named([new OwnerTokenStat("pid:9", "PID 9", 900, 0.6, 0.95, Core.Identity.OwnerKind.Unknown)], 24));
     }
 
     [Fact]
@@ -125,7 +125,7 @@ public class TokenTests
         var unknown = Assert.Single(a.Owners, o => o.Name == "PID 9999");
         Assert.Equal(Core.Identity.OwnerKind.Unknown, unknown.Kind);
         Assert.Contains("; the starts that rise and fall with Toke most are made by a process PoolWatch could not name (PID 9999, ", a.Summary);
-        Assert.Null(TokenCorrelator.Named(a.Owners));
+        Assert.Null(TokenCorrelator.Named(a.Owners, a.Buckets));
         Assert.Null(Assert.Single(rig.Findings).Image);
     }
 
@@ -135,7 +135,8 @@ public class TokenTests
         // PID 9999's children leave a token each, as above; the other app's starts leave none but rise and fall partly with
         // them (a rank correlation of about 0.67 with Toke). The owner whose starts track Toke the most is PID 9999, which
         // says no program: the finding gives none, not the other app in its place, and the summary says the starts that
-        // track are made by a process PoolWatch could not name.
+        // track are made by a process PoolWatch could not name. The other app has more starts (370 against 360), but PID
+        // 9999's correlation is higher far beyond chance (1.0 against at most 0.7 over 24 buckets).
         var rig = new Rig();
         rig.Bucket(0, 0);
         int[] pattern = [0, 20, 5, 40, 0, 30, 10, 0, 25, 15, 35, 0], other = [10, 20, 5, 30, 15, 25, 0, 10, 20, 5, 30, 15];
@@ -146,8 +147,9 @@ public class TokenTests
         var app = Assert.Single(a.Owners, o => o.Name == "Other");
         Assert.InRange(unknown.Spearman, 0.99, 1.0);
         Assert.InRange(app.Spearman, 0.6, 0.7);
+        Assert.True(app.Starts > unknown.Starts, $"{app.Starts} against {unknown.Starts}");
         Assert.Equal(unknown, a.Owners[0]); // listed first, as the one whose starts track Toke the most
-        Assert.Null(TokenCorrelator.Named(a.Owners));
+        Assert.Null(TokenCorrelator.Named(a.Owners, a.Buckets));
         Assert.Contains("; the starts that rise and fall with Toke most are made by a process PoolWatch could not name (PID 9999, ", a.Summary);
         Assert.DoesNotContain("Other", a.Summary);
         var f = Assert.Single(rig.Findings);
@@ -156,9 +158,64 @@ public class TokenTests
         // Named ranks every owner, those PoolWatch could not name included: it gives an app only when the app's starts
         // track Toke the most.
         OwnerTokenStat pid = new("pid:9", "PID 9", 300, 0.5, 0.95, Core.Identity.OwnerKind.Unknown), codex = new("app:codex", "Codex", 300, 0.5, 0.65);
-        Assert.Null(TokenCorrelator.Named([pid, codex]));
-        Assert.Null(TokenCorrelator.Named([codex, pid]));
-        Assert.Equal(codex, TokenCorrelator.Named([pid with { Spearman = 0.5 }, codex]));
+        Assert.Null(TokenCorrelator.Named([pid, codex], 24));
+        Assert.Null(TokenCorrelator.Named([codex, pid], 24));
+        Assert.Equal(codex, TokenCorrelator.Named([pid with { Spearman = 0.5 }, codex], 24));
+    }
+
+    [Fact]
+    public void AnOwnerWithAFewStartsWhoseCorrelationIsHigherOnlyByChanceDoesNotTakeThePlaceOfTheOneWithNearlyAll()
+    {
+        // The shape of a CI run of the token-leak test: over 10 buckets the leak simulator made 322 of the 339 starts,
+        // each leaving tokens, and its starts rose and fell with Toke at 0.675; services.exe, a parent PoolWatch could not
+        // name, made 8 of them, at 0.701. That gap over 10 buckets is chance, yet services.exe was listed first and the
+        // finding named no program. Here the other app makes 322 starts at 0.673 and PID 9999 makes 8 at 0.704: the other
+        // app is listed first and named.
+        var rig = new Rig();
+        rig.Bucket(0, 0);
+        int[] rises = [40, 60, 80, 100, 120, 140, 160, 180, 200, 220];
+        int[] many = [26, 30, 34, 14, 18, 22, 38, 42, 46, 52];
+        int[] few = [0, 1, 0, 0, 0, 0, 2, 1, 2, 2];
+        for (int i = 0; i < rises.Length; i++) rig.Bucket(few[i], rises[i], other: many[i], parent: 9999);
+        var a = rig.Tokens.Latest!;
+        Assert.Equal(TokenVerdict.TracksStarts, a.Verdict);
+        Assert.Equal(10, a.Buckets);
+        var app = Assert.Single(a.Owners, o => o.Name == "Other");
+        var unknown = Assert.Single(a.Owners, o => o.Name == "PID 9999");
+        Assert.Equal((322, 8), (app.Starts, unknown.Starts));
+        Assert.InRange(app.Spearman, 0.672, 0.673); // 1 - 6 x 54 / 990
+        Assert.InRange(unknown.Spearman, 0.703, 0.705); // 53.5 / sqrt(82.5 x 70), the tied ranks averaged
+        Assert.Equal(app, a.Owners[0]);
+        Assert.Equal(app, TokenCorrelator.Named(a.Owners, a.Buckets));
+        Assert.Contains("; the starts that rise and fall with Toke most: Other's (", a.Summary);
+        Assert.DoesNotContain("could not name", a.Summary);
+        Assert.Equal("Other", Assert.Single(rig.Findings).Image);
+    }
+
+    [Fact]
+    public void AHigherCorrelationTakesTheFirstPlaceFromMoreStartsOnlyBeyondChance()
+    {
+        // The CI run's own numbers over 10 buckets: the leak simulator's 322 starts at 0.675, services.exe's 8 at 0.701.
+        // The gap is 0.09 standard errors, short of the 1.645 of one-sided 95%: the simulator is named, whichever is
+        // listed first.
+        OwnerTokenStat leaker = new("app:leaker", "Leaker", 322, 0.95, 0.675),
+            services = new("proc:940", "services.exe (PID 940)", 8, 0.024, 0.701, Core.Identity.OwnerKind.Unknown);
+        Assert.InRange(TokenCorrelator.CorrelationGap(0.701, 0.675, 10), 0.089, 0.091);
+        Assert.Equal(leaker, TokenCorrelator.Named([services, leaker], 10));
+        Assert.Equal(leaker, TokenCorrelator.Named([leaker, services], 10));
+        // 0.99 against 0.67 over 24 buckets is 5.78 standard errors: the owner with fewer starts is listed first, and as
+        // PoolWatch could not name it, no program is named.
+        Assert.InRange(TokenCorrelator.CorrelationGap(0.99, 0.67, 24), 5.77, 5.79);
+        OwnerTokenStat app = new("app:other", "Other", 370, 0.51, 0.67), pid = new("pid:9999", "PID 9999", 360, 0.49, 0.99, Core.Identity.OwnerKind.Unknown);
+        Assert.Null(TokenCorrelator.Named([app, pid], 24));
+        Assert.Equal(app, TokenCorrelator.Named([app, pid with { Spearman = 0.85 }], 24)); // 1.40 standard errors
+        // Over 10 buckets, against 0.675, it takes about 0.94: 0.93 is 1.52 standard errors, 0.95 is 1.84.
+        Assert.False(TokenCorrelator.HigherBeyondChance(0.93, 0.675, 10));
+        Assert.True(TokenCorrelator.HigherBeyondChance(0.95, 0.675, 10));
+        // Over 3 buckets or fewer nothing can be told, and the owner with the most starts keeps the first place.
+        Assert.Equal(0, TokenCorrelator.CorrelationGap(0.99, 0.3, 3));
+        var weak = leaker with { Spearman = 0.3 };
+        Assert.Equal(weak, TokenCorrelator.Named([weak, services with { Spearman = 0.99, Kind = Core.Identity.OwnerKind.App }], 3));
     }
 
     [Fact]

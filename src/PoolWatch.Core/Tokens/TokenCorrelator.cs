@@ -291,9 +291,10 @@ public sealed class TokenCorrelator
             parents.Add(new OwnerTokenStat(k, owner?.Name ?? k, c, total > 0 ? c / (double)total : 0, Stats.Spearman(dOut, series), owner?.Kind ?? OwnerKind.Unknown));
         }
         // Listed first: of the five with the most starts, the owner whose starts rise and fall with Toke the most, at least
-        // somewhat, whether PoolWatch could name it or not; never merely the one with the most starts, which can be an app
-        // whose starts leave no token while another app's leave one each. The analysis names it only when PoolWatch could.
-        if (Tracking(parents) is { } tracking)
+        // somewhat, as far as the window's buckets can tell (Tracking), whether PoolWatch could name it or not; never
+        // merely the one with the most starts, which can be an app whose starts leave no token while another app's leave
+        // one each. The analysis names it only when PoolWatch could.
+        if (Tracking(parents, n) is { } tracking)
         {
             parents.Remove(tracking);
             parents.Insert(0, tracking);
@@ -310,9 +311,9 @@ public sealed class TokenCorrelator
         // How long the window is, on the clock that only goes forward: the samples' wall-clock times show when it began and
         // ended, but a clock set back or forward between them would make this negative or a day too long.
         string span = Fmt.Duration(TimeSpan.FromMilliseconds(_closedMs[^1] - _closedMs[first]));
-        string top = Named(parents) is { } p
+        string top = Named(parents, n) is { } p
             ? $"; the starts that rise and fall with Toke most: {p.Name}'s ({p.Share:P0} of starts, {Correlation.OwnerRanking.Moves(p.Spearman)})"
-            : Tracking(parents) is { } u
+            : Tracking(parents, n) is { } u
                 ? $"; the starts that rise and fall with Toke most are made by a process PoolWatch could not name ({u.Name}, {u.Share:P0} of starts, {Correlation.OwnerRanking.Moves(u.Spearman)})"
                 : parents.Count > 0 ? $"; the starts of no single parent rise and fall with Toke (most starts: {parents[0].Name}'s, {parents[0].Share:P0})" : "";
         string summary = verdict switch
@@ -384,17 +385,47 @@ public sealed class TokenCorrelator
     public const double NamesOwnerFrom = 0.3;
 
     /// <summary>
-    /// The owner an analysis names (and its finding gives as the program behind it): of all <paramref name="owners"/>, the
-    /// one whose starts rise and fall with Toke the most, at <see cref="NamesOwnerFrom"/> or more, the more starts first
-    /// among equals, when PoolWatch could name it. Null when no owner's starts do, and when that owner is
-    /// <see cref="OwnerKind.Unknown"/> (its name is only a process ID, or an image and a process ID: no owner PoolWatch
-    /// could tell): an owner whose starts track Toke less is not given in its place.
+    /// The owner an analysis names (and its finding gives as the program behind it): of all <paramref name="owners"/>,
+    /// the one whose starts rise and fall with Toke the most over <paramref name="buckets"/> buckets
+    /// (<see cref="Tracking"/>), when PoolWatch could name it. Null when no owner's starts rise and fall with Toke at
+    /// <see cref="NamesOwnerFrom"/> or more, and when that owner is <see cref="OwnerKind.Unknown"/> (its name is only a
+    /// process ID, or an image and a process ID: no owner PoolWatch could tell): an owner whose starts track Toke less is
+    /// not given in its place.
     /// </summary>
-    public static OwnerTokenStat? Named(IReadOnlyList<OwnerTokenStat> owners) => Tracking(owners) is { Kind: not OwnerKind.Unknown } top ? top : null;
+    public static OwnerTokenStat? Named(IReadOnlyList<OwnerTokenStat> owners, int buckets) =>
+        Tracking(owners, buckets) is { Kind: not OwnerKind.Unknown } top ? top : null;
 
-    /// <summary>Of <paramref name="owners"/>, named or not, the one whose starts rise and fall with Toke the most, at <see cref="NamesOwnerFrom"/> or more.</summary>
-    private static OwnerTokenStat? Tracking(IEnumerable<OwnerTokenStat> owners) =>
-        owners.Where(o => o.Spearman >= NamesOwnerFrom).OrderByDescending(o => o.Spearman).ThenByDescending(o => o.Starts).FirstOrDefault();
+    /// <summary>
+    /// Of <paramref name="owners"/>, named or not, the one whose starts rise and fall with Toke the most as far as
+    /// <paramref name="buckets"/> buckets can tell. Of those at <see cref="NamesOwnerFrom"/> or more, it is the one with
+    /// the most starts (the higher correlation first among equals) of those whose correlation no other's is higher than
+    /// beyond chance (<see cref="HigherBeyondChance"/>). Over a few buckets a correlation is rough, and the highest alone
+    /// is often chance: in CI a Windows process with 8 of 339 starts came out at 0.701 over 10 buckets against 0.675 for
+    /// the program that made 322 of them, each leaving tokens behind, and was listed in its place.
+    /// </summary>
+    private static OwnerTokenStat? Tracking(IReadOnlyList<OwnerTokenStat> owners, int buckets)
+    {
+        var moving = owners.Where(o => o.Spearman >= NamesOwnerFrom).ToList();
+        return moving.Where(o => !moving.Any(other => HigherBeyondChance(other.Spearman, o.Spearman, buckets)))
+            .OrderByDescending(o => o.Starts).ThenByDescending(o => o.Spearman).FirstOrDefault();
+    }
+
+    /// <summary>
+    /// How far a correlation of <paramref name="r"/> is above one of <paramref name="than"/>, both over
+    /// <paramref name="n"/> buckets, in standard errors: the difference of their Fisher's z, each with the variance
+    /// 1.06 / (n - 3) (as <see cref="SpearmanUpperBound"/>), over the square root of the two variances' sum. It is 0.09
+    /// for 0.701 against 0.675 over 10 buckets, and 5.78 for 0.99 against 0.67 over 24; 0 over 3 buckets or fewer, where
+    /// it cannot be told. The two are taken as independent, though both are against Toke's same buckets: a rough test,
+    /// enough to tell a real gap from noise.
+    /// </summary>
+    internal static double CorrelationGap(double r, double than, int n) =>
+        n <= 3 ? 0 : (Math.Atanh(Math.Clamp(r, -0.999999, 0.999999)) - Math.Atanh(Math.Clamp(than, -0.999999, 0.999999))) / Math.Sqrt(2 * 1.06 / (n - 3));
+
+    /// <summary>
+    /// True when a correlation of <paramref name="r"/> is higher than one of <paramref name="than"/> beyond chance, both
+    /// over <paramref name="n"/> buckets: by a one-sided test at 95% (a <see cref="CorrelationGap"/> of 1.645 or more).
+    /// </summary>
+    internal static bool HigherBeyondChance(double r, double than, int n) => CorrelationGap(r, than, n) >= 1.645;
 
     private Finding? MaybeFinding(TokenAnalysis a, long nowMs)
     {
@@ -407,7 +438,7 @@ public sealed class TokenCorrelator
         return new Finding
         {
             TimeUtc = a.ToUtc, Kind = FindingKind.TokenSpawn, Severity = a.Verdict == TokenVerdict.TracksStarts ? FindingSeverity.Warning : FindingSeverity.Info,
-            Title = a.Summary, Details = details, Image = Named(a.Owners)?.Name,
+            Title = a.Summary, Details = details, Image = Named(a.Owners, a.Buckets)?.Name,
             Data = ToData(a),
         };
     }
