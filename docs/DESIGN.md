@@ -675,15 +675,20 @@ rise in the window can hold the whole window back until it leaves it (with readi
 to 44th, against the 23rd to 38th without the dip). The test pins these numbers, and that at every bucket the verdict
 says Toke tracks the starts whenever the whole window alone does. "Not a per-start leak" is said only from the whole
 window. The finding gives as the program behind it, and its text names, the owner whose starts rise and fall with Toke
-the most (a rank correlation of 0.3 at least) of the five with the most starts: never merely the one with the most
-starts. The five are ranked together with any of them PoolWatch could not tell: a parent whose ancestry it could not
-read, named only by its process ID, and one whose ancestry holds no process it names an owner by (only shared
-runtimes, shells and the like, as a cmd.exe that Explorer started), named by its image and process ID. When the owner
-whose starts move with Toke the most is one of those, the finding gives no program, and not an owner whose starts move
-with Toke less in its place; its text says the starts that move with Toke the most are made by a process PoolWatch
-could not name. When no owner's starts move with Toke, the finding gives no program. The warning's text gives its
-window's length on the clock that only goes forward (`Environment.TickCount64`), as the buckets are timed, so a wall
-clock set back or forward does not change it.
+the most (a rank correlation of 0.3 at least) of the five with the most starts, as far as the window's buckets can tell:
+of those at 0.3 or more whose correlation no other's beats beyond chance (a one-sided 95% test of the difference of
+their Fisher's z, each with the variance 1.06 / (n - 3) over the window's n buckets), the one with the most starts. So
+it is never merely the one with the most starts, and never one with a handful of starts whose correlation is a little
+higher by chance: in CI a Windows process with 8 of 339 starts came out at 0.701 over 10 buckets against 0.675 for the
+program that made 322 of them, a gap of 0.09 standard errors, and was listed in its place. Over 10 buckets, a
+correlation needs about 0.94 to beat one of 0.675 beyond chance; over 24, about 0.87. The five are ranked together with
+any of them PoolWatch could not tell: a parent whose ancestry it could not read, named only by its process ID, and one
+whose ancestry holds no process it names an owner by (only shared runtimes, shells and the like, as a cmd.exe that
+Explorer started), named by its image and process ID. When the owner so chosen is one of those, the finding gives no
+program, and not an owner whose starts move with Toke less in its place; its text says the starts that move with Toke
+are made by a process PoolWatch could not name. When no owner's starts move with Toke, the finding gives no program. The
+warning's text gives its window's length on the clock that only goes forward (`Environment.TickCount64`), as the buckets
+are timed, so a wall clock set back or forward does not change it.
 
 ## 8. Confirmation trace
 

@@ -4,6 +4,14 @@ What changed in each PoolWatch release, newest first, in plain words.
 
 ## Unreleased
 
+- **The token-leak warning no longer passes over the program that makes nearly all the starts.** When the kernel's
+  token objects rise with process starts, the warning names the program whose starts rise and fall with them. Over a
+  short window that is rough, and a process with a handful of starts could come out a little ahead by chance and be
+  named in place of the program that made nearly all of them; when PoolWatch could not tell what that process belonged
+  to, the warning named no program at all. Now, of the programs whose starts follow the tokens at least somewhat,
+  PoolWatch names the one with the most starts among those no other program's starts follow more closely beyond chance,
+  when it can tell what that one is.
+
 ## 1.1.0 - 2026-11-20
 
 - **The size rule clears again once the cache holds the pool again.** After a clear at the pool size that frees
